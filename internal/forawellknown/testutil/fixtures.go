@@ -1,0 +1,316 @@
+// Package testutil provides shared fixtures for forawellknown tests: seeded
+// (deterministic) signing keys, overlay-manifest / WBA-directory / revocation
+// builders, and an httptest origin that serves all three documents. Keys are
+// derived from a seed label so fixtures are reproducible and never depend on a
+// non-deterministic RNG.
+package testutil
+
+import (
+	"crypto/ed25519"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
+)
+
+// NewSigningKey returns a deterministic Ed25519 private key plus its published
+// JWK, valid over [notBefore, notAfter). The seed is derived from the seed label
+// so the same label always yields the same key across test runs. Keys carry no
+// kid — they are identified by their RFC 7638 thumbprint (forawellknown.Thumbprint).
+func NewSigningKey(seed string, notBefore, notAfter time.Time) (ed25519.PrivateKey, *forawellknown.Key) {
+	raw := make([]byte, ed25519.SeedSize)
+	copy(raw, seed)
+	priv := ed25519.NewKeyFromSeed(raw)
+	pub, _ := priv.Public().(ed25519.PublicKey)
+	return priv, forawellknown.NewKey(pub, notBefore, notAfter)
+}
+
+// Manifest assembles a keyless commercial-overlay manifest value with the given
+// role/domain; callers mutate the returned message for role-specific fields
+// before marshaling. Identity keys live in the WBA directory (see WBAFile).
+func Manifest(role forawellknown.Role, domain string) *forawellknown.Manifest {
+	return &forawellknown.Manifest{
+		Ver:    forawellknown.Version,
+		Role:   role,
+		Domain: domain,
+	}
+}
+
+// ExchangeManifest renders the document an Exchange serves about itself: role,
+// its own domain, and the endpoint it advertises.
+//
+// Built through the protobuf message rather than written out as a JSON literal,
+// which is the whole reason it exists. A literal is not checked against the
+// schema, so a field renamed upstream leaves it serving a document the resolver
+// reads and ignores — and the test that depended on the endpoint then fails
+// somewhere else entirely, or worse, passes.
+//
+// The endpoint is a caller's argument because the rule it has to satisfy is the
+// point of most tests using this: an endpoint may name only the host and port
+// that served the manifest, or a subdomain of that host. Passing the serving
+// origin is the production shape; passing anything else is how the refusal is
+// driven.
+//
+// It DELEGATES rather than assembling a second message of its own. The two used
+// to build the same document side by side, so a member every Exchange manifest
+// should carry could be added to one and not the other while the sibling's
+// comment went on claiming they matched.
+func ExchangeManifest(domain, endpoint string) []byte {
+	return ExchangeManifestWithRegistration(domain, endpoint, Registration{})
+}
+
+// ExchangeManifestAtVersion is ExchangeManifest with the document version the
+// caller names in place of the one this implementation stamps. It exists to
+// drive the consumer-side version gate — a manifest at a major this reader does
+// not implement, or with no version at all (pass "") — through the real
+// resolvers, with every other member exactly as production would serve it, so
+// the refusal can only be the version. That promise holds because the members
+// come from exchangeManifest, the one assembler every Exchange fixture shares;
+// only Ver is overwritten here.
+func ExchangeManifestAtVersion(domain, endpoint, ver string) []byte {
+	m := exchangeManifest(domain, endpoint, Registration{})
+	m.Ver = ver
+	return MarshalManifest(m)
+}
+
+// Registration is the optional registration half of an Exchange manifest: what
+// the Exchange asks a registration to carry, and which terms revision
+// submitting one accepts.
+//
+// DataSchemaJSON is the schema AS THE OPERATOR WROTE IT, and it travels through
+// a protojson round trip on its way into the document, exactly as it does in
+// production. That matters for any test about the size cap, which the protocol
+// measures over the served bytes rather than over what was configured.
+type Registration struct {
+	DataSchemaJSON string
+	TermsURI       string
+	TermsDigest    string
+}
+
+// ExchangeManifestWithRegistration renders the document an Exchange serves about
+// itself, carrying the registration members as well. An empty field is left
+// absent, so one fixture covers "publishes a schema", "publishes terms", and
+// every combination — including the pass-through case, which is what a manifest
+// with none of them means, and which is what ExchangeManifest asks for.
+func ExchangeManifestWithRegistration(domain, endpoint string, reg Registration) []byte {
+	return MarshalManifest(exchangeManifest(domain, endpoint, reg))
+}
+
+// exchangeManifest is the ONE assembler of an Exchange's manifest message. Every
+// exported Exchange fixture marshals what it returns, and none builds a message
+// of its own: a member every Exchange manifest should carry is added here, once,
+// and cannot be added to one fixture while a sibling's comment goes on claiming
+// they match.
+func exchangeManifest(domain, endpoint string, reg Registration) *forawellknown.Manifest {
+	m := Manifest(forawellknown.RoleExchange, domain)
+	m.Endpoint = &endpoint
+	if reg.DataSchemaJSON != "" {
+		schema := &structpb.Struct{}
+		if err := protojson.Unmarshal([]byte(reg.DataSchemaJSON), schema); err != nil {
+			panic("forawellknown/testutil: registration data_schema is not a JSON object: " + err.Error())
+		}
+		m.AccountRegistration = &forav1.AccountRegistration{DataSchema: schema}
+	}
+	if reg.TermsURI != "" {
+		m.TermsUri = &reg.TermsURI
+	}
+	if reg.TermsDigest != "" {
+		m.TermsDigest = &reg.TermsDigest
+	}
+	return m
+}
+
+// WBAFile assembles a WBA directory carrying the given keys; callers set
+// RevocationUrl before marshaling when exercising the revocation channel.
+func WBAFile(keys ...*forawellknown.Key) *forawellknown.WBAFile {
+	return &forawellknown.WBAFile{Keys: keys}
+}
+
+// MarshalManifest renders m as canonical protojson (snake_case, full enums).
+func MarshalManifest(m *forawellknown.Manifest) []byte {
+	raw, _ := (protojson.MarshalOptions{UseProtoNames: true}).Marshal(m)
+	return raw
+}
+
+// MarshalWBA renders a WBA directory as canonical protojson.
+func MarshalWBA(f *forawellknown.WBAFile) []byte {
+	raw, _ := (protojson.MarshalOptions{UseProtoNames: true}).Marshal(f)
+	return raw
+}
+
+// MarshalRevocation renders a KeyRevocationList (as_of + revoked thumbprints)
+// as canonical protojson.
+func MarshalRevocation(asOf time.Time, revoked ...string) []byte {
+	list := &forav1.KeyRevocationList{
+		AsOf:    timestamppb.New(asOf.UTC()),
+		Revoked: revoked,
+	}
+	raw, _ := (protojson.MarshalOptions{UseProtoNames: true}).Marshal(list)
+	return raw
+}
+
+// PublisherExchange builds an AuthorizedExchange entry for a publisher manifest.
+func PublisherExchange(domain, endpoint string, rel forav1.ProviderRelationship) *forav1.AuthorizedExchange {
+	return &forav1.AuthorizedExchange{Domain: domain, Endpoint: endpoint, Relationship: rel}
+}
+
+// Client returns the HTTP client the forawellknown tests use in place of
+// http.DefaultClient. httptest.Server.Close() calls
+// http.DefaultTransport.CloseIdleConnections() as a convenience, which drops
+// every idle keep-alive connection pooled on the shared global transport. With
+// the package's parallel tests each running an Origin and deferring Close(), one
+// test's Close() can close an idle connection a concurrent test is reusing,
+// surfacing as "connection broken: http: CloseIdleConnections called". A private
+// transport with keep-alives disabled keeps no idle pool to race and never
+// touches the global transport, so no peer's Close() can disturb an in-flight
+// request.
+func Client() *http.Client {
+	return &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+}
+
+// endpoint is one swappable well-known document endpoint: a body, an optional
+// forced status code, an optional Cache-Control header, a request gate (to force
+// concurrent callers to overlap inside a single in-flight fetch), and a hit
+// counter. The manifest and WBA endpoints share this machinery.
+type endpoint struct {
+	contentType  string
+	doc          atomic.Pointer[[]byte]
+	status       atomic.Int32
+	cacheControl atomic.Pointer[string]
+	gate         atomic.Pointer[chan struct{}]
+	hits         atomic.Int64
+}
+
+func (e *endpoint) serve(w http.ResponseWriter, _ *http.Request) {
+	if g := e.gate.Load(); g != nil {
+		<-*g
+	}
+	e.hits.Add(1)
+	if code := e.status.Load(); code != 0 {
+		w.WriteHeader(int(code))
+		return
+	}
+	if cc := e.cacheControl.Load(); cc != nil {
+		w.Header().Set("Cache-Control", *cc)
+	}
+	w.Header().Set("Content-Type", e.contentType)
+	if p := e.doc.Load(); p != nil {
+		_, _ = w.Write(*p)
+	}
+}
+
+func (e *endpoint) block() (release func()) {
+	ch := make(chan struct{})
+	e.gate.Store(&ch)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			e.gate.Store(nil)
+			close(ch)
+		})
+	}
+}
+
+// Origin is an httptest server that serves an overlay manifest at
+// /.well-known/fora.json, a WBA directory at
+// /.well-known/http-message-signatures-directory, and a revocation list at
+// RevocationPath. Every document is swappable mid-test; the manifest and WBA
+// endpoints can force a status code (Set*Status), the manifest endpoint can emit
+// a Cache-Control header (SetCacheControl), count requests (Hits), and be gated
+// (Block) to force concurrent callers to overlap inside one in-flight fetch.
+type Origin struct {
+	*httptest.Server
+	manifest   *endpoint
+	wba        *endpoint
+	revocation atomic.Pointer[[]byte]
+}
+
+// RevocationPath is where Origin serves its KeyRevocationList. Re-exported from
+// the production constant so fixtures and producers share one source.
+const RevocationPath = forawellknown.RevocationPath
+
+// NewOrigin starts an Origin serving the given initial manifest bytes. The WBA
+// and revocation documents start empty; set them with SetWBA / SetRevocation.
+func NewOrigin(manifest []byte) *Origin {
+	o := &Origin{
+		manifest: &endpoint{contentType: "application/json"},
+		wba:      &endpoint{contentType: "application/jwk-set+json"},
+	}
+	o.SetManifest(manifest)
+	mux := http.NewServeMux()
+	mux.HandleFunc(forawellknown.Path, o.manifest.serve)
+	mux.HandleFunc(forawellknown.WBAPath, o.wba.serve)
+	mux.HandleFunc(RevocationPath, o.serveRevocation)
+	o.Server = httptest.NewServer(mux)
+	return o
+}
+
+// SetManifest swaps the served overlay manifest document.
+func (o *Origin) SetManifest(b []byte) { o.manifest.doc.Store(&b) }
+
+// SetWBA swaps the served WBA directory document.
+func (o *Origin) SetWBA(b []byte) { o.wba.doc.Store(&b) }
+
+// SetRevocation swaps the served revocation document.
+func (o *Origin) SetRevocation(b []byte) { o.revocation.Store(&b) }
+
+// SetManifestStatus forces the manifest endpoint to return code (0 resets to 200).
+func (o *Origin) SetManifestStatus(code int) {
+	o.manifest.status.Store(int32(code)) //nolint:gosec // small status code
+}
+
+// SetWBAStatus forces the WBA endpoint to return code (0 resets to 200).
+func (o *Origin) SetWBAStatus(code int) { o.wba.status.Store(int32(code)) } //nolint:gosec // small status code
+
+// SetCacheControl sets the Cache-Control header the manifest endpoint emits on a
+// 2xx response (empty clears it). Exercises the Cache's max-age TTL clamping.
+func (o *Origin) SetCacheControl(value string) {
+	if value == "" {
+		o.manifest.cacheControl.Store(nil)
+		return
+	}
+	o.manifest.cacheControl.Store(&value)
+}
+
+// Hits reports how many times the manifest endpoint has produced a response.
+func (o *Origin) Hits() int64 { return o.manifest.hits.Load() }
+
+// WBAHits reports how many times the WBA-directory endpoint has produced a
+// response — used to assert a burst of unknown-keyid lookups coalesced into a
+// bounded number of directory fetches.
+func (o *Origin) WBAHits() int64 { return o.wba.hits.Load() }
+
+// Block arms the manifest gate: every manifest request blocks until the returned
+// release is called, so concurrent callers provably overlap inside a single
+// in-flight fetch (single-flight). release is idempotent.
+func (o *Origin) Block() (release func()) { return o.manifest.block() }
+
+// RevocationURL is the absolute URL clients poll for the revocation list.
+func (o *Origin) RevocationURL() string { return o.URL + RevocationPath }
+
+// Host is the origin's "host:port", which is the shape a domain-valued FORA
+// field carries — URL, the embedded server's own field, carries a scheme and is
+// not that shape. A test driving a caller that takes a domain passes this; one
+// driving a caller that takes a URL passes URL.
+func (o *Origin) Host() string { return o.Listener.Addr().String() }
+
+func (o *Origin) serveRevocation(w http.ResponseWriter, _ *http.Request) {
+	p := o.revocation.Load()
+	if p == nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(*p)
+}
+
+// Ptr returns a pointer to v; a small helper for optional proto fields in tests.
+func Ptr[T any](v T) *T { return &v }

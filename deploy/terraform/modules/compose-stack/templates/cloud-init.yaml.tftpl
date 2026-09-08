@@ -1,0 +1,115 @@
+#cloud-config
+# Rendered by Terraform (modules/compose-stack) and delivered gzipped as EC2
+# user data. Everything the stack needs lands under /opt/fora; no SSH
+# provisioners, no baked images.
+#
+# Key material is split into per-service directories so each container is
+# given ONLY its own keys: a compromise of one service must not hand over
+# another service's signing identity. Every key file here is a private key
+# for the service that mounts it — public keys are never pre-shared; each
+# participant publishes its own at its well-known address.
+#
+# Files land 0600 root, then a runcmd below re-owns them root:65532 and
+# opens files 0640 / directories 0750 before compose starts: the services
+# run as distroless nonroot (uid/gid 65532) and mount their key directory
+# read-only, so they need group read across the UID boundary — but no other
+# local user gets to read the keys. (Done in runcmd because write_files
+# cannot chown to a gid that has no /etc/group entry yet.)
+
+package_update: true
+
+write_files:
+  # Root-only: the rendered compose file embeds secrets (the Vault token,
+  # session/signing keys, DB passwords), and only root's docker compose
+  # invocation reads it.
+  - path: /opt/fora/docker-compose.yml
+    permissions: "0600"
+    content: |
+      ${indent(6, compose_yaml)}
+  - path: /opt/fora/Caddyfile
+    permissions: "0644"
+    content: |
+      ${indent(6, caddyfile)}
+  - path: /opt/fora/init-sql/10-create-exchange-dbs.sql
+    permissions: "0644"
+    content: |
+      ${indent(6, init_sql)}
+  # Zitadel's FirstInstance provisioning. Carries the console admin password,
+  # so it is root-only — like the compose file, and unlike the Caddyfile
+  # above, nothing in a container reads it as a non-root user (Zitadel runs
+  # as root here).
+  - path: /opt/fora/zitadel/init-steps.yaml
+    permissions: "0600"
+    content: |
+      ${indent(6, zitadel_init_steps)}
+  - path: /opt/fora/keys/exchange/ed25519-private.pem
+    permissions: "0600"
+    content: |
+      ${indent(6, ed25519_private_pem)}
+%{ if rsa_private_pem != null }
+  - path: /opt/fora/keys/exchange/rsa-private.pem
+    permissions: "0600"
+    content: |
+      ${indent(6, rsa_private_pem)}
+%{ endif }
+  - path: /opt/fora/keys/broker/broker-relay-key.json
+    permissions: "0600"
+    content: |
+      ${indent(6, broker_relay_key_json)}
+  - path: /opt/fora/keys/broker/broker-identity-key.pem
+    permissions: "0600"
+    content: |
+      ${indent(6, broker_identity_key_pem)}
+%{ for wba_hostname, wba_document in static_wba_directories }
+  # Public JWK Set (public keys only, never private material) served verbatim
+  # by Caddy at this hostname's well-known path. Base64-delivered so any byte
+  # of the document is safe inside this YAML and inside the file — the
+  # document never passes through shell or proxy-config quoting.
+  - path: /opt/fora/wba/${wba_hostname}.json
+    permissions: "0644"
+    encoding: b64
+    content: ${base64encode(wba_document)}
+%{ endfor }
+%{ for terms_filename, terms_document in terms_documents ~}
+  # Terms revisions served by Caddy under /terms/. Base64-delivered for the
+  # same reason as the documents above, and for one more that is specific to
+  # these: the Exchange publishes a digest of this file, and a client refuses
+  # the registration when the bytes it fetches do not hash to that digest. A
+  # YAML block scalar could re-wrap a long line or normalize the trailing
+  # newline, and the resulting mismatch would look like a stale digest rather
+  # than a delivery problem. Base64 makes the served bytes exactly the bytes
+  # filesha256() measured.
+  #
+  # Every published revision stays here: a digest of a deleted document
+  # identifies nothing, so registrations accepted under an old revision must
+  # still resolve.
+  - path: /opt/fora/exchange-terms/${terms_filename}
+    permissions: "0644"
+    encoding: b64
+    content: ${base64encode(terms_document)}
+%{ endfor ~}
+%{ if registry_server != null }
+  # Base64-delivered so the secret is never interpolated into a shell
+  # command line — any byte in the token is safe. Root-only, removed after
+  # the one docker login below.
+  - path: /opt/fora/.registry-password
+    permissions: "0600"
+    encoding: b64
+    content: ${base64encode(registry_password)}
+%{ endif }
+
+runcmd:
+  # Docker Engine + Compose plugin via the official convenience script.
+  - curl -fsSL https://get.docker.com | sh
+%{ if registry_server != null }
+  - docker login ${registry_server} -u '${registry_username}' --password-stdin < /opt/fora/.registry-password
+  - rm -f /opt/fora/.registry-password
+%{ endif }
+  # Keys arrive 0600 root (see header). Group 65532 = the distroless nonroot
+  # gid the services run as; group-read on files plus group-traverse on the
+  # per-service directories lets the read-only bind mounts work while every
+  # other local user stays locked out.
+  - chown -R root:65532 /opt/fora/keys
+  - find /opt/fora/keys -type d -exec chmod 0750 {} +
+  - find /opt/fora/keys -type f -exec chmod 0640 {} +
+  - docker compose -f /opt/fora/docker-compose.yml up -d

@@ -1,0 +1,23 @@
+-- Adds the tenant-level signing scheme selector introduced for the
+-- asymmetric-signed-URL plan (no HMAC, Ed25519 for
+-- Cloudflare/Fastly, RSA CloudFront for AWS-fronted publishers).
+
+CREATE TYPE fora.signing_scheme AS ENUM (
+    'ED25519',
+    'AWS_CLOUDFRONT_RSA'
+);
+
+ALTER TABLE fora.tenants
+    ADD COLUMN signing_scheme         fora.signing_scheme NOT NULL DEFAULT 'ED25519', -- ED25519 (default) for Cloudflare/Fastly tenants; AWS_CLOUDFRONT_RSA for AWS-fronted publishers
+    ADD COLUMN rsa_key_ref            TEXT,                                           -- pointer to the RSA private key (e.g. AWS Secrets Manager ARN); NULL for ED25519 tenants
+    ADD COLUMN cloudfront_key_pair_id TEXT;                                           -- the CloudFront Trusted Key Group key-pair id paired with rsa_key_ref
+
+-- RSA scheme requires both the private-key pointer and the CloudFront key-pair
+-- ID. Ed25519 tenants leave both nullable. Enforced in SQL so bad writes cannot
+-- slip past the repo layer.
+ALTER TABLE fora.tenants
+    ADD CONSTRAINT tenants_rsa_fields_required
+    CHECK (
+        signing_scheme <> 'AWS_CLOUDFRONT_RSA'
+        OR (rsa_key_ref IS NOT NULL AND cloudfront_key_pair_id IS NOT NULL)
+    );

@@ -1,0 +1,484 @@
+# FORA staging stack — rendered by Terraform (modules/compose-stack).
+# Do not edit on the VM: changes belong in the Terraform templates.
+#
+# This file is also the own-DC reference bundle: a publisher running the stack
+# on their own hardware runs exactly these services with their own values.
+
+name: fora
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fora
+      POSTGRES_PASSWORD: "${postgres_password}"
+      POSTGRES_DB: fora
+    ports:
+      # Published on the VM's LOOPBACK interface only, so an operator reaches
+      # it through `ssh -L 5432:127.0.0.1:5432` and nothing else can. Postgres
+      # here has one superuser role and a generated password; a wildcard bind
+      # (0.0.0.0, or dropping the 127.0.0.1 prefix, which means the same thing)
+      # would put that role on the public internet.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # First-cluster-init SQL (extra exchange databases, if any). Runs once;
+      # wiping the pgdata volume re-runs it.
+      - /opt/fora/init-sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fora -d fora"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+%{ if tigerbeetle_enabled }
+  # Single-replica TigerBeetle ledger for per-article accounting. The flags
+  # are mandatory: Docker >= 25 blocks io_uring without seccomp=unconfined,
+  # and TigerBeetle locks memory (IPC_LOCK). --development relaxes Direct IO
+  # for overlay/cloud volumes. Static IP because the Exchange's
+  # EXCHANGE_BILLING_TB_ADDRESS accepts IP:port only, never a hostname.
+  tigerbeetle:
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.17.8
+    restart: unless-stopped
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        [ -f /data/0_0.tigerbeetle ] || /tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development /data/0_0.tigerbeetle
+        exec /tigerbeetle start --addresses=0.0.0.0:3000 --cache-grid=256MiB --development /data/0_0.tigerbeetle
+    security_opt:
+      - "seccomp=unconfined"
+    cap_add:
+      - "IPC_LOCK"
+    volumes:
+      - tbdata:/data
+    networks:
+      default:
+        ipv4_address: ${tigerbeetle_ip}
+%{ endif }
+  exchange:
+    image: ${exchange_image}
+    restart: unless-stopped
+%{ if tigerbeetle_enabled }
+    # The embedded TigerBeetle client uses io_uring, which Docker >= 25
+    # blocks in its default seccomp profile — the Exchange needs the same
+    # exception as the tigerbeetle service or the client dies with
+    # "failed to initialize IO: PermissionDenied" at boot.
+    security_opt:
+      - "seccomp=unconfined"
+%{ endif }
+    environment:
+      EXCHANGE_DSN: "postgres://fora:${postgres_password}@postgres:5432/fora?sslmode=disable"
+      # System of Record — its OWN logical database, a second pool distinct from
+      # EXCHANGE_DSN above. FORA_SOR_ADAPTER defaults to postgres and there is
+      # no "off", so this is required: unset, the Exchange exits at boot with
+      # "sor: EXCHANGE_SOR_DSN is required for FORA_SOR_ADAPTER=postgres". The
+      # database is created by the init SQL (see main.tf locals.databases) —
+      # the Exchange migrates it but never creates it.
+      EXCHANGE_SOR_DSN: "postgres://fora:${postgres_password}@postgres:5432/sor?sslmode=disable"
+      EXCHANGE_ADDR: ":8081"
+      # Source addresses allowed to call the admin listener. An empty value
+      # denies EVERY request (the middleware is fail-closed), so leaving this
+      # unset makes the published admin port below answer 403 to everything.
+      #
+      # It is the compose network's own subnet, NOT 127.0.0.1: publishing a
+      # port makes Docker rewrite the source address to the network's gateway
+      # (host 1 of this subnet), so the container never sees loopback. The
+      # middleware reads RemoteAddr and deliberately ignores X-Forwarded-For,
+      # so no header can widen this — the CIDR is the only control.
+      #
+      # Interpolated from the network_subnet variable, the same value the
+      # networks block below uses, so the two cannot drift apart.
+      ADMIN_ALLOWED_CIDRS: "${network_subnet}"
+      # Offer.exchange routing key: the public hostname, port-less — the
+      # Broker fetches https://<domain>/.well-known/fora.json from it.
+      EXCHANGE_DOMAIN: "${exchange_hostname}"
+      EXCHANGE_PUBLIC_ORIGIN: "https://${exchange_hostname}"
+      # The tenant whose activation policy agent Register reads. It is the
+      # PUBLISHER's domain, not the Exchange's: the seed step creates the tenant
+      # row under the publisher hostname. Left unset the binary falls back to
+      # EXCHANGE_DOMAIN above, no tenant row matches, and every Register fails
+      # with a default-tenant-not-seeded error — which also means no agent ever
+      # gets a billing_ref, so nothing can be charged.
+      EXCHANGE_DEFAULT_TENANT: "${default_tenant_domain}"
+      # One-time welcome credit for each newly registered agent, in WHOLE
+      # units of the ledger currency: "100" on the default EUR ledger grants
+      # EUR 100.00 per agent, not 100 cents. "0" disables the grant. This
+      # variable is the sole owner of the setting — every boot overwrites the
+      # default tenant's stored value with it.
+      EXCHANGE_DEFAULT_AGENT_CREDIT: "${default_agent_credit}"
+      FORA_BILLING_ADAPTER: "${billing_adapter}"
+%{ if tigerbeetle_enabled }
+      EXCHANGE_BILLING_TB_ADDRESS: "${tigerbeetle_ip}:3000"
+      # ISO 4217 numeric currency of the ledger — the adapter refuses to boot
+      # without it.
+      EXCHANGE_BILLING_LEDGER: "${billing_ledger}"
+%{ endif }
+      # https is the production default; stated explicitly so this file never
+      # silently inherits a compose-network http override.
+      FORA_WELLKNOWN_SCHEME: "https"
+      # Caddy terminates TLS and proxies plain HTTP to this container; it sets
+      # X-Forwarded-Proto (replacing any client-supplied value), so signature
+      # verification must run against the https URL the caller signed, not the
+      # plain-HTTP socket scheme. Safe here ONLY because the service is not
+      # directly reachable — Caddy owns the public ports.
+      FORA_TRUST_PROXY_HEADERS: "true"
+      # Revocation authority — the Exchange refuses to boot when this is
+      # unset, but never fetches it at boot. While DNS + Caddy certs + the
+      # Broker come up on first boot (a few minutes) the running Exchange
+      # rejects signed requests with 401 and recovers on its own.
+      EXCHANGE_BROKER_WELLKNOWN_URL: "https://${broker_hostname}/.well-known/fora.json"
+      FORA_ED25519_PRIVATE_PEM_FILE: "/keys/ed25519-private.pem"
+%{ if rsa_enabled }
+      # Only AWS_CLOUDFRONT_RSA tenants use this. Omitting it is a supported
+      # posture, not a broken one: the Exchange starts without an RSA key and
+      # refuses only the requests that would need it, naming the setting to add.
+      FORA_RSA_PRIVATE_PEM_FILE: "/keys/rsa-private.pem"
+%{ endif }
+%{ if registration_schema_env != null ~}
+      # Published as account_registration.data_schema AND enforced on Register
+      # — the manifest and the gate read the same loaded value, so the Exchange
+      # cannot advertise one shape while refusing on another. Already quoted
+      # and escaped by the module (jsonencode for YAML, doubled dollars for
+      # Compose's own interpolation), so it carries no quotes here.
+      EXCHANGE_REGISTRATION_SCHEMA: ${registration_schema_env}
+%{ endif ~}
+%{ if terms_uri != null ~}
+      EXCHANGE_TERMS_URI: "${terms_uri}"
+%{ endif ~}
+%{ if terms_digest != null ~}
+      # A registering client must echo this. Publishing it for the first time
+      # refuses every client that does not yet send it — absent and stale are
+      # the same failure.
+      EXCHANGE_TERMS_DIGEST: "${terms_digest}"
+%{ endif ~}
+    ports:
+      # The admin listener (ADMIN_ADDR, default :8082). The container-side 8082
+      # is this container's own port — the Broker's :8082 belongs to a different
+      # container and is not published, so the two never collide on the host.
+      #
+      # Bound to the VM's LOOPBACK interface, so it is reachable only through
+      # `ssh -L 8082:127.0.0.1:8082`. Keep the 127.0.0.1 prefix: this listener
+      # has NO login of any kind, only the source-address allowlist above, so a
+      # wildcard bind would hand the admin plane to the internet.
+      - "127.0.0.1:8082:8082"
+    volumes:
+      # Per-service key directory: each container sees ONLY its own keys, so a
+      # compromise of one service does not hand over another service's signing
+      # identity.
+      - /opt/fora/keys/exchange:/keys:ro
+    # The image is distroless (no shell/curl), so the probe is the service
+    # binary itself (`exchange healthcheck` GETs the local /healthz). While
+    # the service is still coming up on first boot the container reports
+    # unhealthy — that is the honest status; restart: unless-stopped waits
+    # it out.
+    healthcheck:
+      test: ["CMD", "/exchange", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      postgres:
+        condition: service_healthy
+%{ if tigerbeetle_enabled }
+      tigerbeetle:
+        condition: service_started
+%{ endif }
+      broker:
+        condition: service_healthy
+
+  broker:
+    image: ${broker_image}
+    restart: unless-stopped
+    environment:
+      BROKER_DSN: "postgres://fora:${postgres_password}@postgres:5432/fora?sslmode=disable"
+      REDIS_URL: "redis://redis:6379/0"
+      BROKER_ADDR: ":8082"
+      BROKER_ID: "${broker_id}"
+      BROKER_DOMAIN: "${broker_hostname}"
+      FORA_WELLKNOWN_SCHEME: "https"
+      # Same TLS-termination contract as the exchange: Caddy sets
+      # X-Forwarded-Proto and owns the public ports, so verification runs
+      # against the https URL the agent signed.
+      FORA_TRUST_PROXY_HEADERS: "true"
+      BROKER_RELAY_KEY_FILE: "/keys/broker-relay-key.json"
+      # The Broker's IDENTITY key — NOT the relay key above. Its public half is
+      # published in the Broker's WBA directory with a 90-day validity window,
+      # so it has to survive a restart: the Broker refuses to boot without it
+      # rather than mint a throwaway that breaks the window it just published.
+      # A key FILE, not a BROKER_ED25519_SEED env value: this compose file is
+      # world-readable on the VM, the mounted key directory is not. The loader
+      # wants a raw 64-byte ed25519 key as the PEM payload — a shape openssl
+      # does not write; gen-staging-keys.sh derives it from the seed into
+      # keys/broker-identity-key.pem.
+      BROKER_ED25519_KEY_FILE: "/keys/broker-identity-key.pem"
+      BROKER_REVOCATION_URL: "https://${broker_hostname}/.well-known/fora-key-revocations.json"
+%{ if exa_api_key != null }
+      EXA_API_KEY: "${exa_api_key}"
+%{ endif }
+    volumes:
+      - /opt/fora/keys/broker:/keys:ro
+    # Same distroless-image constraint as the exchange: the binary is the probe.
+    healthcheck:
+      test: ["CMD", "/broker", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Identity plane ─────────────────────────────────────────────────────────
+  # The Identity Service custodies each agent's signing key (identity-vault),
+  # provisions agents through real OIDC sign-up (zitadel), publishes each
+  # agent's Web Bot Auth directory on its own subdomain, and exposes the MCP
+  # endpoint agents connect to.
+
+  # Agent key custody. DEV MODE, and that is a deliberate staging trade-off:
+  # the store is in-memory, so restarting this container destroys every agent
+  # key it holds and the developers who own them must sign up again. Dev mode
+  # also auto-unseals and pre-enables the KV v2 mount at `secret/` that
+  # IDENTITY_KV_MOUNT points at. A production deployment runs a sealed Vault
+  # with real storage and a real auth method instead of a root token.
+  identity-vault:
+    image: hashicorp/vault:1.20
+    restart: unless-stopped
+    cap_add:
+      - "IPC_LOCK"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "${vault_root_token}"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    command: ["server", "-dev"]
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Zitadel's own database, deliberately not the `fora` cluster: Zitadel runs
+  # heavy schema migrations under its own roles, and keeping them off the
+  # cluster that serves the Exchange and Broker means neither can take the
+  # other down.
+  zitadel-db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zitadel
+      POSTGRES_PASSWORD: "${zitadel_db_password}"
+      POSTGRES_DB: zitadel
+    volumes:
+      - zitadeldata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zitadel -d zitadel"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Upstream OIDC provider for developer sign-up. ExternalDomain/Secure
+  # describe the PUBLIC address because the OIDC issuer must be one URL
+  # everywhere: the developer's browser is redirected to it, and the Identity
+  # Service validates tokens against the same string. tlsMode external because
+  # Caddy terminates TLS in front.
+  zitadel:
+    image: ghcr.io/zitadel/zitadel:v3.4.9
+    restart: unless-stopped
+    # Runs as root so first init can write its PAT into the bootstrap volume,
+    # which Docker creates owned by root. Staging-only shortcut; a production
+    # deployment pre-creates the volume with the image's own uid instead.
+    user: "0"
+    command:
+      - start-from-init
+      - --masterkey
+      - "${zitadel_masterkey}"
+      - --tlsMode
+      - external
+      - --steps
+      - /etc/zitadel/init-steps.yaml
+    environment:
+      ZITADEL_EXTERNALDOMAIN: "${zitadel_hostname}"
+      ZITADEL_EXTERNALPORT: "443"
+      ZITADEL_EXTERNALSECURE: "true"
+      ZITADEL_PORT: "8080"
+      ZITADEL_TLS_ENABLED: "false"
+      ZITADEL_DATABASE_POSTGRES_HOST: zitadel-db
+      ZITADEL_DATABASE_POSTGRES_PORT: "5432"
+      ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: "${zitadel_db_password}"
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: zitadel
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: "${zitadel_db_password}"
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+%{ if smtp_enabled ~}
+      # Outbound mail, for the confirmation code self-registration sends. Read
+      # ONLY while Zitadel creates its instance on the first start: after that
+      # the provider is stored in Zitadel's database and these values are
+      # ignored. Editing them here changes the VM's user data, which rebuilds
+      # the whole deployment; editing the running provider is a console or
+      # Admin API job.
+      #
+      # jsonencode on every interpolated value: a JSON string literal is also
+      # a valid YAML scalar, so a password holding a quote or a backslash
+      # cannot break the document.
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_SMTP_HOST: ${jsonencode(smtp_host)}
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_SMTP_USER: ${jsonencode(smtp_user)}
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_SMTP_PASSWORD: ${jsonencode(smtp_password)}
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_TLS: "true"
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_FROM: ${jsonencode(smtp_from)}
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_FROMNAME: ${jsonencode(smtp_from_name)}
+%{ endif ~}
+    volumes:
+      - /opt/fora/zitadel/init-steps.yaml:/etc/zitadel/init-steps.yaml:ro
+      # First init writes the bootstrap machine user's PAT here; the identity
+      # bootstrap script reads it, and writes the minted OIDC client id and
+      # secret back into the same volume for the identity service to read.
+      - zitadelbootstrap:/bootstrap
+    depends_on:
+      zitadel-db:
+        condition: service_healthy
+
+  identity:
+    image: ${identity_image}
+    restart: unless-stopped
+    environment:
+      IDENTITY_ADDR: ":8083"
+      IDENTITY_DSN: "postgres://fora:${postgres_password}@postgres:5432/identity?sslmode=disable"
+      # Its own zone: agent directories are served at <slug>.<this>, and the
+      # service refuses any host that is not a single label under it.
+      IDENTITY_BASE_DOMAIN: "${identity_hostname}"
+      IDENTITY_WELLKNOWN_SCHEME: "https"
+      # The service's own public origin. It is the OAuth issuer, the audience
+      # of the bearers it mints, and the base of the /callback URL registered
+      # with Zitadel — changing it invalidates that registration.
+      IDENTITY_AUTH_ISSUER: "https://${identity_hostname}"
+      IDENTITY_OIDC_ISSUER: "https://${zitadel_hostname}"
+      # Minted by the identity bootstrap script into the shared volume. Until
+      # it has run, this container crash-loops on the missing files;
+      # restart: unless-stopped picks it up once the files appear.
+      IDENTITY_OIDC_CLIENT_ID_FILE: "/bootstrap/identity_client_id"
+      IDENTITY_OIDC_CLIENT_SECRET_FILE: "/bootstrap/identity_client_secret"
+      IDENTITY_OIDC_SCOPES: "openid profile email"
+      # Both are generated once and held in Terraform state. Left unset the
+      # service invents them per boot, which silently invalidates every live
+      # session and every bearer it has issued on each restart.
+      IDENTITY_SESSION_KEY: "${identity_session_key}"
+      IDENTITY_TOKEN_SIGNING_KEY: "${identity_token_signing_key}"
+      VAULT_ADDR: "http://identity-vault:8200"
+      VAULT_TOKEN: "${vault_root_token}"
+      IDENTITY_KV_MOUNT: "secret"
+      # The one in-network hop the MCP tools still take. Discovery goes to the
+      # Broker; everything Exchange-facing is resolved per call.
+      IDENTITY_MCP_BROKER_URL: "http://broker:8082"
+      # No Exchange origin, deliberately: an account call names its Exchange by
+      # the domain that Exchange publishes about itself, and the endpoint comes
+      # from that Exchange's own manifest. This deployment runs one, so the
+      # policy names it and nothing else — an agent cannot make this host sign
+      # and send to an Exchange the operator did not choose.
+      IDENTITY_MCP_EXCHANGE_ALLOWLIST: "${exchange_hostname}"
+      IDENTITY_MCP_WELLKNOWN_SCHEME: "https"
+    volumes:
+      - zitadelbootstrap:/bootstrap:ro
+    # The image is distroless (no shell/curl), so the probe is the service
+    # binary itself (`identity healthcheck` GETs the local /healthz) — same
+    # shape as the Exchange and Broker. During the documented first-boot
+    # crash-loop the container reports unhealthy — that is the honest status;
+    # restart: unless-stopped rides it out.
+    healthcheck:
+      test: ["CMD", "/identity", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      postgres:
+        condition: service_healthy
+      identity-vault:
+        condition: service_healthy
+      zitadel:
+        condition: service_started
+
+%{ if publisher_enabled }
+  # Demo publisher origin (staging only): serves the demo content tree the
+  # edge worker's ORIGIN_URL points at.
+  publisher:
+    image: ${publisher_image}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/articles/philosophers/thales-of-miletus.txt >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+%{ endif }
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /opt/fora/Caddyfile:/etc/caddy/Caddyfile:ro
+%{ if wba_enabled ~}
+      # Static Web Bot Auth key directories written by cloud-init; the
+      # Caddyfile's per-hostname site blocks serve them with file_server.
+      - /opt/fora/wba:/srv/wba:ro
+%{ endif ~}
+%{ if terms_enabled ~}
+      # Terms documents written by cloud-init. Caddy runs in this container,
+      # so the Caddyfile's `root * /srv/exchange-terms` resolves HERE, not on
+      # the host — without this mount file_server would serve nothing.
+      - /opt/fora/exchange-terms:/srv/exchange-terms:ro
+%{ endif ~}
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      # Deliberately NOT service_healthy: the Exchange's first boot needs
+      # Caddy live (its broker well-known fetch goes over public HTTPS
+      # through this proxy), so waiting for a healthy Exchange here would
+      # deadlock the cold boot. Caddy answers 502 until the Exchange is up.
+      exchange:
+        condition: service_started
+      broker:
+        condition: service_healthy
+      # Both for the same reason as the Exchange: the Identity Service reaches
+      # Zitadel's issuer over public HTTPS through this proxy, so Caddy must
+      # not wait on either of them — service_healthy here would deadlock the
+      # cold boot even though identity now has its own healthcheck.
+      identity:
+        condition: service_started
+      zitadel:
+        condition: service_started
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${network_subnet}
+
+volumes:
+  pgdata:
+  redisdata:
+%{ if tigerbeetle_enabled }
+  tbdata:
+%{ endif }
+  zitadeldata:
+  # Zitadel's first-init PAT plus the OIDC client id/secret the bootstrap
+  # script mints from it. Wiping this without also wiping zitadeldata (or the
+  # other way round) leaves the two out of step — treat them as one unit.
+  zitadelbootstrap:
+  caddydata:
+  caddyconfig:
+  # identity-vault runs in dev mode and stores nothing on disk, so it has no
+  # volume here. That is what makes a restart lose the agent keys.

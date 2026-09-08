@@ -1,0 +1,1258 @@
+# Local full-stack E2E compose: brings up Postgres, Redis, Exchange, Broker,
+# Miniflare + Fastly + AWS edges, a mock publisher origin, a publisher-JWKS host,
+# and the Identity service (Go MCP adapter) with its Zitadel + Vault + wildcard-DNS
+# supporting cast.
+#
+#   make e2e-up       # docker compose -f docker-compose.e2e.yml up -d --build
+#   make test-e2e     # up → pytest in `runner` service → down
+#   make e2e-down     # docker compose down -v
+#
+# See the Wave 0 compose-topology task for scope.
+
+# The wildcard-DNS sidecar every FORA service resolves *.foramcp.org through.
+# Anchored so the address has ONE owner: it was previously written out at each
+# consumer, and five copies of an IP is five places to miss when it moves.
+x-wildcard-dns: &wildcard-dns
+  - "172.30.0.53"
+
+# The identity service's OAuth issuer identifier. Anchored for the same reason as
+# the DNS address above: three services name it, and three copies is three places
+# to miss when it changes.
+x-identity-issuer: &identity-issuer "http://identity"
+
+# A throwaway Postgres cluster, as one unit. `make e2e-down` runs `down -v` and
+# every stack-up re-inits from scratch, so nothing in PGDATA has to survive.
+# Keeping the data directory in RAM with the durability work switched off takes
+# the stack's Postgres write traffic off the host disk entirely — on a laptop
+# that traffic is what makes the machine unresponsive during a run. size= is a
+# cap, not a reservation: tmpfs allocates only the pages actually written.
+#
+# Anchored rather than repeated, for the same reason as everything else here:
+# two services want it, and the second copy was coupled to the first by a
+# comment saying "same reasoning as above", which nothing enforces.
+x-ephemeral-postgres: &ephemeral-postgres
+  command:
+    ["postgres", "-c", "fsync=off", "-c", "synchronous_commit=off",
+     "-c", "full_page_writes=off"]
+  tmpfs:
+    - /var/lib/postgresql/data:rw,size=2g
+
+# What an Exchange asks a registration to carry, published in its manifest.
+#
+# One value, two publishers: exchange-b is where the account suite registers,
+# and exchange-c publishes the SAME schema so a refusal can be observed against
+# an exchange no test ever opens an account at. Deliberately identical — the
+# refusal under test is about a payload missing a published member, not about
+# which members a given exchange asks for — and anchored so "identical" is a
+# fact rather than a comment. The value is 269 characters as written here, 267
+# once compose un-escapes the two $$ pairs; edit one copy of that and the suite
+# does not notice, because the test that drives the refusal reads the schema from
+# exchange-c's own manifest.
+#
+# $$schema, not $schema: compose interpolates $NAME in a value, so the
+# single-dollar form is read as an unset variable and the member is served with
+# an EMPTY key. The schema still compiles that way, which is what makes the
+# mistake quiet — the document is simply not the one configured. $$ is compose's
+# escape for a literal dollar. The trailing $ in the email pattern needs no
+# escape: compose only interpolates $ followed by a name or a brace. Both
+# escapes are now written once instead of twice each, which is exactly what a
+# copy-edit gets wrong.
+x-registration-schema: &registration-schema '{"$$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["company_name","billing_email"],"properties":{"company_name":{"type":"string","minLength":1},"billing_email":{"type":"string","pattern":"^[^@]+@[^@]+$$"},"vat_id":{"type":"string"}}}'
+
+# The bearer-token issuer and signing seed, as one unit. Both the identity service
+# (which MINTS and verifies bearers) and the runner (whose harness mints its own,
+# in tests/e2e/harness/test_mcp_endpoint.py) must agree on them exactly. Anchored
+# rather than repeated because the failure mode of a second spelling is silent: a
+# rotated seed on one side surfaces as an unexplained 401, not as a mismatch
+# anything reports.
+x-identity-auth: &identity-auth
+  IDENTITY_AUTH_ISSUER: *identity-issuer
+  # Deterministic token key so a bearer stays valid across a restart within a
+  # run (32-byte Ed25519 seed, base64). e2e-only, not a real secret.
+  IDENTITY_TOKEN_SIGNING_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+# One agent well-known host (universal well-known key discovery). Every agent
+# jwks service below is this block plus exactly two per-identity values: the
+# key-file mount (bound at the fixed /keys/signing-key.json path the anchored
+# SIGNING_KEY_FILE names) and the network alias (== the identity's kid, which
+# the harness sends as the covered Signature-Agent header). Each host mounts
+# ONLY its own key file — never the whole fixtures directory — so a wrong
+# mount fails at container start instead of serving another identity's key
+# while healthy (the ghost negative control depends on its key being served
+# NOWHERE, so a mixed-up mount here would hollow that test out silently).
+x-jwks-host: &jwks-host
+  build:
+    # Repo-root context (the same shape the service images use) so the
+    # Dockerfile can copy scripts/lib/ed25519_keys.py — the entrypoint renders
+    # its WBA directory through the same shared helpers the key-gen scripts
+    # use, instead of a shell-side copy kept in sync by hand.
+    context: .
+    dockerfile: deploy/publisher-jwks/Dockerfile
+  environment:
+    SIGNING_KEY_FILE: "/keys/signing-key.json"
+    MANIFEST_ROLE: "ROLE_AGENT"
+  healthcheck:
+    test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/healthz || exit 1"]
+    interval: 3s
+    timeout: 3s
+    retries: 20
+    start_period: 5s
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    <<: *ephemeral-postgres
+    environment:
+      POSTGRES_USER: fora
+      POSTGRES_PASSWORD: fora
+      POSTGRES_DB: fora
+    volumes:
+      # Multi-exchange topology (ripdi): create exchange-b/c's separate catalog
+      # databases (fora_b, fora_c) at cluster init, before the socket opens for
+      # app connections. exchange-b/c gate on `condition: service_healthy`, so
+      # they never race a missing DB. `down -v` wipes the volume → re-runs init.
+      - ./deploy/storage/postgres/10-create-exchange-dbs.sql:/docker-entrypoint-initdb.d/10-create-exchange-dbs.sql:ro
+    ports:
+      # Ephemeral host port — discovered via `docker compose port postgres 5432`.
+      # Lets two parallel worktree stacks coexist on a single Docker daemon
+      # (h9gy). Container port stays 5432.
+      - target: 5432
+        published: 0
+        mode: host
+    healthcheck:
+      # -h 127.0.0.1 forces a TCP check: during first-boot init (creating the
+      # extra databases) postgres listens only on the unix socket, and a
+      # socket-based pg_isready would report healthy while TCP 5432 is still
+      # closed — letting the exchanges start and hit connection-refused. Checking
+      # TCP keeps the container unhealthy until it actually accepts app connections.
+      test: ["CMD-SHELL", "pg_isready -U fora -d fora -h 127.0.0.1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--loglevel", "warning"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  publisher:
+    image: nginx:alpine
+    volumes:
+      - ./tests/e2e/mock-publisher/content:/usr/share/nginx/html:ro
+      # Phase-2 demo content tree, served by PATH alongside the baseline tree.
+      # Mounted under its OWN docroot (/usr/share/nginx/demo) — NOT under the
+      # read-only baseline docroot, which the daemon cannot create child
+      # mountpoints in. deploy/publisher/nginx.conf routes the demo path
+      # prefixes (/articles, /lyrics, /tracks, /sfx) to this tree. The edge
+      # forwards the signed-URL path verbatim to ORIGIN_URL
+      # (http://publisher:80), so these mounts are what the canary fetch reads.
+      - ./deploy/content/demo:/usr/share/nginx/demo:ro
+      - ./deploy/publisher/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/premium/article-42.html || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+
+  # ───── Publisher JWKS host (catalog-contributor pubkey manifest) ─────
+  # Plain-HTTP host that serves the catalog-contributor's
+  # /.well-known/fora.json (§6.6 schema) so the
+  # CatalogSignatureMiddleware self-signup path can resolve the
+  # contributor's pubkey. The entrypoint reads the Ed25519 private key
+  # under /keys and publishes the corresponding pubkey on every
+  # cold start.
+  #
+  # The service is reached via the `examplenews` network alias matching
+  # the contributor fixture's domain, so URL templating
+  # (http://examplenews/.well-known/fora.json) lands on this service.
+  publisher-jwks:
+    <<: *jwks-host
+    # The whole environment map is restated (a YAML merge key replaces nested
+    # maps, it does not deep-merge): this host serves a ROLE_PUBLISHER manifest
+    # (the anchor's ROLE_AGENT must not apply) with its own key path and kid.
+    environment:
+      SIGNING_KEY_FILE: "/keys/examplenews-subscription-key.json"
+      SIGNING_KID_OVERRIDE: "examplenews.sub.2026q2"
+      # Phase-2 demo: the rendered fora.json also advertises the Exchange so the
+      # Broker's publisher-probe (which fetches this same /.well-known/fora.json
+      # for the demo domains aliased below) can route a demo-resource resolve to
+      # exchange.e2e.local. Without exchanges[] the Broker refuses with
+      # NOT_IN_CATALOG even though the contributor is listed.
+      EXCHANGES_JSON: '[{"domain":"exchange:8081","endpoint":"http://exchange:8081","supported_profiles":["fora-news-v1"],"ext":{"resource_owner_id":"demo-resource-owner"}}]'
+    volumes:
+      # ONLY the one key file this host uses — never the whole directory,
+      # per the anchor's rule above: deploy/publisher-keys also collects
+      # gen-contributor-key.sh and gen-buyer-delegation-key.sh output, and a
+      # directory mount would carry every one of those private keys into a
+      # container whose job is serving public documents over HTTP.
+      - ./deploy/publisher-keys/examplenews-subscription-key.json:/keys/examplenews-subscription-key.json:ro
+    networks:
+      default:
+        aliases:
+          - examplenews
+          # Phase-2 demo publisher domains were MOVED to the edges (Phase 2b):
+          # each demo domain now aliases to its publisher's edge runtime, which
+          # serves BOTH /.well-known/fora.json (Gate 2 + Broker probe) AND the
+          # signed CONTENT on port 80. publisher-jwks keeps only its own
+          # `examplenews` alias for the subscription self-signup path.
+
+  # ───── 3rd-party catalog-contributor well-known host ─────
+  # Plain-HTTP host aliased to `catalog-contributor-e2e` that serves THAT
+  # contributor's /.well-known/fora.json with its Ed25519 signing key in
+  # public_keys[] and manifest domain == the host string. This is what the
+  # Exchange Gate-1 self-signup (agentreg.RegisterFromDirectory) fetches to learn
+  # the contributor's key — NO fora.agents pre-seed. The music edge lists this
+  # contributor in CATALOG_CONTRIBUTORS_JSON (Gate-2 3rd-party branch); the
+  # philosophy/sfx edges list it too so the existing ingest/full-path tests that
+  # push to those publishers with the contributor key clear Gate-2 via the fetch
+  # path as well. Reuses the publisher-jwks image; the harness contributor key
+  # fixture (gen-e2e-keys.sh) is mounted read-only and its pubkey is published on
+  # every cold start.
+  catalog-contributor-e2e-jwks:
+    <<: *jwks-host
+    # The whole environment map is restated (a YAML merge key replaces nested
+    # maps, it does not deep-merge): this host is a ROLE_PUBLISHER manifest
+    # (the anchor's ROLE_AGENT must not apply) with contributor extras.
+    environment:
+      SIGNING_KEY_FILE: "/keys/signing-key.json"
+      SIGNING_KID_OVERRIDE: "catalog-contributor-e2e"
+      # A belt, not a load-bearing check: registration anchors the
+      # contributor's identity to the host its directory is fetched from and
+      # never reads the served manifest's domain — pinning the domain here
+      # just keeps the published document consistent with that host string.
+      MANIFEST_DOMAIN_OVERRIDE: "catalog-contributor-e2e"
+      # A self-hosting contributor authorizes no third party of its own.
+      CATALOG_CONTRIBUTORS_JSON: "[]"
+    volumes:
+      - ./tests/e2e/harness/fixtures/catalog_contributor_key.json:/keys/signing-key.json:ro
+    networks:
+      default:
+        aliases:
+          - catalog-contributor-e2e
+
+  # ───── Agent well-known hosts (universal well-known key discovery) ─────
+  # There is no static key file: EVERY signing identity publishes its own keys
+  # at its well-known address, and the Exchange and Broker learn a key only by
+  # fetching the signer's directory (the same path production uses). One host
+  # per identity; the network alias equals the identity's kid, which the
+  # harness sends as the covered Signature-Agent header, and the service name
+  # is that same kid plus "-jwks" — so a kid in a rejection log maps to its
+  # service in `docker compose ps` without a lookup table.
+  #
+  # None of these hosts needs MANIFEST_DOMAIN_OVERRIDE (unlike the
+  # catalog-contributor-e2e-jwks above, which pins it as an explicit belt):
+  # nothing on any path these hosts serve reads a manifest's `domain`. The
+  # httpsig key-resolution path fetches only the WBA directory (a JWK set
+  # matched by thumbprint), and lazy registration fetches that SAME directory
+  # — its identity check (agentreg's ErrAgentIDMismatch) compares the
+  # discovery URL's host against the agent id, never manifest content. The
+  # manifest these hosts do serve gets its domain from the key fixture's
+  # required `issuer` (stamped with the full kid by scripts/gen-e2e-keys.sh),
+  # so it equals the host's alias anyway, dotted kids (test-signer-e2e.v1)
+  # included.
+  #
+  # lazy-agent-e2e-jwks (lazy-registration e2e): serves the fresh agent's ROLE_AGENT
+  # /.well-known/fora.json on the `lazy-agent-e2e` alias (== the agent's
+  # keyID/domain). The agent is deliberately ABSENT from fora.agents, so a
+  # transaction lazily registers it after its key resolves (ADR-009 D2).
+  lazy-agent-e2e-jwks:
+    <<: *jwks-host
+    volumes:
+      - ./tests/e2e/harness/fixtures/agent_lazy_e2e_key.json:/keys/signing-key.json:ro
+    networks:
+      default:
+        aliases:
+          - lazy-agent-e2e
+
+  # The baseline funded buyer the harness signs most agent-direct calls as.
+  agent-e2e-jwks:
+    <<: *jwks-host
+    volumes:
+      - ./tests/e2e/harness/fixtures/agent_e2e_key.json:/keys/signing-key.json:ro
+    networks:
+      default:
+        aliases:
+          - agent-e2e
+
+  # The deliberately-unfunded buyer for the billing deny-path obligations.
+  agent-nobilling-e2e-jwks:
+    <<: *jwks-host
+    volumes:
+      - ./tests/e2e/harness/fixtures/agent_nobilling_e2e_key.json:/keys/signing-key.json:ro
+    networks:
+      default:
+        aliases:
+          - agent-nobilling-e2e
+
+  # The EUR-funded Phase-2 demo buyer.
+  agent-demo-eur-jwks:
+    <<: *jwks-host
+    volumes:
+      - ./tests/e2e/harness/fixtures/agent_demo_eur_key.json:/keys/signing-key.json:ro
+    networks:
+      default:
+        aliases:
+          - agent-demo-eur
+
+  # The generic harness test signer (build_signed_headers' default identity).
+  test-signer-e2e.v1-jwks:
+    <<: *jwks-host
+    volumes:
+      - ./tests/e2e/harness/fixtures/test_signer_key.json:/keys/signing-key.json:ro
+    networks:
+      default:
+        aliases:
+          - test-signer-e2e.v1
+
+  # The throwaway identity the cross-container revocation e2e revokes: its key
+  # resolves here (per-agent well-known) until the test publishes a revocation
+  # through the Broker's channel, after which the Exchange rejects the
+  # thumbprint even though this host still serves the key — revocation
+  # overrides a still-published key.
+  revocation-throwaway-e2e-jwks:
+    <<: *jwks-host
+    volumes:
+      - ./tests/e2e/harness/fixtures/revocation_throwaway_key.json:/keys/signing-key.json:ro
+    networks:
+      default:
+        aliases:
+          - revocation-throwaway-e2e
+
+  # One-shot: generate ephemeral signing keys into a shared volume at stack-up so
+  # nothing is committed to git. Mints (a) the AWS_CLOUDFRONT_RSA tenant RSA pair —
+  # the Exchange reads the private half (FORA_RSA_PRIVATE_PEM_FILE), the aws-edge
+  # CloudFront shim the public half (FORA_CF_PUBLIC_PEM_FILE); and (b) the Ed25519
+  # offer/URL signing key the Exchange reads via FORA_ED25519_PRIVATE_PEM_FILE.
+  # The Exchange no longer generates keys in-process (it fails closed when unset),
+  # so this one-shot is what provisions them for the stack. Mirrors the
+  # publisher-jwks cold-start key-derivation idiom.
+  rsa-keygen:
+    image: alpine:3.20
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        apk add --no-cache openssl >/dev/null
+        # exchange-a keys (unchanged names — exchange-a's identity is preserved).
+        openssl genrsa -out /rsa-keys/rsa-private.pem 2048
+        openssl rsa -in /rsa-keys/rsa-private.pem -pubout -out /rsa-keys/rsa-public.pem
+        openssl genpkey -algorithm ED25519 -out /rsa-keys/ed25519-private.pem
+        # exchange-b / exchange-c keys (ripdi): distinct ed25519 offer keys +
+        # distinct RSA URL-signing keys per exchange, so each /.well-known/fora.json
+        # serves a DISTINCT offer key and an offer signed by one exchange cannot be
+        # verified against another's manifest.
+        openssl genrsa -out /rsa-keys/rsa-b-private.pem 2048
+        openssl rsa -in /rsa-keys/rsa-b-private.pem -pubout -out /rsa-keys/rsa-b-public.pem
+        openssl genpkey -algorithm ED25519 -out /rsa-keys/ed25519-b-private.pem
+        openssl genrsa -out /rsa-keys/rsa-c-private.pem 2048
+        openssl rsa -in /rsa-keys/rsa-c-private.pem -pubout -out /rsa-keys/rsa-c-public.pem
+        openssl genpkey -algorithm ED25519 -out /rsa-keys/ed25519-c-private.pem
+        chmod 0444 /rsa-keys/rsa-private.pem /rsa-keys/rsa-public.pem /rsa-keys/ed25519-private.pem \
+          /rsa-keys/rsa-b-private.pem /rsa-keys/rsa-b-public.pem /rsa-keys/ed25519-b-private.pem \
+          /rsa-keys/rsa-c-private.pem /rsa-keys/rsa-c-public.pem /rsa-keys/ed25519-c-private.pem
+        echo "rsa-keygen: wrote rsa+ed25519 keypairs for exchange a/b/c"
+    volumes:
+      - rsa-keys:/rsa-keys
+    restart: "no"
+
+  # ───── FORA services ─────────────────────────────────────────────────
+  exchange:
+    build:
+      context: .
+      dockerfile: src/exchange/Dockerfile
+    dns: *wildcard-dns
+    environment:
+      EXCHANGE_DSN: "postgres://fora:fora@postgres:5432/fora?sslmode=disable"
+      # System-of-Record account registry. FORA_SOR_ADAPTER
+      # defaults to "postgres", which requires a SEPARATE logical database
+      # (distinct from EXCHANGE_DSN): the Exchange opens a second pool and runs
+      # the SoR migrations at boot, but never CREATE DATABASEs — fora_sor is
+      # pre-created by deploy/storage/postgres/10-create-exchange-dbs.sql at init.
+      EXCHANGE_SOR_DSN: "postgres://fora:fora@postgres:5432/fora_sor?sslmode=disable"
+      EXCHANGE_ADDR: ":8081"
+      # Re-package: Offer.exchange (minted from EXCHANGE_DOMAIN) is the
+      # broker's routing key — it must be a host the broker can fetch
+      # /.well-known/fora.json from in the compose network, so it is the
+      # service host:port (the well-known fetch URL carries no port). The manifest
+      # advertises EXCHANGE_PUBLIC_ORIGIN as the top-level endpoint; it MUST equal
+      # the broker's registered exchange endpoint (EXCHANGES_JSON) for the
+      # post-resolve SSRF equality gate.
+      EXCHANGE_DOMAIN: "exchange:8081"
+      # The tenant whose "activate new agents automatically" policy a registration
+      # reads. It defaults to EXCHANGE_DOMAIN, which no tenant row is ever named
+      # after, so leaving it unset makes every fora_register fail — the exchange
+      # warns about exactly that at boot. Each exchange here fronts one
+      # publisher's catalog, so it names that publisher's tenant.
+      EXCHANGE_DEFAULT_TENANT: "demo.fora-protocol.org"
+      EXCHANGE_PUBLIC_ORIGIN: "http://exchange:8081"
+      # Inmemory billing adapter so the seeded agent-e2e balance is the
+      # authoritative bound for AcceptOffer's billing gate. Defaults to
+      # "free" elsewhere (always-approve); the e2e harness needs a real
+      # deny path so the credit-less-buyer obligation surfaces.
+      FORA_BILLING_ADAPTER: "inmemory"
+      # agent-e2e (USD) funds the baseline obligation/full-stack suites; the
+      # Phase-2 demo catalog denominates terms in EUR/GBP, so a EUR-funded demo
+      # buyer (agent-demo-eur) is seeded for the demo proof (the in-memory
+      # adapter authorizes every term — incl. FREE — on a currency match, so the
+      # demo buyer's balance currency must match the demo terms). lazy-agent-e2e
+      # (USD) funds the v1.1 lazy-registration proof: the agent is absent from
+      # fora.agents and a transaction registers it lazily after its key resolves
+      # via the per-agent well-known path, so its balance must be seeded here too.
+      EXCHANGE_BILLING_SEED: '{"agent-e2e":{"value":"100.00","currency":"USD"},"agent-demo-eur":{"value":"1000.00","currency":"EUR"},"lazy-agent-e2e":{"value":"100.00","currency":"USD"}}'
+      # Single scheme knob for the well-known / manifest-fetch resolver (HTTPS is
+      # the default; compose network is HTTP-only).
+      FORA_WELLKNOWN_SCHEME: "http"
+      # The SSRF guard on every outbound .well-known fetch (agent registration,
+      # contributor-authz, broker revocation poll) blocks private/loopback hosts
+      # by default; the compose network is private + http, so permit it here.
+      # MUST stay unset in production.
+      SKIP_SSRF: "true"
+      ALLOW_INSECURE: "true"
+      # Revocation-aware key resolution: the Exchange polls the Broker's
+      # well-known + invalidation_url so a Broker-revoked kid is rejected, and
+      # resolves the Broker relay key from the same directory. The Broker's
+      # directory is the revocation authority; when it is unreachable the
+      # Exchange fails closed (rejects) rather than trusting any other source.
+      EXCHANGE_BROKER_WELLKNOWN_URL: "http://broker:8082/.well-known/fora.json"
+      # Poll the Broker's revocation channel frequently so the cross-container
+      # revocation e2e (test_revocation_channel) observes a freshly-published
+      # revocation within a bounded wait. Production uses a longer interval.
+      EXCHANGE_REVOCATION_POLL_INTERVAL: "1s"
+      # EXCHANGE_CATALOG_URI_SCHEME overrides the https:// default that
+      # entryFromProto materializes into stored catalog URIs. Compose-internal
+      # traffic is http-only; production leaves this unset.
+      EXCHANGE_CATALOG_URI_SCHEME: "http"
+      # RSA private key for the AWS_CLOUDFRONT_RSA tenant scheme, read from a file
+      # the rsa-keygen one-shot writes into a shared volume at stack-up (the key
+      # is no longer committed to git). The aws-edge CloudFront shim reads the
+      # matching public half from the same volume — mirroring a CloudFront trusted
+      # key group now that the cdn-keys.json route is retired (D4). Production
+      # sources tenant signing keys from a secret store.
+      FORA_RSA_PRIVATE_PEM_FILE: "/rsa-keys/rsa-private.pem"
+      # Ed25519 offer/URL signing key, also written by the rsa-keygen one-shot.
+      # The Exchange fails closed when no key is configured (it no longer mints an
+      # ephemeral key in-process), so this file injection is mandatory for the
+      # stack. Production wires FORA_ED25519_PRIVATE_PEM from Secrets Manager.
+      FORA_ED25519_PRIVATE_PEM_FILE: "/rsa-keys/ed25519-private.pem"
+    volumes:
+      - rsa-keys:/rsa-keys:ro
+    depends_on:
+      dns:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      publisher-jwks:
+        condition: service_healthy
+      catalog-contributor-e2e-jwks:
+        condition: service_healthy
+      rsa-keygen:
+        condition: service_completed_successfully
+    # No healthcheck: distroless image ships only the /exchange binary — no
+    # shell, no wget/curl. Downstream services use depends_on:service_started.
+    ports:
+      # Ephemeral host port — discovered via `docker compose port exchange 8081`
+      # (h9gy: parallel-worktree-stack support).
+      - target: 8081
+        published: 0
+        mode: host
+
+  # ───── exchange-b (music) — SEPARATE catalog DB fora_b (ripdi) ─────────────
+  # A copy of `exchange` (= exchange-a) with its OWN catalog database, OWN
+  # offer/URL signing keys, and OWN identity (EXCHANGE_DOMAIN/PUBLIC_ORIGIN). The
+  # music publisher's edge (fastly-edge) names exchange-b in its EXCHANGES_JSON,
+  # so the broker routes music offers here. Everything else (billing seed, httpsig
+  # key set, fetch overrides, broker-revocation poll) is identical to exchange-a.
+  exchange-b:
+    build:
+      context: .
+      dockerfile: src/exchange/Dockerfile
+    dns: *wildcard-dns
+    environment:
+      EXCHANGE_DSN: "postgres://fora:fora@postgres:5432/fora_b?sslmode=disable"
+      # Own SoR registry DB (see exchange-a). fora_sor_b is pre-created at init.
+      EXCHANGE_SOR_DSN: "postgres://fora:fora@postgres:5432/fora_sor_b?sslmode=disable"
+      EXCHANGE_ADDR: ":8081"
+      EXCHANGE_DOMAIN: "exchange-b:8081"
+      # This exchange's own publisher tenant (see exchange-a).
+      EXCHANGE_DEFAULT_TENANT: "music.demo.fora-protocol.org"
+      EXCHANGE_PUBLIC_ORIGIN: "http://exchange-b:8081"
+      FORA_BILLING_ADAPTER: "inmemory"
+      EXCHANGE_BILLING_SEED: '{"agent-e2e":{"value":"100.00","currency":"USD"},"agent-demo-eur":{"value":"1000.00","currency":"EUR"}}'
+      FORA_WELLKNOWN_SCHEME: "http"
+      SKIP_SSRF: "true"
+      ALLOW_INSECURE: "true"
+      EXCHANGE_BROKER_WELLKNOWN_URL: "http://broker:8082/.well-known/fora.json"
+      EXCHANGE_CATALOG_URI_SCHEME: "http"
+      # One of the two exchanges in this stack that ask for registration details,
+      # so the suites cover both contracts against something real: this one and
+      # exchange-c publish a schema and a terms revision, exchange-a publishes
+      # neither and keeps the pass-through behaviour every exchange had before
+      # the block existed. exchange-a is left bare deliberately — it is what
+      # every other suite transacts against, and changing it would change tests
+      # this has nothing to do with.
+      #
+      # This one is where the account suite REGISTERS. exchange-c publishes the
+      # same schema so a refusal can be observed against an exchange no test ever
+      # opens an account at; see the note there.
+      #
+      # NOTE: publishing the schema is what turns enforcement on, so this exchange
+      # refuses a payload that does not match it. The identity adapter also
+      # pre-checks against the same schema before it signs, so in practice a
+      # non-conforming payload is stopped there first and never reaches here.
+      EXCHANGE_REGISTRATION_SCHEMA: *registration-schema
+      EXCHANGE_TERMS_URI: "http://exchange-b:8081/terms/2026-04"
+      # SHA-256 of the string "test" — a real digest of a real input, so it can
+      # be reproduced rather than trusted.
+      EXCHANGE_TERMS_DIGEST: "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+      # Distinct ed25519 + RSA key MATERIAL (per exchange) so the well-known
+      # serves a distinct offer key. Key REF names are kept identical to
+      # exchange-a so the per-DB tenant rows (seeded with the same refs) resolve.
+      FORA_RSA_PRIVATE_PEM_FILE: "/rsa-keys/rsa-b-private.pem"
+      FORA_ED25519_PRIVATE_PEM_FILE: "/rsa-keys/ed25519-b-private.pem"
+    volumes:
+      - rsa-keys:/rsa-keys:ro
+    depends_on:
+      dns:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      publisher-jwks:
+        condition: service_healthy
+      catalog-contributor-e2e-jwks:
+        condition: service_healthy
+      rsa-keygen:
+        condition: service_completed_successfully
+    ports:
+      - target: 8081
+        published: 0
+        mode: host
+
+  # ───── exchange-c (sfx) — SEPARATE catalog DB fora_c (ripdi) ───────────────
+  # A copy of `exchange` with its OWN catalog database (fora_c), OWN signing keys,
+  # and OWN identity. The sfx publisher's edge (aws-edge) names exchange-c in its
+  # EXCHANGES_JSON, so the broker routes sfx offers here.
+  exchange-c:
+    build:
+      context: .
+      dockerfile: src/exchange/Dockerfile
+    dns: *wildcard-dns
+    environment:
+      EXCHANGE_DSN: "postgres://fora:fora@postgres:5432/fora_c?sslmode=disable"
+      # Own SoR registry DB (see exchange-a). fora_sor_c is pre-created at init.
+      EXCHANGE_SOR_DSN: "postgres://fora:fora@postgres:5432/fora_sor_c?sslmode=disable"
+      EXCHANGE_ADDR: ":8081"
+      EXCHANGE_DOMAIN: "exchange-c:8081"
+      # This exchange's own publisher tenant (see exchange-a).
+      EXCHANGE_DEFAULT_TENANT: "sfx.demo.fora-protocol.org"
+      EXCHANGE_PUBLIC_ORIGIN: "http://exchange-c:8081"
+      FORA_BILLING_ADAPTER: "inmemory"
+      EXCHANGE_BILLING_SEED: '{"agent-e2e":{"value":"100.00","currency":"USD"},"agent-demo-eur":{"value":"1000.00","currency":"EUR"}}'
+      FORA_WELLKNOWN_SCHEME: "http"
+      SKIP_SSRF: "true"
+      ALLOW_INSECURE: "true"
+      EXCHANGE_BROKER_WELLKNOWN_URL: "http://broker:8082/.well-known/fora.json"
+      EXCHANGE_CATALOG_URI_SCHEME: "http"
+      # THIS EXCHANGE IS NEVER REGISTERED AT. It is the account suite's reserved
+      # never-registered target, and that reservation is what lets a refusal be
+      # asserted as a TOTAL — "no account exists here" — instead of as a
+      # before-and-after comparison that cannot fail.
+      #
+      # It cannot fail against an exchange the suite already holds an account at,
+      # because Register is idempotent: a row that already carries a billing
+      # reference takes a fast path and returns the same handle whether or not
+      # the pre-check let the request through. So the comparison stays equal
+      # either way, and the assertion proves nothing.
+      #
+      # The same schema exchange-b publishes; see the anchor for why one value
+      # serves both. Publishing it turns enforcement on here too, but the identity
+      # adapter pre-checks against the same schema before signing, so a
+      # non-conforming payload is stopped there and never reaches this exchange.
+      EXCHANGE_REGISTRATION_SCHEMA: *registration-schema
+      EXCHANGE_TERMS_URI: "http://exchange-c:8081/terms/2026-04"
+      # SHA-256 of the single byte "b", so this exchange's terms revision is a
+      # different real digest from exchange-b's rather than a copy of it.
+      EXCHANGE_TERMS_DIGEST: "sha256:3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d"
+      FORA_RSA_PRIVATE_PEM_FILE: "/rsa-keys/rsa-c-private.pem"
+      FORA_ED25519_PRIVATE_PEM_FILE: "/rsa-keys/ed25519-c-private.pem"
+    volumes:
+      - rsa-keys:/rsa-keys:ro
+    depends_on:
+      dns:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      publisher-jwks:
+        condition: service_healthy
+      catalog-contributor-e2e-jwks:
+        condition: service_healthy
+      rsa-keygen:
+        condition: service_completed_successfully
+    ports:
+      - target: 8081
+        published: 0
+        mode: host
+
+  broker:
+    build:
+      context: .
+      dockerfile: src/broker/Dockerfile
+    dns: *wildcard-dns
+    extra_hosts:
+      # On Linux, Docker doesn't auto-wire this; make it explicit so the
+      # Broker can probe edge URIs authored with host.docker.internal.
+      - "host.docker.internal:host-gateway"
+    environment:
+      BROKER_DSN: "postgres://fora:fora@postgres:5432/fora?sslmode=disable"
+      REDIS_URL: "redis://redis:6379/0"
+      BROKER_ADDR: ":8082"
+      BROKER_ID: "broker-e2e"
+      BROKER_DOMAIN: "broker.e2e.local"
+      # Single scheme knob for every broker well-known fetch: the publisher
+      # probe, the Offer.exchange endpoint resolver (that exchange's
+      # /.well-known/fora.json), and the per-agent well-known key resolver
+      # (v1.1 lazy/just-in-time registration). The compose network is HTTP-only,
+      # so override the default https scheme.
+      FORA_WELLKNOWN_SCHEME: "http"
+      # The SSRF guard on the publisher-probe fetch blocks private/loopback hosts
+      # by default; the compose publisher (and host.docker.internal probe target)
+      # are internal http hosts, so permit it here. MUST stay unset in production.
+      SKIP_SSRF: "true"
+      ALLOW_INSECURE: "true"
+      # The Broker refuses to boot without a persistent identity key, because the
+      # key it publishes in its own WBA directory is cached by verifiers for 90
+      # days and a per-restart key invalidates every cached copy. The e2e stack
+      # is torn down between runs and nothing caches across it, so a throwaway
+      # key is correct here. MUST stay unset in production.
+      BROKER_ALLOW_EPHEMERAL_KEY: "true"
+      # Publish the revocation channel: after the WBA split the Broker's WBA
+      # directory advertises this URL as its revocation_url and serves a
+      # KeyRevocationList (keyed by RFC 7638 thumbprint) at that route
+      # (forawellknown.RevocationPath).
+      BROKER_REVOCATION_URL: "http://broker:8082/.well-known/fora-key-revocations.json"
+      # BROKER_REVOCATION_FILE points at a writable, host-mounted file the Broker
+      # re-reads on mtime change. Absent/empty → the nothing-revoked baseline; the
+      # cross-container revocation e2e writes a KeyRevocationList here to revoke a
+      # throwaway thumbprint and assert the Exchange then rejects it (401).
+      BROKER_REVOCATION_FILE: "/revocations/revocations.json"
+      # Broker-relay signing key — without this the Broker ships unsigned
+      # Exchange calls and the Exchange's httpsig middleware rejects them.
+      # The keypair is a generated harness fixture (gen-e2e-keys.sh; gitignored
+      # as private material). The Broker publishes the relay pubkey in its OWN
+      # WBA directory at boot, which is where the Exchange's broker well-known
+      # resolver learns it — no pre-shared key file anywhere.
+      BROKER_RELAY_KEY_FILE: "/relay/broker-key.json"
+      # EXA_API_KEY deliberately empty — pytest drives with direct URIs.
+    volumes:
+      - ./tests/e2e/harness/fixtures/broker_relay_key.json:/relay/broker-key.json:ro
+      # Writable dir the revocation e2e writes revocations.json into; the Broker
+      # re-reads it on mtime change (see BROKER_REVOCATION_FILE above).
+      - ./tests/e2e/harness/revocations:/revocations
+    depends_on:
+      dns:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      exchange:
+        condition: service_started
+      # Multi-exchange topology (ripdi): the broker resolves music offers to
+      # exchange-b and sfx offers to exchange-c, so both must be up before it.
+      exchange-b:
+        condition: service_started
+      exchange-c:
+        condition: service_started
+    ports:
+      # Ephemeral host port — discovered via `docker compose port broker 8082`
+      # (h9gy: parallel-worktree-stack support).
+      - target: 8082
+        published: 0
+        mode: host
+
+  edge:
+    build:
+      context: src/edge
+      dockerfile: Dockerfile.miniflare
+      # The edge consumes @fora-protocol/sdk-l1 pinned to a commit on GitHub
+      # (git+https://…/protocol#<sha>), fetched during the image build, so no
+      # sibling build-context is mirrored in. How it is fetched is the
+      # Dockerfile's business and is explained there.
+    # WBA_KEYS_JSON for this publisher's self-publish key (no kid; named by
+    # thumbprint) is generated by scripts/gen-e2e-keys.sh into this env_file (the
+    # served JWK is derived from the same private fixture the demo ingest signs
+    # with, so they cannot drift). Served in the WBA directory's keys[] so the
+    # Exchange learns the key via the well-known fetch — no DB pre-seed (fcrk7).
+    env_file:
+      - ./deploy/edge-keys/edge.env
+    # Cloudflare edge listens on port 80 so the demo publisher domain alias
+    # (demo.fora-protocol.org) resolves natively for BOTH the port-80
+    # /.well-known/fora.json fetch (Exchange Gate 2 + Broker probe) and the
+    # port-80 signed-URL content fetch — no Host-override, no port rewrite.
+    # Root user so node can bind the privileged port inside the container.
+    user: "0:0"
+    environment:
+      PORT: "80"
+      EXCHANGE_URL: "http://exchange:8081"
+      # After the WBA split the exchange's offer-signing key lives in its WBA
+      # directory; the edge resolves the delivery-URL verify key by thumbprint
+      # from there, not from fora.json.
+      EXCHANGE_WBA_URL: "http://exchange:8081/.well-known/http-message-signatures-directory"
+      ORIGIN_URL: "http://publisher:80"
+      # Delivery-URL binding enforcement, stated explicitly rather than left to
+      # the default: this is the property the MCP end-to-end test exercises, and
+      # a test whose subject is implied by a default proves less than one whose
+      # subject is written down. A custodied registry agent satisfies the check
+      # because the identity service fetches on its behalf with the bound key.
+      FORA_ENFORCE_BINDING: "true"
+      # PROVIDER is the manifest `domain` field; for the demo publisher this
+      # edge fronts the Stoa Press philosophy catalog.
+      PROVIDER: "demo.fora-protocol.org"
+      EXCHANGES_JSON: '[{"domain":"exchange:8081","endpoint":"http://exchange:8081","supported_profiles":["fora-news-v1"],"ext":{"resource_owner_id":"demo-resource-owner"}}]'
+      # Authorized catalog pushers (Gate-2 3rd-party branch). The harness signs
+      # PushResources as `catalog-contributor-e2e`; the Exchange learns that
+      # contributor's key ONLY by fetching its /.well-known/fora.json from the
+      # catalog-contributor service (no fora.agents pre-seed) — exercising the
+      # real well-known trust path (fcrk7), not an /admin/catalog/reload shortcut.
+      CATALOG_CONTRIBUTORS_JSON: '[{"domain":"catalog-contributor-e2e","relationship":"harness"}]'
+      RSL_BODY: "# e2e rsl"
+    networks:
+      default:
+        aliases:
+          # Stoa Press philosophy publisher → Cloudflare ed25519 edge.
+          - demo.fora-protocol.org
+    depends_on:
+      exchange:
+        condition: service_started
+      publisher:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'node -e "require(''http'').get(''http://127.0.0.1:80/.well-known/fora.json'', r => process.exit(r.statusCode===200?0:1)).on(''error'', () => process.exit(1))"'
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    ports:
+      # Ephemeral host port — discovered via `docker compose port edge 80`
+      # (h9gy: parallel-worktree-stack support).
+      - target: 80
+        published: 0
+        mode: host
+
+  fastly-edge:
+    # Fastly Compute runtime via Viceroy (`fastly compute serve`). Same
+    # Hono app as the Miniflare edge, compiled to WASM via
+    # @fastly/js-compute.
+    build:
+      context: .
+      dockerfile: tests/e2e/fastly-edge/Dockerfile
+      platforms:
+        - linux/amd64
+      # Same SDK source as the edge service: @fora-protocol/sdk-l1 pinned to a
+      # commit on GitHub and fetched during the build, no sibling context.
+    # WBA_KEYS_JSON for the music publisher's self-publish key (no kid; named by
+    # thumbprint), generated by scripts/gen-e2e-keys.sh. The Fastly entrypoint
+    # hoists it into the fora_edge config_store so the WASM worker serves it in
+    # the WBA directory's keys[] (fcrk7).
+    env_file:
+      - ./deploy/edge-keys/fastly-edge.env
+    environment:
+      # Viceroy listens on port 80 so the music demo domain alias resolves
+      # natively for the port-80 manifest fetch + signed-URL content fetch.
+      FASTLY_SERVE_ADDR: "0.0.0.0:80"
+      # Multi-exchange topology (ripdi): the music publisher is fronted by
+      # exchange-b. Its fora.json names exchange-b so the broker routes music
+      # offers there, and the music catalog is ingested into exchange-b's DB.
+      # After the WBA split the edge resolves the delivery-URL verify key by
+      # thumbprint from exchange-b's WBA directory, not from fora.json.
+      EXCHANGE_URL: "http://exchange-b:8081"
+      EXCHANGE_WBA_URL: "http://exchange-b:8081/.well-known/http-message-signatures-directory"
+      ORIGIN_URL: "http://publisher:80"
+      # Binding enforcement stated explicitly; see the cloudflare edge above.
+      FORA_ENFORCE_BINDING: "true"
+      PROVIDER: "music.demo.fora-protocol.org"
+      EXCHANGES_JSON: '[{"domain":"exchange-b:8081","endpoint":"http://exchange-b:8081","supported_profiles":["fora-news-v1"],"ext":{"resource_owner_id":"demo-resource-owner"}}]'
+      # Authorized catalog pushers (Gate-2 3rd-party branch). The harness signs
+      # PushResources as `catalog-contributor-e2e`; the Exchange learns that
+      # contributor's key ONLY by fetching its /.well-known/fora.json from the
+      # catalog-contributor service (no fora.agents pre-seed) — exercising the
+      # real well-known trust path (fcrk7), not an /admin/catalog/reload shortcut.
+      CATALOG_CONTRIBUTORS_JSON: '[{"domain":"catalog-contributor-e2e","relationship":"harness"}]'
+      RSL_BODY: "# e2e rsl fastly"
+    networks:
+      default:
+        aliases:
+          # Harmonia Records music publisher → Fastly ed25519 edge.
+          - music.demo.fora-protocol.org
+    depends_on:
+      # Music publisher fronts exchange-b (ripdi).
+      exchange-b:
+        condition: service_started
+      publisher:
+        condition: service_healthy
+    # Viceroy can report "Listening" before the TCP socket accepts
+    # connections cleanly. Poll fora.json until the server answers so
+    # downstream services (Exchange manifestcache, runner) don't race it.
+    # Image ships node but no curl/wget, so the probe uses node's http.
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'node -e "require(''http'').get(''http://127.0.0.1:80/.well-known/fora.json'', r => process.exit(r.statusCode===200?0:1)).on(''error'', () => process.exit(1))"'
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    ports:
+      # Ephemeral host port — discovered via `docker compose port fastly-edge 80`
+      # (h9gy: parallel-worktree-stack support).
+      - target: 80
+        published: 0
+        mode: host
+
+  aws-edge:
+    # CloudFront canned-policy signed-URL verifier stand-in. Proves the
+    # RSA chain round-trip locally without a real CloudFront distro. Built from
+    # the repo root so the shared src/edge/src/publisher-manifest.mjs builder can
+    # be copied into the image (the shim imports it rather than duplicating it).
+    build:
+      context: .
+      dockerfile: tests/e2e/aws-edge/Dockerfile
+    # WBA_KEYS_JSON for the sfx publisher's self-publish key (no kid; named by
+    # thumbprint), generated by scripts/gen-e2e-keys.sh. The raw-Node shim reads
+    # it from env and serves it in the WBA directory's keys[] (fcrk7).
+    env_file:
+      - ./deploy/edge-keys/aws-edge.env
+    # AWS CloudFront RSA edge shim listens on port 80 so the sfx demo domain
+    # alias resolves natively for the port-80 manifest + content fetches. Root
+    # user so node can bind the privileged port.
+    user: "0:0"
+    environment:
+      # Multi-exchange topology (ripdi): the sfx publisher is fronted by
+      # exchange-c. Its fora.json names exchange-c so the broker routes sfx
+      # offers there, and the sfx catalog is ingested into exchange-c's DB.
+      EXCHANGE_URL: "http://exchange-c:8081"
+      ORIGIN_URL: "http://publisher:80"
+      PROVIDER: "sfx.demo.fora-protocol.org"
+      EXCHANGES_JSON: '[{"domain":"exchange-c:8081","endpoint":"http://exchange-c:8081","supported_profiles":["fora-news-v1"],"ext":{"resource_owner_id":"demo-resource-owner"}}]'
+      # Authorized catalog pushers (Gate-2 3rd-party branch). The harness signs
+      # PushResources as `catalog-contributor-e2e`; the Exchange learns that
+      # contributor's key ONLY by fetching its /.well-known/fora.json from the
+      # catalog-contributor service (no fora.agents pre-seed) — exercising the
+      # real well-known trust path (fcrk7), not an /admin/catalog/reload shortcut.
+      CATALOG_CONTRIBUTORS_JSON: '[{"domain":"catalog-contributor-e2e","relationship":"harness"}]'
+      PORT: "80"
+      # CloudFront RSA verify key, read from the file the rsa-keygen one-shot
+      # writes into the shared volume — the matching public half of the Exchange's
+      # FORA_RSA_PRIVATE_PEM_FILE (trusted key group model; the cdn-keys.json
+      # route is retired, D4). No longer committed to git.
+      # Multi-exchange topology (ripdi): the sfx publisher is fronted by
+      # exchange-c, which signs URLs with rsa-c-private.pem — so this shim must
+      # verify against rsa-c-public.pem (exchange-c's RSA public half), not
+      # exchange-a's.
+      FORA_CF_PUBLIC_PEM_FILE: "/rsa-keys/rsa-c-public.pem"
+    volumes:
+      - rsa-keys:/rsa-keys:ro
+    networks:
+      default:
+        aliases:
+          # FoleyWorks SFX publisher → AWS CloudFront RSA edge.
+          - sfx.demo.fora-protocol.org
+    depends_on:
+      # SFX publisher fronts exchange-c (ripdi).
+      exchange-c:
+        condition: service_started
+      publisher:
+        condition: service_healthy
+      rsa-keygen:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'node -e "require(''http'').get(''http://127.0.0.1:80/.well-known/fora.json'', r => process.exit(r.statusCode===200?0:1)).on(''error'', () => process.exit(1))"'
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    ports:
+      # Ephemeral host port — discovered via `docker compose port aws-edge 80`
+      # (h9gy: parallel-worktree-stack support).
+      - target: 80
+        published: 0
+        mode: host
+
+  # ───── Lambda@Edge (AWS Lambda runtime emulator) ─────────────────────
+  # The REAL src/edge worker running inside the AWS Lambda runtime image, as the
+  # Lambda@Edge bundle a deployment would upload: built by
+  # src/edge/scripts/build-lambda-edge.mjs with the per-deployment config baked
+  # in (Lambda@Edge has no environment variables, which is why nothing is
+  # configured here — see tests/e2e/lambda-edge/write-configs.mjs).
+  #
+  # This is NOT the aws-edge service above. That one is a hand-written
+  # CloudFront-RSA verifier stand-in covering a different signature chain and it
+  # never executes src/edge code; this one is the Ed25519 worker itself on the
+  # third runtime it ships for.
+  #
+  # Reached ONLY through the Lambda invoke endpoint
+  # (POST /2015-03-31/functions/function/invocations, port 8080), so it takes no
+  # publisher-domain network alias: ordinary HTTP is not a thing this runtime
+  # speaks. The harness builds CloudFront viewer-request events and reads the
+  # returned JSON — a pass-through comes back as the request object, a denial as
+  # a generated response.
+  #
+  # No ORIGIN_URL is baked, which is the CloudFront-native posture: CloudFront
+  # owns the origin fetch and the function hands an authorized request back to
+  # it. EXCHANGE_WBA_URL points at exchange-a, so delivery-URL verify keys are
+  # resolved by fetching that directory over this network, the same way
+  # production resolves them.
+  lambda-edge:
+    build:
+      context: .
+      dockerfile: tests/e2e/lambda-edge/Dockerfile
+    depends_on:
+      exchange:
+        condition: service_started
+    # The probe opens a TCP connection to the emulator's invoke port and closes
+    # it. It deliberately does NOT invoke the function: the emulator serves one
+    # invocation at a time, and a probe that lands on top of the harness's
+    # invocation makes the emulator abort that request and exit, taking the
+    # container down in the middle of a suite. Docker runs this every few
+    # seconds for the container's whole life, so an invoking probe collides
+    # eventually. That the bundle actually answers is proven at image build
+    # (each bundle is smoke-invoked) and once per service by the harness before
+    # any test runs; the probe script says more about what that leaves open.
+    healthcheck:
+      test: ["CMD", "node", "/opt/healthcheck.mjs"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    ports:
+      # Ephemeral host port — discovered via
+      # `docker compose port lambda-edge 8080`.
+      - target: 8080
+        published: 0
+        mode: host
+
+  # The same image, running the bundle built WITHOUT a publisher signing key.
+  # The WBA directory route has two answers — the JWK Set above, 404 here — and a
+  # Lambda container serves exactly one baked bundle, so covering both postures
+  # takes two containers. Everything else about the two configs is identical.
+  lambda-edge-no-wba:
+    build:
+      context: .
+      dockerfile: tests/e2e/lambda-edge/Dockerfile
+    command: ["no-wba.handler"]
+    depends_on:
+      exchange:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "node", "/opt/healthcheck.mjs"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    ports:
+      - target: 8080
+        published: 0
+        mode: host
+
+  # Wildcard DNS for the agent zone. Each agent gets a random subdomain
+  # (<slug>.foramcp.org) that the Broker/Exchange must resolve to fetch the
+  # agent's WBA directory and verify its signature. The slug is random, so no
+  # static per-agent alias is possible; this resolves the whole zone to identity
+  # and forwards everything else to Docker's embedded DNS (127.0.0.11), which
+  # answers the compose service names and the demo-domain aliases. dnsmasq is
+  # installed at start from the alpine mirror (no bespoke image to pull/pin).
+  dns:
+    image: alpine:3.20
+    command:
+      - sh
+      - -c
+      - "apk add --no-cache dnsmasq >/dev/null 2>&1 && exec dnsmasq -k --log-facility=- --no-resolv --server=127.0.0.11 --address=/foramcp.org/172.30.0.83"
+    cap_add:
+      - NET_ADMIN
+    networks:
+      default:
+        ipv4_address: 172.30.0.53
+    # Ready once dnsmasq answers (the apk install adds a few seconds of startup);
+    # backends gate on this so they never start before their resolver is up.
+    healthcheck:
+      test: ["CMD-SHELL", "nslookup ready.foramcp.org 127.0.0.1 >/dev/null 2>&1 || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
+
+  # ───── Identity Service (registry / MCP adapter) ──────────────────
+  # The Go service that replaced the Python shim. It custodies each agent's key
+  # (identity-vault), provisions agents through real OIDC sign-up (zitadel), hosts
+  # each agent's WBA directory on its subdomain, and exposes the MCP endpoint the
+  # harness drives. See tests/e2e/harness/test_mcp_endpoint.py.
+  identity-vault:
+    image: hashicorp/vault:1.20
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    # Dev mode auto-unseals and enables a KV v2 mount at `secret/`, which the
+    # identity KeyStore uses (IDENTITY_KV_MOUNT=secret). Not for production; the
+    # real deploy runs a sealed Vault with a real auth method.
+    command: ["server", "-dev"]
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  zitadel-db:
+    image: postgres:17-alpine
+    # It matters more here than for the `postgres` service: Zitadel's event store
+    # writes hard through start-from-init, and none of it outlives the stack.
+    <<: *ephemeral-postgres
+    environment:
+      POSTGRES_USER: zitadel
+      POSTGRES_PASSWORD: zitadel
+      POSTGRES_DB: zitadel
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zitadel -d zitadel"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # In-network OIDC provider. ExternalDomain=zitadel so the issuer is
+  # http://zitadel:8080 — resolvable by identity over the compose network (the dev
+  # stack in docker-compose.yml bakes localhost instead, for a laptop browser).
+  zitadel:
+    image: ghcr.io/zitadel/zitadel:v3.4.9
+    command:
+      - start-from-init
+      - --masterkey
+      - MasterkeyNeedsToHave32Characters
+      - --tlsMode
+      - disabled
+      - --steps
+      - /etc/zitadel/init-steps.yaml
+    environment:
+      ZITADEL_EXTERNALDOMAIN: zitadel
+      ZITADEL_EXTERNALPORT: "8080"
+      ZITADEL_EXTERNALSECURE: "false"
+      ZITADEL_PORT: "8080"
+      ZITADEL_TLS_ENABLED: "false"
+      ZITADEL_DATABASE_POSTGRES_HOST: zitadel-db
+      ZITADEL_DATABASE_POSTGRES_PORT: "5432"
+      ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: zitadel
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: zitadel
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+    user: "0"
+    volumes:
+      - ./deploy/zitadel/init-steps.yaml:/etc/zitadel/init-steps.yaml:ro
+      - zitadel-bootstrap:/bootstrap
+    depends_on:
+      zitadel-db:
+        condition: service_healthy
+
+  # One-shot: provisions the `fora` project, the confidential `fora-mcp` OIDC
+  # client with redirect URI http://identity/callback, and the alice login user;
+  # writes the minted client id/secret to the shared bootstrap volume, which
+  # identity reads via IDENTITY_OIDC_CLIENT_ID/SECRET_FILE.
+  zitadel-init:
+    image: curlimages/curl:8.11.1
+    entrypoint: ["sh", "/bootstrap.sh"]
+    user: "0"
+    environment:
+      ZITADEL_BASE_URL: http://zitadel:8080
+      ZITADEL_INSTANCE_HOST: zitadel
+      ZITADEL_ISSUER: http://zitadel:8080
+      IDENTITY_AUTH_ISSUER: *identity-issuer
+    volumes:
+      - ./scripts/zitadel-bootstrap.sh:/bootstrap.sh:ro
+      - zitadel-bootstrap:/bootstrap
+    depends_on:
+      - zitadel
+
+  identity:
+    build:
+      context: .
+      dockerfile: src/identity/Dockerfile
+    # Runs on :80 as root so the WBA directory it hosts is reachable at the
+    # agent's bare subdomain (http://<slug>.foramcp.org, port 80) — the origin the
+    # Broker/Exchange resolve from the signed Signature-Agent header. The distroless
+    # nonroot default cannot bind a privileged port; e2e overrides it.
+    user: "0"
+    environment:
+      IDENTITY_ADDR: ":80"
+      IDENTITY_DSN: "postgres://fora:fora@postgres:5432/identity?sslmode=disable"
+      VAULT_ADDR: "http://identity-vault:8200"
+      VAULT_TOKEN: "root"
+      IDENTITY_KV_MOUNT: "secret"
+      IDENTITY_BASE_DOMAIN: "foramcp.org"
+      IDENTITY_WELLKNOWN_SCHEME: "http"
+      IDENTITY_OIDC_ISSUER: "http://zitadel:8080"
+      IDENTITY_OIDC_CLIENT_ID_FILE: "/bootstrap/identity_client_id"
+      IDENTITY_OIDC_CLIENT_SECRET_FILE: "/bootstrap/identity_client_secret"
+      IDENTITY_OIDC_SCOPES: "openid profile email"
+      <<: *identity-auth
+      IDENTITY_MCP_BROKER_URL: "http://broker:8082"
+      # No Exchange is configured, deliberately: the account tools take the
+      # target per call and resolve its endpoint from that Exchange's own
+      # manifest. What IS set is the policy — which Exchanges this deployment
+      # will speak to at all. It names all three in this stack, so the lever is
+      # exercised in its production posture rather than left empty; a fourth
+      # Exchange added to this file has to be added here too.
+      IDENTITY_MCP_EXCHANGE_ALLOWLIST: "exchange:8081,exchange-b:8081,exchange-c:8081"
+      IDENTITY_MCP_WELLKNOWN_SCHEME: "http"
+      # The report leg fetches the offer's exchange well-known over the private
+      # compose network, so allow private targets (as the exchanges/broker do).
+      # The SSRF guard is SDK-owned and reads these two flags; the old
+      # FORA_FETCH_INSECURE_ALLOW_PRIVATE knob left with the in-repo guard.
+      # Both MUST stay unset in production.
+      SKIP_SSRF: "true"
+      ALLOW_INSECURE: "true"
+    volumes:
+      - zitadel-bootstrap:/bootstrap:ro
+    # Static IP so the wildcard-DNS sidecar can point *.foramcp.org here.
+    networks:
+      default:
+        ipv4_address: 172.30.0.83
+    # No healthcheck: distroless image ships only the /identity binary — no shell,
+    # no wget/curl (same as exchange/broker). Readiness is gated by the harness,
+    # which polls /healthz before driving the MCP endpoint.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      identity-vault:
+        condition: service_healthy
+      zitadel-init:
+        condition: service_completed_successfully
+
+  runner:
+    # Opt-in: `docker compose --profile test run --rm runner` executes the suite.
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: tests/e2e/Dockerfile
+      # The harness resolves fora-protocol and fora-protocol-sdk off-commit from
+      # git (subdirectories gen/python and sdk/python), so no sibling
+      # build-context is mirrored in.
+    environment:
+      # The harness now drives some paths through the SDK's own FORA client, and
+      # that client refuses to dial anything the rule below does not permit.
+      # SKIP_SSRF drops the dial-time address guard, which would otherwise refuse
+      # this network's private addresses; ALLOW_INSECURE permits plaintext http,
+      # which is all this stack speaks. The Go FORA services that dial out already
+      # set both for the same reason — exchange, exchange-b, exchange-c, broker and
+      # identity. The runner did not, because its calls used to bypass the guard
+      # entirely by not going through the SDK. Those six are the whole set: a
+      # reader auditing which containers run with the address guard off should not
+      # have to take "all of them" on trust.
+      SKIP_SSRF: "true"
+      ALLOW_INSECURE: "true"
+      # The harness mints its own bearer for the MCP-endpoint test, so it needs the
+      # SAME issuer and seed the identity service verifies with.
+      <<: *identity-auth
+      FORA_E2E_REUSE_STACK: "1"
+      FORA_E2E_KEEP_UP: "1"
+      FORA_E2E_IN_NETWORK: "1"
+      FORA_E2E_COMPOSE_FILE: "/runner/docker-compose.e2e.yml"
+      # The harness signs FORA calls as agent-e2e with this key: keyid's
+      # thumbprint resolves to the agent-e2e directory the seed registers, so the
+      # Broker/Exchange signature gate admits it. The fixture ships in the runner
+      # image at /runner/harness.
+      FORA_AGENT_KEY_FILE: "/runner/harness/fixtures/agent_e2e_key.json"
+      # exchange-a's Ed25519 delivery-URL signing key, the private half of the
+      # key it publishes in its WBA directory. The Lambda@Edge suite signs its
+      # own delivery URLs with it because that runtime cannot be handed one the
+      # Exchange minted: CloudFront terminates TLS, so the Lambda adapter always
+      # rebuilds the request URL as https, while this compose network is
+      # http-only and the signature covers the scheme. The verify side stays the
+      # production path — the edge resolves the key by thumbprint from the
+      # Exchange's directory over the network.
+      FORA_EXCHANGE_ED25519_PEM_FILE: "/rsa-keys/ed25519-private.pem"
+    volumes:
+      # Read-only, for the signing key named above. Written by the rsa-keygen
+      # one-shot at stack-up; the aws-edge shim consumes the public half of the
+      # sibling RSA pair from the same volume.
+      - rsa-keys:/rsa-keys:ro
+      - ./docker-compose.e2e.yml:/runner/docker-compose.e2e.yml:ro
+      # Docker socket bind: lets obligation tests drive container lifecycle
+      # (restart, inspect, exec) via the docker-py SDK without depending on
+      # a docker CLI in the runner image. Binding the socket rather than
+      # installing the CLI keeps the runner image small and avoids pinning a
+      # client version against whatever daemon the host happens to run.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The revocation e2e writes revocations.json through the harness tree, and
+      # the broker service above reads THE SAME host directory at /revocations
+      # (BROKER_REVOCATION_FILE). The mount is what makes the write cross the
+      # container boundary. Without it the path resolves inside the runner
+      # image's own layer — the directory is there, because COPY brought
+      # .gitkeep in, so the write succeeds and the Broker never sees a byte.
+      - ./tests/e2e/harness/revocations:/runner/harness/revocations
+    depends_on:
+      exchange:
+        condition: service_started
+      # Multi-exchange topology (ripdi): the seed ingests the music/sfx catalogs
+      # into exchange-b/c's DBs, so the runner must wait for them too.
+      exchange-b:
+        condition: service_started
+      exchange-c:
+        condition: service_started
+      broker:
+        condition: service_started
+      edge:
+        condition: service_healthy
+      aws-edge:
+        condition: service_healthy
+      fastly-edge:
+        condition: service_healthy
+      lambda-edge:
+        condition: service_healthy
+      lambda-edge-no-wba:
+        condition: service_healthy
+      lazy-agent-e2e-jwks:
+        condition: service_healthy
+      agent-e2e-jwks:
+        condition: service_healthy
+      agent-nobilling-e2e-jwks:
+        condition: service_healthy
+      agent-demo-eur-jwks:
+        condition: service_healthy
+      test-signer-e2e.v1-jwks:
+        condition: service_healthy
+      revocation-throwaway-e2e-jwks:
+        condition: service_healthy
+      identity:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+# A fixed subnet so the wildcard-DNS sidecar and identity can hold static IPs.
+# NOTE: a fixed subnet means two e2e stacks on one Docker daemon collide here —
+# override FORA_E2E_SUBNET / the static IPs for a parallel run. The ephemeral
+# host-port scheme (h9gy) is unaffected; only the internal subnet is pinned.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16
+
+volumes:
+  # Ephemeral RSA keypair written by rsa-keygen at stack-up (never committed);
+  # private half read by the Exchange, public half by the aws-edge shim.
+  rsa-keys:
+  # Zitadel's Postgres data and the bootstrap volume the init one-shot writes the
+  # admin PAT + the minted OIDC client id/secret into (identity reads the latter).
+  zitadeldata:
+  zitadel-bootstrap:

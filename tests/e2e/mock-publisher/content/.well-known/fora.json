@@ -1,0 +1,20 @@
+{
+  "ver": "1.0",
+  "role": "ROLE_PUBLISHER",
+  "domain": "publisher",
+  "exchanges": [
+    {
+      "domain": "exchange:8081",
+      "endpoint": "http://exchange:8081",
+      "relationship": "PROVIDER_RELATIONSHIP_DIRECT",
+      "ext": { "resource_owner_id": "demo-resource-owner" }
+    }
+  ],
+  "catalog_contributors": [
+    {
+      "domain": "publisher",
+      "relationship": "publisher"
+    }
+  ],
+  "supported_profiles": ["fora-news-v1"]
+}
