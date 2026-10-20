@@ -10,6 +10,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/foraroute"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/logging"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/repo"
 )
 
@@ -31,8 +32,11 @@ type EndpointResolver interface {
 	ResolveEndpoint(ctx context.Context, host string) (string, error)
 }
 
-// Refresher periodically probes each exchange's /healthz and persists the
-// latest probe state back to broker.exchanges.
+// Refresher periodically probes each exchange and persists the latest probe
+// state back to broker.exchanges. What "answering" means is the exchange's own
+// to say: a pass reads its /.well-known/fora.json and probes the
+// health_endpoint that manifest names, or, when it names none, takes the
+// fetched, valid manifest itself as the answer. See health.
 //
 // It probes every non-BLOCKED exchange, the ones already DOWN or REFUSED
 // included. That is what lets an exchange recover on its own: probing only the
@@ -45,20 +49,22 @@ type EndpointResolver interface {
 // resolver discovery uses, never the registry's endpoint column. That column is
 // operator-supplied bootstrap an exchange can outgrow by moving; probing it
 // would measure an address routing never talks to, and a stale column would
-// strand an exchange whose real /healthz answers 200.
+// strand an exchange that answers perfectly well where it now is.
 //
 // It also writes that resolved address back to the column, so the registry
-// holds ONE opinion about where an exchange is. The relay's SSRF allowlist
-// compares a caller-supplied endpoint against that column, and a column nothing
-// maintains would refuse a live exchange as unregistered for good. The value
-// written is still one the exchange advertised, vetted by the resolver against
-// the registered domain.
+// holds ONE opinion about where an exchange is: the column is where an operator
+// reads the address, and a change of it is logged as
+// broker.registry.endpoint_changed. No request path dials the column; resolve
+// and purchase admission resolve the address from the exchange's own
+// well-known each time. The value written is still one the exchange
+// advertised, vetted by the resolver against the registered domain.
 //
 // A pass probes up to maxConcurrentProbes exchanges at once.
 type Refresher struct {
 	repo      repo.ExchangeHealthRepo
 	endpoints EndpointResolver
 	http      *http.Client
+	scheme    string
 	logger    *slog.Logger
 	interval  time.Duration
 	timeout   time.Duration
@@ -66,10 +72,10 @@ type Refresher struct {
 
 // NewRefresher constructs a Refresher.
 //
-// httpClient is REQUIRED and panics at wiring time when nil, rather than
+// probe.HTTP is REQUIRED and panics at wiring time when nil, rather than
 // fabricating a default. The pass dials an address the exchange advertises about
-// itself and writes it back to the column the relay's allowlist reads, so this
-// client is one of the broker's outbound trust boundaries; a fabricated default
+// itself and writes it back to the registry, so this client is one of the
+// broker's outbound trust boundaries; a fabricated default
 // would be unguarded, and a nil argument is a wiring bug that must fail loud. The
 // exchange client pool refuses a nil client for the same reason.
 //
@@ -79,10 +85,10 @@ type Refresher struct {
 // composition root launches, where nothing recovers, taking the process down at
 // start-up instead of failing the wiring.
 func NewRefresher(
-	r repo.ExchangeHealthRepo, endpoints EndpointResolver, httpClient *http.Client,
+	r repo.ExchangeHealthRepo, endpoints EndpointResolver, probe ProbeTransport,
 	logger *slog.Logger, interval time.Duration,
 ) *Refresher {
-	if httpClient == nil {
+	if probe.HTTP == nil {
 		panic("registry: NewRefresher requires an HTTP client")
 	}
 	if endpoints == nil {
@@ -92,7 +98,7 @@ func NewRefresher(
 		interval = DefaultInterval
 	}
 	return &Refresher{
-		repo: r, endpoints: endpoints, http: httpClient,
+		repo: r, endpoints: endpoints, http: probe.HTTP, scheme: cmp.Or(probe.Scheme, "https"),
 		logger: logger, interval: interval, timeout: 3 * time.Second,
 	}
 }
@@ -102,7 +108,7 @@ func (r *Refresher) Run(ctx context.Context) {
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
 	if err := r.RefreshOnce(ctx); err != nil {
-		r.logger.WarnContext(ctx, "broker.registry.refresh", "err", err)
+		r.logger.Log(ctx, logging.LevelFor(ctx, err, slog.LevelWarn), "broker.registry.refresh", "err", err)
 	}
 	for {
 		select {
@@ -110,7 +116,7 @@ func (r *Refresher) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := r.RefreshOnce(ctx); err != nil {
-				r.logger.WarnContext(ctx, "broker.registry.refresh", "err", err)
+				r.logger.Log(ctx, logging.LevelFor(ctx, err, slog.LevelWarn), "broker.registry.refresh", "err", err)
 			}
 		}
 	}
@@ -122,10 +128,15 @@ func (r *Refresher) Run(ctx context.Context) {
 // It returns an error only when the pass could not run at all — the one outcome
 // a caller cannot observe any other way. A probe or write that fails for ONE
 // exchange is logged and does not abort the pass.
+//
+// Every read, write or fetch that can fail here is logged through
+// logging.LevelFor: one that failed because ctx ended (the process is shutting
+// down) was abandoned, not failed, and a shutdown must not read like a registry
+// fault or an exchange outage.
 func (r *Refresher) RefreshOnce(ctx context.Context) error {
 	entries, err := r.repo.ListUnblocked(ctx)
 	if err != nil {
-		r.logger.WarnContext(ctx, "broker.registry.list", "err", err)
+		r.logger.Log(ctx, logging.LevelFor(ctx, err, slog.LevelWarn), "broker.registry.list", "err", err)
 		return err
 	}
 	// Deliberately not errgroup.WithContext: a failing probe must not cancel its
@@ -148,14 +159,13 @@ func (r *Refresher) refreshOne(ctx context.Context, m repo.Exchange) {
 	endpoint, state := r.probe(ctx, m.Domain)
 	// A pass that could not resolve the well-known learned nothing about WHERE
 	// the exchange is, so it keeps the stored address. Blanking the column would
-	// refuse every relay as unregistered — a permanent answer to a transient
-	// fault.
+	// erase the last known address over a transient fault.
 	endpoint = cmp.Or(endpoint, m.Endpoint)
 	if m.ProbeState == state && m.Endpoint == endpoint {
 		return
 	}
 	if err := r.repo.SetProbeResult(ctx, m.ID, endpoint, state); err != nil {
-		r.logger.WarnContext(ctx, "broker.registry.set_probe_result",
+		r.logger.Log(ctx, logging.LevelFor(ctx, err, slog.LevelWarn), "broker.registry.set_probe_result",
 			"exchange_id", m.ID, "err", err)
 		return
 	}
@@ -175,16 +185,25 @@ func (r *Refresher) refreshOne(ctx context.Context, m repo.Exchange) {
 		// ride the same record, so one grep reads the whole history of a row:
 		// the value says which, and a DOWN that becomes REFUSED is itself worth
 		// seeing, because the exchange came back and is still unusable.
-		r.logger.InfoContext(ctx, "broker.registry.probe_state_changed",
+		//
+		// Leaving LIVE is WARN and the return is INFO. At WARN an operator must
+		// still see an exchange drop out, and nothing else records it: a failed
+		// health ping writes no line of its own.
+		level := slog.LevelWarn
+		if state == repo.ProbeLive {
+			level = slog.LevelInfo
+		}
+		r.logger.Log(ctx, level, "broker.registry.probe_state_changed",
 			"exchange_id", m.ID, "domain", m.Domain,
 			"was", string(m.ProbeState), "now", string(state))
 	}
 }
 
-// probe resolves the exchange's advertised endpoint, asks it for /healthz, and
-// returns the address it measured with what it concluded. An unresolvable
-// well-known yields no address and a non-LIVE state: routing resolves the same
-// way, so such an exchange cannot be routed to either.
+// probe resolves the exchange's advertised endpoint, judges whether the
+// exchange is answering, and returns the address it resolved with what it
+// concluded. An unresolvable well-known yields no address and a non-LIVE state:
+// routing resolves the same way, so such an exchange cannot be routed to
+// either.
 func (r *Refresher) probe(ctx context.Context, domain string) (string, repo.ProbeState) {
 	endpoint, err := r.endpoints.ResolveEndpoint(ctx, domain)
 	if err != nil {
@@ -200,33 +219,16 @@ func (r *Refresher) probe(ctx context.Context, domain string) (string, repo.Prob
 				"domain", domain, "err", err)
 			return "", repo.ProbeRefused
 		}
-		r.logger.InfoContext(ctx, "broker.registry.resolve",
+		// The outage is WARN too, like its request-path twin
+		// broker.routing.resolve: this pass is taking the exchange out of
+		// service, and at INFO an operator filtering at WARN saw the request
+		// path complain while the cause stayed hidden.
+		r.logger.Log(ctx, logging.LevelFor(ctx, err, slog.LevelWarn), "broker.registry.resolve",
 			"domain", domain, "err", err)
 		return "", repo.ProbeDown
 	}
 	// Canonicalized the way the registry stores it, so comparing against the
 	// column answers "has it moved" rather than "is it spelled differently" — a
 	// manifest advertising a trailing slash would rewrite the row every pass.
-	endpoint = repo.CanonicalEndpoint(endpoint)
-	if !r.ping(ctx, endpoint) {
-		return endpoint, repo.ProbeDown
-	}
-	return endpoint, repo.ProbeLive
-}
-
-// ping asks one canonical endpoint for /healthz.
-func (r *Refresher) ping(ctx context.Context, endpoint string) bool {
-	url := endpoint + "/healthz"
-	reqCtx, cancel := context.WithTimeout(ctx, r.timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
-	if err != nil {
-		return false
-	}
-	resp, err := r.http.Do(req)
-	if err != nil {
-		return false
-	}
-	defer func() { _ = resp.Body.Close() }()
-	return resp.StatusCode == http.StatusOK
+	return repo.CanonicalEndpoint(endpoint), r.health(ctx, domain)
 }

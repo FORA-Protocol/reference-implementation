@@ -38,6 +38,13 @@ invisible to them.
 down; a platform you are restarting does not. Bring the provider back before restarting
 the Identity Service, and never schedule maintenance on both at once.
 
+**With the publisher console, the same Zitadel runs a second instance for publishers**
+([`CONFIGURATION.md`](CONFIGURATION.md) §3): its own hostname, accounts, sessions and
+sign-in pages. Everything above applies to it and the console in the same way: the
+console reads its instance's discovery document at start-up and exits without it, and
+publishers who are already signed in keep their console session while the instance is
+down. Both instances live in one Zitadel, so a Zitadel outage is an outage of both.
+
 ---
 
 ## 2. Monitoring
@@ -50,7 +57,18 @@ curl -s https://login.example/.well-known/openid-configuration | head -c 120
 ```
 
 That single check covers what FORA depends on. If it answers with the right issuer, the
-Identity Service can start and developers can sign in.
+Identity Service can start and developers can sign in. With the publisher console, run it
+for the publishers' instance too, and check that the routes a system permission opens
+are not reachable from outside (CONFIGURATION.md lists them):
+
+```bash
+curl -s https://login.console.example/.well-known/openid-configuration | head -c 120
+# Expect: JSON whose "issuer" is exactly https://login.console.example
+
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://login.example/system/v1/instances/_search
+curl -s -o /dev/null -w '%{http_code}\n' -X PUT https://login.example/v2/features/system -d '{}'
+# Expect: 404 for both, from Caddy. A 401 means the request reached Zitadel.
+```
 
 Zitadel publishes its own liveness and readiness endpoints; use whatever your platform
 normally uses for them. Nothing in FORA looks at them.
@@ -100,6 +118,11 @@ rule.
 | Sign-in works but no agent appears | The provider is fine; agent creation failed afterwards | Look for `identity.oauthserver.callback.provision` and check Vault — [`deploy/storage/vault/RUNBOOK.md`](../storage/vault/RUNBOOK.md) §3. |
 | Zitadel will not boot after an upgrade | v4.x has a known crash during its own migrations, not yet fixed | Roll back to `v3.4.9`. §4.3. |
 | Zitadel will not start and reports it cannot decrypt | Wrong or missing master key | Supply the correct one. There is no recovery without it. |
+| The console's sign-in shows "FORA Developers", or a developer's account signs in to the console | The console trusts the developers' instance: its `CONSOLE_OIDC_ISSUER` is the developers' issuer | Roll out the release whose console trusts the publishers' instance; [`src/console/RUNBOOK.md`](../../src/console/RUNBOOK.md) §3. |
+| `bootstrap-identity.sh` stops: the installed console trusts another issuer | The stack describes the publishers' instance, but the release on the VM does not use it yet. Running the publishers' part would replace the client files that console signs in with | Roll out the stack's release first. On the release that moves the console, the rollout stops at "console not ready" until `bootstrap-identity.sh` has run, and a second rollout of the same release records it. |
+| `instance.sh`: "the System API refused the token" | The key that signed the token is not the one Zitadel was given, the token's audience is not Zitadel's external URL, or this machine's clock is more than a minute off | Compare `keys/zitadel-system-api-public.pem` with the private key you used (`openssl pkey -in <private> -pubout`), and check the clock. Nothing was created. |
+| `instance.sh`: the instance exists, but there is no token, or the token does not open it | The publishers' instance's bootstrap token is lost, or belongs to another moment (a database restored from before it was made) | §4.6. Do not delete the instance: every publisher account is in it. |
+| Every publisher is signed out after an upgrade | The console moved to the publishers' instance and ended the sessions sealed under the old issuer | Expected once. Each publisher signs in again, at the publishers' instance. |
 
 ### 3.2 If the hostname really must change
 
@@ -124,8 +147,15 @@ published issuer before anybody signs up.
 - **The hostname and the master key are permanent.** Neither can be changed after first
   start without losing the data.
 - **A client secret cannot be read back.** Losing it means generating a new one.
-- **The setup script and `init-steps.yaml` in this directory are for the automated
-  test stack only.** They carry published passwords and a published master key.
+- **`init-steps.yaml` in this directory is for the laptop and automated test stacks
+  only.** It carries published passwords. The provisioning scripts in
+  `deploy/zitadel/bootstrap/` are what deployments run too, through
+  `bootstrap-identity.sh`; the passwords they use there come from Terraform.
+- **One email address can hold two accounts**, a developer account in the developers'
+  instance and a publisher account in the publishers' one, with different passwords.
+  When someone asks about "their account", ask which side first, and look in that
+  instance's Zitadel console. A console account records the issuer it came from, so the
+  console's side is the instance at `login.console.<domain>`.
 
 ### 3.4 A developer registers and the confirmation code never arrives
 
@@ -133,8 +163,9 @@ Zitadel sends the code and treats the account as unusable until it is entered, s
 is reported as "I signed up and nothing happened". Work through it in this order —
 each step tells a Zitadel problem apart from a relay problem.
 
-**1. Is a provider configured at all?** Sign in to the console as the admin user, open
-Default settings → Notifications → SMTP provider. If it is missing or inactive on an
+**1. Is a provider configured at all?** Sign in to the Zitadel console of the instance
+the person registered at (§4.5), as its admin user, and open Default settings →
+Notifications → SMTP provider. Each instance has its own. If it is missing or inactive on an
 instance that was deployed with mail settings, the first-start configuration did not
 take: fix the deployment and rebuild rather than configuring it by hand, or the next
 rebuild loses the fix. Configuration is in [`CONFIGURATION.md`](CONFIGURATION.md) §3.
@@ -196,8 +227,15 @@ lives in Vault. To stop the agent, revoke its key and remove its registered clie
 
 ### 4.2 Rotating the client secret
 
-The Identity Service reads the secret only at start-up, so there is a short period in
-which the two disagree. Keep it short and do it in this order.
+**On a deployment from the compose bundle**, run `bootstrap-identity.sh` with
+`ROTATE=developers` for the Identity Service's client, `ROTATE=publishers` for the
+console's, or `ROTATE=all`. It mints the new secret, writes it where the service reads
+it, recreates that service, and waits for it to answer. Then do a real sign-in, as in
+step 4 below. A run without `ROTATE` keeps every secret that still works.
+
+**On a provider you run by hand**, the Identity Service reads the secret only at
+start-up, so there is a short period in which the two disagree. Keep it short and do it
+in this order.
 
 1. Generate a new secret on the client in the Zitadel console. **The old one stops
    working immediately** — Zitadel replaces rather than adds.
@@ -231,6 +269,15 @@ Before any upgrade:
 
 1. Back up the database (§5) and confirm you have the master key.
 2. Restore that backup into a throwaway instance and upgrade *that* first.
+3. On a deployment with the publisher console, list the routes the new version opens
+   to a system permission, because the System API user holds SYSTEM_OWNER and Caddy
+   refuses only the routes it names. In the new version's source,
+   `git grep -n 'permission: "system\.' <new tag> -- proto/` names each such method;
+   its `google.api.http` option gives the REST path, and its service the gRPC path.
+   Add every one that is new to the System API block of the compose-stack module's
+   Caddyfile template and to the route lists of
+   `deploy/terraform/scripts/tests/zitadel-instances-test.py`, and run that test
+   (`make test-production-db`) on the new image before rolling it out.
 
 **Roll back** by starting the previous image against the same database — which works
 only if the newer version has not already migrated the schema. That is exactly what the
@@ -250,10 +297,11 @@ Rotate with two credentials live at once:
 1. Create a **second** credential at the relay. Both are now valid. On Amazon SES this
    is a second access key on the same IAM user, which allows two.
 2. Update the stored provider in Zitadel — console → Default settings → Notifications →
-   SMTP provider, or the Admin API — to the new username and password. The environment
-   variables are not involved: they are read only when the instance is first created
-   ([`CONFIGURATION.md`](CONFIGURATION.md) §3).
-3. Send a test message from that screen and confirm it arrives.
+   SMTP provider, or the Admin API — to the new username and password, in **each
+   instance**: the developers' and, with the publisher console, the publishers'. The
+   environment variables are not involved: they are read only when an instance is
+   created ([`CONFIGURATION.md`](CONFIGURATION.md) §3).
+3. Send a test message from each screen and confirm it arrives.
 4. Update whatever renders the first-start configuration, so a future rebuild from empty
    storage comes up on the new credential rather than a deleted one.
 5. Only now, deactivate the old credential at the relay. Deactivate before deleting —
@@ -262,6 +310,56 @@ Rotate with two credentials live at once:
 Do not do this by re-running infrastructure tooling that replaces the credential in one
 step. That deletes the old password before Zitadel has the new one, which is the outage
 this procedure exists to avoid.
+
+### 4.5 Signing in to each instance's Zitadel console
+
+Each instance has its own Zitadel console, at its own hostname, and its own admin user,
+named `zadmin` in both. They are two different accounts with two different passwords.
+
+| Instance | Console | Password, on a deployment from the compose bundle |
+|---|---|---|
+| developers | `https://login.<domain>` | `terraform output -raw zitadel_admin_password`. Set when Zitadel created the instance. |
+| publishers | `https://login.console.<domain>` | `terraform output -raw console_login_admin_password`. Set when `bootstrap-identity.sh` first created the user, and never reset by a later run. |
+
+A password changed in the Zitadel console stays changed: no script sets it again, and
+the Terraform output no longer matches it.
+
+### 4.6 Recovering the publisher instance's token
+
+The publishers' instance is administered with a token of its own machine user,
+`fora-bootstrap`, which is IAM_OWNER of the instance that holds every publisher
+account. Zitadel shows that token once, when the System API creates the instance, and
+`bootstrap-identity.sh` keeps it in `/opt/fora/zitadel-publishers` on the VM's data
+volume. If that file is gone, or holds a token the instance no longer knows,
+`bootstrap-identity.sh` stops at the publishers' instance and points here. The accounts
+are not affected: publishers keep signing in. Only provisioning stops.
+
+Follow the same steps when the token may have been copied, for example from a backup
+of the data volume: the recovery deletes every earlier token of `fora-bootstrap`, so a
+copied one stops working.
+
+The instance itself is not deleted and created again — that would lose every publisher
+account. The System API user gets permission inside that one instance for a while,
+mints the machine user a new token, and loses the permission again:
+
+1. If the file holds a token the instance refuses, or one that may have been copied,
+   remove it on the VM: `sudo rm /opt/fora/zitadel-publishers/bootstrap.pat`.
+2. Run `bootstrap-identity.sh`, with the System API private key available as in
+   step 4. With no token on the VM it looks the instance up through the System API and
+   stops with "instance <id> answers at …, but there is no token". Note the id.
+3. Set the stack's `zitadel_system_api_recovery_instance_id` to the id, apply, and roll
+   the release out. Zitadel restarts with the System API user also holding IAM_OWNER
+   on that instance. While it does, the System API key also opens that instance's Admin
+   and Management APIs, which answer on its public hostname, so go straight on.
+4. Run `bootstrap-identity.sh` again, with the System API private key available
+   (`ZITADEL_SYSTEM_API_KEY_FILE`, by default the stack's
+   `keys/zitadel-system-api-private.pem`). It mints `fora-bootstrap` a new token, keeps
+   it in `/opt/fora/zitadel-publishers`, and, once the new token opens the instance,
+   deletes every other token of `fora-bootstrap`. Then it provisions the instance as
+   usual.
+5. Clear `zitadel_system_api_recovery_instance_id`, apply, and roll the release out
+   again, so the System API user holds SYSTEM_OWNER only again: no permission inside
+   any instance.
 
 ---
 
@@ -273,6 +371,12 @@ Two things, and each is useless without the other:
 |---|---|---|
 | Developer accounts | Zitadel's PostgreSQL database | Every developer signs up again — and gets a **new agent identity**, because the Identity Service ties an agent to the account that created it. Their existing agents are left behind with no owner. |
 | The master key | Your secret manager | The database cannot be decrypted. Same outcome as losing the database, with the backup sitting there unreadable. |
+| The publishers' instance's bootstrap token | `/opt/fora/zitadel-publishers`, on the VM's data volume | Provisioning of that instance stops until the token is recovered (§4.6). Accounts and sign-in are unaffected. |
+
+The database holds both instances: developer accounts and, with the publisher
+console, publisher accounts. Restore the bootstrap token directory together with a
+database restore: a token made after the backup was taken does not exist in the
+restored database, which is the case §4.6 recovers from.
 
 Back up the database on your normal PostgreSQL schedule
 ([`deploy/storage/postgres/RUNBOOK.md`](../storage/postgres/RUNBOOK.md) §5 covers the
@@ -297,10 +401,16 @@ FORA does not say how often you back up or how fast you must recover. You set th
 - **The master key cannot be changed or recovered**, and everything stored depends on
   it.
 - **A client secret cannot be read back**, only replaced.
-- **Mail settings in the environment apply only at first start.** On an instance that
-  already exists they are ignored, and the stored provider is edited instead — so the
-  two can drift apart, and a rebuild from empty storage comes up on the environment's
-  values, not the edited ones.
+- **Mail settings in the environment apply only when an instance is created**: the
+  developers' at first start, the publishers' when the System API creates it. On an
+  instance that already exists they are ignored, and the stored provider is edited
+  instead, in each instance — so the two can drift apart, and a rebuild from empty
+  storage comes up on the environment's values, not the edited ones.
+- **The System API key can create and delete instances and set the system-wide
+  features every instance follows.** It stays configured, because recovering the
+  publishers' instance's token needs it, so keep the private key the way you keep the
+  master key. Caddy refuses every route a system permission opens in the pinned
+  version on the public hostnames; an upgrade lists them again (§4.3).
 - **The Identity Service reads the secret only at start-up**, so rotating it needs a
   restart and a short window in which sign-ups fail.
 - **The Identity Service will not start while this is unreachable**, even though it does

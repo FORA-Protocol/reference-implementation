@@ -6,8 +6,9 @@ import { expect } from 'vitest';
 
 import { SIGNATURE_PARAMS } from '../../src/app.js';
 import { WBA_PATH } from '../../src/well-known.mjs';
+import { signedDirectory } from './directory.js';
 import type { TestKeypair } from './ed25519.js';
-import { generateKeypair, keyThumbprint, wbaDirectoryWithKeys } from './ed25519.js';
+import { generateKeypair, keyThumbprint } from './ed25519.js';
 // Shared test setup for E2E tests
 import { fetchMock } from './fetch-mock.js';
 
@@ -79,12 +80,14 @@ export function setupOriginMock(): void {
     .persist();
 }
 
-export function setupWbaDirectoryMock(keypair: TestKeypair): void {
+// The exchange's directory is served as a Web Bot Auth directory must be: the
+// profile's media type, and a response signature by the key it lists, made with
+// the SDK's signDirectoryResponse for the authority the edge fetches it from.
+export async function setupWbaDirectoryMock(keypair: TestKeypair): Promise<void> {
+  const { body, headers } = await signedDirectory([keypair], 'exchange.test');
   fetchMock
     .get('https://exchange.test')
     .intercept({ path: WBA_PATH, method: 'GET' })
-    .reply(200, wbaDirectoryWithKeys([keypair.publicJwk]), {
-      headers: { 'content-type': 'application/jwk-set+json' },
-    })
+    .reply(200, body, { headers })
     .persist();
 }

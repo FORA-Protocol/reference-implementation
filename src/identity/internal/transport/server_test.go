@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/directory"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/publisher"
@@ -56,7 +58,9 @@ type stubDocs struct {
 	err  error
 }
 
-func (s stubDocs) Directory(_ context.Context, _ string) ([]byte, error)  { return s.body, s.err }
+func (s stubDocs) SignedDirectory(_ context.Context, _, _ string) ([]byte, helpers.DirectoryResponseSignature, error) {
+	return s.body, helpers.DirectoryResponseSignature{}, s.err
+}
 func (s stubDocs) Card(_ context.Context, _ string) ([]byte, error)       { return s.body, s.err }
 func (s stubDocs) Revocation(_ context.Context, _ string) ([]byte, error) { return s.body, s.err }
 func (s stubDocs) Manifest(_ context.Context, _ string) ([]byte, error)   { return s.body, s.err }

@@ -52,13 +52,12 @@ func TestPushResources_EmptyBatchRejectedInvalidArgument(t *testing.T) {
 // TOO BIG — large term lists, large token sets, full-breadth axes, big batches.
 // ---------------------------------------------------------------------------
 
-// TestDiscover_ManyTermsProjectInOrderHeadlinePriceFirst pins the large-terms[]
-// boundary: one resource carrying many public terms projects ALL of them onto a
-// SINGLE offer, in push order, and the offer's headline price is the FIRST
-// term's price (D2 — the publisher controls the headline by term order)
-// even at scale. Rates are integer-valued floats so the JSONB round-trip is
-// exact and the headline assertion needs no tolerance.
-func TestDiscover_ManyTermsProjectInOrderHeadlinePriceFirst(t *testing.T) {
+// TestDiscover_ManyTermsProjectOneOfferEachInOrder pins the large-terms[]
+// boundary: one resource carrying many public terms projects EACH of them onto
+// its own offer, in push order, and every offer is priced from the term it
+// sells — even at scale. Rates are integer-valued floats so the JSONB
+// round-trip is exact and the price assertions need no tolerance.
+func TestDiscover_ManyTermsProjectOneOfferEachInOrder(t *testing.T) {
 	h := newPushHarness(t)
 	callerID := "caller.example"
 	client := setupTermContributor(t, h, callerID)
@@ -74,10 +73,11 @@ func TestDiscover_ManyTermsProjectInOrderHeadlinePriceFirst(t *testing.T) {
 			Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
 			PartLabel: &l,
 			Pricing: &forav1.Pricing{
-				Model:    forav1.PricingModel_PRICING_MODEL_PER_UNIT,
-				Rate:     money(t, float64(i+1)), // first term's rate is "1"
-				Currency: "USD",
-				Unit:     proto.String("accesses"),
+				Model:             forav1.PricingModel_PRICING_MODEL_PER_UNIT,
+				Rate:              money(t, float64(i+1)), // first term's rate is "1"
+				Currency:          "USD",
+				Unit:              proto.String("accesses"),
+				EstimatedQuantity: proto.Int32(1),
 			},
 			// no restrictions, no scopes → public → projects for any requester.
 		})
@@ -89,12 +89,15 @@ func TestDiscover_ManyTermsProjectInOrderHeadlinePriceFirst(t *testing.T) {
 
 	bare := requesterWithExt("agent-bare", "", "")
 	offers := discoverOffersAs(t, h, uri, bare)
-	if len(offers) != 1 {
-		t.Fatalf("offers = %d, want 1 (all %d terms ride one offer)", len(offers), n)
+	if len(offers) != n {
+		t.Fatalf("offers = %d, want %d (one offer per term)", len(offers), n)
 	}
-	assertStrs(t, "many terms, order preserved", labels(offers[0].GetTerms()), wantLabels)
-	if rate := offers[0].GetPricing().GetRate(); rate != money(t, 1.0) {
-		t.Fatalf("headline rate = %v, want %q (first term's price)", rate, money(t, 1.0))
+	assertStrs(t, "many terms, order preserved", labels(offerTerms(t, uri, offers)), wantLabels)
+	for i, o := range offers {
+		want := money(t, float64(i+1))
+		if rate := o.GetPricing().GetRate(); rate != want {
+			t.Fatalf("offer %d rate = %v, want %q (the price of the term it sells)", i, rate, want)
+		}
 	}
 }
 

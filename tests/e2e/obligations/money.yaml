@@ -1,0 +1,726 @@
+# A purchase at an Exchange: offers and their one price, metered estimates and
+# the purchase charge, billing, denials, idempotency, usage reports and delivery-URL
+# issuance. Registry entries (ADR-028 D1); the tests that prove them say so on
+# themselves.
+#
+# Sources: fora.proto, admin.proto and the website docs of the pinned protocol
+# module github.com/FORA-Protocol/protocol (the version in the root go.mod).
+#
+# Merged into existing entries rather than repeated here: a buyer whose balance
+# is too low is PAID-006, and a buyer behind on its reports is PAID-007. A bought
+# item carrying a delivery URL is PAID-002; MONEY-017 holds only what PAID-002
+# does not, the URL's expiry and its absence on a denied item. A report for
+# another agent's transaction is PUBLIC-005; MONEY-024 holds the unknown
+# transaction id.
+#
+# A "# harness:" comment above an entry says why the e2e harness cannot drive it
+# through a public surface yet, and what it would need. The comment is not part
+# of the entry: the registry schema is strict, so the note lives beside it.
+#
+# A "negative:" case is a refusal with a typed error response (ADR-028 D1). What
+# an answer that refuses nothing must leave out is a "must not" in "positive:".
+
+- id: MONEY-001
+  title: A resource with several terms is offered once per term, each offer carrying exactly one term
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A resource with multiple alternative terms (e.g. dual-licensed) produces multiple
+      separate offers, one per term — never one offer with a "headline" picked among them.
+  positive: >-
+    DiscoverResources for a resource whose catalog entry carries two terms returns two
+    offers with distinct offer_ids, each offer's terms list holds exactly one entry,
+    and each offer's pricing is the price of the term it sells.
+  negative: []
+
+- id: MONEY-002
+  title: An offer carries its price once, in Offer.pricing; the term it sells carries no pricing
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      An offer carries its price ONCE, in `pricing`. The term the offer sells (`terms`)
+      carries no pricing: an Exchange projecting a catalog term onto an offer moves the
+      term's price into `pricing` and leaves the term's own `pricing` unset.
+  positive: >-
+    Every offer DiscoverResources returns has pricing set and an unpriced term, and
+    buying it charges exactly Offer.pricing (for a flat offer, its rate).
+  negative: []
+
+- id: MONEY-003
+  title: A FREE offer charges nothing
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      model = FREE must be stated explicitly (absent Pricing is not free).
+  positive: >-
+    Buying an offer whose pricing.model is PRICING_MODEL_FREE returns a bought item
+    whose cost.amount is zero, and the buyer's balances do not move.
+  negative: []
+
+- id: MONEY-004
+  title: An offer altered after the Exchange signed it is denied at purchase and nothing is charged
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Because the signature covers `terms`, `pricing`, `expires_at`, and `exchange`, an
+      intermediary (Broker) cannot tamper with price, restrictions, quotas, obligations,
+      the expiry, the execute-routing target, or any licensing term without invalidating
+      it.
+  positive: The offer reflected unchanged is bought and charged its signed price.
+  negative:
+    - code: ok
+      reason: DENIAL_REASON_SIGNATURE_INVALID, in the body
+      side_effect: >-
+        the item carries no retrieval_endpoint, transaction_id or billing_id, and the
+        buyer's balances do not move, for an altered pricing.rate and an altered term
+
+# harness: the offer is genuinely signed and short-lived: the test shortens one
+# seat's offer lifetime through the Exchange's e2e-only control service (ADR-028
+# D6) and waits out the expiry. A tampered expires_at reaches the signature check
+# first (MONEY-004), so it cannot stand in for this case.
+- id: MONEY-005
+  title: An offer presented after its expiry is denied, and one before it is honoured
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      `expires_at` is signed so the offer's validity window is integrity-protected: a
+      relaying Broker cannot extend (or shorten) the TTL of a signed offer to replay it
+      outside the window the Exchange intended.
+  positive: An offer bought before its expires_at is bought and charged.
+  negative:
+    - code: ok
+      reason: DENIAL_REASON_OFFER_EXPIRED, in the body
+      side_effect: >-
+        the expired offer's item carries no retrieval_endpoint and the buyer's balances
+        do not move
+
+# harness: needs a way to hand the identity service's purchase tool an expired or
+# forged offer. The fora_* tools discover and buy in one step, so the test needs
+# a short offer lifetime (ADR-028 D6) and a tool that buys a previously
+# discovered offer, or a hostile Broker returning a forged offer.
+- id: MONEY-006
+  title: A custodial agent does not buy an offer that is expired or whose Exchange signature does not verify
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Agent SHOULD verify the signature (RFC 2119) against the Exchange's public key, and
+      MUST reject an offer whose `expires_at` is in the past.
+  positive: >-
+    The purchase tool buys a fresh offer whose signature verifies against the issuing
+    Exchange's published key.
+  negative:
+    - code: tool error
+      reason: the offer is expired or its signature does not verify
+      side_effect: >-
+        no ExecuteTransaction reaches any Exchange and the agent's balances do not move
+
+- id: MONEY-007
+  title: An Exchange refuses a purchase unless every item's offer names that Exchange
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      MUST reject the request unless EVERY item's offer.exchange names its own domain.
+  positive: >-
+    A purchase of an offer exchange-b issued, sent to exchange-b, is bought.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        none: the file header's request-recipient rule refuses a mis-addressed request
+        with no typed reason
+      side_effect: >-
+        the same offer sent to exchange-a buys nothing at either Exchange and moves no
+        balance
+
+- id: MONEY-008
+  title: A repeated purchase with the same key returns the original result; the same key with other items is refused
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Reuse with a different request. Within one scope, a request that repeats a key with
+      a DIFFERENT request — for a purchase, different items, or the same items in another
+      order — is refused with the Connect code already_exists, carrying an ErrorDetail
+      with no typed reason block. Nothing is executed, and the result stored under the key
+      is unchanged.
+  positive: >-
+    The same direct purchase sent twice with one idempotency_key answers the same
+    transaction_id, billing_id and retrieval_endpoint both times, and the buyer's
+    balance drops by the item's cost once.
+  negative:
+    - code: already_exists
+      reason: none; the ErrorDetail carries no typed reason block
+      side_effect: >-
+        the same key with another offer buys nothing and moves no balance, and a replay
+        of the first request still answers the first transaction
+
+- id: MONEY-009
+  title: Idempotency keys are scoped to the agent; another agent's same key is its own purchase
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A key that another agent used, or that was used at another tenant of the same
+      Exchange is a different key in a different scope: it is never a collision, and it is
+      never answered from another scope's stored result.
+  positive: >-
+    Agent B buys, directly and with its own acceptance, the offer agent A already
+    bought under the same idempotency_key. B gets a transaction of its own, a
+    retrieval_endpoint bound to B's key, and B's balance drops by the cost. B's
+    answer never carries A's transaction_id or A's retrieval_endpoint, and A's
+    balance does not move.
+  negative: []
+
+- id: MONEY-010
+  title: The buyer's account is resolved from what authenticates the agent, never from anything the request names
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Billing needs nothing from this message: the Exchange resolves the agent's account
+      (RegisterResponse.billing_ref) from what authenticates the agent, never from a value
+      the caller merely states (see "Accounts" in the file header).
+  positive: >-
+    A direct purchase whose requester.id is any free label is charged to the signing
+    agent's account, read through that agent's GetAccountStatus. Another agent's
+    balance does not move, whatever requester.id the purchase names.
+  negative: []
+
+- id: MONEY-011
+  title: An agent with no account at the Exchange is denied ACCOUNT_NOT_REGISTERED and told where to register
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      DENIAL_REASON_ACCOUNT_NOT_REGISTERED = 18; // no account exists at this Exchange for
+      the requester (the agent, also on a purchase a Broker relayed) — the remedy is for
+      the agent to call Register
+  positive: >-
+    After the same agent calls Register at that Exchange, the same purchase is bought.
+  negative:
+    - code: ok, or the whole-request refusal TransactionDenial
+      reason: >-
+        DENIAL_REASON_ACCOUNT_NOT_REGISTERED, either on the item in the body or, when the
+        Exchange refuses the whole request, as transaction_denial whose exchange names
+        the Exchange; both shapes are the protocol's for a reason about the caller
+      side_effect: >-
+        no retrieval_endpoint, transaction or billing record
+
+# harness: needs a seat that holds new agents for operator review, so a fresh
+# agent's Register opens an inactive account. Every seat in the e2e stack
+# activates new agents once the seed has run, and no admin RPC switches that per
+# test; it needs an e2e-only control surface (ADR-028 D6) or a dedicated seat.
+- id: MONEY-012
+  title: A caller whose account is not yet active is denied ACCOUNT_INACTIVE, not told to register again
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      the remedy is to wait or contact the operator, NOT to register again
+  positive: >-
+    Once the operator activates the account, the same purchase is bought.
+  negative:
+    - code: ok, or the whole-request refusal TransactionDenial
+      reason: DENIAL_REASON_ACCOUNT_INACTIVE
+      side_effect: >-
+        no retrieval_endpoint, transaction or billing record, and a repeat Register
+        returns the same billing_ref with active false
+
+# harness: the failure half (a transaction-log write that fails) cannot be caused
+# through any public surface; it needs an e2e-tagged fault switch in the
+# Exchange's control service (ADR-028 D6). The positive half alone is PUB-014
+# and PUB-015: every sale shows in the publisher's transaction list.
+- id: MONEY-015
+  title: No delivery URL is issued for a transaction that was not recorded
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/exchange/request-flows.mdx
+    quote: >-
+      The transaction log write MUST complete successfully before the Signing Engine
+      generates the signed URL. If the transaction log write fails, the request is
+      rejected — no signed URL is ever issued for an unrecorded transaction.
+  positive: >-
+    Every bought item's transaction_id appears in the publisher's transaction list and
+    its evidence verifies.
+  negative:
+    - code: internal
+      reason: none
+      side_effect: >-
+        when the log write fails, the answer carries no retrieval_endpoint and the
+        buyer's balance does not move
+
+- id: MONEY-016
+  title: Every per-item denial is in the body, and items succeed or fail independently in request order
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Every per-item decision is answered in the body. The call returns OK with one
+      TransactionResultItem per item, and an item the Exchange denies carries its
+      TransactionResultItem.denial_reason. This holds whatever the item count: a one-item
+      purchase that is denied is a successful response whose only item is denied, never
+      a non-OK error.
+  positive: >-
+    A direct two-item purchase whose second offer is altered returns OK with two items
+    in request order: the first bought and charged, the second denied.
+  negative:
+    - code: ok
+      reason: DENIAL_REASON_SIGNATURE_INVALID on the second item only
+      side_effect: >-
+        the balance drops by the first item's cost only, and the denied item carries no
+        retrieval_endpoint; a one-item purchase of the altered offer is the same OK
+        answer with its one item denied
+
+- id: MONEY-017
+  title: A bought item carries its delivery URL's expiry; a denied item carries no URL
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Absent if this item was denied or its delivery_method is not signed-URL-based.
+  positive: >-
+    A bought INSTRUCTIONS item carries retrieval_endpoint and an expires_at in the
+    future, and the URL fetches the content.
+  negative:
+    - code: ok
+      reason: any denial_reason
+      side_effect: the denied item carries no retrieval_endpoint and no expires_at
+
+- id: MONEY-018
+  title: The delivery URL is bound to the buying agent's request-signing key
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Identity that a delivered retrieval_endpoint is bound to: the RFC 7638 JWK
+      Thumbprint of the agent's Ed25519 request-signing key
+  positive: >-
+    TransactionResponse.agent_identity_hash equals the RFC 7638 thumbprint of the
+    buyer's signing key, and the URL fetched with that key's proof of possession
+    answers 200 with the content.
+  negative:
+    - code: "403"
+      reason: keyid_mismatch
+      side_effect: >-
+        the same URL fetched with another agent's key, whose proof names that key,
+        serves no content
+
+# harness: subscription offers need a buyer-side subscription grant, which no
+# fixture seeds today; the catalog gates a term on a subscription scope only.
+- id: MONEY-019
+  title: A subscription offer charges nothing per request and reports the access's value
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      If set, this offer is available under an existing subscription/deal. No per-request
+      billing — usage tracked against subscription quota.
+  positive: >-
+    Buying a subscription offer returns an item with subscription_id set, cost.amount
+    zero, a subscription_unit_value carrying the access's value, and the remaining
+    quota in subscription_quota; the buyer's balances do not move.
+  negative:
+    - code: ok
+      reason: DENIAL_REASON_QUOTA_EXCEEDED
+      side_effect: >-
+        once the quota is spent, the next purchase carries no retrieval_endpoint and
+        the quota does not go below zero
+
+# harness: needs delegation JWT minting (a principal key, cnf-linked chains) in
+# the harness identity helpers; none exists yet. Spend caps are out of this
+# version by the protocol author's decision, so the entry covers expiry and the
+# holder binding only.
+- id: MONEY-020
+  title: A purchase under an expired delegation, or one bound to another key, is denied DELEGATION_INVALID
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      DENIAL_REASON_DELEGATION_INVALID = 10; // Delegation missing, unverifiable, expired,
+      holder binding failed, or scopes/caps do not cover the request
+  positive: >-
+    A purchase under a valid delegation whose cnf.jkt is the signing key is bought.
+  negative:
+    - code: ok
+      reason: DENIAL_REASON_DELEGATION_INVALID, in the body
+      side_effect: >-
+        no retrieval_endpoint and no balance moves, for an expired delegation and one
+        whose cnf.jkt is not the signing key
+
+# harness: as MONEY-020, needs delegation minting.
+- id: MONEY-021
+  title: A delegation's access cap is enforced; the purchase that reaches it is denied QUOTA_EXCEEDED
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Deny with DENIAL_REASON_QUOTA_EXCEEDED when count >= limit.
+  positive: The purchases below max_accesses are bought.
+  negative:
+    - code: ok
+      reason: DENIAL_REASON_QUOTA_EXCEEDED
+      side_effect: the purchase at the cap carries no retrieval_endpoint and moves no balance
+
+- id: MONEY-022
+  title: A replayed usage report is answered from the stored report; the same key with another report is refused
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      The server MUST dedupe on this so a replayed report does not double-count usage;
+      the same key with a different report is refused with already_exists.
+  positive: >-
+    The same ReportUsage sent twice with one idempotency_key returns the same report_id
+    both times.
+  negative:
+    - code: already_exists
+      reason: none; the ErrorDetail carries no typed reason block
+      side_effect: >-
+        the second, different report is not recorded: a replay of the first report still
+        answers the first report_id
+
+- id: MONEY-023
+  title: A usage report addressed to another Exchange is refused and nothing is recorded
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      the Exchange that issued the offer and therefore holds the reporting obligation.
+  positive: The report naming the issuing Exchange is accepted with a report_id.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        none: a mis-addressed request carries no typed reason
+      side_effect: >-
+        the refused report changes nothing: a replay of the transaction's accepted
+        report still answers that report's report_id
+
+- id: MONEY-024
+  title: A usage report for a transaction id the Exchange does not hold is refused TRANSACTION_NOT_FOUND
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A successful response means the report was accepted; a rejection travels as a
+      non-OK transport error carrying ErrorDetail.usage_report_rejection.
+  positive: The report for the agent's own transaction is accepted with a report_id.
+  negative:
+    - code: not_found
+      reason: USAGE_REPORT_REJECTION_REASON_TRANSACTION_NOT_FOUND
+      side_effect: >-
+        nothing is recorded: the same report sent again is refused the same way
+
+- id: MONEY-025
+  title: A usage report whose billing_id is not the transaction's is refused
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A malformed report is refused with USAGE_REPORT_REJECTION_REASON_MALFORMED and
+      the Connect code invalid_argument; a report whose billing_id is not the
+      billing_id of the transaction it names is malformed.
+  positive: The report carrying the transaction's own billing_id is accepted.
+  negative:
+    - code: invalid_argument
+      reason: USAGE_REPORT_REJECTION_REASON_MALFORMED
+      side_effect: >-
+        no report is recorded: the same report with the transaction's own billing_id,
+        sent next under a new idempotency key, is accepted rather than refused
+        DUPLICATE
+
+- id: MONEY-026
+  title: A usage report filed after its window has closed is refused WINDOW_EXPIRED, a typed time reason
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      This is the time cause, and it names only that: a report past its window is refused
+      with this reason and the Connect code failed_precondition, whatever it reports.
+  positive: The report filed inside the window is accepted.
+  negative:
+    - code: failed_precondition
+      reason: USAGE_REPORT_REJECTION_REASON_WINDOW_EXPIRED
+      side_effect: >-
+        no report is recorded: a replay of the late report under the same key is refused
+        the same way
+
+- id: MONEY-027
+  title: A usage report missing a field the reporting obligation requires is refused
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      USAGE_REPORT_REJECTION_REASON_MISSING_REQUIRED_FIELDS = 4; //
+      ReportingObligation.required_fields not satisfied
+  positive: >-
+    With the tenant's required_fields set through SetReportingPolicy, the report
+    carrying every required field is accepted.
+  negative:
+    - code: non-OK; the protocol names the reason and states no code
+      reason: USAGE_REPORT_REJECTION_REASON_MISSING_REQUIRED_FIELDS
+      side_effect: >-
+        no report is recorded: the complete report sent next is accepted as the
+        transaction's first
+
+- id: MONEY-028
+  title: A second report for a transaction already reported, under a new key, is refused DUPLICATE
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      USAGE_REPORT_REJECTION_REASON_DUPLICATE = 2; // a report was already filed for this
+      transaction
+  positive: The first report is accepted with a report_id.
+  negative:
+    - code: non-OK; the protocol names the reason and states no code
+      reason: USAGE_REPORT_REJECTION_REASON_DUPLICATE
+      side_effect: >-
+        the second report is not recorded: a replay of the first report still answers
+        the first report_id
+
+- id: MONEY-029
+  title: A usage report is never refused for its quantity, above or below the estimate
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      The reported quantity is unrestricted: no check on it refuses a report (see
+      UsageReportRejectionReason).
+  positive: >-
+    For a metered purchase with an estimate, a report whose consumed_quantity is far
+    above the estimate and one far below it are each accepted with a report_id, and so
+    is one filed while the tenant's deprecated quantity_tolerance is set to 0. For a
+    metered purchase whose offer states no estimate, a report of a non-zero quantity is
+    accepted with a report_id.
+  negative: []
+
+- id: MONEY-030
+  title: A one-time sale with metering NONE owes no usage report
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      NONE = one-time perpetual sale; no ReportUsage required after ExecuteTransaction.
+  positive: >-
+    Buying an offer whose pricing.metering is PRICING_METERING_NONE returns an item
+    with no required reporting obligation.
+  negative: []
+
+- id: MONEY-031
+  title: A reporting window change applies only to obligations minted after it
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/admin/v1/admin.proto
+    quote: >-
+      Reporting window in seconds. Applies to obligations minted after this call;
+      obligations already issued keep the window they were minted with.
+  positive: >-
+    A purchase made after SetReportingPolicy shortens the window carries the short
+    window in its reporting_obligation. An obligation minted before the change keeps
+    its original window: a report filed for it after the short window has passed is
+    accepted.
+  negative: []
+
+- id: MONEY-032
+  title: An estimate the publisher states for the resource is carried onto the metered offer
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      When the publisher states one — on the term's own pricing, or once for the resource
+      on ResourceEntry.estimated_quantity — the Exchange carries it here as
+      estimated_quantity, the term's own estimate taking precedence.
+  positive: >-
+    A PER_UNIT term with no estimate of its own, on a resource whose
+    ResourceEntry.estimated_quantity is 7, is offered with estimated_quantity 7 on
+    Offer.pricing.
+  negative: []
+
+- id: MONEY-033
+  title: A metered item whose offer states an estimate costs the estimate times the rate at purchase
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      For a metered (PER_UNIT) item this is the purchase charge: the offer's
+      estimated_quantity × rate, or one unit, 1 × rate, when the offer states no estimate
+  positive: >-
+    Buying a PER_UNIT offer with estimated_quantity E and rate R returns an item whose
+    cost.amount is E × R in exact decimal, and the buyer's balance drops by it.
+  negative: []
+
+- id: MONEY-035
+  title: A metered offer without an estimate is offered and sold, and its purchase charges one unit
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A metered purchase charges E × R, or one unit, 1 × R, when the offer states no
+      estimate. That is the amount TransactionResultItem.cost carries for the item, and
+      the charge is final.
+  positive: >-
+    A PER_UNIT term pushed with no estimate anywhere is offered as a verified metered offer
+    and can be bought, and the item's cost.amount is the offer's rate, one unit.
+  negative: []
+
+- id: MONEY-036
+  title: A purchase whose ext_critical names a key the Exchange does not understand has every item denied UNKNOWN_CRITICAL_EXTENSION
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/extension-profiles.mdx
+    quote: >-
+      A purchase, at an Exchange or through a Broker, answers OK with every item denied as
+      `DENIAL_REASON_UNKNOWN_CRITICAL_EXTENSION`.
+  positive: >-
+    A purchase whose ext carries an unknown key that its ext_critical does not list is
+    bought.
+  negative:
+    - code: ok
+      reason: >-
+        the item is denied UNKNOWN_CRITICAL_EXTENSION in the body: the purchase carries ext
+        {"acme.must": true} and ext_critical ["acme.must"]
+      side_effect: nothing is sold and the buyer's balance does not move
+
+- id: MONEY-037
+  title: A usage report whose ext_critical names a key the Exchange does not understand is refused UNKNOWN_CRITICAL_EXTENSION
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      The report's ext_critical names a key the Exchange does not understand (see
+      "Critical extensions" in the file header). Refused with the Connect code
+      invalid_argument.
+  positive: >-
+    A usage report whose ext carries an unknown key that its ext_critical does not list is
+    accepted.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        usage_report_rejection UNKNOWN_CRITICAL_EXTENSION: the report carries ext
+        {"acme.must": true} and ext_critical ["acme.must"]
+      side_effect: no report_id is returned
+
+- id: MONEY-038
+  title: GetAccountStatus answers a known agent that holds no account NOT_FOUND, and every OK answer carries billing_ref
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      An agent the Exchange knows, its request signature verified, but that holds no
+      account at this Exchange is answered with the Connect code NOT_FOUND.
+  positive: >-
+    After the same agent calls Register at that Exchange, GetAccountStatus answers OK
+    with the billing_ref Register returned, never an empty one.
+  negative:
+    - code: not_found
+      reason: none; the RPC names only the Connect code
+      side_effect: >-
+        no account is opened: the agent, already known to the Exchange through an
+        answered signed discovery, is answered not_found again on a second read, and
+        its first Register opens the account
+
+# Not driven: the same rule on DisputeTransaction, which this Exchange does not
+# implement yet, and on RequestDomainVerification and ConfirmDomainVerification,
+# which stay unimplemented (ADR-026, PUB-017). No control request can succeed
+# there, so a test could not show the refusal is the rule's and not the stub's.
+- id: MONEY-039
+  title: A registration whose ext_critical names a key the Exchange does not understand is refused UNKNOWN_CRITICAL_EXTENSION, a repeat included
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      The request's ext_critical names a key the Exchange does not understand (see
+      "Critical extensions" in the file header), on a first registration and on a
+      repeat alike. Refused with the Connect code invalid_argument.
+  positive: >-
+    A registration whose ext carries an unknown key that its ext_critical does not list
+    opens the account, and a repeat of it is answered with the stored record.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        registration_failure UNKNOWN_CRITICAL_EXTENSION on a first registration: the
+        request carries ext {"acme.must": true} and ext_critical ["acme.must"]
+      side_effect: no account is opened; GetAccountStatus still answers not_found
+    - code: invalid_argument
+      reason: >-
+        registration_failure UNKNOWN_CRITICAL_EXTENSION on a repeat registration, with
+        the same ext and ext_critical
+      side_effect: the stored record is not returned

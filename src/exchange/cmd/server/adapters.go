@@ -18,27 +18,29 @@ import (
 
 // selectAdapters constructs the billing and SoR adapters together and returns a
 // single cleanup that releases both, so run() carries one boot step rather than
-// two near-identical select-and-defer pairs. The returned currency is the
-// selected billing backend's ledger currency (ISO 4217 alpha), threaded into
-// ExchangeConfig.LedgerCurrency so the welcome-credit grant is denominated in
-// the same currency the adapter checks. A failure in either is a boot-time
+// two near-identical select-and-defer pairs. The returned currencies are the
+// selected billing backend's ledger currencies (ISO 4217 alpha) in
+// configuration order, threaded into ExchangeConfig.LedgerCurrencies so the
+// welcome-credit grants and the adapter agree on what may be granted, and into
+// the well-known document, which advertises the FIRST of them as base_currency.
+// A failure in either is a boot-time
 // config fault: the caller returns it and the process exits non-zero rather than
 // silently degrading. The billing cleanup is run even when the SoR construction
 // fails, so a half-built pair leaks nothing.
 func selectAdapters(
 	ctx context.Context, logger *slog.Logger,
-) (billing.Adapter, string, sor.Adapter, func(), error) {
-	billingAdapter, currency, billingCleanup, err := selectBillingAdapter(ctx, logger)
+) (billing.Adapter, []string, sor.Adapter, func(), error) {
+	billingAdapter, currencies, billingCleanup, err := selectBillingAdapter(ctx, logger)
 	if err != nil {
-		return nil, "", nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	// Constructed at boot so a misconfigured SoR fails fast.
 	sorAdapter, sorCleanup, err := selectSoRAdapter(ctx, logger)
 	if err != nil {
 		billingCleanup()
-		return nil, "", nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return billingAdapter, currency, sorAdapter, func() {
+	return billingAdapter, currencies, sorAdapter, func() {
 		sorCleanup()
 		billingCleanup()
 	}, nil
@@ -56,24 +58,24 @@ func selectAdapters(
 // adapter's own configuration lives under EXCHANGE_BILLING_* (this Exchange process's
 // settings). Selector vs. per-process config — two prefixes on purpose.
 //
-// The returned currency is the backend's ledger currency: the demo tiers
-// (free, in-memory) run in USD, TigerBeetle's comes from
-// EXCHANGE_BILLING_LEDGER. The returned func() releases any adapter-owned
+// The returned currencies are the backend's ledger currencies: the demo tiers
+// (free, in-memory) run in one currency, USD, and TigerBeetle's come from
+// EXCHANGE_BILLING_LEDGER, which may list several. The returned func() releases any adapter-owned
 // resources (the TigerBeetle client connection); it is a no-op for
 // free/inmemory. A non-nil error means an explicitly-selected backend could
 // not be constructed — boot fails rather than silently degrading to free.
-func selectBillingAdapter(ctx context.Context, logger *slog.Logger) (billing.Adapter, string, func(), error) {
+func selectBillingAdapter(ctx context.Context, logger *slog.Logger) (billing.Adapter, []string, func(), error) {
 	noop := func() {}
 	switch kind := runhttp.EnvOr("FORA_BILLING_ADAPTER", "free"); kind {
 	case "free":
-		return billing.FreeAdapter{}, demoCurrency, noop, nil
+		return billing.FreeAdapter{}, demoCurrencies(), noop, nil
 	case "inmemory":
-		return newBillingAdapter(logger), demoCurrency, noop, nil
+		return newBillingAdapter(logger), demoCurrencies(), noop, nil
 	case "tigerbeetle":
 		return newTigerBeetleBillingAdapter(ctx, logger)
 	default:
 		logger.Warn("FORA_BILLING_ADAPTER unknown value; using free", "value", kind)
-		return billing.FreeAdapter{}, demoCurrency, noop, nil
+		return billing.FreeAdapter{}, demoCurrencies(), noop, nil
 	}
 }
 
@@ -82,6 +84,12 @@ func selectBillingAdapter(ctx context.Context, logger *slog.Logger) (billing.Ada
 // literal, so the currency this wiring reports and the currency those adapters
 // check every Credit against cannot drift apart.
 const demoCurrency = billing.DemoCurrency
+
+// demoCurrencies is demoCurrency as the one-element list the boot path threads
+// around. The demo tiers are single-currency; only the persisted TigerBeetle
+// backend can be configured with more than one. A fresh slice per call, so a
+// caller that sorts or appends cannot reach another.
+func demoCurrencies() []string { return []string{demoCurrency} }
 
 // selectSoRAdapter chooses the System-of-Record Adapter at boot.
 // FORA_SOR_ADAPTER=postgres (the default) returns the Postgres-backed adapter

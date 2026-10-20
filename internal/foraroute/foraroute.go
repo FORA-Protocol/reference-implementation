@@ -11,10 +11,11 @@
 //
 // It lives here, in one place, because the set of sentinels is the SDK's
 // EndpointResolver contract rather than any one caller's opinion, and the
-// contract can grow. Two services resolve Exchange endpoints — the identity
-// service's account legs and the Broker's execute relay — and each used to
-// carry its own copy of this test. If the SDK adds a fourth sentinel, a copy
-// that was missed reports a final refusal as retryable.
+// contract can grow. Its production callers are the Broker's health refresher
+// and its resolve routing; Broker purchase admission refuses every resolver
+// error alike, since the protocol gives a routing refusal one code. A caller
+// that kept its own copy of this test and missed a fourth sentinel the SDK
+// added would report a final refusal as retryable.
 package foraroute
 
 import (

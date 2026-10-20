@@ -1,10 +1,10 @@
 package oauthserver
 
 import (
-	"encoding/json"
-	"errors"
 	"net/http"
 	"time"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/oidcup"
 )
 
 const (
@@ -15,19 +15,16 @@ const (
 	pendingTTL  = 20 * time.Minute
 )
 
-// authFlow is the state sealed at /authorize and reopened at /callback. It holds the
-// downstream client's request (to rebuild the redirect and bind the code) and the
-// service's own upstream-leg secrets (state, nonce, PKCE verifier) that the browser
-// must not read or forge.
+// authFlow is the downstream client's request, carried from /authorize to
+// /callback so the redirect can be rebuilt and the code bound to it. The
+// upstream leg's own secrets (state, nonce, PKCE verifier) are sealed beside it
+// by oidcup.Flow, so the browser can read or forge neither.
 type authFlow struct {
-	ClientID         string `json:"cid"`
-	ClientName       string `json:"cnm"`
-	RedirectURI      string `json:"ruri"`
-	ClientState      string `json:"cst"`
-	ClientChallenge  string `json:"cch"`
-	UpstreamState    string `json:"ust"`
-	UpstreamNonce    string `json:"unc"`
-	UpstreamVerifier string `json:"uvf"`
+	ClientID        string `json:"cid"`
+	ClientName      string `json:"cnm"`
+	RedirectURI     string `json:"ruri"`
+	ClientState     string `json:"cst"`
+	ClientChallenge string `json:"cch"`
 }
 
 // pending is the state sealed at /callback and reopened at /consent. It carries the
@@ -51,20 +48,6 @@ type pending struct {
 	CSRFToken string `json:"csrf"`
 }
 
-// errWrongPurpose marks a sealed cookie that decrypted under the wrong name — a
-// value sealed for one cookie presented under another. It cannot cross user
-// boundaries (the key is server-side), but binding the purpose closes the gap
-// where two payloads that share JSON field names could be substituted.
-var errWrongPurpose = errors.New("oauthserver: sealed cookie opened under the wrong purpose")
-
-// purposeEnvelope binds a cookie's name into its sealed payload so a value sealed
-// for one cookie (authFlowCookie) cannot be opened as another (pendingCookie),
-// even though the codec key is shared and the payloads share JSON field names.
-type purposeEnvelope struct {
-	Purpose string          `json:"p"`
-	Data    json.RawMessage `json:"d"`
-}
-
 // setCookie writes a cookie with the sign-up flow's fixed security attributes
 // (Path=/, HttpOnly, SameSite=Lax — the flow returns via top-level GET redirects —
 // and Secure tracking the deployment scheme so a local http compose stack still
@@ -83,13 +66,12 @@ func (s *Server) setCookie(w http.ResponseWriter, name, value string, maxAge int
 	})
 }
 
-// setSealed seals payload into a cookie, tagged with the cookie name as its purpose.
+// setSealed seals payload into a cookie, bound to the cookie name as its
+// purpose, so a value sealed for one cookie (authFlowCookie) cannot be opened as
+// another (pendingCookie) even though the key is shared and the payloads share
+// JSON field names.
 func (s *Server) setSealed(w http.ResponseWriter, name string, payload any, ttl time.Duration) error {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	val, err := s.cfg.Codec.Seal(purposeEnvelope{Purpose: name, Data: data}, ttl)
+	val, err := s.cfg.Codec.SealFor(name, payload, ttl)
 	if err != nil {
 		return err
 	}
@@ -98,27 +80,35 @@ func (s *Server) setSealed(w http.ResponseWriter, name string, payload any, ttl 
 }
 
 // readSealed opens the named cookie into dest, returning http.ErrNoCookie when it
-// is absent, a session error when it is expired or tampered, and errWrongPurpose
-// when the sealed value was minted for a different cookie name.
+// is absent, a session error when it is expired or tampered, and
+// session.ErrWrongPurpose when the sealed value was minted for a different
+// cookie name.
 func (s *Server) readSealed(r *http.Request, name string, dest any) error {
 	c, err := r.Cookie(name)
 	if err != nil {
 		return err
 	}
-	var env purposeEnvelope
-	if err := s.cfg.Codec.Open(c.Value, &env); err != nil {
-		return err
-	}
-	if env.Purpose != name {
-		return errWrongPurpose
-	}
-	return json.Unmarshal(env.Data, dest)
+	return s.cfg.Codec.OpenFor(name, c.Value, dest)
 }
 
 // clearCookie expires the named cookie so a spent flow leaves nothing behind.
 func (s *Server) clearCookie(w http.ResponseWriter, name string) {
 	s.setCookie(w, name, "", -1)
 }
+
+// sealedJar is the Server's cookie handling seen through the oidcup.Jar port, so
+// the shared sign-in flow writes its cookie with this service's attributes.
+type sealedJar struct{ s *Server }
+
+func (j sealedJar) Set(w http.ResponseWriter, name string, payload any, ttl time.Duration) error {
+	return j.s.setSealed(w, name, payload, ttl)
+}
+
+func (j sealedJar) Read(r *http.Request, name string, dst any) error {
+	return j.s.readSealed(r, name, dst)
+}
+
+func (j sealedJar) Clear(w http.ResponseWriter, name string) { j.s.clearCookie(w, name) }
 
 // csrfField is the hidden form field carrying the synchronizer token bound into the
 // sealed pending cookie. A cross-site request cannot read the sealed cookie, so it
@@ -158,7 +148,7 @@ func (s *Server) readPendingPOST(w http.ResponseWriter, r *http.Request) (pendin
 		userError(w, http.StatusBadRequest, "malformed submission")
 		return pending{}, false
 	}
-	if !sameToken(r.PostFormValue(csrfField), p.CSRFToken) {
+	if !oidcup.SameToken(p.CSRFToken, r.PostFormValue(csrfField)) {
 		userError(w, http.StatusBadRequest, "invalid or expired form token; start again")
 		return pending{}, false
 	}

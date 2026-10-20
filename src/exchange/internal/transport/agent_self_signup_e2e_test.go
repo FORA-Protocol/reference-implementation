@@ -20,13 +20,11 @@ import (
 	foraconnect "github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	rwktestutil "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/testutil"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
 )
 
@@ -76,11 +74,11 @@ func (h *pushHarness) seedPublisherEntries(
 ) {
 	t.Helper()
 	h.publisher.setContributors(pubCallerID)
-	pubPub, pubPriv, err := ed25519.GenerateKey(rand.Reader)
+	_, pubPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("publisher keypair: %v", err)
 	}
-	h.publishAgent(t, pubCallerID, pubPub)
+	h.publishAgent(t, pubCallerID, pubPriv)
 	pushResp, err := h.signedCat(pubCallerID, pubPriv).PushResources(h.ctx,
 		connect.NewRequest(newPushRequest(h.tenantID, pubCallerID, entries)))
 	if err != nil {
@@ -94,19 +92,12 @@ func (h *pushHarness) seedPublisherEntries(
 	}
 }
 
-// insertTenant inserts a fresh Ed25519-scheme tenant row for domain.
-func (h *agentHarness) insertTenant(t *testing.T, tenantID, domain string) {
+// registerSite registers one publisher site and lists it active on the
+// harness's seat, so a push naming that domain is accepted. It returns the seat
+// the entries will be stored under, which is the tenant the push must name.
+func (h *agentHarness) registerSite(t *testing.T, domain string) string {
 	t.Helper()
-	if _, err := h.queries.InsertTenant(h.ctx, sqlc.InsertTenantParams{
-		TenantID:        tenantID,
-		Domain:          domain,
-		Ed25519KeyRef:   "secret://ed25519/" + tenantID,
-		ReportingPolicy: []byte(`{}`),
-		SigningScheme:   sqlc.ForaSigningSchemeED25519,
-		RsaKeyRef:       pgtype.Text{},
-	}); err != nil {
-		t.Fatalf("insert tenant: %v", err)
-	}
+	return seedSiteForDomain(t, h.pushHarness, domain)
 }
 
 // agentCombinedOrigin serves the /.well-known/fora.json of a publisher that
@@ -122,13 +113,14 @@ type agentCombinedOrigin struct {
 	contributors []string
 	agentID      string
 	agentPub     ed25519.PublicKey
+	agentPriv    ed25519.PrivateKey
 }
 
-func newAgentCombinedOrigin(t *testing.T, provider string, contributors []string, agentID string, agentPub ed25519.PublicKey) *agentCombinedOrigin {
+func newAgentCombinedOrigin(t *testing.T, provider string, contributors []string, agentID string, agentPriv ed25519.PrivateKey) *agentCombinedOrigin {
 	t.Helper()
 	o := &agentCombinedOrigin{
 		provider: provider, contributors: contributors,
-		agentID: agentID, agentPub: agentPub,
+		agentID: agentID, agentPub: agentPriv.Public().(ed25519.PublicKey), agentPriv: agentPriv,
 	}
 	o.server = httptest.NewServer(http.HandlerFunc(o.handle))
 	t.Cleanup(o.server.Close)
@@ -144,8 +136,7 @@ func (o *agentCombinedOrigin) handle(w http.ResponseWriter, r *http.Request) {
 	// learns it.
 	if r.URL.Path == forawellknown.WBAPath {
 		key := forawellknown.NewKey(o.agentPub, agentKeyValidFrom(), agentKeyValidUntil())
-		w.Header().Set("Content-Type", "application/jwk-set+json")
-		_, _ = w.Write(rwktestutil.MarshalWBA(rwktestutil.WBAFile(key)))
+		serveSignedDirectory(w, r, rwktestutil.MarshalWBA(rwktestutil.WBAFile(key)), o.agentPriv)
 		return
 	}
 	if r.URL.Path != "/.well-known/fora.json" {
@@ -229,40 +220,8 @@ func TestAgentSelfSignup_ExplicitRegister(t *testing.T) {
 	if err != nil {
 		t.Fatalf("agent keypair: %v", err)
 	}
-	h.publishAgent(t, agentID, agentPub)
-
-	// Step 4: POST /exchange/v1/agents/register. Uses the harness's
-	// guarded base transport so any accidental /admin/* hit fails the test.
-	registerBody, _ := json.Marshal(map[string]string{
-		"agent_id":      agentID,
-		"discovery_url": agentID,
-	})
-	regReq, err := http.NewRequestWithContext(h.ctx, http.MethodPost,
-		h.server.URL+"/exchange/v1/agents/register", bytes.NewReader(registerBody))
-	if err != nil {
-		t.Fatalf("new register request: %v", err)
-	}
-	regReq.Header.Set("Content-Type", "application/json")
-	regResp, err := (&http.Client{Transport: h.baseRT}).Do(regReq)
-	if err != nil {
-		t.Fatalf("register do: %v", err)
-	}
-	if regResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(regResp.Body)
-		_ = regResp.Body.Close()
-		t.Fatalf("register status = %d, body=%s", regResp.StatusCode, body)
-	}
-	_ = regResp.Body.Close()
-
-	// Step 5: agents row now carries the fixture pubkey. Read through the
-	// production repository surface, not the raw sqlc Querier (Testing Doctrine pt9).
-	agent, err := repo.NewAgentRepo(h.queries).ByID(h.ctx, agentID)
-	if err != nil {
-		t.Fatalf("AgentRepo.ByID: %v", err)
-	}
-	if !bytes.Equal(agent.PublicKey, agentPub) {
-		t.Fatalf("stored pubkey != fixture pubkey")
-	}
+	h.publishAgent(t, agentID, agentPriv)
+	storedPub := h.explicitRegister(t, agentID, agentPub)
 
 	// The agent is directory-registered but not yet billing-registered; a paid
 	// transaction needs a billing_ref, so register it for billing
@@ -270,22 +229,7 @@ func TestAgentSelfSignup_ExplicitRegister(t *testing.T) {
 	h.registerForBilling(t, agentID, agentPub, agentPriv)
 
 	// Step 6: DiscoverResources returns three Ed25519-signed offers.
-	uris := make([]string, len(entries))
-	for i, e := range entries {
-		uris[i] = "https://" + e.GetDomain() + e.GetPath()
-	}
-	discResp, err := h.exchange.DiscoverResources(h.ctx, connect.NewRequest(newResourceQuery(newRequester(agentID, agentID), uris)))
-	if err != nil {
-		t.Fatalf("DiscoverResources: %v", err)
-	}
-	offers := discResp.Msg.GetOffers()
-	if len(offers) != 3 {
-		t.Fatalf("offers len = %d, want 3", len(offers))
-	}
-	first := offers[0]
-	if first.GetSignature() == "" || first.GetSignatureAlgorithm() != "EdDSA" {
-		t.Fatalf("offer missing Ed25519 signature: %+v", first)
-	}
+	first := h.discoverFirstSignedOffer(t, agentID, entries)
 
 	// Step 7: ExecuteTransaction → signed URL + transaction_log row.
 	// Items-only contract (C4 collapse) with body AgentAcceptance binding
@@ -331,7 +275,7 @@ func TestAgentSelfSignup_ExplicitRegister(t *testing.T) {
 	// signature produced by the matching private key. Future RFC 9421
 	// gates on Discover/Execute will rely on this.
 	probe := []byte("post-register probe payload")
-	if !ed25519.Verify(ed25519.PublicKey(agent.PublicKey), probe, ed25519.Sign(agentPriv, probe)) {
+	if !ed25519.Verify(ed25519.PublicKey(storedPub), probe, ed25519.Sign(agentPriv, probe)) {
 		t.Fatal("registered pubkey does not verify agent signatures")
 	}
 
@@ -345,6 +289,79 @@ func TestAgentSelfSignup_ExplicitRegister(t *testing.T) {
 	}
 }
 
+// explicitRegister POSTs /exchange/v1/agents/register for agentID through the
+// harness's guarded base transport, so any accidental /admin/* hit fails the
+// test, then checks the agents row carries agentPub and returns the stored key.
+func (h *agentHarness) explicitRegister(t *testing.T, agentID string, agentPub ed25519.PublicKey) []byte {
+	t.Helper()
+	// Step 4: POST /exchange/v1/agents/register.
+	registerBody, _ := json.Marshal(map[string]string{
+		"agent_id":      agentID,
+		"discovery_url": agentID,
+	})
+	regReq, err := http.NewRequestWithContext(h.ctx, http.MethodPost,
+		h.server.URL+"/exchange/v1/agents/register", bytes.NewReader(registerBody))
+	if err != nil {
+		t.Fatalf("new register request: %v", err)
+	}
+	regReq.Header.Set("Content-Type", "application/json")
+	regResp, err := (&http.Client{Transport: h.baseRT}).Do(regReq)
+	if err != nil {
+		t.Fatalf("register do: %v", err)
+	}
+	if regResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(regResp.Body)
+		_ = regResp.Body.Close()
+		t.Fatalf("register status = %d, body=%s", regResp.StatusCode, body)
+	}
+	_ = regResp.Body.Close()
+
+	// Step 5: agents row now carries the fixture pubkey. Read through the
+	// production repository surface, not the raw sqlc Querier (Testing Doctrine pt9).
+	agent, err := repo.NewAgentRepo(h.queries).ByID(h.ctx, agentID)
+	if err != nil {
+		t.Fatalf("AgentRepo.ByID: %v", err)
+	}
+	if !bytes.Equal(agent.PublicKey, agentPub) {
+		t.Fatalf("stored pubkey != fixture pubkey")
+	}
+	return agent.PublicKey
+}
+
+// discoverOffers runs DiscoverResources over entries as agentID and requires
+// one offer per entry.
+func (h *agentHarness) discoverOffers(
+	t *testing.T, agentID string, entries []*forav1.ResourceEntry,
+) []*forav1.Offer {
+	t.Helper()
+	uris := make([]string, len(entries))
+	for i, e := range entries {
+		uris[i] = "https://" + e.GetDomain() + e.GetPath()
+	}
+	discResp, err := h.exchange.DiscoverResources(h.ctx, connect.NewRequest(newResourceQuery(newRequester(agentID, agentID), uris)))
+	if err != nil {
+		t.Fatalf("DiscoverResources: %v", err)
+	}
+	offers := discResp.Msg.GetOffers()
+	if len(offers) != len(entries) {
+		t.Fatalf("offers len = %d, want %d", len(offers), len(entries))
+	}
+	return offers
+}
+
+// discoverFirstSignedOffer runs discoverOffers and returns the first offer
+// after checking it carries an Ed25519 signature.
+func (h *agentHarness) discoverFirstSignedOffer(
+	t *testing.T, agentID string, entries []*forav1.ResourceEntry,
+) *forav1.Offer {
+	t.Helper()
+	first := h.discoverOffers(t, agentID, entries)[0]
+	if first.GetSignature() == "" || first.GetSignatureAlgorithm() != "EdDSA" {
+		t.Fatalf("offer missing Ed25519 signature: %+v", first)
+	}
+	return first
+}
+
 // TestAgentSelfSignup_LazyFirstSeen exercises the first-seen path. A brand-new publisher "lazy-agent.example" signs
 // PushResources without any prior /agents/register call. Its fora.json
 // lists itself as the sole catalog_contributor and its fora.json is
@@ -355,8 +372,7 @@ func TestAgentSelfSignup_LazyFirstSeen(t *testing.T) {
 	h := newAgentHarness(t)
 
 	const lazyAgentID = "lazy-agent.example"
-	lazyTenantID := "t_" + uuid.NewString()
-	h.insertTenant(t, lazyTenantID, lazyAgentID)
+	lazyTenantID := h.registerSite(t, lazyAgentID)
 
 	// Single combined origin serves both fora.json (self-listed
 	// contributor) and fora.json (currently-valid Ed25519 key).
@@ -365,7 +381,7 @@ func TestAgentSelfSignup_LazyFirstSeen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lazy keypair: %v", err)
 	}
-	combined := newAgentCombinedOrigin(t, lazyAgentID, []string{lazyAgentID}, lazyAgentID, pub)
+	combined := newAgentCombinedOrigin(t, lazyAgentID, []string{lazyAgentID}, lazyAgentID, priv)
 	h.registerHost(lazyAgentID, combined.server.URL)
 
 	// Precondition: no agents row yet.
@@ -419,16 +435,15 @@ func TestAgentSelfSignup_RotatedKeyRepinnedAndAccepted(t *testing.T) {
 	h := newAgentHarness(t)
 
 	const agentID = "rotating-agent.example"
-	tenantID := "t_" + uuid.NewString()
-	h.insertTenant(t, tenantID, agentID)
+	tenantID := h.registerSite(t, agentID)
 
 	// keyA: the contributor's initial key. The first push is first-contact
 	// self-signup (ErrUnknown) and TOFU-pins keyA.
-	keyAPub, keyAPriv, err := ed25519.GenerateKey(rand.Reader)
+	_, keyAPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("keyA: %v", err)
 	}
-	originA := newAgentCombinedOrigin(t, agentID, []string{agentID}, agentID, keyAPub)
+	originA := newAgentCombinedOrigin(t, agentID, []string{agentID}, agentID, keyAPriv)
 	h.registerHost(agentID, originA.server.URL)
 
 	if _, err := h.signedCat(agentID, keyAPriv).PushResources(h.ctx,
@@ -441,7 +456,7 @@ func TestAgentSelfSignup_RotatedKeyRepinnedAndAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("keyB: %v", err)
 	}
-	originB := newAgentCombinedOrigin(t, agentID, []string{agentID}, agentID, keyBPub)
+	originB := newAgentCombinedOrigin(t, agentID, []string{agentID}, agentID, keyBPriv)
 	h.registerHost(agentID, originB.server.URL) // overwrite: the host now serves keyB
 
 	// A push signed with the ROTATED key keyB: the pinned key is still keyA, so

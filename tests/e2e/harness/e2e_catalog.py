@@ -4,7 +4,8 @@ This leaf module holds the demo-domain constants, buyer identities, and the
 ``DemoResource`` / ``SeededFixture`` dataclasses together with their pure
 builders. It performs NO database access and NO network/subprocess I/O, so it
 imports nothing from the seeding layer — the dependency is one-directional
-(``seed`` → ``e2e_catalog``) and cycle-free.
+(``seed`` → ``e2e_catalog`` → ``exchanges``) and cycle-free. ``exchanges`` is
+pure data too, and it is where the seat each exchange runs is named.
 
 ``seed.py`` re-exports every public name defined here, so the ~40 test modules
 that ``from .seed import X`` continue to resolve unchanged.
@@ -15,54 +16,69 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .exchanges import (
+    EXCHANGE_A_DOMAIN,
+    EXCHANGE_B_DOMAIN,
+    EXCHANGE_C_DOMAIN,
+    seat_tenant_id,
+)
+
 # ───── Demo publisher domains (port-less; alias to their edges on port 80) ──
 DEMO_PHILOSOPHY_DOMAIN = "demo.fora-protocol.org"
 DEMO_MUSIC_DOMAIN = "music.demo.fora-protocol.org"
 DEMO_SFX_DOMAIN = "sfx.demo.fora-protocol.org"
+# The archive publisher: no edge, sold only by exchange-d, the seat that refuses
+# purchases the Broker relays.
+DEMO_ARCHIVE_DOMAIN = "archive.demo.fora-protocol.org"
 
-# Back-compat aliases kept so the few remaining edge-agnostic call sites import
-# cleanly; the demo catalog is served by path through the SAME publisher origin
-# so the edge that fronts each domain is selected by the domain alias, not by a
-# distinct host:port. These point at the philosophy (Cloudflare) publisher demo
-# domain on its natural port 80.
-EDGE_PUBLIC_URL = f"http://{DEMO_PHILOSOPHY_DOMAIN}"
-DEMO_CF_PUBLISHER_HOST = DEMO_PHILOSOPHY_DOMAIN
+# The payee every demo site attests. One publisher owning every site: the same
+# value each demo edge serves in its manifest's exchanges[].ext.resource_owner_id
+# and the value fora.catalog.resource_owner_id carries, which is a foreign key to
+# fora.publishers. It is what tells the demo publishers' rows apart from
+# each other inside one seat's catalog.
+DEMO_PUBLISHER_ID = "demo-resource-owner"
+DEMO_PUBLISHER_NAME = "FORA demo publisher"
+
+# Which exchange fronts each demo site, and therefore which SEAT that site's
+# catalog rows are stored under. The seat is the tenant now; the site is a
+# fora.publisher_domains row listed on that seat.
+SEAT_OF_PHILOSOPHY = seat_tenant_id(EXCHANGE_A_DOMAIN)
+SEAT_OF_MUSIC = seat_tenant_id(EXCHANGE_B_DOMAIN)
+SEAT_OF_SFX = seat_tenant_id(EXCHANGE_C_DOMAIN)
 
 _FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 # 3rd-party contributor identity (kid == catalog-contributor-e2e). Served via the
 # `catalog-contributor-e2e-jwks` well-known host (NOT pre-seeded in fora.agents); the
-# Exchange learns its key by fetching that host. Used by the new trust test's
-# 3rd-party leg and by the existing full-path/ingest probes that push to a
-# publisher listing it. See catalog_push.py for the keyfile format + gate details.
+# Exchange learns its key by fetching that host. Used by the catalog tests that push
+# as the operator's contributor (catalog_calls.contributor) and by the ingest probes.
+# The keyfile format is the one httpsig_signer.load_keypair reads.
 CATALOG_CONTRIBUTOR_ID = "catalog-contributor-e2e"
 CONTRIBUTOR_KEY_PATH = _FIXTURES_DIR / "catalog_contributor_key.json"
 
 # ───── Buyer identities (kid == agent_id; each kid's key is served by its own
 # jwks host in docker-compose.e2e.yml. The httpsig layer resolves keys from
-# those hosts; the Broker self-act gate + Exchange caller-authz then admit the
-# already-verified caller). The in-memory
-# billing adapter authorizes a PRICED term only when the buyer's balance
-# currency matches the term currency. A zero charge is the exception: it skips
-# the currency and balance gates entirely, so a FREE term is authorized for any
-# buyer that has an account at all.
-USD_AGENT_ID = "agent-e2e"  # EXCHANGE_BILLING_SEED: 100.00 USD, the funded buyer.
-USD_AGENT_KEY_PATH = _FIXTURES_DIR / "agent_e2e_key.json"
-# The EUR buyer is NOT funded, and cannot be on this tier. The in-memory adapter
-# denominates every balance in one currency, and that currency is the constant
-# billing.DemoCurrency ("USD"). Its seed loader drops any entry in another
-# currency, so this agent's EUR line in EXCHANGE_BILLING_SEED never becomes a
-# balance; registration then gives it a zero USD account. Pinned by the Go test
-# that asserts the EUR seed entry is skipped.
+# those hosts; the Broker and the Exchange caller-authz then admit the
+# already-verified caller).
 #
-# So this buyer works for FREE terms only — a zero charge skips the currency and
-# balance gates. Send it at a PRICED term in any currency and Authorize refuses
-# with "currency mismatch". Priced coverage belongs to the USD buyer above.
+# Every Exchange bills on its own TigerBeetle ledger, with one ledger per
+# currency (USD and EUR). A funded buyer gets its money from the welcome credit
+# at its first Register, which the seed sends for it at every Exchange
+# (seed_accounts.py), and that credit is granted in BOTH currencies. A priced
+# term is authorized when the buyer's balance in the TERM's currency covers it;
+# a zero charge never reaches the billing gate at all.
+USD_AGENT_ID = "agent-e2e"  # The funded buyer the USD-priced suites buy as.
+USD_AGENT_KEY_PATH = _FIXTURES_DIR / "agent_e2e_key.json"
+# The buyer the EUR-priced demo terms are bought as. Funded like the USD buyer;
+# the two are kept apart so that each currency's suites spend their own buyer's
+# money.
 EUR_AGENT_ID = "agent-demo-eur"
 EUR_AGENT_KEY_PATH = _FIXTURES_DIR / "agent_demo_eur_key.json"
 
-# Credit-less buyer: registered + keyed but absent from EXCHANGE_BILLING_SEED so
-# the billing gate refuses it (obligation 00 failure-5).
+# Credit-less buyer: keyed and registered, with an active account that holds
+# nothing, so the billing gate refuses it (obligation 00 failure-5). The seed
+# registers it while the seats hold new agents for review, so it is granted no
+# welcome credit, then switches its account on; see seed_accounts.py.
 NOBILLING_AGENT_ID = "agent-nobilling-e2e"
 NOBILLING_AGENT_KEY_PATH = _FIXTURES_DIR / "agent_nobilling_e2e_key.json"
 
@@ -73,9 +89,9 @@ CANARY_MARKER = "FORA-DEMO-CANARY-8FK3J2-0418"
 
 # ───── E2E resource catalog (from fixtures/catalog/, described in that
 # directory's README). Each is a port-less demo-domain URI the tests fetch
-# directly (the domain aliases to its edge). The owning tenant + the buyer whose
-# currency matches the term are carried alongside so test scenarios can pick a
-# resource by term-shape.
+# directly (the domain aliases to its edge). The seat the row is stored under
+# and the buyer assigned to the term's currency are carried alongside so test
+# scenarios can pick a resource by term-shape.
 
 
 @dataclass(frozen=True)
@@ -83,8 +99,10 @@ class DemoResource:
     """One demo-catalog resource the rewritten e2e suites assert against.
 
     ``uri`` is the port-less demo-domain URI (resolves to ``edge_service`` via
-    the network alias). ``buyer_agent_id`` / ``buyer_key_path`` is the buyer
-    whose balance currency matches the term currency.
+    the network alias). ``tenant_id`` is the SEAT the row is stored under, which
+    is the exchange fronting ``domain`` — not the publisher.
+    ``buyer_agent_id`` / ``buyer_key_path`` is the buyer the term's currency is
+    bought as.
     """
 
     uri: str
@@ -129,15 +147,11 @@ class SeededFixture:
     """Demo-catalog resources + buyers the rewritten e2e suites consume.
 
     Every resource is produced by ingesting the demo feeds through the real
-    ``fora-ingest`` binary — none is ``push_catalog``-ed. The buyer on
-    each resource matches the term currency.
+    ``fora-ingest`` binary — none is pushed by a test. The buyer on
+    each resource is the one assigned to the term's currency.
     """
 
-    # Buyers.
-    eur_agent_id: str
-    eur_agent_key_path: Path
-    usd_agent_id: str
-    usd_agent_key_path: Path
+    # The credit-less buyer. The funded buyers ride on each resource.
     nobilling_agent_id: str
     nobilling_agent_key_path: Path
 
@@ -150,18 +164,9 @@ class SeededFixture:
     # Geo/user-type restricted multi-term resource (plato: academic-FREE +
     # commercial-PER_UNIT, EUR, geo[EU]) on the Cloudflare edge.
     restricted: DemoResource
-    restricted_commercial_rate: float
-    # Another multi-term resource (zeno-of-citium: academic-FREE EUR +
-    # commercial-PER_UNIT USD) on the Cloudflare edge. Its commercial term is
-    # USD so the commercial path uses the USD buyer.
-    multi_term: DemoResource
-    multi_term_commercial_rate: float
-    multi_term_commercial_buyer_id: str
-    multi_term_commercial_buyer_key_path: Path
     # Retrieval canary (thales-of-miletus: FLAT 9.99 EUR, geo[EU]) on the
-    # Cloudflare edge. Body carries FORA-DEMO-CANARY-8FK3J2-0418.
+    # Cloudflare edge. Body carries CANARY_MARKER.
     canary: DemoResource
-    canary_marker: str
     # One resource per edge runtime (the FREE/affordable resource the
     # signed-URL fetch tests follow to each edge).
     cloudflare: DemoResource
@@ -174,25 +179,17 @@ def _build_fixture() -> SeededFixture:
     socrates = _eur(
         DEMO_PHILOSOPHY_DOMAIN,
         "/articles/philosophers/socrates.txt",
-        "tenant-demo-philosophy",
+        SEAT_OF_PHILOSOPHY,
         "edge",
     )
-    wooden_door = _usd(
-        DEMO_SFX_DOMAIN, "/sfx/wooden-door-creak.json", "tenant-demo-sfx", "aws-edge"
-    )
+    wooden_door = _usd(DEMO_SFX_DOMAIN, "/sfx/wooden-door-creak.json", SEAT_OF_SFX, "aws-edge")
     plato = _eur(
-        DEMO_PHILOSOPHY_DOMAIN, "/articles/philosophers/plato.txt", "tenant-demo-philosophy", "edge"
-    )
-    zeno = _eur(
-        DEMO_PHILOSOPHY_DOMAIN,
-        "/articles/philosophers/zeno-of-citium.txt",
-        "tenant-demo-philosophy",
-        "edge",
+        DEMO_PHILOSOPHY_DOMAIN, "/articles/philosophers/plato.txt", SEAT_OF_PHILOSOPHY, "edge"
     )
     thales = _eur(
         DEMO_PHILOSOPHY_DOMAIN,
         "/articles/philosophers/thales-of-miletus.txt",
-        "tenant-demo-philosophy",
+        SEAT_OF_PHILOSOPHY,
         "edge",
     )
     # paper-satellites: FLAT 3.50 USD, geo[US], no user-type restriction — a
@@ -200,29 +197,19 @@ def _build_fixture() -> SeededFixture:
     # demo's truly-unrestricted music resources are all subscription/
     # reference_only, which yield no offer on a plain resolve.)
     paper_satellites = _usd(
-        DEMO_MUSIC_DOMAIN, "/lyrics/paper-satellites.txt", "tenant-demo-music", "fastly-edge"
+        DEMO_MUSIC_DOMAIN, "/lyrics/paper-satellites.txt", SEAT_OF_MUSIC, "fastly-edge"
     )
     # rain-on-tin-roof: FREE USD, individual, EU/US/GB — the AWS-edge FREE
     # resource a USD individual buyer can fetch.
-    rain = _usd(DEMO_SFX_DOMAIN, "/sfx/rain-on-tin-roof.json", "tenant-demo-sfx", "aws-edge")
+    rain = _usd(DEMO_SFX_DOMAIN, "/sfx/rain-on-tin-roof.json", SEAT_OF_SFX, "aws-edge")
     return SeededFixture(
-        eur_agent_id=EUR_AGENT_ID,
-        eur_agent_key_path=EUR_AGENT_KEY_PATH,
-        usd_agent_id=USD_AGENT_ID,
-        usd_agent_key_path=USD_AGENT_KEY_PATH,
         nobilling_agent_id=NOBILLING_AGENT_ID,
         nobilling_agent_key_path=NOBILLING_AGENT_KEY_PATH,
         free=socrates,
         priced_per_unit=wooden_door,
         priced_per_unit_rate=0.25,
         restricted=plato,
-        restricted_commercial_rate=0.03,
-        multi_term=zeno,
-        multi_term_commercial_rate=0.04,
-        multi_term_commercial_buyer_id=USD_AGENT_ID,
-        multi_term_commercial_buyer_key_path=USD_AGENT_KEY_PATH,
         canary=thales,
-        canary_marker=CANARY_MARKER,
         cloudflare=socrates,
         fastly=paper_satellites,
         aws=rain,

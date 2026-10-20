@@ -52,7 +52,7 @@ func TestTigerBeetleLatency(t *testing.T) {
 		k := fmt.Sprintf("lat%d", i)
 		bid, d := timedAuthorize(t, a, "0.02", "rec-"+k)
 		record("Authorize", d)
-		record("GetBalance", timed(func() { _, err := a.GetBalance(ctx, "ag"); mustNil(t, err) }))
+		record("GetBalance", timed(func() { _, err := a.GetBalance(ctx, "ag", confCurrency); mustNil(t, err) }))
 		record("Record", timed(func() { mustNil(t, a.Record(ctx, bid, 1, "rec-"+k)) }))
 		record("Refund", timed(func() {
 			mustNil(t, a.Refund(ctx, bid, mustAmount(t, "0.01", "USD"), "lat", "ref-"+k))

@@ -25,15 +25,18 @@ mock_provider "aws" {
     }
   }
 
-  # key_name is optional and computed, so an unmocked apply fabricates a random
-  # placeholder for it and no assertion could tell "no key pair" from "a key
-  # pair" apart. Pinning the default to "" removes the fabrication. This does
-  # not make the assertion circular: a mock default only fills an attribute the
-  # configuration leaves unset, so reintroducing key_name on the instance
-  # produces the configured value and the assertion goes red.
+  # key_name and iam_instance_profile are optional and computed, so an unmocked
+  # apply fabricates a random placeholder for each and no assertion could tell
+  # "no key pair" from "a key pair" (or "no profile" from "a profile") apart.
+  # Pinning the defaults to "" removes the fabrication. This does not make the
+  # assertions circular: a mock default only fills an attribute the
+  # configuration leaves unset, so reintroducing key_name on the instance, or
+  # giving iam_instance_profile a non-null default, produces the configured
+  # value and the assertion goes red.
   mock_resource "aws_instance" {
     defaults = {
-      key_name = ""
+      key_name             = ""
+      iam_instance_profile = ""
     }
   }
 }
@@ -485,6 +488,149 @@ run "instance_uses_defaults" {
     condition     = aws_instance.this.metadata_options[0].http_tokens == "required" && aws_instance.this.metadata_options[0].http_put_response_hop_limit == 1
     error_message = "IMDSv2 must be enforced with hop limit 1 — user data carries key material and containers must not reach the metadata service"
   }
+
+  # The production inputs default to null so the stacks that do not set them
+  # plan exactly what they planned before the inputs existed. The profile's
+  # counterpart is in the apply-mode run at the bottom: iam_instance_profile is
+  # optional and computed, so it stays unknown in a plan.
+  assert {
+    condition     = length(aws_ebs_volume.data) == 0 && length(aws_volume_attachment.data) == 0
+    error_message = "No data volume or attachment unless data_volume_gb is set"
+  }
+
+  assert {
+    condition     = aws_instance.this.ami == data.aws_ami.ubuntu.id
+    error_message = "With ami_id unset the instance must follow the Canonical most_recent lookup"
+  }
+}
+
+run "data_volume_absent_by_default" {
+  command = plan
+
+  assert {
+    condition     = length(aws_ebs_volume.data) == 0
+    error_message = "No EBS data volume unless data_volume_gb is set"
+  }
+
+  assert {
+    condition     = length(aws_volume_attachment.data) == 0
+    error_message = "No volume attachment unless data_volume_gb is set"
+  }
+
+  # one() of an empty list is null and is known at plan time, so this is the
+  # one side of the output wiring a plan can check.
+  assert {
+    condition     = output.data_volume_id == null
+    error_message = "data_volume_id must be null when there is no data volume"
+  }
+}
+
+# Plan mode asserts the volume's shape and its attachment. prevent_destroy is a
+# lifecycle setting, not an attribute, and a plan that would destroy the volume
+# is a plan error rather than a checkable failure, so terraform test cannot
+# observe it; read it in main.tf.
+run "data_volume_is_durable_when_sized" {
+  command = plan
+
+  variables {
+    data_volume_gb = 50
+  }
+
+  assert {
+    condition     = length(aws_ebs_volume.data) == 1 && length(aws_volume_attachment.data) == 1
+    error_message = "data_volume_gb must create exactly one volume and one attachment"
+  }
+
+  assert {
+    condition     = aws_ebs_volume.data[0].size == 50 && aws_ebs_volume.data[0].type == "gp3"
+    error_message = "data_volume_gb must drive the size of a gp3 volume"
+  }
+
+  assert {
+    condition     = aws_ebs_volume.data[0].encrypted == true
+    error_message = "The data volume holds the service state that outlives the instance — it must be encrypted at rest like the root volume"
+  }
+
+  # An EBS volume attaches only inside its own zone. The subnet's zone is the
+  # instance's zone, so the volume must be created there, not in a zone of its
+  # own choosing.
+  assert {
+    condition     = aws_ebs_volume.data[0].availability_zone == aws_subnet.public.availability_zone
+    error_message = "The data volume must be created in the instance's availability zone"
+  }
+
+  assert {
+    condition     = aws_ebs_volume.data[0].tags["Name"] == "fora-test-data"
+    error_message = "The data volume's Name tag must derive from name_prefix"
+  }
+
+  assert {
+    condition     = aws_volume_attachment.data[0].device_name == "/dev/sdf"
+    error_message = "The data volume must attach at /dev/sdf — the device name a host mounts it by"
+  }
+
+  assert {
+    condition     = aws_volume_attachment.data[0].stop_instance_before_detaching == true
+    error_message = "Detaching must stop the instance first, so the filesystem on the volume is never pulled out from under a running database"
+  }
+
+  assert {
+    condition     = output.availability_zone == aws_subnet.public.availability_zone
+    error_message = "availability_zone output must report the subnet's zone"
+  }
+}
+
+run "instance_profile_is_wired_when_given" {
+  command = plan
+
+  variables {
+    iam_instance_profile = "fora-test-host"
+  }
+
+  assert {
+    condition     = aws_instance.this.iam_instance_profile == "fora-test-host"
+    error_message = "iam_instance_profile must be attached to the instance as given"
+  }
+}
+
+# The mock returns ami-0123456789abcdef0 for the lookup; the pinned id differs
+# on purpose, so the second assertion is what fails if the instance ever reads
+# the lookup while pinned.
+run "pinned_ami_bypasses_the_lookup" {
+  command = plan
+
+  variables {
+    ami_id = "ami-0fedcba9876543210"
+  }
+
+  assert {
+    condition     = aws_instance.this.ami == "ami-0fedcba9876543210"
+    error_message = "A set ami_id must be the instance's AMI"
+  }
+
+  assert {
+    condition     = aws_instance.this.ami != data.aws_ami.ubuntu.id
+    error_message = "With ami_id set the instance must not follow the most_recent lookup"
+  }
+
+  assert {
+    condition     = output.ami_id == "ami-0fedcba9876543210"
+    error_message = "ami_id output must report the pinned id"
+  }
+}
+
+# An id pasted without its prefix is the likely mistake; the validation must
+# refuse it before AWS reports an invalid AMI at apply time.
+run "malformed_ami_id_is_rejected" {
+  command = plan
+
+  variables {
+    ami_id = "0fedcba9876543210"
+  }
+
+  expect_failures = [
+    var.ami_id,
+  ]
 }
 
 run "names_and_wiring_derive_from_inputs" {
@@ -558,6 +704,13 @@ run "eip_association_and_outputs" {
   assert {
     condition     = aws_instance.this.key_name == null || aws_instance.this.key_name == ""
     error_message = "the instance must carry no EC2 key pair — an unrestricted key defeats every from= restriction"
+  }
+
+  # Same shape as key_name, for the same reason: optional and computed, so a
+  # plan cannot evaluate it. A stack that sets no profile must get none.
+  assert {
+    condition     = aws_instance.this.iam_instance_profile == null || aws_instance.this.iam_instance_profile == ""
+    error_message = "the instance must carry no instance profile unless iam_instance_profile is set"
   }
 
   assert {

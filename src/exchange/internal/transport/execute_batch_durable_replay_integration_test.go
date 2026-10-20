@@ -14,6 +14,7 @@ import (
 
 	rwtestutil "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/testutil"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
 )
 
@@ -29,14 +30,14 @@ import (
 // It reuses h's pool/queries (same DB → the leg-1 row persists), h's billing
 // inner adapter (same balance → a double charge is observable), h's offerSigner
 // + keystore (so URL minting/well-known wiring matches), and the SAME caller
-// identity (h.callerPub/callerPriv) registered with a fresh allowAllRegistry +
+// identity (h.callerPub/callerPriv) registered with a fresh exchangetest.Registry +
 // allowAllManifestCache so the second server authenticates the same agent. The
 // returned client signs with h.callerPriv, exactly like h.exchangeClient.
 func restartedExchangeClient(t *testing.T, h *testHarness) foraconnect.ExchangeServiceClient {
 	t.Helper()
 	const callerID = "agent-test"
-	registry := newAllowAllRegistry()
-	registry.put(callerID, h.callerPub)
+	registry := exchangetest.NewRegistry()
+	registry.Put(callerID, h.callerPub)
 	manifests := newAllowAllManifestCache(callerID)
 
 	srv := startExchangeServer(t, exchangeServerDeps{
@@ -143,7 +144,7 @@ func TestExecuteTransaction_DurableReplayAfterRestartReturnsOriginalResult(t *te
 	} else if rec.TransactionID == "" {
 		t.Fatal("first-call persisted transaction has empty transaction_id")
 	}
-	balAfterFirst, err := h.billing.GetBalance(ctx, h.billingRef)
+	balAfterFirst, err := h.billing.GetBalance(ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after first: %v", err)
 	}
@@ -165,21 +166,12 @@ func TestExecuteTransaction_DurableReplayAfterRestartReturnsOriginalResult(t *te
 	if replayErr != nil {
 		t.Fatalf("durable replay must return the original result, not an error: %v", replayErr)
 	}
-	replayItems := second.Msg.GetItems()
-	if len(replayItems) != 1 {
-		t.Fatalf("durable replay returned %d items, want 1 (the original)", len(replayItems))
-	}
-	if got := replayItems[0].GetTransactionId(); got != origTxID {
-		t.Fatalf("durable replay transaction_id = %q, want the original %q", got, origTxID)
-	}
-	if got := replayItems[0].GetRetrievalEndpoint(); got != origURL {
-		t.Fatalf("durable replay retrieval_endpoint = %q, want the ORIGINAL %q verbatim", got, origURL)
-	}
+	assertReplayedOriginalItem(t, "durable replay", second.Msg.GetItems(), origTxID, origURL)
 
 	// The durable replay must not double-persist or double-charge: balance
 	// unchanged at 9.95 (still exactly one charge), and the derived-key row is
 	// still the lone persisted transaction.
-	balAfterReplay, err := h.billing.GetBalance(ctx, h.billingRef)
+	balAfterReplay, err := h.billing.GetBalance(ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after replay: %v", err)
 	}
@@ -190,5 +182,23 @@ func TestExecuteTransaction_DurableReplayAfterRestartReturnsOriginalResult(t *te
 	if _, rerr := repoTx.ByIdempotencyKey(ctx, derivedKey); rerr != nil {
 		t.Fatalf("ByIdempotencyKey(derived %q) after replay = %v, want the single persisted row to survive",
 			derivedKey, rerr)
+	}
+}
+
+// assertReplayedOriginalItem requires a replayed execute to return exactly one
+// item carrying the original transaction_id and, verbatim, the original
+// retrieval_endpoint. label names the replay in failure messages.
+func assertReplayedOriginalItem(
+	t *testing.T, label string, items []*forav1.TransactionResultItem, origTxID, origURL string,
+) {
+	t.Helper()
+	if len(items) != 1 {
+		t.Fatalf("%s returned %d items, want 1 (the original)", label, len(items))
+	}
+	if got := items[0].GetTransactionId(); got != origTxID {
+		t.Fatalf("%s transaction_id = %q, want the original %q", label, got, origTxID)
+	}
+	if got := items[0].GetRetrievalEndpoint(); got != origURL {
+		t.Fatalf("%s retrieval_endpoint = %q, want the ORIGINAL %q verbatim", label, got, origURL)
 	}
 }

@@ -16,9 +16,9 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing/tigerbeetle"
 )
 
-// tbConfLedger is the conformance ledger id: ISO 4217 USD; the conformance
-// amounts are USD. The asset scale is money.AssetScale, fixed for every
-// deployment.
+// tbConfLedger is the conformance ledger id — the ISO 4217 numeric of
+// confCurrency, the currency every conformance amount is denominated in. The
+// asset scale is money.AssetScale, fixed for every deployment.
 const tbConfLedger uint32 = 840
 
 var (
@@ -85,14 +85,26 @@ func tigerBeetleFactory() adapterFactory {
 // fundSeed and to account-id derivation. Centralizes the construction the four TB
 // integration sites otherwise repeat.
 func newTBAdapter(prefix string, holdTimeout time.Duration) (billing.Adapter, string) {
+	return newTBAdapterFor(prefix, holdTimeout, confCurrency)
+}
+
+// newTBAdapterFor is newTBAdapter with an explicit currency set, for the cases
+// that need more than one ledger configured on one adapter.
+func newTBAdapterFor(
+	prefix string, holdTimeout time.Duration, currencies ...string,
+) (billing.Adapter, string) {
 	ns := fmt.Sprintf("%s%d:", prefix, tbNSCounter.Add(1))
-	adapter := billing.NewTigerBeetleAdapter(billing.TigerBeetleOptions{
+	adapter, err := billing.NewTigerBeetleAdapter(billing.TigerBeetleOptions{
 		Client:      tbClient,
-		Ledger:      tbConfLedger,
-		Currency:    "USD",
+		Currencies:  currencies,
 		HoldTimeout: holdTimeout,
 		IDNamespace: ns,
 	})
+	if err != nil {
+		// A bad currency set is a bug in the test wiring, not an outcome under
+		// test, and the factory closure has no *testing.T in scope.
+		panic(fmt.Sprintf("tigerbeetle test adapter: %v", err))
+	}
 	return adapter, ns
 }
 

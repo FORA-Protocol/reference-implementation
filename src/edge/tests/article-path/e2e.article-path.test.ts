@@ -48,11 +48,11 @@ beforeAll(async () => {
   ({ keypair, exchangeKid } = await setupE2ETest());
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   // Reset first: a one-shot intercept a previous test registered but never
   // consumed must not linger into this test's route table.
   fetchMock.reset();
-  setupWbaDirectoryMock(keypair);
+  await setupWbaDirectoryMock(keypair);
 });
 
 // One-shot origin intercept for the article. Registered ONLY by tests that

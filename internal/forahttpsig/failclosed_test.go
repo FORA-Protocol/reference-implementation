@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FORA-Protocol/protocol/sdk/go/core"
+
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 )
 
@@ -28,17 +30,17 @@ func TestRoundTrip_KeySourceFailureNeverSends(t *testing.T) {
 	sentinel := errors.New("no active key")
 	src := WithKeySource(func(context.Context) (AgentKey, error) { return AgentKey{}, sentinel })
 
-	transport, err := New(nil, "", nil, ClockWindow(clock.System{}, 30*time.Second), src, WithWBASigning())
+	transport, err := New(nil, "", nil, core.ClockWindow(clock.System{}.Now, 30*time.Second), src)
 	if err != nil {
 		t.Fatalf("build transport: %v", err)
 	}
-	err = sendExpectingFailure(t, transport, srv.URL+wbaTarget)
+	err = sendExpectingFailure(t, transport, srv.URL+foraTarget)
 
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err = %v, want the key-source failure", err)
 	}
-	if len(*seen) != 0 {
-		t.Errorf("server received %d requests; an unsignable request must not be sent", len(*seen))
+	if seen.Len() != 0 {
+		t.Errorf("server received %d requests; an unsignable request must not be sent", seen.Len())
 	}
 }
 
@@ -66,7 +68,7 @@ func TestRoundTrip_KeySourceFailureClosesTheBody(t *testing.T) {
 	body := &closeRecordingBody{Reader: bytes.NewReader([]byte(`{"q":"x"}`))}
 	req := newRequest(t, http.MethodPost, srv.URL+foraTarget, nil)
 	req.Body = body
-	transport, err := New(nil, "", nil, ClockWindow(clock.System{}, 30*time.Second), src)
+	transport, err := New(nil, "", nil, core.ClockWindow(clock.System{}.Now, 30*time.Second), src)
 	if err != nil {
 		t.Fatalf("build transport: %v", err)
 	}
@@ -81,8 +83,8 @@ func TestRoundTrip_KeySourceFailureClosesTheBody(t *testing.T) {
 	if !body.closed {
 		t.Error("RoundTrip returned without closing the caller's body")
 	}
-	if len(*seen) != 0 {
-		t.Errorf("server received %d requests; want none", len(*seen))
+	if seen.Len() != 0 {
+		t.Errorf("server received %d requests; want none", seen.Len())
 	}
 }
 
@@ -97,18 +99,18 @@ func TestRoundTrip_RejectsAKeyIDThatDoesNotMatchTheKey(t *testing.T) {
 	_, otherPub := agentKeyFor(t, 0x6d, "https://bob.foramcp.org")
 	key.KeyID = thumbprintOf(t, otherPub)
 
-	transport, err := New(nil, "", nil, ClockWindow(clock.System{}, 30*time.Second),
-		staticSource(key), WithWBASigning())
+	transport, err := New(nil, "", nil, core.ClockWindow(clock.System{}.Now, 30*time.Second),
+		staticSource(key))
 	if err != nil {
 		t.Fatalf("build transport: %v", err)
 	}
-	err = sendExpectingFailure(t, transport, srv.URL+wbaTarget)
+	err = sendExpectingFailure(t, transport, srv.URL+foraTarget)
 
 	if !errors.Is(err, ErrUnusableKey) {
 		t.Fatalf("err = %v, want ErrUnusableKey", err)
 	}
-	if len(*seen) != 0 {
-		t.Errorf("server received %d requests; a mis-keyed signature must not be sent", len(*seen))
+	if seen.Len() != 0 {
+		t.Errorf("server received %d requests; a mis-keyed signature must not be sent", seen.Len())
 	}
 }
 
@@ -129,7 +131,7 @@ func TestRoundTrip_UnreadableBodyNeverSends(t *testing.T) {
 
 	req := newRequest(t, http.MethodPost, srv.URL+foraTarget, nil)
 	req.Body = failingBody{}
-	transport, err := New(nil, "", nil, ClockWindow(clock.System{}, 30*time.Second), staticSource(key))
+	transport, err := New(nil, "", nil, core.ClockWindow(clock.System{}.Now, 30*time.Second), staticSource(key))
 	if err != nil {
 		t.Fatalf("build transport: %v", err)
 	}
@@ -141,8 +143,8 @@ func TestRoundTrip_UnreadableBodyNeverSends(t *testing.T) {
 	if err == nil {
 		t.Fatal("a request whose body could not be read was sent anyway")
 	}
-	if len(*seen) != 0 {
-		t.Errorf("origin saw %d requests; want none", len(*seen))
+	if seen.Len() != 0 {
+		t.Errorf("origin saw %d requests; want none", seen.Len())
 	}
 }
 
@@ -155,16 +157,16 @@ func TestRoundTrip_RejectsNonEd25519KeyMaterial(t *testing.T) {
 		return AgentKey{Directory: "https://alice.foramcp.org", Private: []byte("too short")}, nil
 	})
 
-	transport, err := New(nil, "", nil, ClockWindow(clock.System{}, 30*time.Second), src, WithWBASigning())
+	transport, err := New(nil, "", nil, core.ClockWindow(clock.System{}.Now, 30*time.Second), src)
 	if err != nil {
 		t.Fatalf("build transport: %v", err)
 	}
-	err = sendExpectingFailure(t, transport, srv.URL+wbaTarget)
+	err = sendExpectingFailure(t, transport, srv.URL+foraTarget)
 
 	if !errors.Is(err, ErrUnusableKey) {
 		t.Fatalf("err = %v, want ErrUnusableKey", err)
 	}
-	if len(*seen) != 0 {
-		t.Errorf("server received %d requests; want none", len(*seen))
+	if seen.Len() != 0 {
+		t.Errorf("server received %d requests; want none", seen.Len())
 	}
 }

@@ -1,21 +1,20 @@
 """Full-path term-eligibility E2E over the live stack (demo catalog).
 
 Exercises the COMPLETE vertical through public surfaces only, against the
-demo-catalog resources the real ``fora-ingest`` binary ingested:
-
-* PUSH (validation surface): two probe pushes through the signed
-  ``CatalogService/PushResources`` RPC assert the Exchange's term validator
-  rejects a hard-invalid term and warns (but accepts) an unknown-vocab token.
-  These exercise the RPC's reject/warning behaviour; they do NOT push demo
-  content (the demo catalog is the binary's ingest output, asserted below).
+demo-catalog resources the real ``fora-ingest`` binary ingested. Push validation
+is not driven here: a hard-invalid term refusing the whole push and an unknown
+vocabulary token warned about but accepted are the catalog obligations CATALOG-001
+and TERMS-002, proved in ``obligations/test_catalog_push.py`` and
+``obligations/test_catalog_terms.py``.
 
 * QUERY (agent): Broker → Exchange → Edge on the demo ``plato`` resource, which
   carries an academic-FREE term (pushed first) and a commercial-PER_UNIT 0.03
   term. Per ADR-014's 2026-06-15 amendment the Exchange filters by resource_id +
   scopes ONLY — it no longer excludes a term by the requester's self-declared
-  user_type / geography / intended_use. So EVERY requester now discovers BOTH
-  terms on one offer and the agent self-selects; the headline price is the FIRST
-  projected term, i.e. plato's FREE term → unit cost 0. A requester
+  user_type / geography / intended_use. So EVERY requester discovers BOTH terms,
+  and each term comes back as its own signed offer: two offers for the one plato
+  URI, one term each, each priced from the term it sells. The agent picks the
+  offer it wants — the free one here — and pays that offer's price. A requester
   in any geography (US included) is licensed and delivered bytes; the
   restrictions ride on the offer for the agent to self-honour, and are enforced
   downstream at accept→report→reconcile.
@@ -25,266 +24,111 @@ The QUERY path pushes NOTHING — it reads the demo catalog the seed ingested.
 
 from __future__ import annotations
 
-import re
-import uuid
+from contextlib import closing
+from decimal import Decimal
+from http import HTTPStatus
 
-import httpx
-import pytest
-from fora_sdk.client import CallError
+from wire.models import TransactionResultItem
 
-from .broker_client import execute_first_offer
-from .catalog_push import (
-    OBLIGATION_KIND_SHARE_ALIKE,
-    OBLIGATION_TRIGGER_ON_DISTRIBUTION,
-    PRICING_MODEL_FREE,
-    RESTRICTION_KIND_FUNCTION,
-    CatalogEntry,
-    license_term,
-    push_catalog,
-    restriction,
-)
+from .broker_purchase import buy_through_broker, one_group_per_uri, only_item, resolve_request
+from .catalog_push import PRICING_MODEL_FREE
 from .conftest import StackURLs
-from .discovery import discoverable
-from .edge_fetch import fetch_signed
-from .resolve_carriers import first_item_of, licensed_of, retrieval_endpoint_of
-from .seed import (
-    CONTRIBUTOR_KEY_PATH,
-    DEMO_PHILOSOPHY_DOMAIN,
-    USD_AGENT_ID,
-    USD_AGENT_KEY_PATH,
-    SeededFixture,
-)
+from .edge_fetch import fetch_signed, fetch_without_proof, tamper_query_param
+from .sdk_client import sdk_broker_client
+from .seed import SeededFixture
 
 
-def _deliver_demo(compose_stack, res):
-    # R7: Broker Resolve is discovery-only; the signed URL is minted on the relay
-    # EXECUTE. Two-phase: Broker discover → relay-execute the winning Offer (agent
-    # sig1 + Broker sig2 + offer-acceptance). user_type / geography are no longer
-    # sent: the Broker stopped relaying them and the Exchange no longer filters on
-    # them (ADR-014, 2026-06-15). Only the native intended_use rides through.
-    body = {"agent_id": res.buyer_agent_id, "uri": res.uri, "intended_use": "ai-input"}
-    return execute_first_offer(
-        compose_stack,
-        body,
-        agent_id=res.buyer_agent_id,
-        domain=res.domain,
-        key_path=res.buyer_key_path,
-    )
+def _deliver_demo(compose_stack: StackURLs, res) -> TransactionResultItem:
+    """Resolve ``res`` at the Broker and buy the winner through the Broker.
 
-
-def _delivered_item(resp):
-    """Return items[0] of an EXECUTE TransactionResponse (C2 items[] envelope).
-
-    The EXECUTE response is an items[] envelope, so every
-    per-result field (licensed/retrievalEndpoint/cost) lives on items[0], never
-    the top level. Fails closed if the envelope carries no items[0].
+    Broker Resolve is discovery-only; the signed URL is minted on the purchase.
+    user_type / geography are not sent: the Broker stopped relaying them and the
+    Exchange no longer filters on them (ADR-014, 2026-06-15). Only the native
+    intended_use rides through.
     """
-    payload = resp.json()
-    item = first_item_of(payload)
-    assert item is not None, f"execute response carried no items[0]: {payload}"
+    _, item = buy_through_broker(
+        compose_stack, res.uri, agent_id=res.buyer_agent_id, key_path=res.buyer_key_path
+    )
+    assert item.denial_reason is None, f"the purchase of {res.uri} was denied: {item}"
     return item
-
-
-# ---------------------------------------------------------------------------
-# PUSH (validation surface) — reject + warning probes via the real RPC.
-# These push throwaway probe entries (unique synthetic paths); no demo
-# content is pushed. Gate 2 is satisfied by the demo edge's fora.json
-# (which lists catalog-contributor-e2e), the same gate the binary clears.
-# ---------------------------------------------------------------------------
-
-
-def test_push_invalid_term_rejects_whole_batch(
-    compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: seed registers the contributor
-) -> None:
-    """All-or-nothing: a term violating a hard rule sinks the WHOLE push.
-
-    The bad entry carries a SHARE_ALIKE obligation with no ``scope_license`` — a
-    protovalidate boundary reject. Pushed alongside a valid sibling, it causes the
-    entire submission to be rejected (HTTP 400 invalid_argument naming the rule);
-    NEITHER entry is accepted. No partial acceptance — the publisher fixes and
-    resubmits the whole set.
-    """
-    reject_path = f"/articles/probe/reject-{uuid.uuid4().hex}.txt"
-    good_path = f"/articles/probe/good-{uuid.uuid4().hex}.txt"
-    solo_path = f"/articles/probe/solo-{uuid.uuid4().hex}.txt"
-
-    # SUCCESS leg: the good entry pushed ALONE is accepted (push_catalog raises
-    # unless accepted == len(entries)), proving it is well-formed — so the batch
-    # rejection below is caused by the bad sibling, not the good entry.
-    push_catalog(
-        exchange_url=compose_stack.exchange,
-        tenant_id="tenant-demo-philosophy",
-        entries=[
-            CatalogEntry(
-                domain=DEMO_PHILOSOPHY_DOMAIN,
-                path=solo_path,
-                content_id=f"probe-solo-{uuid.uuid4().hex}",
-                terms=(license_term(model=PRICING_MODEL_FREE, rate=0.0, currency="EUR"),),
-            ),
-        ],
-        key_path=CONTRIBUTOR_KEY_PATH,
-    )
-
-    # FAILURE leg: the same shape of good entry + an invalid sibling → whole push rejected.
-    with pytest.raises(CallError) as caught:
-        push_catalog(
-            exchange_url=compose_stack.exchange,
-            tenant_id="tenant-demo-philosophy",
-            entries=[
-                CatalogEntry(
-                    domain=DEMO_PHILOSOPHY_DOMAIN,
-                    path=good_path,
-                    content_id=f"probe-good-{uuid.uuid4().hex}",
-                    terms=(license_term(model=PRICING_MODEL_FREE, rate=0.0, currency="EUR"),),
-                ),
-                CatalogEntry(
-                    domain=DEMO_PHILOSOPHY_DOMAIN,
-                    path=reject_path,
-                    content_id=f"probe-bad-{uuid.uuid4().hex}",
-                    terms=(
-                        license_term(
-                            model=PRICING_MODEL_FREE,
-                            rate=0.0,
-                            currency="EUR",
-                            obligations=(
-                                {
-                                    "kind": OBLIGATION_KIND_SHARE_ALIKE,
-                                    "trigger": OBLIGATION_TRIGGER_ON_DISTRIBUTION,
-                                },
-                            ),
-                        ),
-                    ),
-                ),
-            ],
-            key_path=CONTRIBUTOR_KEY_PATH,
-        )
-    # The SDK's typed refusal: HTTP 400 with the Connect code as the reason, and
-    # the protovalidate message naming the rule (its id and text both carry
-    # ``scope_license``).
-    exc = caught.value
-    assert exc.status == httpx.codes.BAD_REQUEST, exc
-    assert exc.reason == "invalid_argument", exc
-    assert "scope_license" in str(exc), exc
-
-    # The all-or-nothing half, and the reason this test exists. The refusal
-    # status alone would hold for a server that stored the valid sibling and
-    # reported the invalid one, which is precisely the partial acceptance the
-    # docstring says cannot happen. Read the good entry back through the public
-    # discovery RPC and require it absent.
-    # The stored URI carries the scheme the deployment configures, which is
-    # http here — the same spelling every other read-back in this suite uses.
-    good_uri = f"http://{DEMO_PHILOSOPHY_DOMAIN}{good_path}"
-    assert not discoverable(
-        compose_stack.exchange, good_uri, agent_id=USD_AGENT_ID, key_path=USD_AGENT_KEY_PATH
-    ), f"the valid sibling {good_uri!r} was stored despite the batch being refused"
-
-    # The control: the same entry shape pushed alone IS discoverable, so the
-    # assertion above reflects the batch refusal rather than a read that finds
-    # nothing whatever it is given.
-    solo_uri = f"http://{DEMO_PHILOSOPHY_DOMAIN}{solo_path}"
-    assert discoverable(
-        compose_stack.exchange, solo_uri, agent_id=USD_AGENT_ID, key_path=USD_AGENT_KEY_PATH
-    ), f"the solo entry {solo_uri!r} is not discoverable, so the read leg proves nothing"
-
-
-def test_push_warning_unknown_vocab_accepted(
-    compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: seed registers the contributor
-) -> None:
-    """An unknown vocab token is surfaced in warnings[] but the term is accepted."""
-    warn_path = f"/articles/probe/warn-{uuid.uuid4().hex}.txt"
-    response = push_catalog(
-        exchange_url=compose_stack.exchange,
-        tenant_id="tenant-demo-philosophy",
-        entries=[
-            CatalogEntry(
-                domain=DEMO_PHILOSOPHY_DOMAIN,
-                path=warn_path,
-                content_id=f"probe-warn-{uuid.uuid4().hex}",
-                terms=(
-                    license_term(
-                        model=PRICING_MODEL_FREE,
-                        rate=0.0,
-                        currency="EUR",
-                        restrictions=(
-                            restriction(
-                                RESTRICTION_KIND_FUNCTION,
-                                permitted=("ai-input", "totally-made-up-use"),
-                                advisory=True,
-                            ),
-                        ),
-                    ),
-                ),
-            ),
-        ],
-        key_path=CONTRIBUTOR_KEY_PATH,
-    )
-    # Accepted whole: a refusal is a non-200 error the SDK raises before this
-    # line, and the reference Exchange never sets ``rejected``.
-    assert response.accepted == 1, response
-    warnings = response.warnings or []
-    assert any("totally-made-up-use" in w for w in warnings), (
-        f"expected warnings[] to name the unregistered token, got {response!r}"
-    )
 
 
 # ---------------------------------------------------------------------------
 # QUERY (agent) — full path Broker → Exchange → Edge on the demo plato resource.
 # plato (demo.fora-protocol.org/articles/philosophers/plato.txt): term (a)
 # academic FREE EUR geo[EU,EEA] (pushed FIRST); term (b) commercial PER_UNIT 0.03
-# EUR geo[EU]. Post-ADR-014 (2026-06-15) BOTH terms project for EVERY requester
-# and the headline price is the FIRST term → FREE → unit cost 0. The
-# agent self-selects among the returned terms; the Exchange no longer
-# differentiates requesters by user_type / geography.
+# EUR geo[EU]. Post-ADR-014 (2026-06-15) BOTH terms project for EVERY requester,
+# each as its own signed offer. The agent self-selects among the offers; the
+# Exchange no longer differentiates requesters by user_type / geography.
 # ---------------------------------------------------------------------------
 
 
-def test_query_returns_free_headline_term_and_gets_content(
+def test_query_returns_an_offer_per_term_and_gets_content(
     compose_stack: StackURLs,
     seeded: SeededFixture,
 ) -> None:
     """Any requester resolves plato (both terms returned) and is delivered bytes.
 
-    The Exchange returns both of plato's terms on one offer; the agent
-    self-selects among them and is delivered bytes. The per-term pricing
-    guarantee (FREE term headline cost 0) is covered at the Exchange catalog
-    surface (catalog_pricing tests), not here — ADR-019 removed the
-    Broker's evaluated-candidate list from the agent-facing wire (it is
-    selection-audit detail in the SelectionLog), so this test asserts only the
-    protocol-meaningful licensed outcome.
+    The Exchange returns each of plato's terms as its own offer; the agent
+    self-selects among them and is delivered bytes. Which offer carries which
+    price is asserted by the test below, which picks the free one explicitly;
+    this one asserts the protocol-meaningful licensed outcome of taking the
+    ranked winner, which is what ADR-019 left on the agent-facing wire.
     """
     res = seeded.restricted  # plato
-    resp = _deliver_demo(compose_stack, res)
-    assert resp.status_code == httpx.codes.OK, resp.text
-    item = _delivered_item(resp)
-    assert licensed_of(item) is True, item
-    signed_url = retrieval_endpoint_of(item)
-    assert signed_url, item
+    signed_url = _deliver_demo(compose_stack, res).retrieval_endpoint
+    assert signed_url, f"the purchase minted no delivery URL for {res.uri}"
 
-    content = fetch_signed(signed_url, compose_stack, timeout=15.0, key_path=res.buyer_key_path)
-    assert content.text.strip(), content.text
+    content = fetch_signed(signed_url, compose_stack, key_path=res.buyer_key_path)
+    assert content.body.strip(), content.body[:256]
 
 
-def test_query_all_terms_returned_for_self_selection(
+def test_query_agent_picks_the_free_offer_and_pays_nothing(
     compose_stack: StackURLs,
     seeded: SeededFixture,
 ) -> None:
-    """A requester that once mapped to plato's commercial term is still licensed.
+    """The agent chooses plato's free term by price and is charged nothing.
 
-    Pre-ADR-014 a commercial/EU requester was steered onto plato's PER_UNIT 0.03
-    term. Now the Exchange returns BOTH terms and the agent self-selects, so the
-    assertion is no longer a differentiated price — it is that the requester is
-    licensed and receives a signed URL. The differentiated-cost guarantee was
-    removed with requester-attribute filtering; pricing-per-term is covered at
-    the Exchange surface (catalog_pricing tests).
+    plato is licensed two ways, so discovery answers with TWO offers for the one
+    URI, each selling one term. This is the whole point of the split: the agent
+    reads both alternatives, picks the FREE one by its pricing model rather than
+    by its position, executes that exact signed offer, and the Exchange charges
+    what that offer says — unit cost 0. Before the split both terms rode on one
+    offer priced from the first term, and the second term could never be bought
+    at its own price.
     """
     res = seeded.restricted  # plato
-    resp = _deliver_demo(compose_stack, res)
-    assert resp.status_code == httpx.codes.OK, resp.text
-    item = _delivered_item(resp)
-    assert licensed_of(item) is True, item
-    assert retrieval_endpoint_of(item), item
+    buyer = sdk_broker_client(
+        compose_stack, agent_id=res.buyer_agent_id, key_path=res.buyer_key_path
+    )
+    with closing(buyer) as client:
+        result = client.resolve(resolve_request([res.uri], intended_use="ai-input"))
+        group = one_group_per_uri(result, [res.uri], "broker resolve of plato")[res.uri]
+        assert not group.result.rejected, f"plato offers rejected: {group.result.rejected}"
+        offers = group.result.verified
+        assert len(offers) == 2, f"expected one offer per plato term, got {len(offers)}: {offers!r}"
+        for offer in offers:
+            assert len(offer.offer.get("terms") or []) == 1, (
+                f"an offer carries more than one term: {offer.offer!r}"
+            )
+
+        free = [
+            o for o in offers if (o.offer.get("pricing") or {}).get("model") == PRICING_MODEL_FREE
+        ]
+        assert len(free) == 1, f"expected exactly one FREE offer among {offers!r}"
+        item = only_item(client.execute(free), "broker purchase of plato's free offer")
+
+    assert item.denial_reason is None, item
+    signed_url = item.retrieval_endpoint
+    assert signed_url, item
+
+    # Money is a decimal string on the wire.
+    assert item.cost is not None, item
+    assert Decimal(str(item.cost.unit_cost)) == 0, item.cost
+    assert Decimal(str(item.cost.amount)) == 0, item.cost
+
+    content = fetch_signed(signed_url, compose_stack, key_path=res.buyer_key_path)
+    assert content.body.strip(), content.body[:256]
 
 
 def test_query_us_requester_now_licensed(
@@ -300,11 +144,7 @@ def test_query_us_requester_now_licensed(
     even sent on the wire; this asserts the behaviour the inversion produces.)
     """
     res = seeded.restricted  # plato
-    resp = _deliver_demo(compose_stack, res)
-    assert resp.status_code == httpx.codes.OK, resp.text
-    item = _delivered_item(resp)
-    assert licensed_of(item) is True, item
-    assert retrieval_endpoint_of(item), item
+    assert _deliver_demo(compose_stack, res).retrieval_endpoint, res.uri
 
 
 def test_query_tampered_signature_is_rejected(
@@ -313,15 +153,7 @@ def test_query_tampered_signature_is_rejected(
 ) -> None:
     """Mutating the signature on a term-derived signed URL flips edge verify to 403."""
     res = seeded.restricted  # plato
-    resp = _deliver_demo(compose_stack, res)
-    assert resp.status_code == httpx.codes.OK, resp.text
-    signed_url = retrieval_endpoint_of(_delivered_item(resp))
-    assert signed_url, resp.text
-    m = re.search(r"sig=([^&]+)", signed_url)
-    assert m, signed_url
-    val = m.group(1)
-    mid = len(val) // 2
-    replacement = "B" if val[mid] != "B" else "C"
-    tampered = signed_url.replace(f"sig={val}", f"sig={val[:mid] + replacement + val[mid + 1 :]}")
-    bad = httpx.get(tampered, follow_redirects=True, timeout=15.0)
-    assert bad.status_code == httpx.codes.FORBIDDEN, bad.text
+    signed_url = _deliver_demo(compose_stack, res).retrieval_endpoint
+    assert signed_url, res.uri
+    bad = fetch_without_proof(tamper_query_param(signed_url))
+    assert bad.status == HTTPStatus.FORBIDDEN, bad.text

@@ -24,11 +24,27 @@
 #   - the vendored in-tree copy of fora.proto, which no longer exists — the
 #     protocol is the pinned module github.com/FORA-Protocol/protocol. A bare
 #     `fora.proto` is NOT flagged: it is legitimate wherever the surrounding text
-#     names that module, which is how the ADRs cite it.
+#     names that module, which is how the ADRs cite it. Any path written with the
+#     module in front (github.com/FORA-Protocol/protocol/<path>: fora.proto, or a
+#     page of the protocol's own website docs) is accepted too, because it names
+#     the module a reader opens; the scan drops those paths and re-tests what is
+#     left of the line. An in-tree proto/fora/v1/fora.proto or docs/ path is still
+#     flagged, and so is a versioned form (protocol@v1.0.8/...), which no reader
+#     resolves without the pin.
+#   - any path the publish holds back (DENY_PATHS in scripts/published-paths.sh).
+#     A directory entry is matched by its last two path components (a top-level
+#     directory by its name), the shortest form a relative citation takes, and so
+#     by every longer form too; a file entry by its name alone; a Python module
+#     entry by its import name as well, because a dotted import names the file
+#     without its extension. Each pattern is bounded, so a sibling whose name only
+#     starts like an entry's is not matched. The held-back files themselves are
+#     not scanned: they do not ship.
 #
 # What it does NOT catch, and is reviewer-enforced instead: bare commit SHAs.
 # A pattern broad enough to find them also matches content hashes, key
-# thumbprints and conformance vectors, so gating on it would be noise.
+# thumbprints and conformance vectors, so gating on it would be noise. Nor a
+# held-back directory named by its last component alone: a bare directory name
+# is as often an ordinary word or a variable, so it is not a pattern.
 #
 # The search roots are DERIVED from scripts/published-paths.sh — the same file
 # the publish tool reads to decide what ships. They were once a hand-kept second
@@ -38,32 +54,19 @@
 # Deliberate exceptions take a `published-ref-allow: <reason>` comment on the
 # same line or the line immediately preceding.
 #
-# `--root <dir>` scans a tree other than this checkout; the guard's own tests use
-# it to drive synthetic trees. It is an ARGUMENT and not an environment variable
-# on purpose: the publish tool runs this gate over the tree it is about to push,
-# and an ambient variable could have redirected that run to a different tree
-# while it reported PASS.
+# `--root <dir>` scans a tree other than this checkout. The argument, and why it
+# is an argument, are described once in scripts/gate-args.sh. What is specific
+# here: the publish tool runs this gate over the tree it is about to push.
 #
 # Exits 0 when clean, 1 otherwise.
 
 set -euo pipefail
 
-die() { printf 'FAIL  %s\n' "$*" >&2; exit 1; }
-
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root=""
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --root)
-      [ $# -ge 2 ] || die "--root requires a directory"
-      repo_root="$(cd "$2" && pwd)" || die "--root: no such directory: $2"
-      shift 2
-      ;;
-    *) die "unknown argument: $1" ;;
-  esac
-done
-[ -n "${repo_root}" ] || repo_root="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=scripts/gate-args.sh
+source "${script_dir}/gate-args.sh"
+parse_gate_args "$@"
 
 # shellcheck source=scripts/published-paths.sh
 source "${script_dir}/published-paths.sh"
@@ -102,6 +105,11 @@ unpublished_docs_alt="$(printf '%s|' "${UNPUBLISHED_DOC_DIRS[@]}")"
 # reader to something that is deliberately absent from their tree — the same
 # failure as a docs/ path that does not travel, one file class further out.
 local_only_alt="$(printf '%s\n' "${LOCAL_ONLY_FILES[@]}" | sed 's/\./\\./g' | paste -sd'|' -)"
+# The in-tree path of the retired protocol file; the pattern below escapes it.
+IN_TREE_PROTO="proto/fora/v1/fora.proto"
+# A path inside the pinned protocol module: the module, a slash (never "@" and a
+# version), then everything up to the next space, quote, bracket or delimiter.
+MODULE_PATH_RE='github\.com/FORA-Protocol/protocol/[^[:space:]"'"'"'`()<>,;]+'
 PATTERNS=(
   "docs/(${unpublished_docs_alt%|})/"
   "\\b(${local_only_alt})\\b"
@@ -113,7 +121,7 @@ PATTERNS=(
   'MR !'
   '\bpiarch\b'
   '/(Users|home)/[a-z]'
-  'proto/fora/v1/fora\.proto'
+  "${IN_TREE_PROTO//./\\.}"
 )
 
 # Bare basenames of every unpublished doc, derived from the tree so the list
@@ -147,6 +155,34 @@ if [ -n "${bare_docs}" ]; then
   PATTERNS+=("\\b(${bare_docs})\\.md\\b")
 fi
 
+# Held-back paths. The bounds are written out rather than \b, because \b counts
+# "-" as a boundary, and a sibling directory named <entry>-old would then match. A
+# "." is a boundary only when no name character follows it, so a citation at the
+# end of a sentence matches and <entry>.orig, a different file, does not.
+ere_escape() { printf '%s' "$1" | sed 's/[].[\*^$+?(){}|]/\\&/g'; }
+held_left='(^|[^A-Za-z0-9_-])'
+held_right='([^A-Za-z0-9_.-]|\.([^A-Za-z0-9_-]|$)|$)'
+for denied in ${DENY_PATHS[@]+"${DENY_PATHS[@]}"}; do
+  case "${denied}" in
+    */)
+      trimmed="${denied%/}"
+      key="${trimmed##*/}"
+      parent="${trimmed%/*}"
+      [ "${parent}" = "${trimmed}" ] || key="${parent##*/}/${key}"
+      PATTERNS+=("${held_left}$(ere_escape "${key}")${held_right}")
+      ;;
+    *)
+      base="${denied##*/}"
+      PATTERNS+=("${held_left}$(ere_escape "${base}")${held_right}")
+      stem="${base%.py}"
+      # Only an identifier can be imported, so only then is the stem a citation.
+      if [ "${stem}" != "${base}" ] && printf '%s' "${stem}" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
+        PATTERNS+=("${held_left}$(ere_escape "${stem}")${held_right}")
+      fi
+      ;;
+  esac
+done
+
 combined="$(printf '%s|' "${PATTERNS[@]}")"
 combined="${combined%|}"
 
@@ -171,15 +207,34 @@ done
 #
 # -I skips binary files: they cannot carry a citation, and without it the local
 # lint/type caches report "binary file matches" on every run. The excluded dirs
-# are all gitignored build output, so none of them is ever published.
+# are all gitignored build output, so none of them is ever published. A Python
+# package's *.egg-info is the same class: uv writes one into tests/e2e on every
+# sync, and its SOURCES.txt lists every harness module by path, held-back ones
+# included.
 set +e
 hits="$(grep -rnEI "${combined}" "${SEARCH_ROOTS[@]}" \
     --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist \
     --exclude-dir=__pycache__ --exclude-dir=.venv --exclude-dir=.wrangler \
-    --exclude-dir=.ruff_cache --exclude-dir=.mypy_cache --exclude-dir=.pytest_cache)"
+    --exclude-dir=.ruff_cache --exclude-dir=.mypy_cache --exclude-dir=.pytest_cache \
+    --exclude-dir='*.egg-info')"
 grep_status=$?
 set -e
 [ "${grep_status}" -le 1 ] || die "the reference scan itself failed (grep exit ${grep_status}) — no conclusion can be drawn"
+
+# A held-back file does not ship, so nothing it says can dangle for a public
+# reader, and its citations of the other held-back paths are the norm rather than
+# a leak. Its hits are dropped here, in one pass: a directory entry by prefix, a
+# file entry only as the whole path in front of grep's ":<line>:".
+held_files=""
+for denied in ${DENY_PATHS[@]+"${DENY_PATHS[@]}"}; do
+  case "${denied}" in
+    */) held_files+="|$(ere_escape "${denied}")" ;;
+    *)  held_files+="|$(ere_escape "${denied}"):" ;;
+  esac
+done
+if [ -n "${held_files}" ] && [ -n "${hits}" ]; then
+  hits="$(printf '%s\n' "${hits}" | { grep -vE "^(${held_files#|})" || true; })"
+fi
 
 violations=""
 while IFS= read -r hit; do
@@ -200,6 +255,16 @@ while IFS= read -r hit; do
   case "${same}${prev}" in
     *published-ref-allow:*) continue ;;
   esac
+
+  # A path with the protocol module in front names something a public reader can
+  # open. Drop every such path from the line's content (never the file:lineno:
+  # prefix, which could itself match a pattern) and re-test the rest: the hit
+  # stands only if something else on the line still matches.
+  content="${rest#*:}"
+  remainder="$(printf '%s\n' "${content}" | sed -E "s#${MODULE_PATH_RE}##g")"
+  if ! printf '%s\n' "${remainder}" | grep -qE "${combined}"; then
+    continue
+  fi
 
   violations+="${hit}"$'\n'
 done <<< "${hits}"

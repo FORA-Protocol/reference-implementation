@@ -8,11 +8,14 @@ import (
 	"testing"
 
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+	"github.com/FORA-Protocol/protocol/sdk/go/resolvers"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	rwtestutil "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/testutil"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/account"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/agentsign"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/exchreg"
 )
 
@@ -25,13 +28,34 @@ func newReader(t *testing.T) *exchreg.Reader {
 	return r
 }
 
+// capturing returns a context carrying a request-scoped logger and the capture
+// reading it back.
+//
+// The unusable-schema warning is written by the reader, because the reader is
+// the last layer that sees the verdict: the SDK verb this reader serves takes
+// the schema and the digest off the answer and discards the verdict. So the log
+// line IS the observable for "a published schema was refused", and a test that
+// wants to assert that state asserts the line.
+func capturing(ctx context.Context) (context.Context, *testutil.LogCapture) {
+	capture, logger := testutil.NewLogCapture()
+	// Stamped the way the bearer gate stamps it, because the reader takes the
+	// agent off the context rather than as an argument -- the seam it implements
+	// fixes the signature, so there is nowhere to pass one.
+	ctx = agentsign.WithSubdomain(ctx, capturedAgent)
+	return reqctx.IntoContext(ctx, logger), capture
+}
+
+// capturedAgent is the authenticated agent capturing() stands in for.
+const capturedAgent = "agent-under-test"
+
 // exchangeServing starts an origin publishing an Exchange manifest with reg.
 func exchangeServing(t *testing.T, reg rwtestutil.Registration) *rwtestutil.Origin {
 	t.Helper()
 	origin := rwtestutil.NewOrigin(nil)
 	t.Cleanup(origin.Close)
 	origin.SetManifest(rwtestutil.ExchangeManifestWithRegistration(
-		"exchange.example", origin.URL, reg))
+		"exchange.example", origin.URL, reg,
+	))
 	return origin
 }
 
@@ -42,7 +66,7 @@ func TestRequirements_ReadsThePublishedSchemaAndTerms(t *testing.T) {
 	t.Parallel()
 	origin := exchangeServing(t, testutil.FullRegistration)
 
-	reqs, err := newReader(t).Requirements(context.Background(), origin.Host())
+	reqs, err := newReader(t).ResolveRegistrationRequirements(context.Background(), origin.Host())
 	if err != nil {
 		t.Fatalf("Requirements: %v", err)
 	}
@@ -82,15 +106,23 @@ func TestRequirements_NoSchemaIsTheNormalPassThroughState(t *testing.T) {
 	t.Parallel()
 	origin := exchangeServing(t, rwtestutil.Registration{})
 
-	reqs, err := newReader(t).Requirements(context.Background(), origin.Host())
+	ctx, logs := capturing(context.Background())
+
+	reqs, err := newReader(t).ResolveRegistrationRequirements(ctx, origin.Host())
 	if err != nil {
-		t.Fatalf("Requirements: %v", err)
+		t.Fatalf("ResolveRegistrationRequirements: %v", err)
 	}
 	if reqs.Verdict != helpers.SchemaNotPublished {
 		t.Fatalf("verdict = %s, want not_published", reqs.Verdict)
 	}
-	if reqs.Schema != nil || reqs.SchemaRefused() {
-		t.Fatalf("schema=%v refused=%t, want neither", reqs.Schema, reqs.SchemaRefused())
+	if reqs.Schema != nil {
+		t.Fatalf("schema = %v, want none", reqs.Schema)
+	}
+	// Publishing no schema is the ordinary case, not a refusal, so the operator
+	// hears nothing. A line here would page someone for every Exchange that
+	// simply asks for no particular shape.
+	if lines := logs.Find("identity.mcp.register.schema_unusable"); len(lines) != 0 {
+		t.Errorf("an unpublished schema logged %d refusal lines: %v", len(lines), lines)
 	}
 	if reqs.TermsDigest != nil {
 		t.Fatalf("terms digest = %v, want absent", *reqs.TermsDigest)
@@ -118,9 +150,11 @@ func TestRequirements_AnUnusableSchemaIsNotALocalVeto(t *testing.T) {
 			t.Parallel()
 			origin := exchangeServing(t, rwtestutil.Registration{DataSchemaJSON: tc.Raw})
 
-			reqs, err := newReader(t).Requirements(context.Background(), origin.Host())
+			ctx, logs := capturing(context.Background())
+
+			reqs, err := newReader(t).ResolveRegistrationRequirements(ctx, origin.Host())
 			if err != nil {
-				t.Fatalf("Requirements: %v", err)
+				t.Fatalf("ResolveRegistrationRequirements: %v", err)
 			}
 			if reqs.Verdict.String() != tc.Verdict {
 				t.Fatalf("verdict = %s, want %s", reqs.Verdict, tc.Verdict)
@@ -128,8 +162,25 @@ func TestRequirements_AnUnusableSchemaIsNotALocalVeto(t *testing.T) {
 			if reqs.Schema != nil {
 				t.Fatal("a refused schema left a usable validator")
 			}
-			if !reqs.SchemaRefused() {
-				t.Fatal("a refused schema does not report as refused, so nothing would log it")
+			// The operator is told the pre-check was skipped, once, with the
+			// verdict that explains why. The agent is told nothing, so this line
+			// is the only record that it happened.
+			lines := logs.Find("identity.mcp.register.schema_unusable")
+			if len(lines) != 1 {
+				t.Fatalf("got %d schema_unusable lines, want 1: %v", len(lines), lines)
+			}
+			if !strings.Contains(lines[0], tc.Verdict) {
+				t.Errorf("log line %s does not carry the verdict that named the refusal", lines[0])
+			}
+			if !strings.Contains(lines[0], origin.Host()) {
+				t.Errorf("log line %s does not name the exchange it is about", lines[0])
+			}
+			// The agent, not only the exchange. An operator asking which agents
+			// registered with no local pre-check reads this line; without the
+			// subdomain they have to take the request id and search the stream a
+			// second time, and every sibling identity.mcp.* line spares them that.
+			if !strings.Contains(lines[0], capturedAgent) {
+				t.Errorf("log line %s does not name the agent that registered", lines[0])
 			}
 			if failures := reqs.Schema.Validate(map[string]any{"x": 1}); len(failures) != 0 {
 				t.Fatalf("a refused schema vetoed a payload locally (%d failures)", len(failures))
@@ -149,7 +200,7 @@ func TestRequirements_ReadsTheOriginEveryTime(t *testing.T) {
 	reader := newReader(t)
 	ctx := context.Background()
 
-	if _, err := reader.Requirements(ctx, origin.Host()); err != nil {
+	if _, err := reader.ResolveRegistrationRequirements(ctx, origin.Host()); err != nil {
 		t.Fatalf("first Requirements: %v", err)
 	}
 	if got := origin.Hits(); got != 1 {
@@ -169,7 +220,7 @@ func TestRequirements_ReadsTheOriginEveryTime(t *testing.T) {
 			TermsDigest:    revised,
 		}))
 
-	reqs, err := reader.Requirements(ctx, origin.Host())
+	reqs, err := reader.ResolveRegistrationRequirements(ctx, origin.Host())
 	if err != nil {
 		t.Fatalf("second Requirements: %v", err)
 	}
@@ -191,11 +242,11 @@ func TestRequirements_CompilesOneDocumentOnce(t *testing.T) {
 	reader := newReader(t)
 	ctx := context.Background()
 
-	first, err := reader.Requirements(ctx, origin.Host())
+	first, err := reader.ResolveRegistrationRequirements(ctx, origin.Host())
 	if err != nil {
 		t.Fatalf("first Requirements: %v", err)
 	}
-	second, err := reader.Requirements(ctx, origin.Host())
+	second, err := reader.ResolveRegistrationRequirements(ctx, origin.Host())
 	if err != nil {
 		t.Fatalf("second Requirements: %v", err)
 	}
@@ -215,10 +266,11 @@ func TestRequirements_CompilesOneDocumentOnce(t *testing.T) {
 func TestRequirements_RefusesADocumentThatIsNotAnExchange(t *testing.T) {
 	t.Parallel()
 	origin := rwtestutil.NewOrigin(rwtestutil.MarshalManifest(
-		rwtestutil.Manifest(forawellknown.RolePublisher, "publisher.example")))
+		rwtestutil.Manifest(forawellknown.RolePublisher, "publisher.example"),
+	))
 	defer origin.Close()
 
-	_, err := newReader(t).Requirements(context.Background(), origin.Host())
+	_, err := newReader(t).ResolveRegistrationRequirements(context.Background(), origin.Host())
 	if !errors.Is(err, forawellknown.ErrRoleMismatch) {
 		t.Fatalf("want ErrRoleMismatch, got %v", err)
 	}
@@ -226,15 +278,24 @@ func TestRequirements_RefusesADocumentThatIsNotAnExchange(t *testing.T) {
 
 // TestRequirements_RefusesAManifestVersionItCannotRead drives a real origin
 // serving a well-formed Exchange manifest at a major this build does not accept,
-// and pins that the reader reports it as the port's own verdict.
+// and pins that the reader reports it as a verdict in BOTH vocabularies the
+// refusal has to carry.
 //
-// The sentinel is what the whole identity leg hangs from: exchacct maps
+// The port's own sentinel is what the whole identity leg hangs from: exchacct maps
 // account.ErrManifestVersionRefused to KindManifestVersionRefused, and the MCP
 // tool renders that kind as "nothing was sent, retrying will not change its
 // answer". Nothing else in production produces it, so without this test the
 // translation could be deleted and every identity test would still pass while an
 // agent was told the Exchange did not answer — the wording that invites the retry
 // this verdict exists to rule out.
+//
+// The SDK's sentinel is the second half of the pairing. The verb this reader
+// serves classifies on the SDK's own verdict sentinels and reads a refusal
+// carrying none as a transport failure worth retrying, so without this one the
+// verb fetches the same refused document again and again. Both sentinels sit on
+// one chain beside the failed-read sentinel every refusal from this reader
+// carries, and exchacct reads the version arm first, so an operator gets the
+// more specific fact rather than the general one.
 //
 // The document is refused for the version and for nothing else: the fixture
 // builds it through the one Exchange assembler and overwrites only Ver, so a
@@ -250,12 +311,17 @@ func TestRequirements_RefusesAManifestVersionItCannotRead(t *testing.T) {
 			origin := rwtestutil.NewOrigin(nil)
 			defer origin.Close()
 			origin.SetManifest(rwtestutil.ExchangeManifestAtVersion(
-				origin.Host(), origin.URL, ver))
+				origin.Host(), origin.URL, ver,
+			))
 
-			_, err := newReader(t).Requirements(context.Background(), origin.Host())
+			_, err := newReader(t).ResolveRegistrationRequirements(context.Background(), origin.Host())
 			if !errors.Is(err, account.ErrManifestVersionRefused) {
 				t.Fatalf("want account.ErrManifestVersionRefused, got %v — this is the "+
 					"sentinel exchacct classifies and the tool renders as a verdict", err)
+			}
+			if !errors.Is(err, resolvers.ErrManifestVersionRefused) {
+				t.Errorf("err = %v, want it to wrap resolvers.ErrManifestVersionRefused so the "+
+					"SDK refuses finally instead of retrying a document that will not change", err)
 			}
 			// The reader's own cause stays reachable underneath, so an operator
 			// line can still name which version was served.
@@ -277,7 +343,7 @@ func TestRequirements_AnAbsentManifestIsReported(t *testing.T) {
 	defer origin.Close()
 	origin.SetManifestStatus(404)
 
-	_, err := newReader(t).Requirements(context.Background(), origin.Host())
+	_, err := newReader(t).ResolveRegistrationRequirements(context.Background(), origin.Host())
 	if !errors.Is(err, forawellknown.ErrNoDocument) {
 		t.Fatalf("want ErrNoDocument, got %v", err)
 	}
@@ -365,7 +431,7 @@ func TestRequirements_RefusesADomainThePolicyExcludes(t *testing.T) {
 		t.Fatalf("exchreg.New: %v", err)
 	}
 
-	if _, err = reader.Requirements(context.Background(), origin.Host()); err == nil {
+	if _, err = reader.ResolveRegistrationRequirements(context.Background(), origin.Host()); err == nil {
 		t.Fatal("an excluded domain's requirements were read")
 	}
 	if !errors.Is(err, account.ErrNotPermitted) {
@@ -402,7 +468,7 @@ func TestRequirements_RefusesAValueThatIsNotABareDomain(t *testing.T) {
 	for _, tc := range testutil.NonBareDomains {
 		t.Run(tc.Name, func(t *testing.T) {
 			before := origin.Hits()
-			_, err := reader.Requirements(context.Background(), tc.Of(origin.Host()))
+			_, err := reader.ResolveRegistrationRequirements(context.Background(), tc.Of(origin.Host()))
 			if err == nil {
 				t.Fatalf("%q was read as an Exchange domain", tc.Of(origin.Host()))
 			}
@@ -425,7 +491,7 @@ func TestRequirements_ANilPolicyPermitsEveryDomain(t *testing.T) {
 	t.Parallel()
 	origin := exchangeServing(t, testutil.FullRegistration)
 
-	if _, err := newReader(t).Requirements(context.Background(), origin.Host()); err != nil {
+	if _, err := newReader(t).ResolveRegistrationRequirements(context.Background(), origin.Host()); err != nil {
 		t.Fatalf("an unset policy refused %s: %v", origin.Host(), err)
 	}
 }

@@ -1,22 +1,15 @@
 package testutil
 
 import (
-	"crypto/ed25519"
-	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"regexp"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
-
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/httpsig"
 )
 
 // EdgeDouble is a publisher edge that ENFORCES delivery-URL binding (ADR-013
@@ -30,17 +23,20 @@ import (
 // which is the one failure a fetcher test has to catch — at the real edge it
 // surfaces as an undifferentiated 403.
 //
-// The verify side is written out here rather than calling the signer's own
-// helpers beyond the shared signature base. Two implementations that agree only
-// because they share code prove nothing about interoperability, and the party
-// this must interoperate with is the SDK's TypeScript verifier.
+// The verify side is written out here (edgedouble_proof.go) rather than calling
+// the SDK's own verifier. Two implementations that agree only because they share
+// code prove nothing about interoperability, and the party this must
+// interoperate with is the SDK's TypeScript verifier, which the edge runs.
 //
-// That verifier — sdk/ts/src/pop.ts in github.com/FORA-Protocol/protocol — is the
-// behaviour this double tracks, and nothing pins the two together the way the
-// shared vectors pin the signer. Where they knowingly differ, the difference is
-// commented at the site. Independence is the point, so the ORDER of the checks is
-// deliberately not copied; only the accept/reject boundaries have to agree,
-// because those are what a test asserts on.
+// That verifier — sdk/ts/src/pop.ts in github.com/FORA-Protocol/protocol, with
+// Go's helpers.VerifyAgentBinding as its parity twin — is the behaviour this
+// double tracks. The SDK's shared proof corpus (testdata/pop-sign-vectors.json)
+// pins the two together: edgedouble_test.go replays every vector through the
+// double, which must accept exactly the ones the corpus marks valid. Where they
+// knowingly differ, the difference is commented at the site. Independence is the
+// point, so the ORDER of the checks is deliberately not copied; only the
+// accept/reject boundaries have to agree, because those are what a test asserts
+// on.
 //
 // Nothing is bound at construction: like the real edge, the double reads the
 // expected identity out of the URL's own agent_id parameter, so one double
@@ -79,13 +75,6 @@ type settings struct {
 	refusalBody   string
 	handler       http.HandlerFunc
 }
-
-// popParams re-parses the parameters the agent-binding profile emits. The
-// covered set is fixed at exactly @method and @target-uri, so an anchored
-// pattern is also the covered-component check.
-var popParams = regexp.MustCompile(
-	`^sig1=\("@method" "@target-uri"\);keyid="([^"]+)";alg="([^"]+)";created=(\d+);expires=(\d+)$`,
-)
 
 // NewEdgeDouble starts an enforcing edge and registers its shutdown.
 func NewEdgeDouble(tb testing.TB, now int64) *EdgeDouble {
@@ -230,102 +219,12 @@ func (e *EdgeDouble) serve(w http.ResponseWriter, r *http.Request) {
 // tokens match the production vocabulary so a test can assert on the exact
 // string an agent would see.
 func (e *EdgeDouble) verify(r *http.Request) string {
-	pub, reason := presentedKey(r)
-	if reason != "" {
-		return reason
-	}
-	sigInput := r.Header.Get("Signature-Input")
-	m := popParams.FindStringSubmatch(sigInput)
-	if m == nil {
-		return "bad_covered_components"
-	}
-	if m[2] != "ed25519" {
-		return "unsupported_alg"
-	}
-	if reason = e.freshness(m[3], m[4]); reason != "" {
-		return reason
-	}
-	if reason = identityAgrees(r, m[1], pub); reason != "" {
-		return reason
-	}
-	sig, reason := presentedSignature(r)
-	if reason != "" {
-		return reason
-	}
-	// The base is rebuilt from the request AS RECEIVED — the raw request line,
-	// never a re-parsed URL — which is what makes this a real interop check.
-	base := httpsig.PoPSignatureBase(r.Method, "http://"+r.Host+r.RequestURI, strings.TrimPrefix(sigInput, "sig1="))
-	if !ed25519.Verify(pub, []byte(base), sig) {
-		return "pop_sig_invalid"
-	}
-	return ""
-}
-
-// presentedKey decodes the key the fetcher offered.
-func presentedKey(r *http.Request) (ed25519.PublicKey, string) {
-	raw := r.Header.Get(helpers.AgentKeyHeader)
-	if raw == "" {
-		return nil, "missing_agent_key"
-	}
-	pub, err := base64.RawURLEncoding.DecodeString(raw)
-	if err != nil || len(pub) != ed25519.PublicKeySize {
-		return nil, "bad_agent_key"
-	}
-	return pub, ""
-}
-
-// presentedSignature decodes the RFC 8941 byte string, which is STANDARD base64
-// even though the presented key beside it is base64url.
-func presentedSignature(r *http.Request) ([]byte, string) {
-	raw, ok := strings.CutPrefix(r.Header.Get("Signature"), "sig1=:")
-	if !ok || !strings.HasSuffix(raw, ":") {
-		return nil, "missing_sig"
-	}
-	sig, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(raw, ":"))
-	if err != nil {
-		return nil, "missing_sig"
-	}
-	return sig, ""
-}
-
-// identityAgrees enforces the three-way identity: the agent_id the Exchange
-// signed into the URL, the keyid on the signature, and the thumbprint of the key
-// actually presented must all be one value. Verifying the signature without this
-// would let any actor present their own key plus a valid self-signature.
-func identityAgrees(r *http.Request, keyid string, pub ed25519.PublicKey) string {
-	agentID := r.URL.Query().Get("agent_id")
-	if keyid != agentID {
-		return "keyid_mismatch"
-	}
-	thumbprint, err := helpers.Thumbprint(pub)
-	if err != nil || thumbprint != agentID {
-		return "thumbprint_mismatch"
-	}
-	return ""
-}
-
-// freshness applies the window the production edge applies: created may lead the
-// verifier by at most 300s, and expires may not already have passed.
-//
-// The expiry comparison is INCLUSIVE — a proof whose expires lands exactly on the
-// verifier's current second is stale, matching the SDK verifier's `now >= expires`
-// (sdk/ts/src/pop.ts). Refusing only strictly-past proofs would make this double
-// lenient where production refuses, which is the direction that lets a bad signing
-// window pass every Go test and 403 at the real edge.
-func (e *EdgeDouble) freshness(createdRaw, expiresRaw string) string {
-	created, err := strconv.ParseInt(createdRaw, 10, 64)
-	if err != nil {
-		return "pop_missing_created"
-	}
-	expires, err := strconv.ParseInt(expiresRaw, 10, 64)
-	if err != nil {
-		return "pop_missing_exp"
-	}
-	if created > e.now+300 {
-		return "pop_future_created"
-	}
-	if expires <= e.now {
-		return "pop_expired"
-	}
-	return ""
+	// The target URI is rebuilt from the request AS RECEIVED — the raw request
+	// line, never a re-parsed URL — which is what makes this a real interop check.
+	return verifyProof(e.now, proof{
+		method:    r.Method,
+		targetURI: "http://" + r.Host + r.RequestURI,
+		agentID:   r.URL.Query().Get("agent_id"),
+		header:    r.Header,
+	})
 }

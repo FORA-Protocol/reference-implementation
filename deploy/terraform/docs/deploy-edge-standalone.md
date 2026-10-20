@@ -98,68 +98,65 @@ whoever manages the zone's security settings before go-live.
   the worker re-deploys only when the bundle content changed.
 - **Config change** (manifest values, routes): edit tfvars, `terraform apply`.
 
-## Deploying on top of the staging stack (client simulation)
+## Deploying on top of the staging stack (publisher hand-off rehearsal)
 
 This is how WE rehearse the publisher hand-off: the staging stack
-(`stacks/staging-aws`) plays the Exchange operator running the FORA backend, and this stack
-plays the client deploying only the edge worker for their own hostname.
+(`stacks/staging-aws`) plays the Exchange operator running the FORA backend, and
+this stack plays a publisher deploying only the edge worker for their own
+hostname.
 
-1. **Staging side** — deploy (or re-apply) staging with its own worker turned
-   off AND the tenant domain pointed at the client hostname, in
-   `stacks/staging-aws/terraform.tfvars`:
+1. **Backend side** — deploy (or re-apply) staging with its own worker turned
+   off, in `stacks/staging-aws/terraform.tfvars`:
 
    ```hcl
-   deploy_edge           = false
-   default_tenant_domain = "client-news.staging-zone.example"
+   deploy_edge = false
    ```
 
    The backend and the demo origin still run in full; only staging's worker,
    its route, and the `demo.<domain>` placeholder record are skipped (on a
    re-apply: destroyed — that hostname stops serving).
 
-   `default_tenant_domain` is required in this mode: it is the domain the
-   Exchange resolves its default tenant under (agent Register reads its
-   activation policy there), and seed-staging.sh creates the tenant under the
-   same value by reading it back from the stack's output. Without it the
-   Exchange keeps looking under `demo.<domain>` while the tenant exists under
-   the client hostname, and every agent Register fails.
+   Nothing else changes here. A tenant row is the Exchange seat, keyed on the
+   Exchange's own hostname, so the seat is the same whichever publisher it
+   sells. The publisher is a separate record, registered in step 3.
 
-2. **Client side** — fill this stack's `terraform.tfvars` with a hostname of
-   your choice on the zone (the "client" hostname) and the staging backend
-   as the Exchange operator. With `client-news` on a staging domain `staging-zone.example`:
+2. **Publisher side** — fill this stack's `terraform.tfvars` with a hostname of
+   your choice on the zone and the staging backend as the Exchange operator.
+   With `news` on a staging domain `staging-zone.example`:
 
    ```hcl
-   worker_hostname = "client-news.staging-zone.example"
-   provider_domain = "client-news.staging-zone.example"
+   worker_hostname = "news.staging-zone.example"
+   provider_domain = "news.staging-zone.example"
    exchange_url    = "https://exchange.staging-zone.example"
-   exchanges_json  = "[{\"domain\":\"exchange.staging-zone.example\",\"endpoint\":\"https://exchange.staging-zone.example\",\"supported_profiles\":[\"fora-news-v1\"],\"ext\":{\"resource_owner_id\":\"staging-resource-owner\"}}]"
+   exchanges_json  = "[{\"domain\":\"exchange.staging-zone.example\",\"endpoint\":\"https://exchange.staging-zone.example\",\"supported_profiles\":[\"fora-news-v1\",\"fora-comp-v1\",\"fora-music-v1\"],\"ext\":{\"resource_owner_id\":\"staging-resource-owner\"}}]"
    origin_url      = "https://origin.staging-zone.example"
    ```
 
    (`route_patterns` and `exchange_wba_url` derive automatically;
-   `resource_owner_id` must match staging's `resource_owner_id` tfvar.)
+   `resource_owner_id` must match staging's `resource_owner_id` tfvar — the
+   Exchange refuses a push whose attested payee is not the registered one.)
    Then `terraform apply` as usual.
 
-3. **Onboard the client publisher** in the staging Exchange — the same step
-   an Exchange operator performs for a real client. The seed script reads the
-   publisher hostname from the stack's `default_tenant_domain` output (set in
-   step 1), so only the tenant id needs passing:
+3. **Onboard the publisher** in the staging Exchange — the same step an
+   Exchange operator performs for a real one. It registers the site and lists it
+   on the existing seat, so pass the hostname and, if it differs from staging's
+   own, the payee id:
 
    ```bash
-   TENANT_ID=tenant-client \
+   PUBLISHER_DOMAIN=news.staging-zone.example \
    deploy/terraform/scripts/seed-staging.sh
    ```
 
 4. **Verify** — fund the smoke agent if not yet done
    (`deploy/terraform/scripts/fund-staging-agent.sh`), then run the full
-   proof against the client hostname:
+   proof against the publisher hostname:
 
    ```bash
-   PUBLISHER_DOMAIN=client-news.staging-zone.example \
+   PUBLISHER_DOMAIN=news.staging-zone.example \
    deploy/terraform/scripts/smoke.sh
    ```
 
-Notes: pick a client hostname that is NOT `demo.<domain>` (staging owns that
-name whenever its own worker is on, and two stacks must never manage the same
+Notes: pick a hostname that is NOT `demo.<domain>` (staging owns that name
+whenever its own worker is on, and two stacks must never manage the same
 hostname). Leave `create_waf_skip_rule = false` here if the staging stack
 already manages the zone's custom-firewall ruleset — a zone can hold only one.

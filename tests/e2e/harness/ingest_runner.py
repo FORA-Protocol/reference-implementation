@@ -74,6 +74,3 @@ def ingest_succeeded(proc: subprocess.CompletedProcess[str]) -> bool:
     the only result that means the whole feed landed.
     """
     return proc.returncode == 0
-
-
-__all__ = ["ingest_succeeded", "run_ingest"]

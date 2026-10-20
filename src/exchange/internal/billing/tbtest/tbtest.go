@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"math/big"
 	"testing"
+	"time"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing"
@@ -33,6 +34,33 @@ import (
 type Ledger struct {
 	Client *tigerbeetle.Client
 	ID     uint32 // TigerBeetle ledger id (ISO 4217 numeric)
+}
+
+// Currency is the ISO 4217 alpha code of this ledger, read from the shared
+// currency table the production derivation uses. The account id is keyed by the
+// alpha code, so a fixture on ledger 840 derives USD accounts and a fixture on
+// ledger 978 derives EUR accounts without either caller restating the mapping.
+// An unsupported ledger id fails the test rather than deriving a nameless
+// account.
+func (l Ledger) Currency(tb testing.TB) string {
+	tb.Helper()
+	currency, err := l.currency()
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return currency
+}
+
+// currency is the error-returning form of Currency, for the funding helpers,
+// which return errors rather than failing a *testing.T so the conformance
+// adapter factory (a closure with no *testing.T in scope) can call them.
+func (l Ledger) currency() (string, error) {
+	currency, ok := tigerbeetle.CurrencyForLedger(l.ID)
+	if !ok {
+		return "", fmt.Errorf("tbtest: ledger %d is not a supported currency (%s)",
+			l.ID, tigerbeetle.SupportedLedgers())
+	}
+	return currency, nil
 }
 
 // creditLegs are the resolved endpoints, transfer-id keys, and amount of a single
@@ -58,6 +86,10 @@ func (l Ledger) FundAgent(ctx context.Context, salt, agentID string, amount *big
 	if err != nil {
 		return err
 	}
+	currency, cErr := l.currency()
+	if cErr != nil {
+		return cErr
+	}
 	liq, agent, err := l.fundEndpoints(ctx, salt, agentID)
 	if err != nil {
 		return err
@@ -65,9 +97,14 @@ func (l Ledger) FundAgent(ctx context.Context, salt, agentID string, amount *big
 	if m.Sign() == 0 {
 		return nil
 	}
+	// The currency is part of both transfer keys because a TigerBeetle transfer
+	// id is unique per cluster, not per ledger: funding one agent on two ledgers
+	// under keys that differ only by salt would derive one shared id, and the
+	// second ledger's funding would be rejected as a conflicting duplicate.
 	return l.postCredit(ctx, creditLegs{
-		fundKey: salt + "fund:" + agentID, postKey: salt + "fundpost:" + agentID,
-		debit: liq, credit: agent, minor: m,
+		fundKey: salt + "fund:" + currency + ":" + agentID,
+		postKey: salt + "fundpost:" + currency + ":" + agentID,
+		debit:   liq, credit: agent, minor: m,
 	})
 }
 
@@ -75,7 +112,8 @@ func (l Ledger) FundAgent(ctx context.Context, salt, agentID string, amount *big
 // destination every funding helper posts between — the account setup FundAgent
 // and FundAgentWelcome share.
 func (l Ledger) fundEndpoints(ctx context.Context, salt, agentID string) (liq, agent tigerbeetle.ID, err error) {
-	liq, err = l.ensureAccount(ctx, tigerbeetle.PrefixPlatform, salt+tigerbeetle.PlatformLiquidityID, tigerbeetle.CodePlatform)
+	liq, err = l.ensureAccount(ctx, tigerbeetle.PrefixPlatform,
+		salt+tigerbeetle.PlatformLiquidityID, tigerbeetle.CodePlatform)
 	if err != nil {
 		return liq, agent, err
 	}
@@ -85,8 +123,9 @@ func (l Ledger) fundEndpoints(ctx context.Context, salt, agentID string) (liq, a
 
 // FundAgentWelcome posts the single-phase liquidity→agent credit the operator
 // funding script issues under its reserved service-welcome label: one posted
-// transfer whose id is TransferID(salt + billing.WelcomeCreditKey(agentID))
-// — the SAME slot the Register flow's default-credit grant derives, so a
+// transfer whose id is TransferID(salt + WelcomeCreditKey(agentID, currency)),
+// with the currency taken from this ledger — the SAME slot the Register flow's
+// default-credit grant derives for that currency, so a
 // script prefund and the service grant can never both apply. Test stand-in for
 // fund-staging-agent.sh with the service-welcome label.
 func (l Ledger) FundAgentWelcome(ctx context.Context, salt, agentID string, amount *big.Rat) error {
@@ -94,11 +133,15 @@ func (l Ledger) FundAgentWelcome(ctx context.Context, salt, agentID string, amou
 	if err != nil {
 		return fmt.Errorf("tbtest: welcome fund minor units: %w", err)
 	}
+	currency, cErr := l.currency()
+	if cErr != nil {
+		return cErr
+	}
 	liq, agent, err := l.fundEndpoints(ctx, salt, agentID)
 	if err != nil {
 		return fmt.Errorf("tbtest: welcome fund: %w", err)
 	}
-	id, err := tigerbeetle.TransferID(salt + billing.WelcomeCreditKey(agentID))
+	id, err := tigerbeetle.TransferID(salt + billing.WelcomeCreditKey(agentID, currency))
 	if err != nil {
 		return fmt.Errorf("tbtest: welcome fund transfer id: %w", err)
 	}
@@ -140,7 +183,11 @@ func (l Ledger) MustFundAgent(tb testing.TB, salt, agentID, dollars string) {
 func (l Ledger) ensureAccount(
 	ctx context.Context, p tigerbeetle.Prefix, businessID string, code tigerbeetle.AccountCode,
 ) (tigerbeetle.ID, error) {
-	id, err := tigerbeetle.AccountID(p, businessID)
+	currency, err := l.currency()
+	if err != nil {
+		return tigerbeetle.ID{}, err
+	}
+	id, err := tigerbeetle.AccountID(p, currency, businessID)
 	if err != nil {
 		return id, fmt.Errorf("tbtest: %s account id: %w", p, err)
 	}
@@ -252,23 +299,25 @@ func (l Ledger) Minor(tb testing.TB, dollars string) int64 {
 // deliberately not read here.
 func (l Ledger) AssertOwnerPlatformSplit(tb testing.TB, salt, ownerID string, ownerMinor, platformMinor int64) {
 	tb.Helper()
-	owner := MustAccountID(tb, tigerbeetle.PrefixOwner, salt+tigerbeetle.OwnerRevenuePrefix+ownerID)
+	owner := MustAccountID(tb, tigerbeetle.PrefixOwner, l.Currency(tb), salt+tigerbeetle.OwnerRevenuePrefix+ownerID)
 	if got := l.PostedBalance(tb, owner); got != ownerMinor {
 		tb.Errorf("owner revenue = %d, want %d", got, ownerMinor)
 	}
-	platform := MustAccountID(tb, tigerbeetle.PrefixPlatform, salt+tigerbeetle.PlatformFeeID)
+	platform := MustAccountID(tb, tigerbeetle.PrefixPlatform, l.Currency(tb), salt+tigerbeetle.PlatformFeeID)
 	if got := l.PostedBalance(tb, platform); got != platformMinor {
 		tb.Errorf("platform fee = %d, want %d", got, platformMinor)
 	}
 }
 
-// MustAccountID derives the deterministic account id for (prefix, businessID) —
-// the caller prepends its salt to businessID — failing the test on error.
-func MustAccountID(tb testing.TB, p tigerbeetle.Prefix, businessID string) tigerbeetle.ID {
+// MustAccountID derives the deterministic account id for (prefix, currency,
+// businessID) — the caller prepends its salt to businessID — failing the test on
+// error. Pass the ledger's alpha code (Ledger.Currency) as currency: the same
+// business id on two ledgers derives two different accounts.
+func MustAccountID(tb testing.TB, p tigerbeetle.Prefix, currency, businessID string) tigerbeetle.ID {
 	tb.Helper()
-	id, err := tigerbeetle.AccountID(p, businessID)
+	id, err := tigerbeetle.AccountID(p, currency, businessID)
 	if err != nil {
-		tb.Fatalf("tbtest: AccountID(%s%s): %v", p, businessID, err)
+		tb.Fatalf("tbtest: AccountID(%s%s:%s): %v", p, currency, businessID, err)
 	}
 	return id
 }
@@ -293,4 +342,34 @@ func BootClient(address string) (*tigerbeetle.Client, func(), error) {
 		return nil, nil, err
 	}
 	return c, c.Close, nil
+}
+
+// Adapter is the TigerBeetle billing adapter every suite charges through: over
+// client, keeping a ledger in each of currencies, with every account id salted
+// with salt so sibling tests on the reset-less shared ledger never share an
+// account, and a hold that times out after a minute.
+func Adapter(tb testing.TB, client *tigerbeetle.Client, salt string, currencies ...string) *billing.TigerBeetleAdapter {
+	tb.Helper()
+	adapter, err := billing.NewTigerBeetleAdapter(billing.TigerBeetleOptions{
+		Client:      client,
+		Currencies:  currencies,
+		HoldTimeout: time.Minute,
+		IDNamespace: salt,
+	})
+	if err != nil {
+		tb.Fatalf("tbtest: TigerBeetle adapter for %v: %v", currencies, err)
+	}
+	return adapter
+}
+
+// LedgerFor is the Ledger of currency on client, its id read from the currency
+// table the production adapter uses. A currency no ledger is kept in fails the
+// test.
+func LedgerFor(tb testing.TB, client *tigerbeetle.Client, currency string) Ledger {
+	tb.Helper()
+	id, ok := tigerbeetle.LedgerForCurrency(currency)
+	if !ok {
+		tb.Fatalf("tbtest: no ledger for currency %q (%s)", currency, tigerbeetle.SupportedLedgers())
+	}
+	return Ledger{Client: client, ID: id}
 }

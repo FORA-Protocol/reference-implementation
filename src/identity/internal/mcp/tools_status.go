@@ -60,6 +60,19 @@ type accountEntry struct {
 	// call for "exchange", the last accepted registration or confirmed status for
 	// "local_hint". RFC 3339.
 	AsOf string `json:"as_of"`
+	// Balances is what the account can spend now, one entry per currency, as
+	// the Exchange reported it during this call. Empty means not reported,
+	// never zero: every hint, an Exchange that reports no balances, and an
+	// account that does not exist. Always a list, never null, for the same
+	// one-shape reason as billing_ref.
+	Balances []balanceEntry `json:"balances"`
+}
+
+// balanceEntry is one currency's available balance. The amount is the
+// Exchange's exact decimal string, passed through unchanged.
+type balanceEntry struct {
+	Amount   string `json:"amount"`
+	Currency string `json:"currency"`
 }
 
 // statusOutput is always a list, in both modes.
@@ -105,13 +118,17 @@ func (t *toolset) statusFromExchange(
 	if err != nil {
 		return nil, err
 	}
-	acct, err := t.accounts.Status(t.callCtx(ctx, who), who.subdomain, exchange)
+	acct, err := t.accounts.Status(ctx, who.subdomain, exchange)
 	if err != nil {
 		return nil, t.accountFailure(ctx, who, tool, err)
 	}
-	t.logger(ctx, who).InfoContext(ctx, "identity.mcp.status",
+	t.logger(ctx).InfoContext(ctx, "identity.mcp.status",
 		"subdomain", who.subdomain, "exchange", acct.Exchange,
 		"registered", acct.Registered, "active", acct.IsActive())
+	balances := make([]balanceEntry, 0, len(acct.Balances))
+	for _, b := range acct.Balances {
+		balances = append(balances, balanceEntry(b))
+	}
 	return []accountEntry{{
 		Exchange:   acct.Exchange,
 		Source:     sourceExchange,
@@ -119,6 +136,7 @@ func (t *toolset) statusFromExchange(
 		Active:     acct.Active,
 		BillingRef: acct.BillingRef,
 		AsOf:       stamp(acct.AsOf),
+		Balances:   balances,
 	}}, nil
 }
 
@@ -129,7 +147,7 @@ func (t *toolset) statusFromExchange(
 // which is why the per-Exchange call remains the authoritative answer and why
 // this one carries no billing reference and no activity.
 func (t *toolset) statusHints(ctx context.Context, who caller, tool string) ([]accountEntry, error) {
-	hints, err := t.accounts.Hints(t.callCtx(ctx, who), who.subdomain)
+	hints, err := t.accounts.Hints(ctx, who.subdomain)
 	if err != nil {
 		// Through the same renderer as every other account failure, so this one
 		// reaches the operator on the same event at the same level with the same
@@ -144,9 +162,10 @@ func (t *toolset) statusHints(ctx context.Context, who caller, tool string) ([]a
 			Source:     sourceLocalHint,
 			Registered: true,
 			AsOf:       stamp(hint.AsOf),
+			Balances:   []balanceEntry{},
 		})
 	}
-	t.logger(ctx, who).InfoContext(ctx, "identity.mcp.status.hints",
+	t.logger(ctx).InfoContext(ctx, "identity.mcp.status.hints",
 		"subdomain", who.subdomain, "count", len(entries))
 	return entries, nil
 }

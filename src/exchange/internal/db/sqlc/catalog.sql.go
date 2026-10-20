@@ -12,7 +12,7 @@ import (
 )
 
 const getCatalogEntry = `-- name: GetCatalogEntry :one
-SELECT resource_id, tenant_id, uri, uri_prefix, pricing, delivery_method, created_at, updated_at, terms, metadata, resource_owner_id, title FROM fora.catalog WHERE resource_id = $1
+SELECT resource_id, tenant_id, uri, uri_prefix, pricing, delivery_method, created_at, updated_at, terms, metadata, resource_owner_id, title, auto_imported, domain FROM fora.catalog WHERE resource_id = $1
 `
 
 func (q *Queries) GetCatalogEntry(ctx context.Context, resourceID string) (ForaCatalog, error) {
@@ -31,6 +31,8 @@ func (q *Queries) GetCatalogEntry(ctx context.Context, resourceID string) (ForaC
 		&i.Metadata,
 		&i.ResourceOwnerID,
 		&i.Title,
+		&i.AutoImported,
+		&i.Domain,
 	)
 	return i, err
 }
@@ -38,10 +40,10 @@ func (q *Queries) GetCatalogEntry(ctx context.Context, resourceID string) (ForaC
 const insertCatalogEntry = `-- name: InsertCatalogEntry :one
 INSERT INTO fora.catalog (
     resource_id, tenant_id, uri, uri_prefix, pricing, terms,
-    delivery_method, metadata, resource_owner_id, title
+    delivery_method, metadata, resource_owner_id, title, domain
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-RETURNING resource_id, tenant_id, uri, uri_prefix, pricing, delivery_method, created_at, updated_at, terms, metadata, resource_owner_id, title
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+RETURNING resource_id, tenant_id, uri, uri_prefix, pricing, delivery_method, created_at, updated_at, terms, metadata, resource_owner_id, title, auto_imported, domain
 `
 
 type InsertCatalogEntryParams struct {
@@ -55,6 +57,7 @@ type InsertCatalogEntryParams struct {
 	Metadata        []byte             `json:"metadata"`
 	ResourceOwnerID string             `json:"resource_owner_id"`
 	Title           pgtype.Text        `json:"title"`
+	Domain          string             `json:"domain"`
 }
 
 func (q *Queries) InsertCatalogEntry(ctx context.Context, arg InsertCatalogEntryParams) (ForaCatalog, error) {
@@ -69,6 +72,7 @@ func (q *Queries) InsertCatalogEntry(ctx context.Context, arg InsertCatalogEntry
 		arg.Metadata,
 		arg.ResourceOwnerID,
 		arg.Title,
+		arg.Domain,
 	)
 	var i ForaCatalog
 	err := row.Scan(
@@ -84,12 +88,14 @@ func (q *Queries) InsertCatalogEntry(ctx context.Context, arg InsertCatalogEntry
 		&i.Metadata,
 		&i.ResourceOwnerID,
 		&i.Title,
+		&i.AutoImported,
+		&i.Domain,
 	)
 	return i, err
 }
 
 const listAllCatalog = `-- name: ListAllCatalog :many
-SELECT resource_id, tenant_id, uri, uri_prefix, pricing, delivery_method, created_at, updated_at, terms, metadata, resource_owner_id, title FROM fora.catalog ORDER BY tenant_id, uri_prefix
+SELECT resource_id, tenant_id, uri, uri_prefix, pricing, delivery_method, created_at, updated_at, terms, metadata, resource_owner_id, title, auto_imported, domain FROM fora.catalog ORDER BY tenant_id, uri_prefix
 `
 
 func (q *Queries) ListAllCatalog(ctx context.Context) ([]ForaCatalog, error) {
@@ -114,6 +120,8 @@ func (q *Queries) ListAllCatalog(ctx context.Context) ([]ForaCatalog, error) {
 			&i.Metadata,
 			&i.ResourceOwnerID,
 			&i.Title,
+			&i.AutoImported,
+			&i.Domain,
 		); err != nil {
 			return nil, err
 		}
@@ -126,7 +134,7 @@ func (q *Queries) ListAllCatalog(ctx context.Context) ([]ForaCatalog, error) {
 }
 
 const listCatalogByTenant = `-- name: ListCatalogByTenant :many
-SELECT resource_id, tenant_id, uri, uri_prefix, pricing, delivery_method, created_at, updated_at, terms, metadata, resource_owner_id, title FROM fora.catalog WHERE tenant_id = $1 ORDER BY uri_prefix
+SELECT resource_id, tenant_id, uri, uri_prefix, pricing, delivery_method, created_at, updated_at, terms, metadata, resource_owner_id, title, auto_imported, domain FROM fora.catalog WHERE tenant_id = $1 ORDER BY uri_prefix
 `
 
 func (q *Queries) ListCatalogByTenant(ctx context.Context, tenantID string) ([]ForaCatalog, error) {
@@ -151,6 +159,59 @@ func (q *Queries) ListCatalogByTenant(ctx context.Context, tenantID string) ([]F
 			&i.Metadata,
 			&i.ResourceOwnerID,
 			&i.Title,
+			&i.AutoImported,
+			&i.Domain,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCatalogPagesOfSite = `-- name: ListCatalogPagesOfSite :many
+SELECT resource_id, uri, title, metadata, auto_imported
+  FROM fora.catalog
+ WHERE tenant_id = $1
+   AND domain = $2::text
+ ORDER BY uri
+`
+
+type ListCatalogPagesOfSiteParams struct {
+	TenantID string `json:"tenant_id"`
+	Domain   string `json:"domain"`
+}
+
+type ListCatalogPagesOfSiteRow struct {
+	ResourceID   string      `json:"resource_id"`
+	Uri          string      `json:"uri"`
+	Title        pgtype.Text `json:"title"`
+	Metadata     []byte      `json:"metadata"`
+	AutoImported bool        `json:"auto_imported"`
+}
+
+// The rows the automatic import compares a site's pages with: every row of one
+// seat pushed under one domain, whatever scheme its URI was built with. The
+// comparison is on the stored domain and exact, so publisher.example never
+// matches publisher.example.org or x.publisher.example. Tenant-scoped.
+func (q *Queries) ListCatalogPagesOfSite(ctx context.Context, arg ListCatalogPagesOfSiteParams) ([]ListCatalogPagesOfSiteRow, error) {
+	rows, err := q.db.Query(ctx, listCatalogPagesOfSite, arg.TenantID, arg.Domain)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCatalogPagesOfSiteRow{}
+	for rows.Next() {
+		var i ListCatalogPagesOfSiteRow
+		if err := rows.Scan(
+			&i.ResourceID,
+			&i.Uri,
+			&i.Title,
+			&i.Metadata,
+			&i.AutoImported,
 		); err != nil {
 			return nil, err
 		}
@@ -165,11 +226,14 @@ func (q *Queries) ListCatalogByTenant(ctx context.Context, tenantID string) ([]F
 const upsertCatalogEntry = `-- name: UpsertCatalogEntry :one
 INSERT INTO fora.catalog (
     resource_id, tenant_id, uri, uri_prefix, pricing, terms,
-    delivery_method, metadata, resource_owner_id, title
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    delivery_method, metadata, resource_owner_id, title, auto_imported, domain
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (resource_id) DO UPDATE
    SET tenant_id = EXCLUDED.tenant_id,
        uri = EXCLUDED.uri,
+       -- The domain is part of the address, which the guard below keeps
+       -- unchanged, so this rewrites the value the row already holds.
+       domain = EXCLUDED.domain,
        uri_prefix = EXCLUDED.uri_prefix,
        pricing = EXCLUDED.pricing,
        terms = EXCLUDED.terms,
@@ -181,6 +245,10 @@ ON CONFLICT (resource_id) DO UPDATE
        -- EXCLUDED verbatim; omitting this line would pin the first title ever
        -- pushed for the resource.
        title = EXCLUDED.title,
+       -- The last push decides who may refresh the row: a push without the
+       -- automatic import's label hands a row the importer wrote back to its
+       -- owner, and a labelled push hands the row to the importer.
+       auto_imported = EXCLUDED.auto_imported,
        updated_at = NOW()
  -- The catalog URI is immutable for an existing resource_id: a signed offer
  -- binds at execute via its Identity.canonical_url, so letting a re-push move
@@ -191,7 +259,7 @@ ON CONFLICT (resource_id) DO UPDATE
  -- update is suppressed and RETURNING yields no row, which the repository
  -- surfaces as an immutability error.
  WHERE fora.catalog.uri = EXCLUDED.uri
-RETURNING resource_id, tenant_id, uri, uri_prefix, pricing, delivery_method, created_at, updated_at, terms, metadata, resource_owner_id, title
+RETURNING resource_id, tenant_id, uri, uri_prefix, pricing, delivery_method, created_at, updated_at, terms, metadata, resource_owner_id, title, auto_imported, domain
 `
 
 type UpsertCatalogEntryParams struct {
@@ -205,6 +273,8 @@ type UpsertCatalogEntryParams struct {
 	Metadata        []byte             `json:"metadata"`
 	ResourceOwnerID string             `json:"resource_owner_id"`
 	Title           pgtype.Text        `json:"title"`
+	AutoImported    bool               `json:"auto_imported"`
+	Domain          string             `json:"domain"`
 }
 
 func (q *Queries) UpsertCatalogEntry(ctx context.Context, arg UpsertCatalogEntryParams) (ForaCatalog, error) {
@@ -219,6 +289,8 @@ func (q *Queries) UpsertCatalogEntry(ctx context.Context, arg UpsertCatalogEntry
 		arg.Metadata,
 		arg.ResourceOwnerID,
 		arg.Title,
+		arg.AutoImported,
+		arg.Domain,
 	)
 	var i ForaCatalog
 	err := row.Scan(
@@ -234,6 +306,8 @@ func (q *Queries) UpsertCatalogEntry(ctx context.Context, arg UpsertCatalogEntry
 		&i.Metadata,
 		&i.ResourceOwnerID,
 		&i.Title,
+		&i.AutoImported,
+		&i.Domain,
 	)
 	return i, err
 }

@@ -3,18 +3,24 @@
 package transport_test
 
 import (
+	"crypto/ed25519"
+	"errors"
+	"net/http"
 	"testing"
 
 	connect "connectrpc.com/connect"
+	foraconnect "github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 )
 
-// An agent's identity is the HOST of the directory it names in the covered
-// Signature-Agent header, not the URL verbatim. The scheme is a property of the
-// deployment — compose serves directories over http, production over https — so
-// letting it into the identity gave one agent several registrations, each with its
-// own key pin and its own billing account.
+// An agent's identity is the HOST of the directory it names in its covered
+// Signature-Agent member, not the origin verbatim. Under the Web Bot Auth profile
+// that member is always an https origin, so the identity is the host — with any
+// non-default port — and a member that is not an https origin is refused before
+// any identity is derived.
 //
 // These drive the property through the public Connect router only: Register
 // creates the account, GetAccountStatus reads it back. Both legs traverse
@@ -28,31 +34,26 @@ import (
 // Signature-Agent the client signs with varies, which is exactly the variable
 // under test.
 
-// TestAgentIdentity_SchemeSpellingsShareOneAccount is the ticket's property. One
-// agent, one key, three spellings of its directory: the bare host it self-signed
-// up under, and the same host with each scheme. All three must land on the account
-// the first call created.
-//
-// Without normalization the https and http calls would each miss the row keyed on
-// the bare host and self-sign up a second and third time, so each would report its
-// own freshly-minted billing_ref — the assertion below would see three different
-// refs where the agent has one account.
-func TestAgentIdentity_SchemeSpellingsShareOneAccount(t *testing.T) {
+// TestAgentIdentity_OneHostIsOneAccount pins the property: one agent, one key,
+// and the spellings of its directory a signer may use — the origin and the host
+// the test signer expands to that same origin — land on the account the first
+// call created. A billing_ref is minted once per account, so one ref across the
+// spellings proves they resolved to one row.
+func TestAgentIdentity_OneHostIsOneAccount(t *testing.T) {
 	h := newRegisterHarness(t)
 	const host = "collapse-agent.example"
 	a := h.newAgent(t, host)
 
 	reg, err := a.client.Register(h.ctx, connect.NewRequest(newRegisterRequest(testutil.RegistrationStruct(t, map[string]any{"legal_entity": "Collapse AI Ltd"}))))
 	if err != nil {
-		t.Fatalf("Register as bare host %q: %v", host, err)
+		t.Fatalf("Register as %q: %v", host, err)
 	}
 	want := reg.Msg.GetBillingRef()
 	if want == "" {
 		t.Fatal("Register returned an empty billing_ref; the rest of this test would assert nothing")
 	}
 
-	// The SAME key, re-signed under each schemed spelling of the same directory.
-	for _, directory := range []string{"https://" + host, "http://" + host, host} {
+	for _, directory := range []string{"https://" + host, host} {
 		t.Run(directory, func(t *testing.T) {
 			client := h.clientFor(directory, a.priv)
 			resp, err := client.GetAccountStatus(h.ctx,
@@ -69,6 +70,60 @@ func TestAgentIdentity_SchemeSpellingsShareOneAccount(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAgentIdentity_HTTPSignatureAgentIsRefused is the negative half: a
+// Signature-Agent member naming the agent's directory over plaintext http is
+// refused as an authentication failure, with the Accept-Signature value a
+// signature here must follow, since the caller can fix it by signing again as
+// the profile requires, and it reaches no account — not the one the agent holds
+// under its https origin, and not a second one. No scheme or
+// port setting on the Exchange can make an http member acceptable. The member is
+// rewritten after an otherwise valid signature, because no SDK signer emits it.
+func TestAgentIdentity_HTTPSignatureAgentIsRefused(t *testing.T) {
+	h := newRegisterHarness(t)
+	const host = "plaintext-agent.example"
+	a := h.newAgent(t, host)
+
+	for _, member := range []string{`sig1="http://` + host + `"`, `sig1="http://` + host + `:443"`} {
+		client := h.memberRewritingClient(host, member, a.priv)
+		_, err := client.Register(h.ctx, connect.NewRequest(newRegisterRequest(nil)))
+		if got := connect.CodeOf(err); got != connect.CodeUnauthenticated {
+			t.Fatalf("member %s: code = %v, want Unauthenticated (err=%v)", member, got, err)
+		}
+		var cerr *connect.Error
+		if !errors.As(err, &cerr) {
+			t.Fatalf("member %s: refusal %v is not a Connect error", member, err)
+		}
+		if got, want := cerr.Meta().Get(helpers.AcceptSignatureHeader), helpers.AcceptSignature(false); got != want {
+			t.Errorf("member %s: %s = %q, want %q", member, helpers.AcceptSignatureHeader, got, want)
+		}
+	}
+	// Nothing was registered for the host the refused member named: the agent's
+	// own https client finds no account.
+	_, err := a.client.GetAccountStatus(h.ctx, connect.NewRequest(newAccountStatusRequest()))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Fatalf("code = %v, want NotFound — an http member registered an account (err=%v)", got, err)
+	}
+}
+
+// memberRewritingClient is a client that signs as https://<host> with priv and
+// then replaces the Signature-Agent header with member, standing in for a
+// signer that names a member the profile refuses. It speaks the Connect
+// protocol, not gRPC: the signature gate answers a refusal with a plain HTTP
+// 401 carrying Accept-Signature, and a gRPC client reads that status without
+// surfacing the response headers, which would hide the header under test.
+func (h *registerHarness) memberRewritingClient(
+	host, member string, priv ed25519.PrivateKey,
+) foraconnect.ExchangeServiceClient {
+	rewrite := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		req = req.Clone(req.Context())
+		req.Header.Set(helpers.SignatureAgentHeader, member)
+		return h.baseTransport.RoundTrip(req)
+	})
+	return foraconnect.NewExchangeServiceClient(
+		&http.Client{Transport: exchangetest.SigningTransport(rewrite, host, priv)},
+		h.server, connect.WithProtoJSON())
 }
 
 // TestAgentIdentity_SchemeIsNotAnIdentityBoundary is the same property seen from
@@ -103,60 +158,13 @@ func TestAgentIdentity_SchemeIsNotAnIdentityBoundary(t *testing.T) {
 	}
 }
 
-// TestAgentIdentity_QuotedSignatureAgentAuthorizes is the interop half of the
-// ticket, driven end to end. Web Bot Auth defines the Signature-Agent value as an
-// RFC 8941 String, and a String has exactly one serialization — quoted — so this
-// is what a conformant external agent puts on the wire:
-//
-//	Signature-Agent: "https://agent.example"
-//
-// Read verbatim, the quotes travel into the directory URI, no host parses out of
-// it, the signer's key is never found, and the request is refused. That made a
-// spec-conformant agent unable to talk to the Exchange at all — a 401, not a
-// cosmetic storage-format wart.
-//
-// This could not be written until the SDK pin moved: the Connect gate verifies
-// through the SDK, so before that the quoted form was rejected no matter what the
-// app did. It is also the assertion that proves the two halves of the fix meet —
-// the SDK unquotes the value, and internal/agentid reduces it to the host that
-// keys the account.
-func TestAgentIdentity_QuotedSignatureAgentAuthorizes(t *testing.T) {
-	h := newRegisterHarness(t)
-	const host = "quoted-agent.example"
-	a := h.newAgent(t, host)
-
-	// Register with the bare form the agent self-signed up under.
-	reg, err := a.client.Register(h.ctx, connect.NewRequest(newRegisterRequest(nil)))
-	if err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	want := reg.Msg.GetBillingRef()
-
-	// The same key, now signing the quoted form a conformant agent sends. The
-	// header is signed WITH its quotes — the signature base covers the wire bytes —
-	// and only the extracted directory is unquoted.
-	quoted := h.clientFor(`"https://`+host+`"`, a.priv)
-	resp, err := quoted.GetAccountStatus(h.ctx,
-		connect.NewRequest(newAccountStatusRequest()))
-	if err != nil {
-		t.Fatalf(`GetAccountStatus signing Signature-Agent "https://%s": %v — a conformant signer must not be refused`, host, err)
-	}
-	if got := resp.Msg.GetBillingRef(); got != want {
-		t.Errorf("billing_ref = %q, want %q — the quoted form resolved to a different account than the bare one",
-			got, want)
-	}
-}
-
 // TestAgentIdentity_UnusableDirectoryIsRejected is the negative path (Testing
 // Doctrine §10). A Signature-Agent that names no host cannot be an identity and
 // cannot be a fetch target, so it must be refused rather than stored.
 //
-// The value used is the spec's sf-dictionary form, which FORA deliberately does
-// not read — an inline data: member would let a signer supply its own key
-// directory, and key resolution rests on fetching the directory from a location
-// the signer had to control. It is also a stable choice for this assertion: unlike
-// the quoted sf-string, no layer unwraps it, so this test pins the refusal rather
-// than a parsing gap that a later change would close.
+// The value used is a dictionary whose only member is keyed agent2 while the
+// signature covers the member keyed sig1: the signature names no directory at
+// all, so no identity can be derived from it.
 //
 // The refused call is a REGISTER, deliberately, and that choice is what makes the
 // side-effect half of this test able to fail at all. Register is the only RPC that
@@ -171,7 +179,7 @@ func TestAgentIdentity_UnusableDirectoryIsRejected(t *testing.T) {
 	const host = "dict-form-agent.example"
 	a := h.newAgent(t, host)
 
-	client := h.clientFor(`agent2="https://`+host+`"`, a.priv)
+	client := h.memberRewritingClient(host, `agent2="https://`+host+`"`, a.priv)
 	_, err := client.Register(h.ctx, connect.NewRequest(newRegisterRequest(testutil.RegistrationStruct(t, map[string]any{"legal_entity": "Dict Form AI Ltd"}))))
 	if err == nil {
 		t.Fatal("Register succeeded with a Signature-Agent that names no host; want rejection")

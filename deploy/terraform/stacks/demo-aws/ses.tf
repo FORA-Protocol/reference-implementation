@@ -1,10 +1,16 @@
-# Outbound mail for Zitadel, via Amazon SES.
+# Outbound mail via Amazon SES, for Zitadel and for the onboarding preview
+# service's contact form.
 #
 # Developer self-registration sends a confirmation code, so without a mail
 # provider the sign-up flow cannot complete. Zitadel reads its provider
 # settings only when it first creates its instance, which means these values
 # reach it through the compose bundle in the VM's cloud-init user data — and
 # changing any of them replaces the VM.
+#
+# The onboarding service (when enabled in main.tf) relays enquiries through
+# the same sender and credential. The IAM policy below allows exactly one
+# From address, so that service sends as zitadel_smtp_from too; the visitor's
+# address travels as Reply-To.
 #
 # Everything here is created in us-east-1 regardless of where the VM runs.
 # SES sandbox status, the SMTP endpoint, the DKIM CNAME targets, and the

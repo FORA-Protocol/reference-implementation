@@ -22,7 +22,7 @@ import (
 func ed25519SignerFor(t *testing.T, pub ed25519.PublicKey, priv ed25519.PrivateKey) (signing.URLSigner, string) {
 	t.Helper()
 	sgn, err := signing.URLSignerFor(
-		signing.TenantKeys{Scheme: signing.SchemeEd25519, Ed25519Ref: "k"},
+		signing.URLSigningKeys{Scheme: signing.SchemeEd25519, Ed25519Ref: "k"},
 		&stubStore{pub: pub, priv: priv},
 	)
 	if err != nil {
@@ -168,7 +168,7 @@ func TestEd25519URLSigner_MissingKeyRejected(t *testing.T) {
 	// A tenant whose key store yields no usable key material cannot obtain a
 	// signer: the dispatcher fails building the kid thumbprint from a nil key.
 	_, err := signing.URLSignerFor(
-		signing.TenantKeys{Scheme: signing.SchemeEd25519, Ed25519Ref: "k"},
+		signing.URLSigningKeys{Scheme: signing.SchemeEd25519, Ed25519Ref: "k"},
 		&stubStore{},
 	)
 	if err == nil {

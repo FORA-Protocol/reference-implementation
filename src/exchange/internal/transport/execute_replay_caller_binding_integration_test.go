@@ -69,7 +69,7 @@ func TestExecuteTransaction_ReplayRejectsForeignCaller(t *testing.T) {
 	if len(aItems) != 1 || aItems[0].GetRetrievalEndpoint() == "" {
 		t.Fatalf("agent A call did not yield a signed retrieval endpoint: %+v", aItems)
 	}
-	balAfterA, err := h.billing.GetBalance(ctx, h.billingRef)
+	balAfterA, err := h.billing.GetBalance(ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance(billing_ref) after A: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestExecuteTransaction_ReplayRejectsForeignCaller(t *testing.T) {
 	// OWN identity, but reuses A's idempotency_key (a client-chosen dedup token B
 	// could learn off-band — it is not a bearer secret). B's request is otherwise
 	// valid; only the (idempotency_key, offer_id) pair collides with A's row.
-	clientB, _, bPriv := h.addCallerWithKey(t, "agent-b", "AGENT")
+	clientB, bPriv := h.addCallerWithKey(t, "agent-b", "AGENT")
 	bRequester := newRequester("agent-b", "agent-b.example")
 	bReq := &forav1.TransactionRequest{
 		Ver:            helpers.ProtocolVersion,
@@ -114,7 +114,7 @@ func TestExecuteTransaction_ReplayRejectsForeignCaller(t *testing.T) {
 	if _, rerr := repoTx.ByIdempotencyKey(ctx, derivedKey); rerr != nil {
 		t.Fatalf("A's persisted row must survive B's rejected replay: %v", rerr)
 	}
-	balAfterB, err := h.billing.GetBalance(ctx, h.billingRef)
+	balAfterB, err := h.billing.GetBalance(ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance(billing_ref) after B: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestExecuteTransaction_ReplayRejectsForeignCallerWithoutRequestProof(t *tes
 	if items := aResp.Msg.GetItems(); len(items) != 1 || items[0].GetRetrievalEndpoint() == "" {
 		t.Fatalf("agent A call did not yield a signed retrieval endpoint: %+v", items)
 	}
-	balAfterA, err := h.billing.GetBalance(ctx, h.billingRef)
+	balAfterA, err := h.billing.GetBalance(ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance(billing_ref) after A: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestExecuteTransaction_ReplayRejectsForeignCallerWithoutRequestProof(t *tes
 	// Agent B is a different registered agent with its own keypair. It signs a
 	// valid acceptance under its OWN identity and reuses A's idempotency_key and
 	// offer. Only that pair collides with A's row.
-	clientB, _, bPriv := h.addCallerWithKey(t, "agent-b-noproof", "AGENT")
+	clientB, bPriv := h.addCallerWithKey(t, "agent-b-noproof", "AGENT")
 	bRequester := newRequester("agent-b-noproof", "agent-b.example")
 	bReq := &forav1.TransactionRequest{
 		Ver:            helpers.ProtocolVersion,
@@ -206,7 +206,7 @@ func TestExecuteTransaction_ReplayRejectsForeignCallerWithoutRequestProof(t *tes
 	if _, rerr := repo.NewTransactionRepo(h.queries).ByIdempotencyKey(ctx, idem+":"+offer.GetOfferId()); rerr != nil {
 		t.Fatalf("A's persisted row must survive B's rejected replay: %v", rerr)
 	}
-	balAfterB, err := h.billing.GetBalance(ctx, h.billingRef)
+	balAfterB, err := h.billing.GetBalance(ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance(billing_ref) after B: %v", err)
 	}
@@ -216,28 +216,29 @@ func TestExecuteTransaction_ReplayRejectsForeignCallerWithoutRequestProof(t *tes
 	}
 }
 
-// TestExecuteTransaction_ReplaySpoofedRequesterIDRejected pins the sharper half of
-// the ownership gate: it is NOT enough to compare the caller-supplied
-// requester.id (or a thumbprint derived from it) to the stored row — requester.id
-// is unauthenticated caller input. A foreign caller that SPOOFS the victim's
-// requester.id still cannot forge the victim's body offer-acceptance signature
-// (proof of possession of the victim's registered key), so the request must
-// yield NO signed URL and NO side effects under the victim's identity.
+// TestExecuteTransaction_ReplayWithCopiedRequesterLabelRejected pins the sharper
+// half of the ownership gate: copying the victim's requester.id changes nothing.
+// requester.id is a free label that carries no identity — the agent is derived
+// from the verified Signature-Agent directory — so a foreign caller that writes
+// the victim's label into its own request is still itself. It cannot be served
+// the victim's stored result, because it cannot prove possession of the key whose
+// thumbprint the victim's row records.
 //
-// Since possession is proven at ADMISSION (before any claim or replay probe),
-// the spoofed request never reaches the stored row at all: it degrades to the
-// same in-body SIGNATURE_INVALID denial an unverifiable acceptance gets on a
-// fresh request. That uniformity is deliberate — an error-vs-denial split here
-// would hand a spoofing caller an oracle for whether the victim has already
-// used the key. This guards against a future "simplification" of the ownership
-// check into a bare requester.id / claimed-thumbprint compare (which would
-// pass TestExecuteTransaction_ReplayRejectsForeignCaller but reopen the leak).
+// The refusal is PermissionDenied from the ownership gate in the per-item replay
+// probe: the derived key idempotency_key:offer_id is global, so the foreign
+// caller's request does land on the victim's persisted row, and the gate is what
+// refuses it there. No signed URL reaches the caller and the victim's row and
+// balance are untouched.
+//
+// This guards against a future "simplification" of the ownership check into a
+// bare requester.id or claimed-thumbprint compare, which would pass
+// TestExecuteTransaction_ReplayRejectsForeignCaller and reopen the leak.
 //
 // Round-trip honesty: identical shape to the sibling test — A writes via the RPC,
-// B replays via the SAME RPC signing its transport with B's key but claiming
+// B replays via the SAME RPC signing its transport with B's key while copying
 // requester.id="agent-test"; asserted through the RPC surface + repo/billing for
 // side-effect absence (Testing Doctrine §9).
-func TestExecuteTransaction_ReplaySpoofedRequesterIDRejected(t *testing.T) {
+func TestExecuteTransaction_ReplayWithCopiedRequesterLabelRejected(t *testing.T) {
 	h := newTestHarness(t)
 	ctx := h.ctx
 	uri := seedResourceWithRate(t, h, "/articles/replay-spoof", "0.05")
@@ -258,60 +259,73 @@ func TestExecuteTransaction_ReplaySpoofedRequesterIDRejected(t *testing.T) {
 	if _, err := h.exchangeClient.ExecuteTransaction(ctx, connect.NewRequest(aReq)); err != nil {
 		t.Fatalf("agent A original call must succeed: %v", err)
 	}
-	balAfterA, err := h.billing.GetBalance(ctx, h.billingRef)
+	balAfterA, err := h.billing.GetBalance(ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance(billing_ref) after A: %v", err)
 	}
 
-	// Agent B signs transport with B's own key but SPOOFS requester.id="agent-test".
-	// B cannot produce a valid acceptance for agent-test (it lacks A's private key),
-	// so it signs the acceptance with its OWN key — which will not verify against
-	// agent-test's registered key.
-	clientB, _, bPriv := h.addCallerWithKey(t, "agent-b-spoof", "AGENT")
-	spoofReq := &forav1.TransactionRequest{
+	// Agent B signs transport with B's own key and copies A's requester.id label.
+	// The acceptance is signed with B's OWN key, which is the only key B has, and
+	// which is the key B's own Signature-Agent directory publishes — so the
+	// acceptance itself verifies. What B cannot do is possess the key A's row
+	// records.
+	clientB, bPriv := h.addCallerWithKey(t, "agent-b-spoof", "AGENT")
+	copiedLabelReq := &forav1.TransactionRequest{
 		Ver:            helpers.ProtocolVersion,
 		IdempotencyKey: idem,
-		Requester:      aRequester, // spoofed: claims to be agent-test
+		Requester:      aRequester, // copies A's label; B is still B on the transport
 		Items: []*forav1.TransactionItem{
 			{Offer: offer, AgentAcceptance: signAcceptanceFor(t, bPriv, offer, aRequester, idem)},
 		},
 	}
-	spoofResp, spoofErr := clientB.ExecuteTransaction(ctx, connect.NewRequest(spoofReq))
+	_, copiedLabelErr := clientB.ExecuteTransaction(ctx, connect.NewRequest(copiedLabelReq))
 
-	// INVARIANT: NO signed URL ever reaches the spoofing caller. Possession
-	// fails at admission, so the request is answered exactly like a fresh
-	// wrong-key acceptance: an in-body SIGNATURE_INVALID denial with no
-	// retrieval endpoint (never A's stored result, and no error/denial split
-	// that would disclose whether A has used the key).
-	assertItemDenied(t, spoofResp, spoofErr, forav1.DenialReason_DENIAL_REASON_SIGNATURE_INVALID)
+	// INVARIANT: NO signed URL ever reaches the foreign caller. The request lands
+	// on A's globally-keyed row in the per-item replay probe, and the ownership
+	// gate refuses it there because B's proven key is not the one A's row records.
+	if copiedLabelErr == nil {
+		t.Fatal("SECURITY: a foreign caller copying the victim's requester.id was served a response")
+	}
+	if got := connect.CodeOf(copiedLabelErr); got != connect.CodePermissionDenied {
+		t.Fatalf("copied-label replay error code = %v, want PermissionDenied (err: %v)", got, copiedLabelErr)
+	}
 
 	// Side effects: A's row survives, A not re-charged.
 	derivedKey := idem + ":" + offer.GetOfferId()
 	repoTx := repo.NewTransactionRepo(h.queries)
 	if _, rerr := repoTx.ByIdempotencyKey(ctx, derivedKey); rerr != nil {
-		t.Fatalf("A's persisted row must survive the spoofed replay: %v", rerr)
+		t.Fatalf("A's persisted row must survive the refused replay: %v", rerr)
 	}
-	balAfterSpoof, err := h.billing.GetBalance(ctx, h.billingRef)
+	balAfterCopiedLabel, err := h.billing.GetBalance(ctx, h.billingRef, harnessCurrency)
 	if err != nil {
-		t.Fatalf("GetBalance(billing_ref) after spoof: %v", err)
+		t.Fatalf("GetBalance(billing_ref) after the copied-label replay: %v", err)
 	}
-	if balAfterSpoof.Value.Cmp(balAfterA.Value) != 0 {
-		t.Fatalf("agent-test balance moved on spoofed replay: %s -> %s",
-			balAfterA.Value.FloatString(4), balAfterSpoof.Value.FloatString(4))
+	if balAfterCopiedLabel.Value.Cmp(balAfterA.Value) != 0 {
+		t.Fatalf("agent-test balance moved on the copied-label replay: %s -> %s",
+			balAfterA.Value.FloatString(4), balAfterCopiedLabel.Value.FloatString(4))
 	}
 }
 
-// TestExecuteTransaction_AttackerFirstSpoofLeavesNoClaim runs the spoof BEFORE
-// the victim ever executes, the sharper ordering the victim-first sibling cannot
-// prove: an attacker that spoofs the victim's requester.id but cannot forge the
-// victim's acceptance must reserve NO claim, so the victim's OWN later request
-// under the same idempotency_key proceeds as fresh — it executes and charges,
-// rather than being refused AlreadyExists off a claim the attacker poisoned.
+// TestExecuteTransaction_CopiedRequesterLabelLeavesNoVictimClaim runs the
+// label-copying request BEFORE the victim ever executes, the ordering the
+// victim-first sibling cannot prove: a caller that writes the victim's
+// requester.id into its own request reserves nothing under the victim's identity,
+// so the victim's OWN later request under the same idempotency_key proceeds as
+// fresh — it executes and charges, rather than being refused AlreadyExists off a
+// claim the label-copying caller poisoned.
+//
+// The copied label buys the attacker nothing because the agent is derived from
+// the verified Signature-Agent directory: the request is the attacker's own, and
+// so is every check it then faces. Here that check is the attacker's own account
+// state — it never registered for billing, so its paid item is denied
+// ACCOUNT_NOT_REGISTERED. The denial reason is the point rather than an
+// incidental detail: it names the ATTACKER's account, which is what "the request
+// never became the victim's" looks like from the outside.
 //
 // Round-trip honesty: both legs drive the ExecuteTransaction RPC; the victim's
 // fresh execution is observed through the response (a signed URL) and the billing
 // balance debit, side effects only through the production surfaces.
-func TestExecuteTransaction_AttackerFirstSpoofLeavesNoClaim(t *testing.T) {
+func TestExecuteTransaction_CopiedRequesterLabelLeavesNoVictimClaim(t *testing.T) {
 	h := newTestHarness(t)
 	ctx := h.ctx
 	uri := seedResourceWithRate(t, h, "/articles/attacker-first-spoof", "0.05")
@@ -319,39 +333,41 @@ func TestExecuteTransaction_AttackerFirstSpoofLeavesNoClaim(t *testing.T) {
 
 	const idem = "tx-attacker-first-spoof"
 
-	// Attacker B spoofs requester.id="agent-test" but signs the acceptance with
-	// its OWN key. Possession fails at admission, so the request degrades to an
-	// in-body SIGNATURE_INVALID denial and reserves no claim.
-	clientB, _, bPriv := h.addCallerWithKey(t, "agent-b-attacker", "AGENT")
+	// Attacker B copies requester.id="agent-test" and signs the acceptance with its
+	// OWN key. The acceptance verifies — it is B's own request — but B never
+	// registered for billing, so the paid item is denied in-body under B's own
+	// account and nothing is persisted.
+	clientB, bPriv := h.addCallerWithKey(t, "agent-b-attacker", "AGENT")
 	aRequester := newRequester("agent-test", "agent.example")
-	spoofReq := &forav1.TransactionRequest{
+	copiedLabelReq := &forav1.TransactionRequest{
 		Ver:            helpers.ProtocolVersion,
 		IdempotencyKey: idem,
-		Requester:      aRequester, // spoofed
+		Requester:      aRequester, // copies the victim's label
 		Items: []*forav1.TransactionItem{
 			{Offer: offer, AgentAcceptance: signAcceptanceFor(t, bPriv, offer, aRequester, idem)},
 		},
 	}
-	spoofResp, spoofErr := clientB.ExecuteTransaction(ctx, connect.NewRequest(spoofReq))
-	assertItemDenied(t, spoofResp, spoofErr, forav1.DenialReason_DENIAL_REASON_SIGNATURE_INVALID)
+	resp, respErr := clientB.ExecuteTransaction(ctx, connect.NewRequest(copiedLabelReq))
+	assertItemDenied(t, resp, respErr, forav1.DenialReason_DENIAL_REASON_ACCOUNT_NOT_REGISTERED)
 	// The attacker charged nothing and reserved nothing.
 	if _, rerr := repo.NewTransactionRepo(h.queries).ByIdempotencyKey(ctx, idem+":"+offer.GetOfferId()); rerr == nil {
-		t.Fatal("attacker-first spoof persisted a row under the derived key; want none")
+		t.Fatal("the label-copying request persisted a row under the derived key; want none")
 	}
 
 	// The victim (agent-test) now runs its OWN legitimate request under the SAME
-	// idempotency_key. It must be fresh — a claim reserved by the attacker would
-	// refuse this AlreadyExists (KindIdempotent).
+	// idempotency_key. It must be fresh — a claim reserved under the victim's
+	// identity would refuse this AlreadyExists (KindIdempotent).
 	victim, err := executeSingleItem(t, h, idem, offer)
 	if err != nil {
-		t.Fatalf("victim's own request after an attacker-first spoof must be fresh, not AlreadyExists: %v", err)
+		t.Fatalf("victim's own request after the label-copying attempt must be fresh, "+
+			"not AlreadyExists: %v", err)
 	}
 	if victim.Msg.GetItems()[0].GetRetrievalEndpoint() == "" {
 		t.Fatal("victim's fresh request returned no retrieval endpoint")
 	}
-	// The victim was charged exactly once (0.05 → 9.95); the attacker's refused
-	// spoof charged nothing.
-	bal, err := h.billing.GetBalance(ctx, h.billingRef)
+	// The victim was charged exactly once (0.05 → 9.95); the refused
+	// label-copying request charged nothing.
+	bal, err := h.billing.GetBalance(ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}

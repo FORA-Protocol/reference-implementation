@@ -4,7 +4,7 @@
 #
 # Before the first apply (STAGING_DOMAIN is the PUBLISHER hostname here —
 # demo.<domain> — because every name in this stack nests under that label):
-#   1. STACK_DIR=$PWD STAGING_DOMAIN=demo.<domain> ../../scripts/gen-staging-keys.sh
+#   1. STAGING_DOMAIN=demo.<domain> ../../scripts/gen-keys.sh demo-aws
 #      # writes ./keys/ (gitignored)
 #   2. ../../scripts/build-push-images.sh                 # builds + pushes the images
 #
@@ -61,6 +61,11 @@ domain          = "publisher.example"
 # publisher_subdomain = "demo"
 # identity_subdomain  = "mcp"
 # zitadel_subdomain   = "login"
+# Optional: serve the MCP endpoint under its own label. The token audience
+# follows <mcp_subdomain>.demo.<domain>; the issuer and the agent wildcard stay
+# on identity_subdomain. Changing it on a running demo replaces the VM and
+# invalidates every issued bearer.
+# mcp_subdomain       = "agents"
 
 # Images: <image_registry>/<image_prefix>/{exchange,broker,identity,publisher}:<image_tag>,
 # as pushed by ../../scripts/build-push-images.sh. Use the same values here
@@ -74,9 +79,35 @@ image_tag    = "latest"
 # Private registry? Set a read token (password in secrets.auto.tfvars):
 # registry_username = "gitlab+deploy-token-123"
 
-# One-time welcome credit for each newly registered agent, in whole ledger
-# currency units. "100" grants EUR 100.00; "0" disables the credit.
-# default_agent_credit = "100"
+# Onboarding preview service — the server behind the public publisher
+# onboarding page, at https://pub-onboarding.demo.<domain>/onboarding. Off
+# until an image is named. The image is NOT <image_prefix>:<image_tag>: the
+# build script builds onboarding only when asked, from a tree that carries its
+# source (../../scripts/build-push-images.sh onboarding), and a live rollout pins
+# the digest so what runs is exactly what was recorded:
+# onboarding_image = "registry.gitlab.com/your-group/your-project/onboarding@sha256:..."
+# A tag is accepted too, for a throwaway environment:
+# onboarding_image = "registry.gitlab.com/your-group/your-project/onboarding:latest"
+#
+# Every origin the public page is served from, exactly (a browser refuses the
+# call from any other):
+# onboarding_allowed_origins = ["https://www.publisher.example", "https://publisher.example"]
+#
+# Where the page's contact form delivers. Sent as noreply@<domain> through the
+# SES sender in ses.tf. Leave unset to run without the form (it answers 503).
+# While the SES account is sandboxed every recipient must be a verified SES
+# identity in us-east-1 — see "Outbound mail" in ../../docs/deploy-demo-aws.md.
+# onboarding_contact_recipients = ["partnerships@example.com"]
+#
+# Adding the service to a RUNNING demo does not go through a plain apply —
+# that replaces the VM. Follow "Adding the onboarding service to a running
+# demo" in ../../docs/deploy-demo-aws.md.
+
+# One-time welcome credit for each newly registered agent, per currency, in
+# whole currency units. "EUR=100" grants EUR 100.00; leave it unset to disable
+# the credit. The demo bills in EUR only (the module's billing_ledger default),
+# so EUR is the only code this stack accepts.
+# default_agent_credit = "EUR=100"
 
 # Email for Let's Encrypt: Caddy on the VM mints certificates for the service
 # hostnames. The publisher hostname's certificate comes from ACM instead
@@ -84,6 +115,12 @@ image_tag    = "latest"
 acme_email = "ops@example.com"
 # Iterating on apply/destroy? Use the LE staging CA (untrusted certs):
 # acme_staging = true
+# Let's Encrypt rate-limiting the hostnames? Use Google Trust Services, with
+# the EAB key from `gcloud publicca external-account-keys create --project
+# <project>` (keyId here, b64MacKey as acme_eab_mac_key in
+# secrets.auto.tfvars). Not together with acme_staging.
+# acme_ca         = "https://dv.acme-v02.api.pki.goog/directory"
+# acme_eab_key_id = "..."
 
 # The smoke identities (smoke-agent.demo.<domain> and
 # catalog-contributor.demo.<domain>) need no variables: each id IS the
@@ -105,3 +142,10 @@ acme_email = "ops@example.com"
 # fora_enforce_binding = "false"
 
 # The secrets do NOT belong in this file — copy secrets.auto.tfvars.example to secrets.auto.tfvars.
+
+# Broker catalog search (off by default): an agent's free-text query is matched
+# against the demo music feed through a Bedrock model. Creates an IAM user that
+# may invoke only that model; its key reaches the Broker alone. The model must
+# be enabled for the account in aws_region.
+# query_discovery_enabled = true
+# query_discovery_model   = "amazon.nova-lite-v1:0"

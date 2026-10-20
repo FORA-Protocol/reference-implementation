@@ -216,7 +216,7 @@ func (s *ExchangeService) persistValidation(
 		Ver:      helpers.ProtocolVersion,
 		ReportId: updated.IssuedReportID,
 	}
-	s.logOutcome(ctx, "report_usage", "VALIDATED", caller,
+	s.logOutcome(ctx, "report_usage", outcomeValidated, caller,
 		&repo.Tenant{ID: rc.TenantID}, rc.AgentID, rc.TransactionID, nil)
 	return nil
 }
@@ -230,7 +230,7 @@ func (s *ExchangeService) persistValidation(
 func (s *ExchangeService) buildReplayResponse(
 	ctx context.Context, caller Caller, existing repo.Obligation,
 ) *forav1.UsageReportResponse {
-	s.logOutcome(ctx, "report_usage", "REPLAY", caller, nil, "", existing.TransactionID, nil)
+	s.logOutcome(ctx, "report_usage", outcomeReplay, caller, nil, "", existing.TransactionID, nil)
 	return &forav1.UsageReportResponse{
 		Ver:      helpers.ProtocolVersion,
 		ReportId: existing.IssuedReportID,

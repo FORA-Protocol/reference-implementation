@@ -22,10 +22,6 @@ const (
 	CodeRefund     TransferCode = 2
 )
 
-// refundPageLimit bounds one GetAccountTransfers page. Realistic refund counts per
-// billing id are tiny; the loop pages regardless so a large history still sums.
-const refundPageLimit uint32 = 254
-
 // LinkedOutcome classifies the result of an atomic linked batch.
 type LinkedOutcome int
 
@@ -159,14 +155,21 @@ func linkedOutcome(results []tb.CreateTransferResult) (LinkedOutcome, error) {
 }
 
 // TransferInfo is the subset of a transfer the settling adapter reads back: the
-// reserved amount, the metadata carried in user_data (the frozen fee rate), and the
-// accounts. Returned by LookupTransfer so callers need not import the raw client.
+// reserved amount, the metadata carried in user_data (the frozen fee rate), the
+// accounts, and the ledger. Returned by LookupTransfer so callers need not import
+// the raw client.
+//
+// Ledger is what makes a settlement or a reversal currency-correct without the
+// adapter carrying a per-call currency: the hold already recorded which ledger it
+// reserved on, so the fee leg and the refund legs read that value back instead of
+// guessing from configuration that may have changed since.
 type TransferInfo struct {
 	Amount      *big.Int
 	UserData128 ID
 	UserData64  uint64
 	Debit       ID
 	Credit      ID
+	Ledger      uint32
 }
 
 // LookupTransfer returns the transfer with the given id, or ok=false if it does not
@@ -189,6 +192,7 @@ func (c *Client) LookupTransfer(ctx context.Context, id ID) (TransferInfo, bool,
 		UserData64:  t.UserData64,
 		Debit:       t.DebitAccountID,
 		Credit:      t.CreditAccountID,
+		Ledger:      t.Ledger,
 	}, true, nil
 }
 
@@ -199,27 +203,21 @@ func (c *Client) LookupTransfer(ctx context.Context, id ID) (TransferInfo, bool,
 // ordered) results until exhausted.
 func (c *Client) SumAccountRefunds(ctx context.Context, account, group ID, code TransferCode) (*big.Int, error) {
 	sum := new(big.Int)
-	var timestampMin uint64
-	for {
-		transfers, err := withDeadline(ctx, c.opTimeout, func() ([]tb.Transfer, error) {
-			return c.inner.GetAccountTransfers(tb.AccountFilter{
-				AccountID:    account,
-				UserData128:  group,
-				Code:         uint16(code),
-				TimestampMin: timestampMin,
-				Limit:        refundPageLimit,
-				Flags:        tb.AccountFilterFlags{Credits: true}.ToUint32(),
-			})
-		})
-		if err != nil {
-			return nil, fmt.Errorf("tigerbeetle: sum refunds: %w", err)
+	// Realistic refund counts per billing id are tiny; the scan pages
+	// regardless, so a large history still sums.
+	err := c.scanAccountTransfers(ctx, tb.AccountFilter{
+		AccountID:   account,
+		UserData128: group,
+		Code:        uint16(code),
+		Flags:       tb.AccountFilterFlags{Credits: true}.ToUint32(),
+	}, func(page []tb.Transfer) error {
+		for i := range page {
+			sum.Add(sum, page[i].Amount.BigInt())
 		}
-		for i := range transfers {
-			sum.Add(sum, transfers[i].Amount.BigInt())
-		}
-		if len(transfers) < int(refundPageLimit) {
-			return sum, nil
-		}
-		timestampMin = transfers[len(transfers)-1].Timestamp + 1
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("tigerbeetle: sum refunds: %w", err)
 	}
+	return sum, nil
 }

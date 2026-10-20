@@ -25,8 +25,8 @@ run "exchanges_json_renders_the_single_direct_exchange" {
   command = plan
 
   assert {
-    condition     = output.exchanges_json == "[{\"domain\":\"exchange.demo.publisher.example\",\"endpoint\":\"https://exchange.demo.publisher.example\",\"ext\":{\"resource_owner_id\":\"example-resource-owner\"},\"supported_profiles\":[\"fora-news-v1\"]}]"
-    error_message = "exchanges_json must render the exchange entry with the derived https endpoint, the fora-news-v1 profile, and the resource owner in ext — byte-identical to what deployed workers already carry."
+    condition     = output.exchanges_json == "[{\"domain\":\"exchange.demo.publisher.example\",\"endpoint\":\"https://exchange.demo.publisher.example\",\"ext\":{\"resource_owner_id\":\"example-resource-owner\"},\"supported_profiles\":[\"fora-news-v1\",\"fora-comp-v1\",\"fora-music-v1\"]}]"
+    error_message = "exchanges_json must render the exchange entry with the derived https endpoint, the profiles the Exchange supports, and the resource owner in ext — byte-identical to what deployed workers already carry."
   }
 }
 

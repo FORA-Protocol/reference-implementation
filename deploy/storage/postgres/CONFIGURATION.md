@@ -29,7 +29,8 @@ For preparing a cluster and first-boot verification see
 | TLS | **Depends on the network path** | Not needed when every connection stays on the database host, strongly recommended on a private network you control end to end, required once any part of the path is not exclusively yours. §2.3 has the three cases. |
 
 The design depends on the connecting role owning the database; it is not only a
-convenience. The one table whose rows can never be changed is protected by
+convenience. The two tables whose rows can never be changed —
+`fora.transaction_evidence` and `fora.transaction_events` — are protected by
 triggers rather than by `REVOKE`, exactly because every environment connects as
 the owner, and table permissions do not stop an owner. The triggers stop every
 role, the owner included.
@@ -43,7 +44,8 @@ schema and applies its own migrations when it starts.
 
 ### 2.1 The connection-string variables
 
-There are **three**, and a fourth if you deploy the Identity service.
+There are **three**, a fourth if you deploy the Identity service, and a fifth if you
+deploy the publisher console.
 
 | Variable | Read by | Required? | Behaviour when unset |
 |---|---|---|---|
@@ -51,6 +53,7 @@ There are **three**, and a fourth if you deploy the Identity service.
 | `EXCHANGE_SOR_DSN` | Exchange | **Yes** | The Exchange **exits** with `sor: EXCHANGE_SOR_DSN is required for FORA_SOR_ADAPTER=postgres`. |
 | `BROKER_DSN` | Broker | **Yes** | The Broker **exits** with `BROKER_DSN is required`. |
 | `IDENTITY_DSN` | Identity service | **Yes**, if you deploy that service | The Identity service **exits** with `IDENTITY_DSN is required`. |
+| `CONSOLE_DSN` | Publisher console | **Yes**, if you deploy that service | The console **exits** with `CONSOLE_DSN is required`. |
 
 **Every one of them makes the mistake impossible to miss: the service stops.** No
 service starts without its database, and each exits before it serves anything, so
@@ -161,30 +164,38 @@ explicitly. Leave `search_path` out of the DSN.
 
 ## 3. Schema and database layout
 
-**Tenant and publisher are not the same thing, and two columns keep them apart.**
-`fora.tenants.domain` says which site the content is on, and the tenant row answers
-"whose settings apply" — its signing keys, fee rate, reporting policy and
-signed-URL scheme. `resource_owner_id` on `fora.catalog` answers a different
-question: who gets the money.
+**Tenant, publisher and site are three different records.** A `fora.tenants` row
+is the **seat**: one Exchange identity that sells on this deployment. Its
+`domain` is the EXCHANGE's own hostname, and the row answers "whose selling
+settings apply" — its signing keys, fee rate, reporting policy, broker relay and
+agent activation. A `fora.publishers` row is the **payee**, and its
+`publisher_id` is the value `fora.catalog.resource_owner_id` carries: who gets
+the money. A `fora.publisher_domains` row is one **site**, belonging to one
+publisher, carrying the physical facts about it — the `signing_scheme` its CDN
+needs and its CloudFront key-pair id.
 
-One site belongs to one tenant. A *publisher* is the business that owns the
-content, and one publisher can own several sites, and so several tenants. That is
-why `resource_owner_id` is not tied to a tenant. A tenant that holds content for
-several publishers is an aggregator.
+A site is offered on a seat through a `fora.publisher_domain_listings` row, keyed
+`(tenant_id, domain)`. The commercial arrangement is on that row: the state, the
+content path scope and the terms preset. One publisher listed on two seats gets
+two listings, so it can offer different parts of the site on different terms
+through each.
 
-FORA puts everything in **four schemas plus four small tables in `public`**, spread
-over **three databases** — or two, if you are not running the Identity Service:
+FORA puts everything in **five schemas plus five small tables in `public`**, spread
+over **four databases** — fewer if you do not run the Identity Service or the publisher
+console, which each have one schema, one table and one database of their own:
 
 | Object | Database | Owned by | Created by | Contents |
 |---|---|---|---|---|
-| Schema `fora` | `EXCHANGE_DSN` | Exchange | The Exchange's first migration | 8 tables: tenants, agents, catalog, transaction log, transaction evidence, reporting obligations, per-owner fee overrides, admin audit log. |
+| Schema `fora` | `EXCHANGE_DSN` | Exchange | The Exchange's first migration | 12 tables: tenants, publishers, publisher domains, publisher domain listings, publisher grants, agents, catalog, transaction log, transaction evidence, reporting obligations, per-owner fee overrides, admin audit log. |
 | Schema `broker` | `BROKER_DSN` | Broker | The Broker's first migration | 2 tables: the Exchange registry, and the discovery selection log. |
 | Schema `sor` | `EXCHANGE_SOR_DSN` | Exchange | The SoR's first migration | 1 table, `sor.agent_accounts`: the account register (§2.1). |
 | Schema `identity` | `IDENTITY_DSN` | Identity Service | The Identity Service's first migration | 5 tables: agent cards, key revocations, developer accounts, and two for the sign-in flow. Only present if you run that service. |
+| Schema `console` | `CONSOLE_DSN` | Publisher console | The console's first migration | 1 table, `console.accounts`: who has signed in to the console. Nothing a publisher owns is stored here; it all lives in the Exchange's schema. Only present if you run the console. |
 | `public.schema_migrations_fora` | `EXCHANGE_DSN` | Exchange | The migration runner | Which Exchange migrations have been applied. Two columns: `version`, `dirty`. |
 | `public.schema_migrations_broker` | `BROKER_DSN` | Broker | The migration runner | The same, for the Broker. |
 | `public.schema_migrations_sor` | `EXCHANGE_SOR_DSN` | Exchange | The migration runner | The same, for the SoR. |
 | `public.schema_migrations_identity` | `IDENTITY_DSN` | Identity Service | The migration runner | The same, for the Identity Service. |
+| `public.schema_migrations_console` | `CONSOLE_DSN` | Publisher console | The migration runner | The same, for the console. |
 
 The tracking tables have deliberately different names and are all fixed to
 `public`. Two reasons. Creating the `fora` schema cannot change the default and
@@ -217,6 +228,12 @@ content catalog. Nothing creates this database for you either — create it befo
 start the service. Its settings are in
 [`src/identity/CONFIGURATION.md`](../../../src/identity/CONFIGURATION.md) §2.
 
+**The publisher console needs a database of its own as well.** It holds one table, who
+has signed in to the console, and nothing a publisher owns: publishers, sites and their
+terms all live in the Exchange's schema. Nothing creates this database for you either —
+create it before you start the console. Its settings are in
+[`src/console/CONFIGURATION.md`](../../../src/console/CONFIGURATION.md) §2.
+
 ### 3.1 One catalog database per Exchange
 
 **Two Exchange instances that are meant to serve different tenants must not share a
@@ -237,11 +254,12 @@ process.
 The same rule applies to the SoR database: one per Exchange, shared by that
 Exchange's replicas.
 
-> `10-create-exchange-dbs.sql`, in this directory, creates **six** extra databases:
-> two extra catalogs (`fora_b`, `fora_c`), three SoR databases (`fora_sor`,
-> `fora_sor_b`, `fora_sor_c`) and one for the Identity service (`identity`). It
-> exists **only** for the automated multi-Exchange test setup, where three
-> Exchanges run against one cluster. Do not run it.
+> `10-create-exchange-dbs.sql`, in this directory, creates **nine** extra databases:
+> three extra catalogs (`fora_b`, `fora_c`, `fora_d`), four SoR databases (`fora_sor`,
+> `fora_sor_b`, `fora_sor_c`, `fora_sor_d`), one for the Identity service (`identity`)
+> and one for the publisher console (`console`). It exists **only** for the automated
+> multi-Exchange test setup, where four Exchanges run against one cluster. Do not
+> run it.
 >
 > It is still worth reading. It is the shortest statement of the layout: each
 > Exchange gets a catalog database **and** a SoR database, and every one of them is
@@ -266,7 +284,8 @@ line per sequence, so a healthy Exchange boot logs **two** ([`DEPLOYMENT.md`](DE
 
 The Identity service, if you deploy it, follows the same pattern: schema `identity`,
 tracking table `public.schema_migrations_identity`, applied at its own boot against
-`IDENTITY_DSN`.
+`IDENTITY_DSN`. So does the publisher console: schema `console`, tracking table
+`public.schema_migrations_console`, against `CONSOLE_DSN`.
 
 **The running services never migrate backwards.** Every migration has a matching
 "down" file in the source tree, but the binaries only ever migrate *up*. Moving the
@@ -281,12 +300,13 @@ re-applied. See [`RUNBOOK.md`](RUNBOOK.md) §5.
 
 ### 4.1 Global uniqueness worth knowing
 
-Three constraints are global rather than per-tenant. They are the ones most likely
+Four constraints are global rather than per-tenant. They are the ones most likely
 to surprise you when a write is rejected.
 
 | Constraint | Scope | Why |
 |---|---|---|
-| `fora.tenants.domain` | Globally unique | The tenant's own domain. Catalog URLs are built from it, so it must name exactly one tenant. |
+| `fora.tenants.domain` | Globally unique | The seat's own hostname, which is the Exchange's. One seat per deployment, so it must name exactly one tenant. |
+| `fora.publisher_domains.domain` | Globally unique | One site belongs to one publisher, deployment-wide. Two publishers cannot claim the same hostname. |
 | `fora.catalog.uri` | **Globally unique — deliberately not per tenant** | A per-tenant key would let two tenants claim the same URL. Discovery resolves a URL to exactly one owning row, so the URL must belong to exactly one row across the whole catalog. |
 | `fora.transaction_log.idempotency_key` | Globally unique | The last guard against a double charge: a repeated request cannot produce a second charge. |
 
@@ -314,8 +334,8 @@ healthy, then start the rest.
 ## 5. Connection pooling
 
 **Count pools, not services.** The Broker opens one connection pool per process. The
-Exchange opens **two** — one per DSN it reads (§2.1). The Identity service, if you
-deploy it, opens one.
+Exchange opens **two** — one per DSN it reads (§2.1). The Identity service and the
+publisher console, if you deploy them, open one each.
 
 **FORA has no environment variable for pool sizing** — the services give the pool
 library no settings at all and let it use its own defaults.
@@ -371,7 +391,8 @@ deployment. That under-counts by nearly half, so count pools.
 The connections land on two different databases, but `max_connections` is a limit on
 the **server**, not on one database, so add them together.
 
-Add one more pool per Identity service replica if you deploy it.
+Add one more pool per Identity service replica, and one per publisher console
+replica, if you deploy them.
 
 ---
 
@@ -385,7 +406,7 @@ outside it.
 |---|---|---|
 | `sslmode=disable` in every DSN | The database is a container on the same private bridge. | Correct only while the connection stays on one host. Once it crosses a network every row travels in clear text, and on a network you do not control exclusively TLS is required. What the login exposes depends on the cluster's authentication method (§2.3). |
 | `POSTGRES_USER: fora` / `POSTGRES_PASSWORD: fora` | A throwaway container recreated on every run. | A published password. |
-| `10-create-exchange-dbs.sql` (this directory) | Creates six databases for the three-Exchange test setup (§3.1). | A single-Exchange deployment needs two of these six — one catalog and one SoR — and you create them yourself with your own names ([`DEPLOYMENT.md`](DEPLOYMENT.md) §2). |
+| `10-create-exchange-dbs.sql` (this directory) | Creates nine databases for the four-Exchange test setup (§3.1). | A single-Exchange deployment needs two of these nine — one catalog and one SoR — and you create them yourself with your own names ([`DEPLOYMENT.md`](DEPLOYMENT.md) §2). |
 | Host port publishing (`55432`, or an ephemeral port) | Lets a developer's `psql` reach the container. | Exposes the database beyond its network. |
 | The `pgdata` named volume | Convenient local persistence. | Not a backup, and not sized, monitored or replicated. |
 | A second PostgreSQL on `postgres:17-alpine`, service `zitadel-db` | Zitadel, the identity provider the dev stack runs, brings its own database. | It is not a FORA database. FORA never connects to it and no FORA DSN points at it. Do not confuse it with the `postgres:16-alpine` service that holds FORA's data (§1). |
@@ -409,6 +430,9 @@ BROKER_DSN=postgres://fora:<password>@<db-host>:5432/fora?sslmode=require
 
 # Identity Service — its own database. Only if you run that service.
 IDENTITY_DSN=postgres://fora:<password>@<db-host>:5432/identity?sslmode=require
+
+# Publisher console — its own database. Only if you run the console.
+CONSOLE_DSN=postgres://fora:<password>@<db-host>:5432/console?sslmode=require
 ```
 
 Cluster side:
@@ -416,7 +440,7 @@ Cluster side:
 | Item | Value |
 |---|---|
 | PostgreSQL version | 16 |
-| Databases | `fora` (catalog, shared with the Broker), `fora_sor` (System of Record), and `identity` if you run the Identity Service |
+| Databases | `fora` (catalog, shared with the Broker), `fora_sor` (System of Record), `identity` if you run the Identity Service, and `console` if you run the publisher console |
 | Owning role | `fora` (owns **every** database above; supplies the password) |
 | Extensions | none |
 | `max_connections` | leave at the cluster default; FORA's peak is in §5 |

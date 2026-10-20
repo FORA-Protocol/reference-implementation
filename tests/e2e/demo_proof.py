@@ -2,28 +2,41 @@
 
 Re-runnable proof that the live e2e stack ingests and serves the multi-publisher
 catalog through the REAL JSONL ingestion path. NOT a pytest module — a
-standalone script run against an already-up stack (`make e2e-up`):
+standalone script run from the host against an already-up stack with host
+ports (`make e2e-up E2E_HOST_PORTS=1`):
 
     uv run --project tests/e2e python tests/e2e/demo_proof.py
 
 What it does, end to end:
 
-1. Registers the three demo publisher tenants (one per edge runtime / signing
-   scheme) by DOMAIN — the Exchange derives the owning tenant from each ResourceEntry
-   domain via the UNIQUE fora.tenants.domain mapping, so the tenant the ingest
-   binary pushes under MUST be the domain's tenant.
-2. Registers the catalog-contributor pubkey (Gate 1) and the broker exchange row
-   (so the Broker can route a demo resolve to exchange:8081).
+1. Registers the Exchange SEAT (a fora.tenants row keyed on the exchange's own
+   hostname), the demo payee, and the three demo sites (one per edge runtime /
+   signing scheme), each listed ACTIVE on that seat. The Exchange resolves its
+   seat from EXCHANGE_DOMAIN and the entry's domain from fora.publisher_domains,
+   so the tenant the ingest binary pushes under is the SEAT's, and every site it
+   pushes for needs an active listing. No product surface creates these rows
+   yet, so they are written through harness/operator_writes.py, the harness's
+   one database writer, which names the missing surface for each.
+2. Nothing else is registered. The Exchange learns the catalog contributor's key
+   and the buyer's key from their own Web Bot Auth directories when each first
+   signs a call, and the Broker reads its exchange registry from its
+   configuration file at boot.
 3. Runs the production ingest binary `cmd/fora-ingest` ONCE PER FEED
    (philosophy/music/sfx), each as signed PushResources RPCs — one per
    submission of at most the wire bound; every demo feed fits in one. A
    non-zero exit (the binary exits non-zero on any refusal) fails the proof.
-4. DiscoverResources (via the Broker resolve surface) for a demo resource
-   (socrates) and prints its offer/terms — proving ingest+discovery on the real
-   catalog.
-5. A signed-URL fetch of the canary article thales-of-miletus.txt THROUGH the
+4. A Broker resolve for a demo resource (socrates), through the SDK's own
+   BrokerClient, which verifies the offer against exchange-a's published key —
+   proving ingest+discovery on the real catalog.
+5. A purchase of the canary article thales-of-miletus.txt through the Broker
+   (BrokerClient.execute), then a fetch of the signed URL it mints THROUGH the
    Cloudflare edge, asserting the body contains FORA-DEMO-CANARY-8FK3J2-0418 —
-   proving ingest -> discover -> sign -> edge -> origin.
+   proving ingest -> discover -> buy -> sign -> edge -> origin.
+
+The SDK's guarded client refuses plaintext http and loopback addresses unless
+ALLOW_INSECURE and SKIP_SSRF are set, and this script reads the exchange's key
+directory from a loopback port over http. So it sets both for its own process
+when they are unset, exactly as the runner service does for the suite.
 
 Signed-URL host note: the Exchange signs the canonical `GET\n<url>` where the
 url host is the publisher domain with NO port (http://demo.fora-protocol.org/...).
@@ -34,36 +47,35 @@ verifies byte-for-byte.
 
 from __future__ import annotations
 
-import subprocess
+import os
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import httpx
-import psycopg
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tests" / "e2e"))
 
-from harness.broker_client import resolve  # noqa: E402
-from harness.catalog_push import load_public_key_bytes  # noqa: E402
+from harness._compose import host_project, resolve_host_port  # noqa: E402
+from harness.broker_purchase import only_item, resolve_offer  # noqa: E402
+from harness.sdk_client import offer_verifier, sdk_broker_client  # noqa: E402
 from harness.stack_urls import StackURLs  # noqa: E402
-from harness.resolve_carriers import (  # noqa: E402
-    licensed_of,
-    retrieval_endpoint_of,
-)
-from harness.exchanges import EXCHANGE_A_DOMAIN, EXCHANGE_A_INTERNAL_URL  # noqa: E402
+from harness.exchanges import EXCHANGE_A_DOMAIN, seat_tenant_id  # noqa: E402
 from harness.ingest_runner import ingest_succeeded, run_ingest  # noqa: E402
-from harness.seed import (  # noqa: E402
-    _broker_relay_pubkey_bytes,
-    _BROKER_RELAY_KID,
+from harness.operator_writes import (  # noqa: E402
+    list_site_on_seat,
+    pg_dsn,
+    provision_seat,
+    register_publisher,
+    register_site,
 )
-from harness.signing import AGENT_E2E_KEY_PATH  # noqa: E402
+from harness.seed import DEMO_PUBLISHER_ID, DEMO_PUBLISHER_NAME  # noqa: E402
 
 COMPOSE_FILE = REPO_ROOT / "docker-compose.e2e.yml"
 CONTRIBUTOR_KEY = (
     REPO_ROOT / "tests" / "e2e" / "harness" / "fixtures" / "catalog_contributor_key.json"
 )
-CONTRIBUTOR_ID = "catalog-contributor-e2e"
 
 # Feed paths are REPO_ROOT-relative because ingest runs with cwd=REPO_ROOT.
 CATALOG_DIR_REL = "tests/e2e/harness/fixtures/catalog"
@@ -78,49 +90,51 @@ CATALOG_DIR_REL = "tests/e2e/harness/fixtures/catalog"
 # silently replace the catalog the tests expect, and the damage would surface as
 # unrelated tests failing on terms they never asked for.
 #
-# (tenant_id, domain, signing_scheme, feed file, edge service, edge container port).
+# The signing scheme is a fact about the site's CDN, so it is written on the
+# site's fora.publisher_domains row. No tenant id appears here: this script
+# drives one exchange, and its seat is the single tenant every push names.
+#
+# (domain, signing_scheme, feed file, edge service).
 E2E_PUBLISHERS = [
     (
-        "tenant-demo-philosophy",
         "demo.fora-protocol.org",
         "ED25519",
         f"{CATALOG_DIR_REL}/philosophy.jsonl",
         "edge",
-        8787,
     ),
     (
-        "tenant-demo-music",
         "music.demo.fora-protocol.org",
         "ED25519",
         f"{CATALOG_DIR_REL}/music.jsonl",
         "fastly-edge",
-        7676,
     ),
     (
-        "tenant-demo-sfx",
         "sfx.demo.fora-protocol.org",
         "AWS_CLOUDFRONT_RSA",
         f"{CATALOG_DIR_REL}/sfx.jsonl",
         "aws-edge",
-        8788,
     ),
 ]
 
-ED25519_KEY_REF = "exchange-primary"
-RSA_KEY_REF = "cf-rsa-primary"
+# The seat this script drives: exchange-a, addressed by its own hostname. Every
+# push names it, and all three demo sites are listed on it because this script
+# sends all three feeds to that one exchange.
+SEAT_TENANT_ID = seat_tenant_id(EXCHANGE_A_DOMAIN)
+SEAT_DOMAIN = EXCHANGE_A_DOMAIN
 
-# The buyer this proof runs as. It is NOT funded, and cannot be: the in-memory
-# billing adapter denominates every balance in one currency, billing.DemoCurrency
-# ("USD"), and its seed loader drops any EXCHANGE_BILLING_SEED entry in another
-# currency. Registration then gives this agent a zero USD account.
+# The buyer this proof runs as. This script never registers it, so on a stack
+# only this script has seeded the agent holds
+# no account, and a paid purchase is refused ACCOUNT_NOT_REGISTERED. The pytest
+# seed registers it, and its first Register grants the welcome credit in USD and
+# EUR.
 #
-# That is enough for what this script proves. The resources it walks — socrates
-# for discovery, thales for the canary fetch — are reached on terms whose charge
-# is zero, and a zero charge skips the currency and balance gates. Point it at a
-# PRICED term and Authorize refuses with "currency mismatch".
+# socrates, the discovery resource, carries a FREE term, and a zero charge never
+# reaches the billing gate. thales, the canary, does not: the e2e catalog feed
+# prices it FLAT 9.99 EUR. So the canary purchase needs the account the pytest
+# seed opens, and this script does not open one itself.
 #
-# Its kid == agent_id so the Broker self-act gate (verified keyID == req.agent_id)
-# admits it.
+# Its kid == agent_id so the requester label matches the signing agent in the
+# evidence rows.
 DEMO_AGENT_ID = "agent-demo-eur"
 DEMO_AGENT_KEY_PATH = (
     REPO_ROOT / "tests" / "e2e" / "harness" / "fixtures" / "agent_demo_eur_key.json"
@@ -128,117 +142,22 @@ DEMO_AGENT_KEY_PATH = (
 
 
 def _port(service: str, container_port: int) -> str:
-    out = subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "port", service, str(container_port)],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    # "0.0.0.0:57003" -> "127.0.0.1:57003"
-    return out.replace("0.0.0.0", "127.0.0.1")
+    # The stack publishes host ports only when brought up with
+    # docker-compose.e2e.ports.yml, which binds them to loopback.
+    port = resolve_host_port(COMPOSE_FILE, service, container_port, project=host_project())
+    return f"127.0.0.1:{port}"
 
 
-def _pg_dsn() -> str:
-    hostport = _port("postgres", 5432)
-    return f"postgres://fora:fora@{hostport}/fora"
+def _register_seat_and_payee(dsn: str) -> None:
+    """Create the exchange's seat and the demo payee, through the harness's operator writes."""
+    provision_seat(dsn, tenant_id=SEAT_TENANT_ID, domain=SEAT_DOMAIN, allow_broker_relay=True)
+    register_publisher(dsn, publisher_id=DEMO_PUBLISHER_ID, display_name=DEMO_PUBLISHER_NAME)
 
 
-def _register_tenant(dsn: str, tenant_id: str, domain: str, scheme: str) -> None:
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT tenant_id FROM fora.tenants WHERE domain = %s", (domain,))
-        row = cur.fetchone()
-        if row is not None:
-            return
-        if scheme == "AWS_CLOUDFRONT_RSA":
-            cur.execute(
-                """
-                INSERT INTO fora.tenants (
-                    tenant_id, domain, ed25519_key_ref,
-                    reporting_policy, signing_scheme, rsa_key_ref, cloudfront_key_pair_id
-                ) VALUES (%s, %s, %s, '{}', 'AWS_CLOUDFRONT_RSA', %s, %s)
-                """,
-                (tenant_id, domain, ED25519_KEY_REF, RSA_KEY_REF, RSA_KEY_REF),
-            )
-        else:
-            cur.execute(
-                """
-                INSERT INTO fora.tenants (
-                    tenant_id, domain, ed25519_key_ref,
-                    reporting_policy, signing_scheme
-                ) VALUES (%s, %s, %s, '{}', 'ED25519')
-                """,
-                (tenant_id, domain, ED25519_KEY_REF),
-            )
-        conn.commit()
-
-
-def _register_contributor_and_exchange(dsn: str) -> None:
-    pub = load_public_key_bytes(CONTRIBUTOR_KEY)
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO fora.agents (agent_id, public_key, requester_type)
-            VALUES (%s, %s, 'AGENT')
-            ON CONFLICT (agent_id) DO UPDATE SET public_key = EXCLUDED.public_key
-            """,
-            (CONTRIBUTOR_ID, pub),
-        )
-        cur.execute(
-            """
-            INSERT INTO fora.agents (agent_id, public_key, requester_type)
-            VALUES ('agent-e2e', %s, 'AGENT')
-            ON CONFLICT (agent_id) DO UPDATE SET public_key = EXCLUDED.public_key
-            """,
-            (load_public_key_bytes(AGENT_E2E_KEY_PATH),),
-        )
-        cur.execute(
-            """
-            INSERT INTO fora.agents (agent_id, public_key, requester_type)
-            VALUES (%s, %s, 'AGENT')
-            ON CONFLICT (agent_id) DO UPDATE SET public_key = EXCLUDED.public_key
-            """,
-            (DEMO_AGENT_ID, load_public_key_bytes(DEMO_AGENT_KEY_PATH)),
-        )
-        # Broker outbound-relay identity: the Broker signs the relayed
-        # ExecuteTransaction with this kid, so the Exchange's resolveCaller must
-        # find it classified as BROKER (else "caller keyID ... not registered").
-        cur.execute(
-            """
-            INSERT INTO fora.agents (agent_id, public_key, requester_type)
-            VALUES (%s, %s, 'BROKER')
-            ON CONFLICT (agent_id) DO UPDATE SET
-                public_key = EXCLUDED.public_key,
-                requester_type = EXCLUDED.requester_type
-            """,
-            (_BROKER_RELAY_KID, _broker_relay_pubkey_bytes()),
-        )
-        # The registry row and the recipient every push names must be the same
-        # exchange, or the demo routes to one and addresses the other. Both come
-        # from the constant, so they cannot be kept equal by hand and then not
-        # be.
-        cur.execute("SELECT 1 FROM broker.exchanges WHERE domain = %s", (EXCHANGE_A_DOMAIN,))
-        if cur.fetchone() is None:
-            cur.execute(
-                """
-                INSERT INTO broker.exchanges (
-                    exchange_id, domain, endpoint, trust_level,
-                    supported_profiles, priority, probe_state
-                ) VALUES ('ex-demo', %s, %s,
-                          'VERIFIED', '["fora-news-v1"]'::jsonb, 10, 'LIVE')
-                """,
-                (EXCHANGE_A_DOMAIN, EXCHANGE_A_INTERNAL_URL),
-            )
-        conn.commit()
-
-
-def _enable_broker_relay(dsn: str, domain: str) -> None:
-    """Opt a demo tenant into broker-relayed ExecuteTransaction (defaults FALSE)."""
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute(
-            "UPDATE fora.tenants SET allow_broker_relay = TRUE WHERE domain = %s",
-            (domain,),
-        )
-        conn.commit()
+def _register_site(dsn: str, domain: str, scheme: str) -> None:
+    """Register one site and list it ACTIVE on this seat, through the harness's operator writes."""
+    register_site(dsn, domain=domain, publisher_id=DEMO_PUBLISHER_ID, scheme=scheme)
+    list_site_on_seat(dsn, tenant_id=SEAT_TENANT_ID, domain=domain)
 
 
 def _ingest(exchange_url: str, tenant_id: str, feed: str) -> None:
@@ -263,11 +182,11 @@ def _ingest(exchange_url: str, tenant_id: str, feed: str) -> None:
 
 
 def main() -> None:
-    dsn = _pg_dsn()
+    dsn = pg_dsn(str(COMPOSE_FILE), "fora")
     exchange_url = f"http://{_port('exchange', 8081)}"
     broker_url = f"http://{_port('broker', 8082)}"
-    # harness.broker_client.resolve only consumes compose_stack.broker; the edge
-    # fetch below keeps demo_proof's own port logic (container 8787, not 80).
+    # The SDK Broker client only consumes stack.broker; the edge fetch below
+    # looks up the edge's own host port (every edge listens on 80).
     stack = StackURLs(
         exchange=exchange_url,
         # The multi-exchange topology and the identity service are not part of
@@ -275,6 +194,7 @@ def main() -> None:
         # a future field addition surfaces here instead of silently binding.
         exchange_b="",
         exchange_c="",
+        exchange_d="",
         broker=broker_url,
         edge="",
         aws_edge="",
@@ -285,56 +205,44 @@ def main() -> None:
         zitadel="",
     )
 
-    print("== item 2: register demo tenants + contributor + exchange ==")
-    for tenant_id, domain, scheme, _feed, _svc, _p in E2E_PUBLISHERS:
-        _register_tenant(dsn, tenant_id, domain, scheme)
-        _enable_broker_relay(dsn, domain)
-        print(f"  tenant {tenant_id} ({domain}, {scheme})")
-    _register_contributor_and_exchange(dsn)
+    print("== item 2: register the seat and the demo sites ==")
+    _register_seat_and_payee(dsn)
+    print(f"  seat {SEAT_TENANT_ID} ({SEAT_DOMAIN})")
+    for domain, scheme, _feed, _svc in E2E_PUBLISHERS:
+        _register_site(dsn, domain, scheme)
+        print(f"  site {domain} ({scheme}), listed active")
 
     print("== item 2: ingest all three demo feeds via cmd/fora-ingest ==")
-    for tenant_id, _domain, _scheme, feed, _svc, _p in E2E_PUBLISHERS:
-        _ingest(exchange_url, tenant_id, feed)
+    for _domain, _scheme, feed, _svc in E2E_PUBLISHERS:
+        _ingest(exchange_url, SEAT_TENANT_ID, feed)
 
-    print("== item 3: DiscoverResources for socrates ==")
-    socrates = "http://demo.fora-protocol.org/articles/philosophers/socrates.txt"
-    resp = resolve(
-        stack,
-        {
-            "agent_id": DEMO_AGENT_ID,
-            "uri": socrates,
-            "intended_use": "ai-input",
-        },
-        key_path=DEMO_AGENT_KEY_PATH,
+    os.environ.setdefault("ALLOW_INSECURE", "true")
+    os.environ.setdefault("SKIP_SSRF", "true")
+    # From the host, exchange-a's domain resolves to nothing, so its key
+    # directory is read from the mapped port; the key is still filed under the
+    # domain every offer names.
+    verifier = offer_verifier(
+        [EXCHANGE_A_DOMAIN], dial={EXCHANGE_A_DOMAIN: _port("exchange", 8081)}
     )
-    print(f"  resolve status={resp.status_code}")
-    print(f"  body={resp.text}")
-    payload = resp.json()
-    if not licensed_of(payload):
-        msg = "socrates resolve did not return a licensed offer"
-        raise SystemExit(msg)
+    buyer = sdk_broker_client(stack, verifier, agent_id=DEMO_AGENT_ID, key_path=DEMO_AGENT_KEY_PATH)
 
-    print("== item 4: signed-URL canary fetch through the Cloudflare edge ==")
-    canary = "http://demo.fora-protocol.org/articles/philosophers/thales-of-miletus.txt"
-    resp = resolve(
-        stack,
-        {
-            "agent_id": DEMO_AGENT_ID,
-            "uri": canary,
-            "intended_use": "ai-input",
-        },
-        key_path=DEMO_AGENT_KEY_PATH,
-    )
-    payload = resp.json()
-    signed = retrieval_endpoint_of(payload)
-    print(f"  resolve status={resp.status_code} licensed={licensed_of(payload)}")
+    with closing(buyer) as client:
+        print("== item 3: Broker resolve for socrates ==")
+        socrates = "http://demo.fora-protocol.org/articles/philosophers/socrates.txt"
+        offer = resolve_offer(client, socrates)
+        print(f"  verified offer {offer.offer.get('offer_id')} from {offer.offer.get('exchange')}")
+
+        print("== item 4: buy the canary, then fetch its signed URL through the Cloudflare edge ==")
+        canary = "http://demo.fora-protocol.org/articles/philosophers/thales-of-miletus.txt"
+        item = only_item(client.execute([resolve_offer(client, canary)]), "canary purchase")
+    signed = item.retrieval_endpoint
     print(f"  retrievalEndpoint={signed}")
     if not signed:
-        print(f"  body={resp.text}")
-        msg = "canary resolve returned no retrievalEndpoint"
+        print(f"  item={item}")
+        msg = "canary purchase returned no retrievalEndpoint"
         raise SystemExit(msg)
 
-    edge_hostport = _port("edge", 8787)
+    edge_hostport = _port("edge", 80)
     # Replace the signed URL's host:port with the host-mapped edge, but stamp the
     # original (port-less) Host so the edge reconstructs the signed authority.
     fetch_url = signed.replace("http://demo.fora-protocol.org", f"http://{edge_hostport}")

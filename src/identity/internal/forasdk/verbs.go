@@ -43,6 +43,49 @@ func (c *Client) Resolve(ctx context.Context, req *forav1.DiscoveryRequest) (cor
 	return broker.Resolve(ctx, req)
 }
 
+// Execute buys the offers req carries through the Broker
+// (BrokerService.ExecuteTransaction), however many Exchanges issued them, and
+// returns the Broker's combined answer.
+//
+// req supplies three things and nothing else: the requester, each item's offer,
+// and the idempotency key. The SDK builds the request from them — each item's
+// detached acceptance and the request acceptance over the complete ordered set,
+// signed with the calling agent's custodied key — so the acceptances are signed
+// by the key the Exchange will bind each delivery URL to, and the transport is
+// signed by the same key.
+//
+// The offers are passed to the SDK unverified (core.Off). The agent hands back
+// offers fora_discover showed it, which the Broker leg already verified there;
+// and the Exchange that issued each offer is the party that authoritatively
+// checks its signature and expiry at purchase, answering per item with
+// SIGNATURE_INVALID or OFFER_EXPIRED. Verifying again here would turn that typed
+// per-item answer into a local refusal of the whole call. The SDK still refuses
+// an unsigned offer, or one naming no Exchange, before anything is sent.
+//
+// The delivery URLs in the answer are returned as the Exchanges issued them. The
+// protocol leaves verifying a delivery URL to the edge that serves it, which is
+// the party holding the scheme and the key, so an agent does not check one
+// before fetching it.
+//
+// An Exchange that refused its whole sub-request is not an error: the call
+// succeeds and the affected items carry an UpstreamRefusal. Only the Broker's own
+// refusals return an error, and then nothing was bought.
+func (c *Client) Execute(
+	ctx context.Context, req *forav1.TransactionRequest,
+) (*forav1.BrokerTransactionResponse, error) {
+	opts, err := c.callOptions(ctx, "execute")
+	if err != nil {
+		return nil, err
+	}
+	offers := make([]*forav1.Offer, 0, len(req.GetItems()))
+	for _, item := range req.GetItems() {
+		offers = append(offers, item.GetOffer())
+	}
+	unverified := core.NewVerifier(core.Off, nil, nil).Sort(ctx, offers).Verified
+	broker := connect.NewBrokerClient(c.brokerURL, append(opts, connect.WithRequester(req.GetRequester()))...)
+	return broker.Execute(ctx, unverified, connect.WithIdempotencyKey(req.GetIdempotencyKey()))
+}
+
 // ReportUsage files a usage report with the Exchange that ISSUED the offer.
 //
 // The destination is read off the report's own exchange field and resolved
@@ -87,10 +130,15 @@ func (c *Client) ContentSession(ctx context.Context) (ContentFetch, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A method value, so the client it is bound to lives exactly as long as the
+	// A closure over one client, so the client lives exactly as long as the
 	// fetches that use it and there is no handle type whose only job is to hold
-	// one field.
-	return connect.NewClient(homeExchangePlaceholder, opts...).Fetch, nil
+	// one field. It names no issuing Exchange: the SDK's Fetch reads no call
+	// option and sends the URL as given, because verifying a delivery URL is the
+	// job of the edge that serves it, as Execute's comment says.
+	client := connect.NewClient(homeExchangePlaceholder, opts...)
+	return func(ctx context.Context, signedURL string) (resolvers.Content, error) {
+		return client.Fetch(ctx, signedURL)
+	}, nil
 }
 
 // notSignable classifies a local failure to produce the credentials a call is
@@ -133,14 +181,13 @@ func (c *Client) callOptions(ctx context.Context, op string) ([]connect.ClientOp
 	// is then rejected and nothing on this side names why.
 	//
 	// The rule that a keyid must identify its key belongs to whoever owns outbound
-	// signing keys, and asking it here rather than restating it is what stops this
-	// service's two outbound paths answering differently — the legs foraclient
-	// still carries have run this check all along.
+	// signing keys (forahttpsig), and asking it here rather than restating it is
+	// what keeps every outbound leg answering the same way.
 	//
 	// Not reachable through the MCP surface: arranging it needs a key-store record
 	// whose thumbprint disagrees with its key, which only a test writing past the
 	// repository layer could produce. The rule keeps its own test where it is
-	// defined; what this line buys is that both paths ask the same question.
+	// defined.
 	key, err = forahttpsig.CompleteKey(key)
 	if err != nil {
 		return nil, notSignable(op, err)
@@ -160,6 +207,14 @@ func (c *Client) callOptions(ctx context.Context, op string) ([]connect.ClientOp
 		connect.WithSignWindow(c.signWindow),
 		connect.WithProofWindow(c.proofWindow),
 		connect.WithEndpointResolver(c.endpoints),
+		// The registration leg's own manifest read. It is a separate face from
+		// the endpoint resolver on purpose: the contract requires a registering
+		// client to echo a terms digest read from a FRESHLY fetched manifest, and
+		// the endpoint resolver is built out of the per-host cache that rule
+		// forbids. Passed to every client rather than only the account one,
+		// because these options are the whole outbound posture and a per-verb
+		// subset is somewhere the two could come apart.
+		connect.WithRegistrationRequirements(c.requirements),
 		// The Broker's own leg. Its timeout is the operator's to set; the
 		// offer-derived leg carries its own deadline inside the SDK.
 		connect.WithHTTPClient(&http.Client{Transport: c.homeBase, Timeout: c.timeout}),
@@ -175,9 +230,9 @@ func (c *Client) callOptions(ctx context.Context, op string) ([]connect.ClientOp
 		// one when the context carries none, which keeps a log line correlatable
 		// even on a path that lost the header.
 		//
-		// It reaches all THREE legs, including the delivery fetch — which is worth
+		// It reaches every leg, including the delivery fetch — which is worth
 		// saying because that one is not an RPC and does not correlate the way the
-		// other two do. The RPC legs stamp the header from an interceptor; a plain
+		// four RPCs do. The RPC legs stamp the header from an interceptor; a plain
 		// GET never traverses one, so the fetcher takes this same mint through its
 		// own hook. Dropping this option does not leave the fetch bare: the SDK
 		// falls back to its own mint, so the edge records the delivery under an id

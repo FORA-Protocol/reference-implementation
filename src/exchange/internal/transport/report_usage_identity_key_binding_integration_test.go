@@ -53,7 +53,7 @@ func TestReportUsage_SignerKeyMustMatchCallerDirectory_ImpersonationRejected(t *
 	h.addCallerWithKey(t, "victim.example", "AGENT")
 	// attacker.example: a registered agent pinned to keyB, so keyB is resolver-known
 	// and the transport signature the attacker produces will verify.
-	_, _, attackerPriv := h.addCallerWithKey(t, "attacker.example", "AGENT")
+	_, attackerPriv := h.addCallerWithKey(t, "attacker.example", "AGENT")
 
 	// The attack: sign with attacker's keyB but claim Signature-Agent: victim.example.
 	impersonatingClient := foraconnect.NewExchangeServiceClient(

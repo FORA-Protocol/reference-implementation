@@ -20,6 +20,7 @@ import (
 	"github.com/FORA-Protocol/protocol/sdk/go/connectserver"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	"github.com/FORA-Protocol/protocol/sdk/go/resolvers"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/agentkeys"
@@ -28,12 +29,14 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/foraaudience"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/server"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/logging"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/replay"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/runhttp"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/budget"
 	brokerdb "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/db"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/exa"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/probe"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/purchase"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/rediscli"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/registry"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/repo"
@@ -48,8 +51,15 @@ func main() {
 	// distroless image has no shell or curl, so the compose healthcheck
 	// execs the service binary itself.
 	runhttp.MaybeHealthcheck("BROKER_ADDR", ":8082")
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	if err := run(logger); err != nil {
+	// A BROKER_LOG_LEVEL that is not a level stops the boot here, before
+	// anything connects, through the same broker.exit record as every other
+	// start-up failure.
+	const levelVar = "BROKER_LOG_LEVEL"
+	logger, err := logging.Setup(os.Stdout, levelVar, runhttp.EnvTrimmed(levelVar))
+	if err == nil {
+		err = run(logger)
+	}
+	if err != nil {
 		logger.Error("broker.exit", "err", err)
 		os.Exit(1)
 	}
@@ -64,17 +74,18 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := db.Setup(ctx, db.SetupOptions{
-		DSN:             runhttp.EnvOr("BROKER_DSN", ""),
-		Migrations:      brokerdb.Migrations,
-		MigrationsDir:   brokerdb.MigrationsDir,
-		MigrationsTable: brokerdb.MigrationsTable,
-	}, logger)
+	// The Broker's identity is read first, before anything connects: a
+	// Signature-Agent origin every verifier would refuse stops the boot here
+	// rather than after the database and Redis are up.
+	brokerDomain := runhttp.EnvOr("BROKER_DOMAIN", "broker.local")
+	brokerOrigin, err := brokerPublicOrigin(brokerDomain)
 	if err != nil {
-		return fmt.Errorf("db setup: %w", err)
+		return err
 	}
-	if pool == nil {
-		return errors.New("BROKER_DSN is required")
+
+	pool, err := setupPool(ctx, logger)
+	if err != nil {
+		return err
 	}
 	defer pool.Close()
 
@@ -87,8 +98,7 @@ func run(logger *slog.Logger) error {
 	}
 
 	brokerID := runhttp.EnvOr("BROKER_ID", "broker-local")
-	brokerDomain := runhttp.EnvOr("BROKER_DOMAIN", "broker.local")
-	signer, err := signing.LoadFromEnv(brokerDomain, brokerID, clock.System{})
+	signer, err := signing.LoadFromEnv(brokerDomain, clock.System{})
 	if err != nil {
 		return fmt.Errorf("signer setup: %w", err)
 	}
@@ -98,24 +108,26 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	discovery := buildDiscoveryClient(logger)
-	fetchWiring := buildFetchWiring(ctx, logger)
-	identity, err := setupRelayAndKeys(logger, brokerDomain)
+	querySearcher, err := buildQuerySearcher(ctx, logger)
 	if err != nil {
 		return err
 	}
-	budgetSvc := budget.Select(redisCli, 0, clock.System{})
+	fetchWiring := buildFetchWiring(ctx, logger)
+	identity, err := setupRelayAndKeys(logger, brokerDomain, brokerOrigin)
+	if err != nil {
+		return err
+	}
 
 	mux, wk, err := buildBrokerMux(brokerMuxDeps{
 		pool: pool,
 		resolveDeps: resolve.Deps{
 			Exchanges: exchangeRepo,
 			Log:       logRepo,
-			Discovery: discovery,
+			Discovery: buildDiscoveryClient(logger),
+			Query:     querySearcher,
 			Prober:    fetchWiring.prober,
 			Exchange:  identity.relay,
-			Budget:    budgetSvc,
-			Signer:    signer,
+			Budget:    budget.Select(redisCli, 0, clock.System{}),
 			Endpoints: fetchWiring.endpoints,
 			Clk:       clock.System{},
 			Verifier:  fetchWiring.verifier,
@@ -123,6 +135,7 @@ func run(logger *slog.Logger) error {
 		signer:        signer,
 		brokerID:      brokerID,
 		ownKeys:       identity.ownKeys,
+		ownSigners:    identity.ownSigners,
 		agentResolver: fetchWiring.agentResolver,
 		redisCli:      redisCli,
 		audience:      identity.audience,
@@ -132,8 +145,7 @@ func run(logger *slog.Logger) error {
 	}
 
 	// Launch refresher goroutine — fire-and-forget; newHealthProbeClient says why the probe dials through the guard.
-	refresher := registry.NewRefresher(exchangeRepo, fetchWiring.endpoints, newHealthProbeClient(), logger, 0)
-	go refresher.Run(ctx)
+	go newRegistryRefresher(exchangeRepo, fetchWiring.endpoints, logger).Run(ctx)
 
 	// Keep the served discovery documents fresh: their validity windows are
 	// stamped from the signer clock at each build, so a long-lived Broker must
@@ -141,17 +153,32 @@ func run(logger *slog.Logger) error {
 	// copies, never the live service.
 	go wk.RunRefresher(ctx, transport.WellKnownRebuildInterval, logger)
 
-	// Request-id is outermost so every route (healthz, well-known, relay) carries
+	// Request-id is outermost so every route (healthz, well-known, revocation) carries
 	// request_id in context and echoes X-Request-ID on responses. The
 	// BrokerService connectserver handler (mounted inside buildBrokerMux) adds its
 	// own request-id layer outermost to the /fora.v1.BrokerService subtree so that
 	// subtree carries the id on the reject path too. Having it here as well means
 	// ALL routes carry it, not just the BrokerService surface.
-	wrapped := buildWrapped(logger, mux)
-
-	addr := runhttp.EnvOr("BROKER_ADDR", ":8082")
-	runhttp.Serve("broker", addr, wrapped, logger)
+	runhttp.Serve("broker", runhttp.EnvOr("BROKER_ADDR", ":8082"), buildWrapped(logger, mux), logger)
 	return nil
+}
+
+// setupPool opens and migrates the Broker's database, refusing a boot with no
+// BROKER_DSN.
+func setupPool(ctx context.Context, logger *slog.Logger) (*pgxpool.Pool, error) {
+	pool, err := db.Setup(ctx, db.SetupOptions{
+		DSN:             runhttp.EnvOr("BROKER_DSN", ""),
+		Migrations:      brokerdb.Migrations,
+		MigrationsDir:   brokerdb.MigrationsDir,
+		MigrationsTable: brokerdb.MigrationsTable,
+	}, logger)
+	if err != nil {
+		return nil, fmt.Errorf("db setup: %w", err)
+	}
+	if pool == nil {
+		return nil, errors.New("BROKER_DSN is required")
+	}
+	return pool, nil
 }
 
 // buildWrapped assembles the Broker's outermost HTTP middleware: the shared
@@ -163,13 +190,14 @@ func buildWrapped(logger *slog.Logger, mux http.Handler) http.Handler {
 }
 
 // newRelayHTTPClient loads the broker-relay private key and builds an
-// *http.Client whose transport stamps RFC 9421 Signature headers on every
-// outbound Broker→Exchange call. When the key file is absent the returned client
+// *http.Client whose transport stamps the Broker's Web Bot Auth request
+// signature, naming origin as its Signature-Agent, on every outbound
+// Broker→Exchange call. When the key file is absent the returned client
 // carries the guard but no signer — callers hitting a signed Exchange will get
 // 401 but the Broker will still boot (useful for local dev without bootstrap).
 //
 // Both returns dial through the SDK guarded client, never http.DefaultTransport.
-// Nothing operator-written bounds this leg's target: the execute relay reads its
+// Nothing operator-written bounds this leg's target: the purchase service reads its
 // admission off the row it fetched by DOMAIN and then POSTs the agent's signed
 // offer to whatever that exchange's own well-known advertises. The SDK's host
 // anchoring compares host and port and deliberately leaves the scheme to the
@@ -182,7 +210,7 @@ func buildWrapped(logger *slog.Logger, mux http.Handler) http.Handler {
 // the guarded one, and the factory's redirect policy is carried across so a
 // redirect cannot walk the request onto a scheme the first hop was refused for.
 // Only the timeout is the relay's own.
-func newRelayHTTPClient(logger *slog.Logger, brokerDomain string) (*http.Client, *xclient.RelayKey, error) {
+func newRelayHTTPClient(logger *slog.Logger, origin string) (*http.Client, *xclient.RelayKey, error) {
 	guarded := resolvers.NewGuardedClientFromEnv()
 	relayClient := func(rt http.RoundTripper) *http.Client {
 		return &http.Client{
@@ -207,7 +235,7 @@ func newRelayHTTPClient(logger *slog.Logger, brokerDomain string) (*http.Client,
 	}
 	logger.Info("broker.relay.signing", "keyid", key.KeyID)
 	signing, err := xclient.NewSigningTransport(
-		guarded.Transport, key, brokerDomain, 30*time.Second, clock.System{},
+		guarded.Transport, key, origin, 30*time.Second, clock.System{},
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("broker-relay signing transport: %w", err)
@@ -229,68 +257,58 @@ type brokerMuxDeps struct {
 	// served WBA directory. It plays no part in verifying inbound signatures —
 	// see agentSig1Resolver.
 	ownKeys *transport.KeyRegistry
+	// ownSigners hold the private halves of ownKeys, so the served directory's
+	// response is signed by every key it lists.
+	ownSigners []helpers.Signer
 	// agentResolver is the per-agent well-known resolver — the way every agent
 	// key is learned. REQUIRED: buildBrokerMux refuses a nil (tests that never
 	// verify a signature pass transporttest.NeverResolves()).
 	agentResolver helpers.KeyResolver
-	// redisCli backs the relay route's own replay store (Redis when present,
-	// in-memory otherwise). The relay route is excluded from the connectserver
-	// gate, so it enforces sig1 (keyid,signature) uniqueness itself.
+	// redisCli backs the BrokerService seam's replay store (Redis when present,
+	// in-memory otherwise).
 	redisCli *redis.Client
 	// audience refuses a request addressed to a different party. Nothing this
-	// interceptor sees names one today: the only agent-facing BrokerService RPC
-	// is discovery, and DiscoveryRequest carries no recipient field, so there is
-	// nothing to compare rather than a comparison that passes.
-	//
-	// The Broker is a participant in the contract all the same. The fan-out legs
-	// it AUTHORS name the Exchange each one goes to, and the execute relay
-	// receives TransactionRequests whose items name the downstream Exchange —
-	// that route is not a Connect route and so runs beside this interceptor, with
-	// its own refusal for an item that names nobody (src/broker/internal/relay).
-	// Mounted here so an agent-facing RPC that gains a recipient later is guarded
-	// the day it does rather than the day somebody remembers.
+	// interceptor sees names the Broker today: DiscoveryRequest carries no
+	// recipient field, and the items of a TransactionRequest sent to
+	// ExecuteTransaction name the Exchanges the Broker routes them to, which the
+	// interceptor knows not to compare against the Broker. The fan-out legs the
+	// Broker AUTHORS name the Exchange each one goes to, and each Exchange checks
+	// them with this same interceptor. Mounted here so an agent-facing RPC that
+	// gains a recipient later is guarded the day it does rather than the day
+	// somebody remembers.
 	audience *foraaudience.Interceptor
 }
 
-// agentSig1Resolver returns the resolver both agent-facing surfaces verify an
-// agent's sig1 with. Both surfaces authenticate identically and MUST stay that
-// way: the bespoke relay routes (which self-verify at the boundary) and the
-// /fora.v1.BrokerService connectserver verify gate both drive the SDK verifier
-// with this one resolver (the per-agent well-known lookup, which learns every
-// agent key from the signer's own directory). If a surface ever needs a
-// genuinely different trust policy, encode it as an explicit parameter here
-// rather than forking a second copy.
+// agentSig1Resolver returns the resolver the agent-facing surface verifies an
+// agent's sig1 with: the /fora.v1.BrokerService connectserver verify gate drives
+// the SDK verifier with this one resolver (the per-agent well-known lookup,
+// which learns every agent key from the signer's own directory). If a surface
+// ever needs a genuinely different trust policy, encode it as an explicit
+// parameter here rather than forking a second copy.
 //
 // The Broker's own-key registry is deliberately NOT a delegate here: it holds
 // only keys whose private halves never sign an inbound request (the relay key
 // signs outbound Broker→Exchange calls), so a lookup over it could never match
 // an inbound signature — it exists solely to build the served WBA directory.
 //
-// Revocation is DELIBERATELY not enforced here: the returned resolver checks
-// no revocation channel, so an agent kid the operator has revoked but whose
-// directory still publishes it verifies at the Broker. That is by design —
-// the Broker only RELAYS (it never terminates a
-// transaction: it holds no funds and binds no delivery URL), and every relayed
-// request is re-verified downstream at the Exchange, which is the single
-// authoritative revocation checkpoint. The Exchange fails CLOSED (it refuses to
-// boot without EXCHANGE_BROKER_WELLKNOWN_URL) and its composite consults the
-// Broker's revocation channel FIRST, rejecting a revoked thumbprint even when
-// it is directory-absent (via the SDK revocation-set membership accessor) — so
-// a revoked key has a fail-closed checkpoint on the whole
-// Agent→Broker→Exchange path. Duplicating that check at the Broker would need
-// the Broker to CONSUME its own revocation channel (it currently only
-// PUBLISHES one, via BROKER_REVOCATION_URL/_FILE, for the Exchange to poll) —
-// added inbound revocation infra for no security gain, since the terminal
-// checkpoint already covers this path. Should the Broker ever gain a terminal
-// (non-relay) agent surface, a revocation-aware delegate belongs here FIRST,
-// mirroring the Exchange's brokerRevocationResolver.
+// Revocation is scoped to the signer: an agent's key is revoked only by its own
+// directory's revocation list, never by another party's. The resolver this
+// returns is the SDK WBAKeyResolver behind internal/agentkeys, which reads each
+// signer's directory under that directory's own list, so a key its agent
+// revoked is refused here. The Broker's own list, which it publishes via
+// BROKER_REVOCATION_URL/_FILE for the Exchange to poll, revokes only the
+// Broker's keys, so this Broker has no reason to consume it. The Exchange
+// resolves each signature the same way, in the directory that signature's own
+// member names; on a purchase this Broker relays, it verifies the agent's
+// acceptances against the agent key it holds for that directory.
 func (d brokerMuxDeps) agentSig1Resolver() helpers.KeyResolver {
 	return d.agentResolver
 }
 
 // buildBrokerMux assembles the Broker's HTTP surface: healthz, the canonical
-// fora.v1.BrokerService Connect endpoint, the bespoke relay
-// routes, and the unified /.well-known/fora.json route. It also returns the
+// fora.v1.BrokerService Connect endpoint (Resolve and ExecuteTransaction) and
+// the unified /.well-known/fora.json route.
+// It also returns the
 // well-known handler pair so run() can keep the served documents fresh with
 // RunRefresher — the published validity windows are stamped at build time, so
 // a never-rebuilt document lapses under uptime.
@@ -309,17 +327,16 @@ func buildBrokerMux(d brokerMuxDeps) (*http.ServeMux, server.Handlers, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz(d.pool))
 	resolveHandler := resolve.NewService(d.resolveDeps)
-	// ADR-019: the canonical fora.v1.BrokerService/Resolve Connect
-	// endpoint is the SOLE agent surface over the *Service business core
-	// (the bespoke POST /broker/v1/resolve route was removed in the contract
-	// cleanup). connectserver.NewBrokerServiceHandler wraps the generated handler
+	// ADR-019: the canonical fora.v1.BrokerService Connect endpoint is the SOLE
+	// agent surface over the resolve and purchase business cores (the bespoke
+	// POST /broker/v1/resolve and /broker/v1/exchange/execute routes were
+	// removed). connectserver.NewBrokerServiceHandler wraps the generated handler
 	// with request-id (outermost) → RFC 9421 verify middleware → connect
 	// interceptors (protovalidate bidirectional). MaxSignatures is unset (0 =
 	// unbounded): the hop bound is an Exchange-terminal policy; bounding it at the
 	// Broker too would double-count the relay hop the Broker is about to add.
 	// The resolver and replay store for the BrokerService surface are
-	// constructed inline from the same agentResolver and redisCli that the
-	// relay routes also draw from.
+	// constructed inline from agentResolver and redisCli.
 	brokerResolver := d.agentSig1Resolver()
 	replayStore := replay.NewCoreAdapter(replay.NewStore(d.redisCli, "httpsig:broker:replay:"))
 	// Built by the function the integration harness builds it with, so the mount
@@ -331,12 +348,17 @@ func buildBrokerMux(d brokerMuxDeps) (*http.ServeMux, server.Handlers, error) {
 	if err != nil {
 		return nil, server.Handlers{}, err
 	}
+	// The purchase service resolves each signed offer.exchange to the endpoint
+	// the Exchange advertises in its own /.well-known/fora.json through the SAME
+	// shared resolver discovery uses (resolveDeps.Endpoints) — one guarded
+	// instance carrying the env-guarded SSRF client, so a registered domain that
+	// rebinds to a private address is refused at dial time, not merely
+	// string-checked by the registry gate before the fetch.
+	purchaseSvc := purchase.New(d.resolveDeps.Exchanges, d.resolveDeps.Endpoints, d.resolveDeps.Exchange)
 	connectPath, connectHandler := connectserver.NewBrokerServiceHandler(
-		transport.NewBrokerConnectHandler(resolveHandler), svrOpts...,
+		transport.NewBrokerConnectHandler(resolveHandler, purchaseSvc), svrOpts...,
 	)
 	mux.Handle(connectPath, connectHandler)
-	mountExchangeRelay(mux, d)
-	mountDiscoverRelay(mux, d)
 	// BROKER_REVOCATION_URL is advertised in the WBA directory as revocation_url so
 	// the Exchange learns where to poll revocations; BROKER_REVOCATION_FILE is the
 	// operator's revoked-thumbprint lever served at the route below. Both unset →
@@ -347,6 +369,7 @@ func buildBrokerMux(d brokerMuxDeps) (*http.ServeMux, server.Handlers, error) {
 		Signer:        d.signer,
 		BrokerID:      d.brokerID,
 		Keys:          d.ownKeys,
+		KeySigners:    d.ownSigners,
 		RevocationURL: revURL,
 	})
 	if err != nil {
@@ -358,62 +381,15 @@ func buildBrokerMux(d brokerMuxDeps) (*http.ServeMux, server.Handlers, error) {
 	return mux, wk, nil
 }
 
-// mountExchangeRelay registers the bespoke relay route
-// POST /broker/v1/exchange/execute on the SAME mux as the Connect resolve
-// handler. The route is deliberately NON-/fora.-prefixed, so it sits outside
-// the BrokerService connectserver verify gate. The relay handler self-verifies
-// the agent's sig1 at the boundary (open-proxy guard) and enforces its OWN
-// relay-scoped replay store. sig1 is verified by agentSig1Resolver — the
-// per-agent well-known lookup (ADR-009 D2), which learns a never-seen agent's
-// key from the signer's own directory.
-
-// mountExchangeRelay wires the bespoke relay route. Each request surface takes
-// its own prefix-scoped replay.NewStore instance (a fresh store per call — the
-// in-memory branch relies on that for isolation) so the execute, discover, and
-// BrokerService surfaces never share a replay namespace.
-func mountExchangeRelay(mux *http.ServeMux, d brokerMuxDeps) {
-	resolver := d.agentSig1Resolver()
-	replayStore := replay.NewStore(d.redisCli, "httpsig:broker:relay:execute:")
-	// The relay resolves the signed Offer.exchange to the endpoint the Exchange
-	// advertises in its own /.well-known/fora.json through the SAME
-	// shared resolver discovery uses (resolveDeps.Endpoints) — one guarded
-	// instance, not a second inline build. The well-known GET is unsigned (the
-	// relay's signing transport is not used) and the shared resolver carries the
-	// env-guarded SSRF client, so a registered domain that rebinds to a private
-	// address is refused at dial time, not merely string-checked by the handler's
-	// pre-fetch GetByDomain trust gate.
-	relay := transport.NewExchangeRelayHandler(
-		d.resolveDeps.Exchange, resolver, d.resolveDeps.Endpoints, d.resolveDeps.Exchanges, clock.System{}, replayStore,
-	)
-	mux.Handle("POST /broker/v1/exchange/execute", relay)
-}
-
-// mountDiscoverRelay registers the bespoke known-URL discover-relay route
-// POST /broker/v1/exchange/discover — the discovery counterpart of
-// mountExchangeRelay. Like the execute relay it is deliberately NON-/fora.-
-// prefixed, so it sits outside the BrokerService connectserver verify gate.
-// The handler self-verifies the agent's sig1 at the boundary (open-proxy guard)
-// and enforces its OWN relay-scoped replay store under a DISTINCT key prefix
-// ("httpsig:broker:relay:discover:") so a discover sig1 and an execute sig1
-// occupy disjoint replay namespaces.
-func mountDiscoverRelay(mux *http.ServeMux, d brokerMuxDeps) {
-	resolver := d.agentSig1Resolver()
-	replayStore := replay.NewStore(d.redisCli, "httpsig:broker:relay:discover:")
-	relay := transport.NewDiscoverRelayHandler(
-		d.resolveDeps.Exchange, resolver, d.resolveDeps.Exchanges, clock.System{}, replayStore,
-	)
-	mux.Handle("POST /broker/v1/exchange/discover", relay)
-}
-
 // buildAgentResolver builds the per-agent well-known transport-key resolver
 // (ADR-009 D2): it resolves an agent's key from the agent's own
 // /.well-known/http-message-signatures-directory (the WBA directory the
-// Signature-Agent header names) so every agent's sig1 verifies at the resolve
-// gate and in the relay handler. This is the only way agent keys are learned — there is
+// Signature-Agent header names) so every agent's sig1 verifies at the
+// BrokerService gate. This is the only way agent keys are learned — there is
 // no static key file and no off switch, so there is nothing to announce at
 // boot; mirrors the Exchange-side resolver, which is equally silent.
 func buildAgentResolver(ctx context.Context, fetch *http.Client, logger *slog.Logger) helpers.KeyResolver {
-	return agentkeys.NewFromEnv(ctx, fetch, logger)
+	return agentkeys.NewService(ctx, fetch, logger)
 }
 
 // buildProbeWiring constructs the SSRF-guarded fetch client shared by the
@@ -427,9 +403,7 @@ func buildProbeWiring(
 	ctx context.Context, logger *slog.Logger,
 ) (*probe.Prober, helpers.KeyResolver) {
 	guardedFetch := resolvers.NewGuardedClientFromEnv()
-	prober := probe.New(guardedFetch, logger, probe.Options{
-		Scheme: runhttp.EnvOr("FORA_WELLKNOWN_SCHEME", "https"),
-	})
+	prober := probe.New(guardedFetch, logger, probe.Options{Scheme: wellKnownScheme()})
 	return prober, buildAgentResolver(ctx, guardedFetch, logger)
 }
 

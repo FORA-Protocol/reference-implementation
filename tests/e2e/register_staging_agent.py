@@ -25,9 +25,10 @@ Preconditions the Exchange enforces, in the order you will hit them:
 
 1. The caller must resolve to a row in fora.agents whose stored public key is
    the one that signed this request — seed-staging.sh's SQL step.
-2. The tenant named by EXCHANGE_DEFAULT_TENANT must exist, because Register
-   reads its agent-activation policy. The stack points that at the publisher
-   hostname the seed creates the tenant under.
+2. The seat named by EXCHANGE_DEFAULT_TENANT must exist, because Register reads
+   its agent-activation policy. A fora.tenants row is the Exchange's own selling
+   identity, so the stack points that at the Exchange's own hostname — not at a
+   publisher's — and seed-staging.sh refuses to run unless the two agree.
 3. Where the Exchange publishes a registration schema, registration_data must
    conform to it. Publishing a schema is what turns this check on, so an
    Exchange that publishes none accepts whatever is sent.
@@ -57,7 +58,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tests" / "e2e"))
 
 from harness.exchanges import recipient_of  # noqa: E402
-from harness.signing import sign_post  # noqa: E402
+from harness.sdk_client import agent_signer, post_signed_json  # noqa: E402
 from harness.urls import bare_host  # noqa: E402
 
 REGISTER_PATH = "/fora.v1.ExchangeService/Register"
@@ -116,7 +117,7 @@ def main() -> None:
     exchange = os.environ.get("FORA_STAGING_EXCHANGE", "") or recipient_of(exchange_url)
     key_path = Path(_require_env("FORA_STAGING_AGENT_KEY"))
     if not key_path.is_file():
-        msg = f"agent key not found: {key_path} — run gen-staging-keys.sh"
+        msg = f"agent key not found: {key_path} — run gen-keys.sh"
         raise SystemExit(msg)
 
     terms_digest = _fresh_terms_digest(exchange_url)
@@ -138,7 +139,7 @@ def main() -> None:
     if terms_digest:
         body["terms_digest"] = terms_digest
 
-    resp = sign_post(url, body=body, key_path=key_path)
+    resp = post_signed_json(url, body, signer=agent_signer(key_path))
     if resp.status_code != 200:
         msg = f"register failed: {resp.status_code} {resp.text[:512]}"
         raise SystemExit(msg)

@@ -5,4 +5,11 @@
 **/terraform.tfstate
 **/terraform.tfstate.*
 **/crash.log
+# A saved plan (terraform plan -out) carries every sensitive value the
+# stack renders, the compose bundle's secrets included.
+**/*.tfplan
+**/terraform.tfvars
+**/terraform.tfvars.json
+**/*.auto.tfvars
+**/*.auto.tfvars.json
 modules/**/.terraform.lock.hcl

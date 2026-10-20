@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -45,22 +46,26 @@ type registerFixture struct {
 }
 
 // agentOrigin serves an ed25519 key manifest for the fixture agent.
-// statusOverride, when non-zero, short-circuits to a custom response code.
+// statusOverride, when non-zero, short-circuits to a custom response code, and
+// bodyOverride, when set, is served signed in place of the directory.
 type agentOrigin struct {
 	server         *httptest.Server
 	mu             sync.Mutex
 	agentID        string
 	pub            ed25519.PublicKey
+	priv           ed25519.PrivateKey
 	validFrom      time.Time
 	validUntil     time.Time
 	statusOverride int
+	bodyOverride   []byte
 }
 
-func newAgentOrigin(t *testing.T, agentID string, pub ed25519.PublicKey, now time.Time) *agentOrigin {
+func newAgentOrigin(t *testing.T, agentID string, priv ed25519.PrivateKey, now time.Time) *agentOrigin {
 	t.Helper()
 	o := &agentOrigin{
 		agentID:    agentID,
-		pub:        pub,
+		pub:        priv.Public().(ed25519.PublicKey),
+		priv:       priv,
 		validFrom:  now.Add(-time.Hour),
 		validUntil: now.Add(24 * time.Hour),
 	}
@@ -75,9 +80,16 @@ func (o *agentOrigin) setStatus(code int) {
 	o.mu.Unlock()
 }
 
+func (o *agentOrigin) setBody(body []byte) {
+	o.mu.Lock()
+	o.bodyOverride = body
+	o.mu.Unlock()
+}
+
 func (o *agentOrigin) handle(w http.ResponseWriter, r *http.Request) {
 	o.mu.Lock()
 	status := o.statusOverride
+	override := o.bodyOverride
 	agentID := o.agentID
 	pub := o.pub
 	from, until := o.validFrom, o.validUntil
@@ -91,8 +103,11 @@ func (o *agentOrigin) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = agentID
-	w.Header().Set("Content-Type", "application/jwk-set+json")
-	_, _ = w.Write(agentWBABytes(pub, from, until))
+	if override != nil {
+		serveSignedDirectory(w, r, override, o.priv)
+		return
+	}
+	serveSignedDirectory(w, r, agentWBABytes(pub, from, until), o.priv)
 }
 
 type registerFixedClock struct{ now time.Time }
@@ -112,7 +127,7 @@ func setupRegisterFixture(t *testing.T, opts transport.AgentsRegisterOptions) *r
 		t.Fatalf("ed25519 gen: %v", err)
 	}
 	agentID := "agent.register.test"
-	origin := newAgentOrigin(t, agentID, pub, now)
+	origin := newAgentOrigin(t, agentID, priv, now)
 	rewriteMu := &sync.Mutex{}
 	rewrite := map[string]string{agentID: origin.server.URL}
 
@@ -139,7 +154,7 @@ func setupRegisterFixture(t *testing.T, opts transport.AgentsRegisterOptions) *r
 	}
 }
 
-func postRegister(t *testing.T, fx *registerFixture, body []byte) *http.Response {
+func postRegister(t *testing.T, fx *registerFixture, body []byte) (int, []byte) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(fx.ctx, http.MethodPost,
 		fx.server.URL+"/exchange/v1/agents/register",
@@ -152,16 +167,16 @@ func postRegister(t *testing.T, fx *registerFixture, body []byte) *http.Response
 	if err != nil {
 		t.Fatalf("http do: %v", err)
 	}
-	return resp
-}
-
-func decodeBody(t *testing.T, resp *http.Response) map[string]any {
-	t.Helper()
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
+	return resp.StatusCode, raw
+}
+
+func decodeBody(t *testing.T, raw []byte) map[string]any {
+	t.Helper()
 	if len(raw) == 0 {
 		return map[string]any{}
 	}
@@ -178,11 +193,11 @@ func TestAgentsRegister_HappyPathAndSignatureVerifies(t *testing.T) {
 		"agent_id":      fx.agentID,
 		"discovery_url": fx.agentID,
 	})
-	resp := postRegister(t, fx, body)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	status, raw := postRegister(t, fx, body)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
 	}
-	out := decodeBody(t, resp)
+	out := decodeBody(t, raw)
 	if out["status"] != "registered" || out["agent_id"] != fx.agentID {
 		t.Fatalf("body = %v", out)
 	}
@@ -229,11 +244,11 @@ func TestAgentsRegister_MethodNotAllowed(t *testing.T) {
 
 func TestAgentsRegister_MissingBody(t *testing.T) {
 	fx := setupRegisterFixture(t, transport.AgentsRegisterOptions{})
-	resp := postRegister(t, fx, nil)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	status, raw := postRegister(t, fx, nil)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", status)
 	}
-	out := decodeBody(t, resp)
+	out := decodeBody(t, raw)
 	if out["error"] == nil {
 		t.Fatalf("error missing: %v", out)
 	}
@@ -241,18 +256,18 @@ func TestAgentsRegister_MissingBody(t *testing.T) {
 
 func TestAgentsRegister_MalformedJSON(t *testing.T) {
 	fx := setupRegisterFixture(t, transport.AgentsRegisterOptions{})
-	resp := postRegister(t, fx, []byte("{not-json"))
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	status, _ := postRegister(t, fx, []byte("{not-json"))
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", status)
 	}
 }
 
 func TestAgentsRegister_MissingFields(t *testing.T) {
 	fx := setupRegisterFixture(t, transport.AgentsRegisterOptions{})
 	body, _ := json.Marshal(map[string]string{"agent_id": "some.agent"})
-	resp := postRegister(t, fx, body)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	status, _ := postRegister(t, fx, body)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", status)
 	}
 }
 
@@ -260,9 +275,9 @@ func TestAgentsRegister_BodyOverLimit(t *testing.T) {
 	fx := setupRegisterFixture(t, transport.AgentsRegisterOptions{MaxBodyBytes: 32})
 	// 64 bytes of filler > 32 byte cap.
 	body := []byte(`{"agent_id":"` + strings.Repeat("x", 64) + `","discovery_url":"y"}`)
-	resp := postRegister(t, fx, body)
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	status, _ := postRegister(t, fx, body)
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", status)
 	}
 }
 
@@ -283,12 +298,12 @@ func TestAgentsRegister_AbsentDirectoryIsRefusedAsPermanent(t *testing.T) {
 		"agent_id":      fx.agentID,
 		"discovery_url": fx.agentID,
 	})
-	resp := postRegister(t, fx, body)
-	if resp.StatusCode != http.StatusBadRequest {
+	status, raw := postRegister(t, fx, body)
+	if status != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (a 502 tells the caller to retry a 404 that will not change)",
-			resp.StatusCode)
+			status)
 	}
-	out := decodeBody(t, resp)
+	out := decodeBody(t, raw)
 	msg, _ := out["error"].(string)
 	if msg == "" {
 		t.Fatalf("missing error body: %v", out)
@@ -309,13 +324,35 @@ func TestAgentsRegister_UpstreamFetchFailure(t *testing.T) {
 		"agent_id":      fx.agentID,
 		"discovery_url": fx.agentID,
 	})
-	resp := postRegister(t, fx, body)
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	status, raw := postRegister(t, fx, body)
+	if status != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", status)
 	}
-	out := decodeBody(t, resp)
+	out := decodeBody(t, raw)
 	if out["error"] == nil {
 		t.Fatalf("missing error body: %v", out)
+	}
+}
+
+// TestAgentsRegister_DirectoryThatIsNotAKeyDirectoryIsTransient pins the answer
+// for a directory whose JSON is not a key directory. The read states a body that
+// does not decode as a key directory as an unavailable document, as it states a
+// body that is not JSON at all, so this endpoint answers 502 and registers
+// nothing. The origin answered 200, but what it served establishes nothing about
+// the agent's keys, and the next attempt may return the real directory.
+func TestAgentsRegister_DirectoryThatIsNotAKeyDirectoryIsTransient(t *testing.T) {
+	fx := setupRegisterFixture(t, transport.AgentsRegisterOptions{})
+	fx.origin.setBody([]byte(`{"keys":"x"}`))
+	body, _ := json.Marshal(map[string]string{
+		"agent_id":      fx.agentID,
+		"discovery_url": fx.agentID,
+	})
+	if status, raw := postRegister(t, fx, body); status != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502: %s", status, raw)
+	}
+	// Through the production repository, not a raw query.
+	if _, err := repo.NewAgentRepo(fx.queries).ByID(fx.ctx, fx.agentID); !errors.Is(err, repo.ErrAgentNotFound) {
+		t.Fatalf("a row was stored for an agent whose directory could not be read: ByID = %v", err)
 	}
 }
 
@@ -339,14 +376,10 @@ func TestAgentsRegister_RateLimit(t *testing.T) {
 		"agent_id":      fx.agentID,
 		"discovery_url": fx.agentID,
 	})
-	resp1 := postRegister(t, fx, body)
-	if resp1.StatusCode != http.StatusOK {
-		t.Fatalf("first call status = %d, want 200", resp1.StatusCode)
+	if status, _ := postRegister(t, fx, body); status != http.StatusOK {
+		t.Fatalf("first call status = %d, want 200", status)
 	}
-	_ = resp1.Body.Close()
-	resp2 := postRegister(t, fx, body)
-	if resp2.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("second call status = %d, want 429", resp2.StatusCode)
+	if status, _ := postRegister(t, fx, body); status != http.StatusTooManyRequests {
+		t.Fatalf("second call status = %d, want 429", status)
 	}
-	_ = resp2.Body.Close()
 }

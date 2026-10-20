@@ -24,10 +24,10 @@ import (
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	"github.com/FORA-Protocol/protocol/sdk/go/resolvers"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo/repotest"
 )
 
 // TestPublisherOnboarding_HappyPath walks the onboarding happy path
@@ -65,22 +65,22 @@ import (
 func TestPublisherOnboarding_HappyPath(t *testing.T) {
 	h := newAgentHarness(t)
 
-	// A dedicated CloudFront-scheme publisher tenant. pushHarness seeds an
-	// ED25519-scheme tenant already; this one takes the AWS_CLOUDFRONT_RSA
-	// code path when ExecuteTransaction mints a URL.
+	// A dedicated CloudFront-scheme publisher site. The harness registers an
+	// ED25519-scheme site already; this one takes the AWS_CLOUDFRONT_RSA code
+	// path when ExecuteTransaction mints a URL, which is what proves the scheme
+	// is read per site rather than per seat.
 	const publisherDomain = "cf-publisher.example"
-	publisherTenantID := "t_" + uuid.NewString()
-	insertCloudFrontTenant(t, h.pushHarness, publisherTenantID, publisherDomain)
+	publisherTenantID := registerCloudFrontSite(t, h.pushHarness, publisherDomain)
 
 	// Publisher's combined origin: fora.json lists itself as sole
 	// contributor and the Exchange as exchange; fora.json carries
 	// its Ed25519 pubkey for lazy signup on first PushResources contact.
-	pubPub, pubPriv, err := ed25519.GenerateKey(rand.Reader)
+	_, pubPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("publisher keypair: %v", err)
 	}
 	pubOrigin := newAgentCombinedOrigin(t,
-		publisherDomain, []string{publisherDomain}, publisherDomain, pubPub)
+		publisherDomain, []string{publisherDomain}, publisherDomain, pubPriv)
 	h.registerHost(publisherDomain, pubOrigin.server.URL)
 
 	// Step 4: signed push. Lazy self-signup runs implicitly; accepted = 3.
@@ -115,36 +115,15 @@ func TestPublisherOnboarding_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("agent keypair: %v", err)
 	}
-	h.publishAgent(t, agentID, agentPub)
+	h.publishAgent(t, agentID, agentPriv)
 	registerAgentViaPublicEndpoint(t, h, agentID)
 	// Directory registration does not mint a billing_ref; a paid transaction needs
 	// one, so billing-register the agent through the public Register RPC.
 	h.registerForBilling(t, agentID, agentPub, agentPriv)
 
-	// Step 6: DiscoverResources for the three URIs.
-	uris := make([]string, len(entries))
-	for i, e := range entries {
-		uris[i] = "https://" + e.GetDomain() + e.GetPath()
-	}
-	discResp, err := h.exchange.DiscoverResources(h.ctx, connect.NewRequest(newResourceQuery(newRequester(agentID, agentID), uris)))
-	if err != nil {
-		t.Fatalf("DiscoverResources: %v", err)
-	}
-	offers := discResp.Msg.GetOffers()
-	if len(offers) != 3 {
-		t.Fatalf("offers len = %d, want 3", len(offers))
-	}
-
-	// Step 7: each offer's signature verifies against JWKS.
-	jwksPub := fetchExchangeOfferKey(t, h.pushHarness)
-	for i, offer := range offers {
-		if offer.GetSignatureAlgorithm() != "EdDSA" {
-			t.Fatalf("offer[%d] alg = %q, want EdDSA", i, offer.GetSignatureAlgorithm())
-		}
-		if err := helpers.VerifyOffer(offer, offer.GetSignature(), jwksPub); err != nil {
-			t.Fatalf("offer[%d] signature verify: %v", i, err)
-		}
-	}
+	// Steps 6-7: DiscoverResources for the three URIs; each offer verifies
+	// against JWKS.
+	offers := h.discoverJWKSVerifiedOffers(t, agentID, entries)
 
 	// Step 8: execute first offer → CloudFront signed URL.
 	// Items-only contract (C4 collapse) with body AgentAcceptance binding
@@ -194,33 +173,25 @@ func TestPublisherOnboarding_HappyPath(t *testing.T) {
 // pushHarness + agentHarness in the sibling e2e tests.
 // --------------------------------------------------------------------
 
-// insertCloudFrontTenant seeds a tenant configured for AWS_CLOUDFRONT_RSA
-// URL signing. The RsaKeyRef and CloudFrontKeyPairID match the kid
-// startExchangeServer registers in deps.keystore, so mintSignedURL resolves
-// the same RSA key the fixture exposes as rsaPub for the verification step.
-func insertCloudFrontTenant(t *testing.T, h *pushHarness, tenantID, domain string) {
+// registerCloudFrontSite registers a publisher site that signs its delivery URLs
+// with AWS_CLOUDFRONT_RSA, and lists it active on the harness's seat. It returns
+// the seat the entries land under.
+//
+// The site's CloudFront key-pair id and the seat's rsa_key_ref both name the ref
+// startExchangeServer registers in deps.keystore, so mintSignedURL resolves the
+// same RSA key the fixture exposes as rsaPub for the verification step. That
+// split is the point of the fixture: the scheme and the key-pair id come from
+// the site row, the private key from the seat.
+func registerCloudFrontSite(t *testing.T, h *pushHarness, domain string) string {
 	t.Helper()
-	if _, err := h.queries.InsertTenant(h.ctx, sqlc.InsertTenantParams{
-		TenantID:            tenantID,
+	repotest.SeedSite(t, h.ctx, h.pool, repotest.Site{
+		SeatTenantID:        h.tenantID,
 		Domain:              domain,
-		Ed25519KeyRef:       "secret://ed25519/" + tenantID,
-		ReportingPolicy:     []byte(`{}`),
-		SigningScheme:       sqlc.ForaSigningSchemeAWSCLOUDFRONTRSA,
-		RsaKeyRef:           pgtype.Text{String: "cf-test", Valid: true},
-		CloudfrontKeyPairID: pgtype.Text{String: "cf-test", Valid: true},
-	}); err != nil {
-		t.Fatalf("insert cloudfront tenant: %v", err)
-	}
-	// The push harness's discover signer is registered as a BROKER (see
-	// newPushHarness); the per-test publisher tenant must opt in to broker
-	// relay so onboarding ExecuteTransaction calls pass the new
-	// caller-identity authorization gate.
-	if err := h.queries.SetTenantAllowBrokerRelay(h.ctx, sqlc.SetTenantAllowBrokerRelayParams{
-		TenantID:         tenantID,
-		AllowBrokerRelay: true,
-	}); err != nil {
-		t.Fatalf("enable cloudfront tenant broker relay: %v", err)
-	}
+		PublisherID:         harnessResourceOwner,
+		SigningScheme:       string(sqlc.ForaSigningSchemeAWSCLOUDFRONTRSA),
+		CloudFrontKeyPairID: cloudFrontTestKeyRef,
+	})
+	return h.tenantID
 }
 
 // registerAgentViaPublicEndpoint POSTs /exchange/v1/agents/register
@@ -249,6 +220,26 @@ func registerAgentViaPublicEndpoint(t *testing.T, h *agentHarness, agentID strin
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("register status = %d", resp.StatusCode)
 	}
+}
+
+// discoverJWKSVerifiedOffers runs discoverOffers and requires every offer to be
+// EdDSA-signed with a signature that verifies against the Exchange's published
+// offer key.
+func (h *agentHarness) discoverJWKSVerifiedOffers(
+	t *testing.T, agentID string, entries []*forav1.ResourceEntry,
+) []*forav1.Offer {
+	t.Helper()
+	offers := h.discoverOffers(t, agentID, entries)
+	jwksPub := fetchExchangeOfferKey(t, h.pushHarness)
+	for i, offer := range offers {
+		if offer.GetSignatureAlgorithm() != "EdDSA" {
+			t.Fatalf("offer[%d] alg = %q, want EdDSA", i, offer.GetSignatureAlgorithm())
+		}
+		if err := helpers.VerifyOffer(offer, offer.GetSignature(), jwksPub); err != nil {
+			t.Fatalf("offer[%d] signature verify: %v", i, err)
+		}
+	}
+	return offers
 }
 
 // fetchExchangeOfferKey reads the Exchange's Ed25519 offer-signing key from its

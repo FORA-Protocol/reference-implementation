@@ -109,11 +109,11 @@ def _single_offer_offences(tree: ast.AST) -> list[tuple[int, str]]:
 def test_no_single_offer_wire_shape_in_e2e() -> None:
     """No e2e .py builds a top-level single-offer TransactionRequest body.
 
-    Green since every sender was folded onto the items[] shape --
-    ``relay.relay_execute``, ``obligations.flow.execute_offer`` and the inline
-    obligation senders all build the envelope now. It is a ratchet from here: it
-    fails the moment a new body puts ``offer`` and ``agent_acceptance`` back
-    beside a request-level key.
+    Green since every sender was folded onto the items[] shape: every purchase
+    the suite sends, direct or through the Broker, is built by the SDK, which
+    this scan cannot see and need not. It is a ratchet from here: it fails the
+    moment a new body puts ``offer`` and ``agent_acceptance`` back beside a
+    request-level key.
     """
     hits = scan_tree(_single_offer_offences, exclude=Path(__file__))
     assert not hits, (
@@ -186,7 +186,7 @@ def test_guard_ignores_items_batch_body() -> None:
     """NEGATIVE meta-test: the legitimate items[] batch body is NOT flagged."""
     assert _hits_in_snippet(_ITEMS_BATCH_SNIPPET) == [], (
         "items[]-nested per-item offer/agentAcceptance must not be flagged "
-        "(this is the correct batch shape — relay_execute_batch / test_multi_exchange)"
+        "(this is the correct batch shape)"
     )
 
 

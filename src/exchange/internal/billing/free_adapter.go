@@ -34,7 +34,7 @@ func (FreeAdapter) EnsureAgentAccount(_ context.Context, billingRef string) erro
 // DemoCurrency — the currency GetBalance reports below, so this tier has a
 // currency and takes no exemption from the rule.
 func (FreeAdapter) Credit(_ context.Context, billingRef string, amount Amount, idempotencyKey string) error {
-	return validateCreditArgs(billingRef, amount, idempotencyKey, DemoCurrency)
+	return validateCreditArgs(billingRef, amount, idempotencyKey, demoCurrencies)
 }
 
 // Authorize always approves and returns a fresh ULID BillingID.
@@ -60,9 +60,19 @@ func (FreeAdapter) Refund(_ context.Context, _ string, _ Amount, _ string, _ str
 	return ErrRefundUnsupported
 }
 
-// GetBalance reports an effectively unbounded balance in the demo currency.
-func (FreeAdapter) GetBalance(_ context.Context, _ string) (Amount, error) {
+// GetBalance reports an effectively unbounded balance in the demo currency. The
+// currency argument is ignored for the same reason as on the in-memory tier:
+// this tier is single-currency and nothing here is ever charged, so there is no
+// second balance to select.
+func (FreeAdapter) GetBalance(_ context.Context, _, _ string) (Amount, error) {
 	return Amount{Value: big.NewRat(math.MaxInt64, 1), Currency: DemoCurrency}, nil
+}
+
+// AvailableBalance returns ErrBalanceNotReported: the free tier keeps no
+// balance, and the GetBalance maximum above is a stand-in that must never be
+// shown to an agent as money.
+func (FreeAdapter) AvailableBalance(_ context.Context, _, _ string) (Amount, error) {
+	return Amount{}, ErrBalanceNotReported
 }
 
 // GetQuota reports an effectively unbounded quota.

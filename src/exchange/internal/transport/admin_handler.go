@@ -63,9 +63,11 @@ func (h *AdminHandler) SetReportingPolicy(
 ) (*connect.Response[foraadminv1.SetReportingPolicyResponse], error) {
 	policy := req.Msg.GetPolicy()
 	res, err := h.svc.SetReportingPolicy(ctx, adminCaller(ctx, req.Peer().Addr), service.ReportingPolicyValues{
-		TenantID:          policy.GetTenantId(),
-		RequiredFields:    policy.GetRequiredFields(),
-		QuantityTolerance: policy.QuantityTolerance,
+		TenantID:       policy.GetTenantId(),
+		RequiredFields: policy.GetRequiredFields(),
+		// The deprecated quantity_tolerance is not read: the protocol leaves a usage
+		// report's quantity unrestricted and says an Exchange must not refuse on it.
+		QuantityTolerance: nil,
 		WindowSeconds:     policy.WindowSeconds,
 	})
 	if err != nil {
@@ -83,8 +85,8 @@ func (h *AdminHandler) SetReportingPolicy(
 }
 
 // adminCaller builds the audit attribution from the transport: the Connect peer
-// address and the request-scoped correlation id. Actor is left nil — v1 has no
-// per-operator identity, the network allowlist is the only gate (ADR-022).
+// address and the request-scoped correlation id. No actor is recorded — v1 has
+// no per-operator identity, the network allowlist is the only gate (ADR-022).
 func adminCaller(ctx context.Context, peerAddr string) service.AdminCaller {
 	return service.AdminCaller{
 		SourceAddr: peerAddr,

@@ -30,6 +30,10 @@ export function logEvent(
   });
 }
 
+// There is deliberately no level threshold to filter these by. Nothing sits
+// below info, and info is the delivery record the evidence chain reads back,
+// so a threshold could only hide records that must not be hidden. The
+// operator-facing reasoning is in src/edge/CONFIGURATION.md §1.
 export type LogLevel = 'info' | 'warn' | 'error';
 
 // logRecord is the ONE place a record reaches the log stream, so every record

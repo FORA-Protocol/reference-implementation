@@ -26,19 +26,19 @@ mirroring how the seed shells out to it.
 from __future__ import annotations
 
 import subprocess
+from decimal import Decimal
 from pathlib import Path
 
-import httpx
 
-from .broker_client import execute_first_offer
+from .broker_purchase import buy_through_broker
 from .conftest import StackURLs
-from .constants import WBA_DIRECTORY_PATH
 from .edge_fetch import fetch_signed
-from .resolve_carriers import cost_of, first_item_of, licensed_of, retrieval_endpoint_of
+from .protocol_documents import manifest_at, wba_directory_at
 from .seed import (
     CATALOG_CONTRIBUTOR_ID,
     CATALOG_DIR,
     CONTRIBUTOR_KEY_PATH,
+    SEAT_OF_PHILOSOPHY,
     SELFPUB_PHILOSOPHY_KEY_PATH,
     SeededFixture,
 )
@@ -102,7 +102,7 @@ def test_ingester_pushes_via_rpc_and_exits_clean(
     """
     proc = _run_ingester(
         compose_stack.exchange,
-        "tenant-demo-philosophy",
+        SEAT_OF_PHILOSOPHY,
         _PHILOSOPHY_FEED,
         SELFPUB_PHILOSOPHY_KEY_PATH,
     )
@@ -124,45 +124,28 @@ def test_requester_discovers_free_term_and_gets_content(
     cost is 0 (FREE), and the Exchange-signed URL delivers the origin content
     through the Cloudflare edge.
 
-    Two-phase relay: Broker Resolve is discovery-only (it returns ranked
-    signed Offers, no signed URL). The agent then RELAY-EXECUTES the winning Offer
-    (agent sig1 + Broker sig2 + offer-acceptance) through the Broker to the
-    Exchange, which mints the signed URL and returns the term-derived cost on the
-    TransactionResponse.
+    Broker Resolve is discovery-only (it returns ranked signed offers, no signed
+    URL). The agent then buys the winning offer through the Broker, and the
+    Exchange mints the signed URL and returns the term-derived cost on the result
+    item.
     """
     res = seeded.free  # socrates: FREE EUR
-    resp = execute_first_offer(
-        compose_stack,
-        {"agent_id": res.buyer_agent_id, "uri": res.uri, "intended_use": "ai-input"},
-        agent_id=res.buyer_agent_id,
-        domain=_PHILOSOPHY_DOMAIN,
-        key_path=res.buyer_key_path,
+    _, item = buy_through_broker(
+        compose_stack, res.uri, agent_id=res.buyer_agent_id, key_path=res.buyer_key_path
     )
-    assert resp.status_code == httpx.codes.OK, resp.text
-    # The EXECUTE response is an items[] envelope — read the
-    # per-result fields from items[0]. The licensed signal is the delivered
-    # retrieval_endpoint on items[0], not the discovery-only Resolve.
-    payload = resp.json()
-    item = first_item_of(payload)
-    assert item is not None, f"execute response carried no items[0]: {payload}"
-    assert licensed_of(item) is True, payload
-    signed_url = retrieval_endpoint_of(item)
-    assert signed_url, payload
+    signed_url = item.retrieval_endpoint
+    assert signed_url, f"the purchase answered no delivery URL: {item}"
     # ADR-019: the FREE-term delivered price rides on the canonical typed
-    # per-item cost (Exchange buildBatchResultItem). socrates' headline term is
-    # FREE, so the agent observes cost.amount == 0.
-    cost = cost_of(item)
-    assert cost is not None, payload
-    # Money-as-string: Money.amount is a decimal STRING on the wire
-    # (FormatMoney: 0 → "0"); the FREE term's cost is zero either as the
-    # canonical "0" string or a numeric 0, so parse before comparing.
-    assert float(cost["amount"]) == 0, cost
+    # per-item cost. socrates' headline term is FREE, so the agent observes a
+    # zero amount. Money is a decimal string on the wire.
+    assert item.cost is not None, item
+    assert Decimal(str(item.cost.amount)) == 0, item.cost
 
-    # The relay-minted URL is bound to the executing agent — fetch_signed attaches
+    # The URL is bound to the buying agent — fetch_signed attaches
     # RFC 9421 proof-of-possession headers when key_path is set and the URL carries
     # agent_id= (edge enforces agent_id == keyid == thumbprint of presented key).
-    content = fetch_signed(signed_url, compose_stack, timeout=15.0, key_path=res.buyer_key_path)
-    assert content.text.strip(), content.text
+    content = fetch_signed(signed_url, compose_stack, key_path=res.buyer_key_path)
+    assert content.body.strip(), content.body[:256]
 
 
 def test_us_requester_now_licensed_on_geo_restricted_resource(
@@ -177,24 +160,15 @@ def test_us_requester_now_licensed_on_geo_restricted_resource(
     offer for the agent to self-honour — so the requester is licensed and
     receives a signed URL. (user_type / geography are no longer sent on the wire.)
 
-    R7: discovery (Broker Resolve) then relay-execute the winning Offer; the
-    signed URL is minted on the EXECUTE (TransactionResponse).
+    Broker Resolve, then a purchase of the winning offer through the Broker; the
+    signed URL is minted on the purchase.
     """
     res = seeded.restricted  # plato
-    resp = execute_first_offer(
-        compose_stack,
-        {"agent_id": res.buyer_agent_id, "uri": res.uri, "intended_use": "ai-input"},
-        agent_id=res.buyer_agent_id,
-        domain=_PHILOSOPHY_DOMAIN,
-        key_path=res.buyer_key_path,
+    _, item = buy_through_broker(
+        compose_stack, res.uri, agent_id=res.buyer_agent_id, key_path=res.buyer_key_path
     )
-    assert resp.status_code == httpx.codes.OK, resp.text
-    # C2: read the per-result fields from items[0] of the EXECUTE envelope.
-    payload = resp.json()
-    item = first_item_of(payload)
-    assert item is not None, f"execute response carried no items[0]: {payload}"
-    assert licensed_of(item) is True, payload
-    assert retrieval_endpoint_of(item), payload
+    assert item.denial_reason is None, item
+    assert item.retrieval_endpoint, item
 
 
 def test_contributor_identity_is_served_via_wellknown(compose_stack: StackURLs) -> None:
@@ -217,28 +191,23 @@ def test_contributor_identity_is_served_via_wellknown(compose_stack: StackURLs) 
     assert doc["kid"] == CATALOG_CONTRIBUTOR_ID
     assert _PHILOSOPHY_FEED.is_file(), _PHILOSOPHY_FEED
 
-    # Fetch the contributor's served overlay + WBA directory THROUGH the real
+    # Read the contributor's served overlay + WBA directory THROUGH the real
     # host alias. After the WBA split the overlay is keyless; the signing key
-    # lives in the WBA directory keys[] (no kid, named by thumbprint).
-    manifest = httpx.get(
-        f"http://{CATALOG_CONTRIBUTOR_ID}/.well-known/fora.json", timeout=5.0
-    ).json()
-    assert manifest.get("domain") == CATALOG_CONTRIBUTOR_ID, manifest
-    assert "public_keys" not in manifest, manifest
-    directory = httpx.get(
-        f"http://{CATALOG_CONTRIBUTOR_ID}{WBA_DIRECTORY_PATH}",
-        timeout=5.0,
-    ).json()
-    served = directory.get("keys") or []
+    # lives in the WBA directory keys[] (no kid, named by thumbprint). Both SDK reads
+    # refuse a document the strict check does not accept, so a manifest still
+    # carrying public_keys, or a directory key carrying a kid, fails here.
+    origin = f"http://{CATALOG_CONTRIBUTOR_ID}"
+    manifest = manifest_at(origin).message
+    assert manifest.domain == CATALOG_CONTRIBUTOR_ID, manifest
+    served = wba_directory_at(origin).message.keys or []
     assert len(served) == 1, f"contributor WBA directory must serve one key; got {served!r}"
-    key = served[0]
-    assert "kid" not in key, f"WBA key must not carry a kid: {key!r}"
+    x = served[0].x or ""
     # The served `x` (base64url, no pad) must equal the fixture's public half.
     fixture_pub = doc["public_key"].rstrip("=")
-    assert key["x"].rstrip("=") == fixture_pub, (
+    assert x.rstrip("=") == fixture_pub, (
         f"served contributor key drifted from signing fixture: "
-        f"served={key['x']!r} fixture={doc['public_key']!r}"
+        f"served={x!r} fixture={doc['public_key']!r}"
     )
     # Sanity: the served x decodes to a 32-byte Ed25519 raw key.
-    raw = base64.urlsafe_b64decode(key["x"] + "=" * (-len(key["x"]) % 4))
+    raw = base64.urlsafe_b64decode(x + "=" * (-len(x) % 4))
     assert len(raw) == 32, f"served key not 32 raw bytes: {len(raw)}"

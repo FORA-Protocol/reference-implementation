@@ -134,7 +134,7 @@ func TestExecuteTransaction_CommittedRowsAnswerRetryWithoutWaiting(t *testing.T)
 	if got := rec.releaseCallCount(); got != 0 {
 		t.Errorf("Release calls = %d, want 0", got)
 	}
-	bal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	bal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}

@@ -18,9 +18,6 @@ func mustBillingAmount(t *testing.T, raw, ccy string) billing.Amount {
 	return a
 }
 
-// stringPtr returns a pointer to s (generic proto optional-string helper).
-func stringPtr(s string) *string { return &s }
-
 // tenantDrain returns an authorize request that subtracts the full seed balance
 // so subsequent authorizations fail. billingRef is the account to drain — the ref
 // the harness registered the caller under, not the agent id.
@@ -37,7 +34,7 @@ func tenantDrain(t *testing.T, billingRef string) billing.AuthorizeRequest {
 // evidence RPC — the public surface an obligation is normally read through, and
 // the tier-1 surface the Testing Doctrine asks for. Returns nil when the
 // transaction minted no obligation, which is what the route renders for one.
-func obligationView(t *testing.T, h *testHarness, txID string) *evidenceview.ObligationState {
+func obligationView(t testing.TB, h *testHarness, txID string) *evidenceview.ObligationState {
 	t.Helper()
 	return readEvidence(t, h, h.adminBaseURL(t), txID).ObligationState
 }
@@ -45,7 +42,7 @@ func obligationView(t *testing.T, h *testHarness, txID string) *evidenceview.Obl
 // mustObligationView reads the obligation through the evidence RPC and fails
 // when the transaction minted none. Every assertion about an obligation's
 // contents starts here; only assertNoObligation wants the nil case.
-func mustObligationView(t *testing.T, h *testHarness, txID string) *evidenceview.ObligationState {
+func mustObligationView(t testing.TB, h *testHarness, txID string) *evidenceview.ObligationState {
 	t.Helper()
 	ob := obligationView(t, h, txID)
 	if ob == nil {

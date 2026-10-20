@@ -31,8 +31,8 @@ type Exchange struct {
 
 // ExchangeRepo is the read port handlers and services depend on. The probe
 // state and the endpoint are not writable here: from inside request handling a
-// handler could mark an exchange down, or move the address the SSRF allowlist
-// compares against. Those writes belong to ExchangeHealthRepo.
+// handler could mark an exchange down, or move the address the registry records
+// for it. Those writes belong to ExchangeHealthRepo.
 type ExchangeRepo interface {
 	ListUnblocked(ctx context.Context) ([]Exchange, error)
 	GetByDomain(ctx context.Context, domain string) (Exchange, error)
@@ -74,21 +74,23 @@ const (
 type ProbeState string
 
 const (
-	// ProbeLive means the pass resolved the Exchange's endpoint and it answered
-	// /healthz.
+	// ProbeLive means the pass resolved the Exchange's endpoint and the
+	// Exchange answered: the health endpoint its manifest names returned 200,
+	// or its manifest names none and was fetched and valid.
 	ProbeLive ProbeState = "LIVE"
 	// ProbeDown means the pass could not reach the Exchange, or it did not
 	// answer. Transient.
 	ProbeDown ProbeState = "DOWN"
-	// ProbeRefused means the pass READ the Exchange's manifest and the resolver
-	// refused it — no endpoint, an endpoint on a host the manifest does not
-	// speak for, or a document version this build does not accept. Settled.
+	// ProbeRefused means the pass READ the Exchange's manifest and refused it —
+	// no endpoint, an endpoint on a host the manifest does not speak for, a
+	// document version this build does not accept, a document that breaks the
+	// manifest schema, or a health endpoint no pass can dial. Settled.
 	ProbeRefused ProbeState = "REFUSED"
 )
 
 // Admission is whether the broker may route to one registry row, and it is the
-// SINGLE derivation of that rule — the relay's SSRF admission, the resolve
-// router's guard and the routing-skip reason all read it here. Four values
+// SINGLE derivation of that rule — purchase admission, the resolve router's
+// guard and the routing-skip reason all read it here. Four values
 // because the callers owe four answers, split by whether the state clears on
 // its own and by which party has to act.
 //
@@ -158,10 +160,10 @@ func NewExchangeRepo(pool *pgxpool.Pool) *PgxExchangeRepo {
 //
 // The refresher must see those rows or the state becomes a one-way ratchet —
 // that applies to REFUSED as much as to DOWN, since an exchange that publishes
-// a manifest this build accepts must be able to come back. The relay allowlist
-// must see them to refuse a down exchange retryably and a refused one finally,
-// instead of claiming either was never registered. Discovery reads one row
-// through GetByDomain and applies Admission itself.
+// a manifest this build accepts must be able to come back. The refresher is
+// this method's only caller. Resolve and purchase admission read one row
+// through GetByDomain and apply Admission themselves, so they too can tell a
+// down or refused exchange from one that was never registered.
 func (r *PgxExchangeRepo) ListUnblocked(ctx context.Context) ([]Exchange, error) {
 	rows, err := r.q.ListUnblockedExchanges(ctx)
 	if err != nil {
@@ -214,9 +216,11 @@ SELECT exchange_id, domain, endpoint, trust_level, probe_state,
 // trimmed. Every write to the endpoint column goes through it, as does any
 // caller comparing a freshly resolved address against the stored one.
 //
-// Without it a trailing-slash endpoint passes the relay's SSRF allowlist but
-// the reconstructed double-slash @target-uri fails sig1 verification, breaking
-// such Exchanges over the relay.
+// Without it a trailing-slash spelling and a bare one would read as two
+// addresses: the refresher would log a change of address that is not one, and
+// the client pool would hold two clients for one Exchange. (The generated
+// Connect client trims the base URL itself, so the slash never reaches the
+// wire.)
 func CanonicalEndpoint(endpoint string) string {
 	return strings.TrimRight(endpoint, "/")
 }
@@ -249,9 +253,8 @@ func (r *PgxExchangeRepo) UpsertFromBootstrap(ctx context.Context, m Exchange) (
 // The endpoint is written too, because the well-known is the authority on where
 // an exchange is and the column is a cache of it. Discovery already dials the
 // resolved address and the probe measures it; leaving the column alone would
-// keep a third opinion in the registry, and the relay's SSRF allowlist compares
-// against exactly that column. Bootstrap seeds the row, the probe loop keeps it
-// true — a restart replays the bootstrap value and the next pass corrects it.
+// keep a third opinion in the registry, the one an operator reads. Bootstrap
+// seeds the row, the probe loop keeps it true — a restart replays the bootstrap value and the next pass corrects it.
 func (r *PgxExchangeRepo) SetProbeResult(
 	ctx context.Context, exchangeID, endpoint string, state ProbeState,
 ) error {

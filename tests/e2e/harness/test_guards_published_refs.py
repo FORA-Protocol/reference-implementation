@@ -27,7 +27,10 @@ builds the tree that makes the blindness visible.
 
 The planted-violation row carries several cases, because the gate has more than
 one pattern family and more than one search root, and a case is added whenever
-either set grows.
+either set grows. The held-back family adds a fifth outcome, a file the gate must
+not read at all: a path the publish holds back never ships, so nothing in it is
+a pointer a public reader could follow. Its complement has cases too: a file
+whose name only extends a held-back entry's ships, so the gate reads it.
 
 Unlike its sibling guards, the subject here is a shell script rather than Python
 source, so there is no pure detector function to feed inline snippets to. The
@@ -47,8 +50,10 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from .conftest import REPO_ROOT
-from .guard_harness import guard_marks, run_gate
+from .guard_harness import guard_marks, hold_back, run_gate
 from .published_paths import first_entry as _first_entry
 from .published_paths import shared_array as _shared_array
 
@@ -84,6 +89,36 @@ _WAIVED_VIOLATION = (
     # published-ref-allow: as above — this one also demonstrates the waiver itself
     "# published-ref-allow: illustrating the escape hatch\n"
     "# see docs/design/design-exchange.md for the layering\n"
+)
+# The protocol file, cited four ways. The pattern for the retired in-tree copy
+# must reject the in-tree path, alone or beside a module citation, and must
+# accept the path qualified by the pinned module, because naming the module is
+# what lets a public reader open it. A versioned module path is not the accepted
+# form, so it stays flagged. The module-qualified line is not a violation and
+# carries no waiver.
+_PROTOCOL_MODULE_CITATION = (
+    "# wire types: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto\n"
+)
+# A page of the protocol's own website docs, cited through the module. Its path
+# matches the unpublished-docs pattern, and it is resolvable all the same because
+# the module ships it.
+_PROTOCOL_MODULE_DOC_CITATION = (
+    "# see github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx\n"
+)
+_MODULE_DOC_AND_IN_REPO_DOC_VIOLATION = (
+    "# see github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/a.mdx"
+    # published-ref-allow: the fixture a gate is tested with has to be a real violation
+    " and docs/protocol/a.mdx\n"
+)
+# published-ref-allow: the fixture a gate is tested with has to be a real violation
+_PROTOCOL_IN_TREE_VIOLATION = "# wire types: proto/fora/v1/fora.proto\n"
+_PROTOCOL_BOTH_FORMS_VIOLATION = (
+    # published-ref-allow: as above
+    "# github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto, copied to proto/fora/v1/fora.proto\n"
+)
+_PROTOCOL_VERSIONED_VIOLATION = (
+    # published-ref-allow: as above
+    "# wire types: github.com/FORA-Protocol/protocol@v1.0.8/proto/fora/v1/fora.proto\n"
 )
 # There is deliberately NO constant here for the doc the publish stages out of
 # this tree. The two cases that need it read it from the shared definition
@@ -125,8 +160,10 @@ def _build_tree(root: Path) -> None:
         dest = root / script
         dest.parent.mkdir(parents=True, exist_ok=True)
         src = REPO_ROOT / script
-        # The two the gate itself needs are copied verbatim; the rest only have
-        # to exist, since the gate requires every allowlisted script as a root.
+        # Every allowlisted script that exists here is copied verbatim. The gate
+        # and the definition it sources have to be the real ones; the rest are
+        # real too, so a pattern that would flag a line in a shipped script turns
+        # the clean-tree case red rather than passing unnoticed.
         dest.write_bytes(src.read_bytes() if src.is_file() else b"")
 
     (root / "docs" / _UNPUBLISHED_DOC).write_text("# not a published doc\n")
@@ -282,3 +319,330 @@ def test_waiver_comment_suppresses_a_deliberate_reference(tmp_path: Path) -> Non
 
     assert proc.returncode == 0, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
     assert "PASS" in proc.stdout, proc.stdout
+
+
+@pytest.mark.parametrize(
+    "line",
+    [_PROTOCOL_MODULE_CITATION, _PROTOCOL_MODULE_DOC_CITATION],
+    ids=["fora-proto", "website-doc-page"],
+)
+def test_gate_accepts_the_protocol_file_cited_through_its_module(tmp_path: Path, line: str) -> None:
+    """A path cited through the protocol module is resolvable, so it passes.
+
+    The in-tree pattern also matches inside this path. If the gate does not
+    remove the module-qualified occurrence before it judges the line, every
+    registry entry citing the protocol fails the gate.
+    """
+    _build_tree(tmp_path)
+    (tmp_path / "docker-compose.yml").write_text(line)
+
+    proc = _run_gate(tmp_path)
+
+    assert proc.returncode == 0, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    assert "PASS" in proc.stdout, proc.stdout
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        _PROTOCOL_IN_TREE_VIOLATION,
+        _PROTOCOL_BOTH_FORMS_VIOLATION,
+        _PROTOCOL_VERSIONED_VIOLATION,
+        _MODULE_DOC_AND_IN_REPO_DOC_VIOLATION,
+    ],
+    ids=[
+        "in-tree-path",
+        "module-and-in-tree-on-one-line",
+        "versioned-module-path",
+        "module-doc-and-in-repo-doc-on-one-line",
+    ],
+)
+def test_gate_flags_the_protocol_file_cited_any_other_way(tmp_path: Path, line: str) -> None:
+    """The in-tree path is flagged alone, beside a module citation, and under a version.
+
+    The second case is the one that proves the module-qualified exemption is
+    narrow: the gate removes only the exact module-qualified path and still sees
+    the in-tree path left on the line.
+    """
+    _build_tree(tmp_path)
+    (tmp_path / "docker-compose.yml").write_text(line)
+
+    proc = _run_gate(tmp_path)
+
+    assert proc.returncode == 1, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    assert "docker-compose.yml:1:" in proc.stdout, proc.stdout
+
+
+# Held-back paths, in the shapes DENY_PATHS takes: a directory (trailing slash),
+# a file, and a Python module, which a citation can name by its import path. They
+# are synthetic and live only in the fixture, so the real gate never sees them as
+# entries and this module needs no waiver for writing them.
+_HELD_DIR = "deploy/kept/held-back-dir/"
+_HELD_FILE = "deploy/kept/held-back-guide.md"
+_HELD_MODULE = "tests/e2e/harness/held_back_module.py"
+
+
+def _hold_back(root: Path, *entries: str) -> None:
+    """Add ``entries`` to DENY_PATHS in the fixture's own copy of the definition."""
+    hold_back(root / "scripts" / "published-paths.sh", *entries)
+
+
+@pytest.mark.parametrize(
+    "citation",
+    [
+        "# see deploy/kept/held-back-dir/main.tf\n",
+        "# see kept/held-back-dir/main.tf\n",
+        "# copied from ../kept/held-back-dir.\n",
+        "# see deploy/kept/held-back-guide.md\n",
+        "# the steps are in held-back-guide.md#first-deployment\n",
+        "from harness.held_back_module import Step\n",
+        "# reads tests/e2e/harness/held_back_module.py\n",
+    ],
+    ids=[
+        "directory-by-full-path",
+        "directory-by-its-last-two-components",
+        "directory-at-the-end-of-a-sentence",
+        "file-by-full-path",
+        "file-by-its-name-alone",
+        "module-by-its-import-path",
+        "module-by-full-path",
+    ],
+)
+def test_gate_flags_a_citation_of_a_held_back_path(tmp_path: Path, citation: str) -> None:
+    """Every form a published file can cite a held-back path in is refused.
+
+    A held-back path is absent from the public tree, so a citation of it is the
+    same dangling pointer as one into an unpublished doc. A directory is matched
+    by its last two components, the shortest form a relative citation takes; a
+    file by its name alone, the form a bare doc filename takes; a Python module by
+    its import path too, because a dotted import names the file without its
+    extension.
+    """
+    _build_tree(tmp_path)
+    _hold_back(tmp_path, _HELD_DIR, _HELD_FILE, _HELD_MODULE)
+    (tmp_path / "docker-compose.yml").write_text(citation)
+
+    proc = _run_gate(tmp_path)
+
+    assert proc.returncode == 1, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    assert "docker-compose.yml:1:" in proc.stdout, proc.stdout
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "# see deploy/kept/held-back-dir-sibling/main.tf\n",
+        "# see deploy/kept/held-back-guide.md.orig\n",
+        "# see deploy/kept/pre-held-back-guide.md\n",
+        "from harness.held_back_module_extra import Step\n",
+        "from harness.extra_held_back_module import Step\n",
+        "# the held-back-dir variable defaults to null\n",
+    ],
+    ids=[
+        "directory-sibling",
+        "file-sibling",
+        "file-whose-name-ends-like-it",
+        "module-sibling",
+        "module-whose-name-ends-like-it",
+        "bare-directory-name",
+    ],
+)
+def test_gate_accepts_a_name_that_only_resembles_a_held_back_path(
+    tmp_path: Path, line: str
+) -> None:
+    """A different path whose name starts like an entry's is not a citation of it.
+
+    The patterns are bounded on both sides, so a name that extends an entry's,
+    at either end, is a different file; and a directory is never matched by its
+    last component alone, because a bare directory name is as often an ordinary
+    word.
+    """
+    _build_tree(tmp_path)
+    _hold_back(tmp_path, _HELD_DIR, _HELD_FILE, _HELD_MODULE)
+    (tmp_path / "docker-compose.yml").write_text(line)
+
+    proc = _run_gate(tmp_path)
+
+    assert proc.returncode == 0, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+
+
+def test_gate_does_not_scan_a_held_back_file(tmp_path: Path) -> None:
+    """What a held-back file says never reaches a public reader, so it is not read.
+
+    A held-back directory's files cite each other and the rest of what is held
+    back as a matter of course, and none of them ship. The planted file carries
+    one violation of each family — a held-back sibling and an unpublished doc —
+    and the gate must report neither.
+    """
+    _build_tree(tmp_path)
+    _hold_back(tmp_path, _HELD_DIR, _HELD_FILE)
+    inside = tmp_path / _HELD_DIR / "notes.md"
+    inside.parent.mkdir(parents=True)
+    inside.write_text(f"see held-back-guide.md and {_FULL_PATH_VIOLATION}")
+    (tmp_path / _HELD_FILE).write_text(_FULL_PATH_VIOLATION)
+
+    proc = _run_gate(tmp_path)
+
+    assert proc.returncode == 0, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    assert "PASS" in proc.stdout, proc.stdout
+
+
+@pytest.mark.parametrize(
+    ("held", "neighbour"),
+    [
+        (f"{_HELD_DIR}notes.md", "deploy/kept/held-back-dir-sibling/notes.md"),
+        (_HELD_FILE, f"{_HELD_FILE}.orig"),
+    ],
+    ids=["directory-sibling", "file-sibling"],
+)
+def test_gate_scans_a_published_neighbour_of_a_held_back_path(
+    tmp_path: Path, held: str, neighbour: str
+) -> None:
+    """A file whose name only extends a held-back entry's ships, so it is read.
+
+    The complement of the case above. The skip is bounded the way the patterns
+    are: a directory entry covers what sits under its slash, a file entry that one
+    file. Without this case, dropping either bound skips the neighbour too, and
+    every other case in this module still passes. The held-back file carries the
+    same violation as its neighbour and stays unreported, so one run shows both
+    sides of the bound.
+    """
+    _build_tree(tmp_path)
+    _hold_back(tmp_path, _HELD_DIR, _HELD_FILE)
+    for relative in (held, neighbour):
+        planted = tmp_path / relative
+        planted.parent.mkdir(parents=True, exist_ok=True)
+        planted.write_text(_FULL_PATH_VIOLATION)
+
+    proc = _run_gate(tmp_path)
+
+    assert proc.returncode == 1, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    assert f"{neighbour}:1:" in proc.stdout, proc.stdout
+    assert f"{held}:1:" not in proc.stdout, proc.stdout
+
+
+def test_gate_honours_a_waiver_on_the_same_line(tmp_path: Path) -> None:
+    """The waiver works on the line it sits on, which is the form a shell array entry takes.
+
+    The preceding-line form has its own case above; this one is what every entry
+    of DENY_PATHS relies on, because each carries its waiver on its own line.
+    """
+    _build_tree(tmp_path)
+    _hold_back(tmp_path, _HELD_FILE)
+    (tmp_path / "docker-compose.yml").write_text(
+        "# see deploy/kept/held-back-guide.md  # published-ref-allow: the case needs one\n"
+    )
+
+    proc = _run_gate(tmp_path)
+
+    assert proc.returncode == 0, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+
+
+def test_gate_flags_a_local_only_file(tmp_path: Path) -> None:
+    """A file that stays on the operator's machine is named only at the cost of a dangling pointer.
+
+    This pattern family is derived from LOCAL_ONLY_FILES, the array closest in
+    shape to DENY_PATHS, and it had no case of its own. The name is read from the
+    shared definition inside the body, for the reason ``first_entry`` gives.
+    """
+    _build_tree(tmp_path)
+    local_only = _first_entry("LOCAL_ONLY_FILES")
+    (tmp_path / "docker-compose.yml").write_text(f"# run {local_only} first\n")
+
+    proc = _run_gate(tmp_path)
+
+    assert proc.returncode == 1, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    assert "docker-compose.yml:1:" in proc.stdout, proc.stdout
+
+
+def test_gate_does_not_scan_python_build_metadata(tmp_path: Path) -> None:
+    """A package's build metadata lists every module by path, held-back ones included.
+
+    uv writes it into tests/e2e on every sync, gitignored like the other build
+    output the scan skips, and it never ships. Reading it would make the gate
+    fail on any checkout that has run the harness once.
+    """
+    _build_tree(tmp_path)
+    _hold_back(tmp_path, _HELD_MODULE)
+    sources = tmp_path / "tests" / "e2e" / "fixture_e2e.egg-info" / "SOURCES.txt"
+    sources.parent.mkdir(parents=True)
+    sources.write_text("harness/held_back_module.py\n")
+
+    proc = _run_gate(tmp_path)
+
+    assert proc.returncode == 0, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+
+
+def _citation_of(entry: str) -> str:
+    """The shortest form a published file can cite ``entry`` in and still be refused."""
+    if entry.endswith("/"):
+        parts = entry.rstrip("/").split("/")
+        return "/".join(parts[-2:]) + "/main.tf"
+    return entry.rsplit("/", 1)[-1]
+
+
+def test_gate_flags_a_citation_of_every_real_held_back_path(tmp_path: Path) -> None:
+    """Every path the publish really holds back is a refused citation.
+
+    The synthetic cases above prove the pattern forms; this one proves the real
+    entries produce them, in the shortest form each can be cited in. It raises
+    on an empty array, which would otherwise pass having checked nothing.
+    """
+    entries = _shared_array("DENY_PATHS")
+    if not entries:
+        raise AssertionError("DENY_PATHS is empty, so this case would assert nothing")
+    _build_tree(tmp_path)
+    lines = [f"# see {_citation_of(entry)}\n" for entry in entries]
+    (tmp_path / "docker-compose.yml").write_text("".join(lines))
+
+    proc = _run_gate(tmp_path)
+
+    assert proc.returncode == 1, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    for number, entry in enumerate(entries, start=1):
+        assert f"docker-compose.yml:{number}:" in proc.stdout, f"{entry} was not flagged"
+
+
+def test_gate_accepts_the_bare_name_of_a_real_held_back_directory(tmp_path: Path) -> None:
+    """A held-back directory's last component alone is not a citation, by design.
+
+    Published scripts pass a held-back stack's name as an argument, and a
+    component's bare name is as often an ordinary word, so the gate leaves those
+    to review. This case pins that choice: making bare names a pattern would
+    refuse those uses, and has to be decided rather than slipped in.
+    """
+    directories = [entry for entry in _shared_array("DENY_PATHS") if entry.endswith("/")]
+    if not directories:
+        raise AssertionError("DENY_PATHS holds no directory, so this case would assert nothing")
+    _build_tree(tmp_path)
+    names = [entry.rstrip("/").rsplit("/", 1)[-1] for entry in directories]
+    (tmp_path / "docker-compose.yml").write_text("".join(f"# the {name} name\n" for name in names))
+
+    proc = _run_gate(tmp_path)
+
+    assert proc.returncode == 0, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'onboarding_image = "registry.example/fora/onboarding@sha256:0"\n',
+        "# the publisher onboarding page answers from the demo\n",
+        "# ghcr.io/fora-protocol/onboarding was never published\n",
+        "# reaches http://onboarding:8084 inside the network\n",
+    ],
+    ids=["variable", "prose", "image-name", "in-network-url"],
+)
+def test_gate_accepts_an_ordinary_use_of_a_held_back_directorys_name(
+    tmp_path: Path, line: str
+) -> None:
+    """The real entries flag a held-back path, never the word it is named after.
+
+    "onboarding" names a held-back directory, and it is also a variable prefix, an
+    image name, a compose service and plain prose in files that ship.
+    """
+    _build_tree(tmp_path)
+    (tmp_path / "docker-compose.yml").write_text(line)
+
+    proc = _run_gate(tmp_path)
+
+    assert proc.returncode == 0, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"

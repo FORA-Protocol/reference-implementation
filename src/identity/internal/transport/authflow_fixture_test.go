@@ -24,16 +24,16 @@ import (
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/oidcup"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/session"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/account"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/app"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/directory"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/keystore"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/oauthserver"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/oidcup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/publisher"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/repo"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/session"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/signup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/token"
 )
@@ -56,6 +56,16 @@ const (
 	// out, and the consent-render assertions fail if the two ever drift.
 	flowSlug      = "agent-flow0001"
 	flowClientURI = "http://127.0.0.1:5599/callback"
+
+	// flowIssuer is the issuer the fixture configures the auth server with. It is
+	// deliberately not the httptest origin the requests go to (127.0.0.1:<port>),
+	// so an issuer taken from the request Host instead of the configuration fails
+	// every check made against this value.
+	flowIssuer = "http://auth.foramcp.org"
+
+	// flowState is the state the downstream client sends at /authorize. The
+	// approved redirect must echo it back.
+	flowState = "cli-state"
 
 	// The consent form's controls as they go over the wire: the decision field with
 	// its two values, and the hidden CSRF field. These tests are a black-box package
@@ -231,7 +241,7 @@ func buildAuthFixture(
 		Clock:           clk,
 		Health:          func(context.Context) error { return nil },
 		Auth: &app.AuthConfig{
-			Issuer:        "http://auth.foramcp.org",
+			Issuer:        flowIssuer,
 			Upstream:      &recordingUpstream{Authenticator: up, seen: seen},
 			SessionKey:    sessionKey,
 			Tokens:        tokens,
@@ -402,13 +412,16 @@ func newKeystoreOutageFixture(t *testing.T) *authFixture {
 	return buildAuthFixture(t, up, drive, authServerOpts{keyMount: "nonexistent-outage-mount"})
 }
 
+// newTokenIssuer builds the access-token signer. Its issuer is flowIssuer, the one
+// the auth server is configured with, because cmd/server derives both from the
+// same IDENTITY_AUTH_ISSUER value.
 func newTokenIssuer(t *testing.T) *token.Issuer {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatalf("gen token key: %v", err)
 	}
-	iss, err := token.NewIssuer(priv, "https://auth.foramcp.org", "https://mcp.foramcp.org", clock.System{})
+	iss, err := token.NewIssuer(priv, flowIssuer, "https://mcp.foramcp.org", clock.System{})
 	if err != nil {
 		t.Fatalf("token.NewIssuer: %v", err)
 	}
@@ -498,23 +511,36 @@ func (f *authFixture) register(t *testing.T, redirectURI string) string {
 	return out.ClientID
 }
 
-// authorizeThenCallback runs authorize (which stashes the flow cookie and hands
-// the leg to the upstream) then completes the upstream leg via f.drive and issues
-// the upstream callback, returning the callback result (a 302 to /consent, or an
-// error status on upstream failure).
-func (f *authFixture) authorizeThenCallback(t *testing.T, clientID, redirectURI, challenge string) flowResp {
+// startAuthorize sends the downstream client's standard authorization request and
+// returns the Location of the 302 that hands the browser to the upstream identity
+// provider. /authorize seals the flow cookie just before that redirect, so a
+// returned Location means a sign-in has started. A refused request answers 302
+// too, but back to the client with an error. A test that took that for a started
+// sign-in would fail later, for a reason other than the one it is named for, so a
+// 302 back to the client fails here.
+func (f *authFixture) startAuthorize(t *testing.T, clientID, redirectURI, challenge string) string {
 	t.Helper()
-	q := url.Values{
+	r := f.getAuthorize(t, url.Values{
 		"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {redirectURI},
-		"state": {"cli-state"}, "code_challenge": {challenge}, "code_challenge_method": {"S256"},
+		"state": {flowState}, "code_challenge": {challenge}, "code_challenge_method": {"S256"},
 		"scope": {"openid"},
-	}
-	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, f.srv.URL+oauthserver.AuthorizePath+"?"+q.Encode(), nil)
-	r := f.do(t, req)
+	})
 	if r.status != http.StatusFound {
 		t.Fatalf("authorize status = %d, want 302", r.status)
 	}
-	code, state := f.drive(t, r.location)
+	if sameEndpoint(mustParseURL(t, r.location), mustParseURL(t, redirectURI)) {
+		t.Fatalf("authorize redirected back to the client (%q) instead of to the upstream identity provider",
+			r.location)
+	}
+	return r.location
+}
+
+// authorizeThenCallback starts the sign-in (startAuthorize), completes the
+// upstream leg via f.drive and issues the upstream callback, returning the
+// callback result (a 302 to /consent, or an error status on upstream failure).
+func (f *authFixture) authorizeThenCallback(t *testing.T, clientID, redirectURI, challenge string) flowResp {
+	t.Helper()
+	code, state := f.drive(t, f.startAuthorize(t, clientID, redirectURI, challenge))
 	cb := url.Values{"code": {code}, "state": {state}}
 	creq, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, f.srv.URL+oauthserver.CallbackPath+"?"+cb.Encode(), nil)
 	return f.do(t, creq)
@@ -525,10 +551,17 @@ func (f *authFixture) authorizeThenCallback(t *testing.T, clientID, redirectURI,
 // from a known-good mid-flow state.
 func (f *authFixture) driveToConsent(t *testing.T) (clientID, verifier string) {
 	t.Helper()
+	return f.driveToConsentVia(t, flowClientURI)
+}
+
+// driveToConsentVia is driveToConsent for a client that registers redirectURI
+// instead of the package's usual one.
+func (f *authFixture) driveToConsentVia(t *testing.T, redirectURI string) (clientID, verifier string) {
+	t.Helper()
 	var challenge string
 	verifier, challenge = pkcePair(t)
-	clientID = f.register(t, flowClientURI)
-	cb := f.authorizeThenCallback(t, clientID, flowClientURI, challenge)
+	clientID = f.register(t, redirectURI)
+	cb := f.authorizeThenCallback(t, clientID, redirectURI, challenge)
 	if cb.status != http.StatusFound || cb.location != oauthserver.ConsentPath {
 		t.Fatalf("callback = %d -> %q, want 302 -> /consent", cb.status, cb.location)
 	}
@@ -579,13 +612,29 @@ func (f *authFixture) postConsent(t *testing.T, body string) flowResp {
 	return f.do(t, f.newConsentPOST(t, body))
 }
 
-// grantCode takes an authenticated, provisioned flow the rest of the way to the
-// authorization code the client receives: approve the requesting client, then read
-// the code out of the redirect. It is the one place a test spells what an approved
-// consent does, so a change to that path is one edit and not one per call site.
+// approvedRedirect takes an authenticated, provisioned flow the rest of the way:
+// it approves the requesting client and returns the query of the redirect back to
+// it. That redirect has passed clientRedirectQuery, and it must carry an
+// authorization code and echo the client's own state. It is the one place a test
+// spells what an approved consent does, so a change to that path is one edit and
+// not one per call site.
+func (f *authFixture) approvedRedirect(t *testing.T) url.Values {
+	t.Helper()
+	q := clientRedirectQuery(t, f.decideConsent(t, consentApprove))
+	if q.Get("code") == "" {
+		t.Fatalf("the approved redirect carries no code: %v", q)
+	}
+	if got := q.Get("state"); got != flowState {
+		t.Fatalf("the approved redirect echoes state %q, want the client's own %q", got, flowState)
+	}
+	return q
+}
+
+// grantCode is approvedRedirect for a test that needs only the authorization code
+// the client receives.
 func (f *authFixture) grantCode(t *testing.T) string {
 	t.Helper()
-	return codeFromRedirect(t, f.decideConsent(t, consentApprove))
+	return f.approvedRedirect(t).Get("code")
 }
 
 func (f *authFixture) exchangeToken(t *testing.T, code, verifier, clientID string) flowResp {
@@ -606,29 +655,11 @@ func (f *authFixture) postToken(t *testing.T, vals url.Values) flowResp {
 }
 
 // getAuthorize GETs /authorize with the given query, so a test does not re-spell the
-// request line; authorizeThenCallback drives the happy leg, this drives the rejections.
+// request line; startAuthorize sends the standard request, this drives the rejections.
 func (f *authFixture) getAuthorize(t *testing.T, params url.Values) flowResp {
 	t.Helper()
 	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, f.srv.URL+oauthserver.AuthorizePath+"?"+params.Encode(), nil)
 	return f.do(t, req)
-}
-
-// codeFromRedirect extracts the authorization code from a 302 Location back to the
-// client.
-func codeFromRedirect(t *testing.T, r flowResp) string {
-	t.Helper()
-	if r.status != http.StatusFound {
-		t.Fatalf("expected 302 to client, got %d", r.status)
-	}
-	loc, err := url.Parse(r.location)
-	if err != nil {
-		t.Fatalf("parse location: %v", err)
-	}
-	code := loc.Query().Get("code")
-	if code == "" {
-		t.Fatalf("no code in redirect %q", loc)
-	}
-	return code
 }
 
 // assertConsentNames requires the consent screen to render, and to name the given

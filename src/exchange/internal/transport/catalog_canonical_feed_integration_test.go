@@ -12,9 +12,8 @@ import (
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	foraconnect "github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
 	"github.com/FORA-Protocol/protocol/gen/go/vocab/pricingunits"
-	"google.golang.org/protobuf/proto"
 
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/ingest"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/catalogfeed"
 )
 
 // Core invariant (the principle this test protects):
@@ -24,14 +23,15 @@ import (
 //   round-trips intact through the INGESTION surface. Each entry pushed via
 //   CatalogService.PushResources is observable, term-for-term proto-equal, through
 //   the public CatalogService→ExchangeService read surface DiscoverResources →
-//   Offer.terms, with NO agent-agency and NO billing dependency (billing fires
+//   Offer.terms and Offer.pricing (the price is carried once, on the offer, and
+//   the term copy is unpriced), with NO agent-agency and NO billing dependency (billing fires
 //   only at ExecuteTransaction/consume, so EUR pricing is fine at ingest+discover).
 //
 // Every assertion below drives behaviour through the OUTERMOST public surface
 // (PushResources to write, DiscoverResources to read) and asserts back through
 // that SAME surface. No DB / sqlc Querier / raw SQL / Redis is read or written to
 // arrange or observe (Testing Doctrine pt 9). The terms[] expectation is produced
-// by the PRODUCTION ingest pipeline (ingest.ParseJSONL + MapRecords),
+// by the PRODUCTION ingest pipeline (catalogfeed.ParseJSONL + MapRecords),
 // the same mapper+Normalize the real feed flows through, so a regression in either
 // the mapper or the Discover projection breaks the proto.Equal comparison.
 
@@ -41,18 +41,18 @@ import (
 // the catalog must accept. The mapper runs the SAME Normalize the PushResources
 // handler runs, so the returned terms are exactly what a faithful round-trip must
 // project back.
-func canonicalFeedFixture(t *testing.T) ([]ingest.Record, []*forav1.ResourceEntry) {
+func canonicalFeedFixture(t *testing.T) ([]catalogfeed.Record, []*forav1.ResourceEntry) {
 	t.Helper()
 	feed, err := os.Open(feedFixturePath(t))
 	if err != nil {
 		t.Fatalf("open canonical feed: %v", err)
 	}
 	defer func() { _ = feed.Close() }()
-	records, err := ingest.ParseJSONL(feed)
+	records, err := catalogfeed.ParseJSONL(feed)
 	if err != nil {
 		t.Fatalf("parse canonical feed: %v", err)
 	}
-	entries, err := ingest.MapRecords(records)
+	entries, err := catalogfeed.MapRecords(records)
 	if err != nil {
 		t.Fatalf("map canonical feed: %v", err)
 	}
@@ -70,13 +70,13 @@ func canonicalFeedFixture(t *testing.T) ([]ingest.Record, []*forav1.ResourceEntr
 func pushCanonicalContributor(t *testing.T, h *pushHarness) (client foraconnect.CatalogServiceClient, kid, tenantID string) {
 	t.Helper()
 	kid = "publisher-contributor.example"
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen contributor key: %v", err)
 	}
-	h.publishAgent(t, kid, pub)                     // Gate 1: kid -> pubkey via fora.json self-signup
+	h.publishAgent(t, kid, priv)                    // Gate 1: kid -> pubkey via fora.json self-signup
 	h.publishPublisher(t, canonicalFeedDomain, kid) // Gate 2: kid listed as contributor in publisher manifest
-	tenantID = seedTenantForDomain(t, h, canonicalFeedDomain)
+	tenantID = seedSiteForDomain(t, h, canonicalFeedDomain)
 	return h.signedCat(kid, priv), kid, tenantID
 }
 
@@ -96,21 +96,6 @@ func pushCanonicalEntry(t *testing.T, h *pushHarness, client foraconnect.Catalog
 	}
 }
 
-// findTerm returns the single discovered term proto-equal to want, failing the
-// test if no discovered term matches. It compares against the production-mapped
-// expectation (mapper + Normalize), so the match proves the full canonical shape
-// — pricing, restrictions, quotas, obligations, scopes — survived the round-trip.
-func findTerm(t *testing.T, got []*forav1.LicenseTerm, want *forav1.LicenseTerm) *forav1.LicenseTerm {
-	t.Helper()
-	for _, g := range got {
-		if proto.Equal(g, want) {
-			return g
-		}
-	}
-	t.Fatalf("no discovered term equals the expected canonical term:\nwant = %v\ngot  = %v", want, got)
-	return nil
-}
-
 const canonicalFeedDomain = "publisher.example"
 
 // TestCanonicalFeed_PerUnitQuotaRoundTrip drives the FIRST canonical entry
@@ -128,13 +113,15 @@ func TestCanonicalFeed_PerUnitQuotaRoundTrip(t *testing.T) {
 	wantTerm := entries[0].GetTerms()[1]
 	uri := "https://" + canonicalFeedDomain + records[0].Path
 	req := requesterWithExt("agent-commercial-de", "commercial_entity", "DE", "ai-input")
-	got := discoverTermsAs(t, h, uri, req)
-
-	term := findTerm(t, got, wantTerm)
+	// The match proves the full canonical shape survived the round-trip: the
+	// term copy equals the production-mapped term without its pricing, and the
+	// offer's own price states the term's (one price per offer, on Offer.pricing).
+	offer := findOfferSelling(t, discoverOffersAs(t, h, uri, req), wantTerm)
+	term := offer.GetTerms()[0]
 
 	// Pin the canonical PER_UNIT-with-quota shape explicitly (beyond proto.Equal)
 	// so a reader sees what "per-unit EUR pricing with quotas" means concretely.
-	p := term.GetPricing()
+	p := offer.GetPricing()
 	if p.GetModel() != forav1.PricingModel_PRICING_MODEL_PER_UNIT {
 		t.Errorf("pricing model = %v, want PER_UNIT", p.GetModel())
 	}
@@ -170,12 +157,12 @@ func TestCanonicalFeed_FlatPricingAndAttributionObligationRoundTrip(t *testing.T
 	wantTerm := entries[1].GetTerms()[0]
 	uri := "https://" + canonicalFeedDomain + records[1].Path
 	req := requesterWithExt("agent-eu", "", "EU", "ai-input")
-	got := discoverTermsAs(t, h, uri, req)
+	offer := findOfferSelling(t, discoverOffersAs(t, h, uri, req), wantTerm)
+	term := offer.GetTerms()[0]
 
-	term := findTerm(t, got, wantTerm)
-
-	// FLAT: 4.99 EUR, no metering unit (the FLAT no-unit invariant).
-	p := term.GetPricing()
+	// FLAT: 4.99 EUR, no metering unit (the FLAT no-unit invariant), on the
+	// offer's one price.
+	p := offer.GetPricing()
 	if p.GetModel() != forav1.PricingModel_PRICING_MODEL_FLAT {
 		t.Errorf("pricing model = %v, want FLAT", p.GetModel())
 	}
@@ -237,7 +224,7 @@ func TestCanonicalFeed_SubscriptionReferenceOnlyRoundTrip(t *testing.T) {
 		t.Fatalf("offers with subscription scope = %d, want 1", len(offers))
 	}
 
-	term := findTerm(t, offers[0].GetTerms(), wantTerm)
+	term := findOfferSelling(t, offers, wantTerm).GetTerms()[0]
 
 	if term.GetSemantics() != forav1.TermSemantics_TERM_SEMANTICS_REFERENCE_ONLY {
 		t.Errorf("semantics = %v, want REFERENCE_ONLY", term.GetSemantics())
@@ -284,9 +271,12 @@ func TestCanonicalFeed_MultiResourceAllDiscoverable(t *testing.T) {
 	for _, pr := range probes {
 		uri := "https://" + canonicalFeedDomain + pr.path
 		offers := discoverOffersAs(t, h, uri, pr.req)
-		if len(offers) != 1 {
-			t.Errorf("discover %s: offers = %d, want 1 (multi-resource ingest)", uri, len(offers))
+		if len(offers) == 0 {
+			t.Errorf("discover %s: no offers, want at least one (multi-resource ingest)", uri)
+			continue
 		}
+		// Every eligible term of the resource is sold by its own offer.
+		offerTerms(t, uri, offers)
 	}
 }
 

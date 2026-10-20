@@ -33,7 +33,7 @@ const DefaultMaxCallContentBytes int64 = 32 << 20
 // The per-fetch timeout does not bound a call: items are fetched in sequence and
 // the batch size is the caller's choice, so the worst case is N × the per-fetch
 // timeout with N chosen by whoever is calling. Nothing upstream supplies a
-// deadline — the MCP session's context carries none and the HTTP server sets only
+// deadline — the request's context carries none and the HTTP server sets only
 // ReadHeaderTimeout — so without this the call is unbounded in wall time.
 const DefaultCallTimeout = 2 * time.Minute
 

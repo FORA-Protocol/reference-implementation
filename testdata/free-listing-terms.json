@@ -1,0 +1,5 @@
+{
+  "pricing_model": "free",
+  "permitted_functions": ["search", "ai-input", "ai-index", "ai-train", "crawl"],
+  "attribution_required": false
+}

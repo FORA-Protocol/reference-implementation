@@ -15,6 +15,12 @@ signed one with, so it is the same credential, and skipping the UI steps that ad
 nothing to a discover/execute test keeps this driver from scraping more of
 Zitadel's and identity's HTML than it must. Provisioning is real; only the final
 token issuance is short-circuited.
+
+The sign-in itself is the subject of one obligation, so the whole of it is here
+too. :func:`sign_in` approves the consent screen and redeems the code at the token
+endpoint. :func:`authorize_with`, :func:`token_grant` and
+:func:`authorization_server_metadata` read how the authorization server answers
+requests it must refuse. Each returns a typed answer; the raw responses stay here.
 """
 
 from __future__ import annotations
@@ -25,7 +31,10 @@ import re
 import secrets
 import time
 import uuid
-from http.cookies import SimpleCookie
+from dataclasses import dataclass
+from http import HTTPStatus
+from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 import httpx
 import jwt
@@ -33,26 +42,38 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from fora_sdk.b64 import b64url_nopad
 
-# The two local Zitadel logins the bootstrap creates (scripts/zitadel-bootstrap.sh),
-# sharing one password. A sign-up is idempotent per login: it returns the same
-# agent subdomain every time. ALICE is the agent the account-tool suites register
-# at exchanges; BOB is never registered anywhere, so a suite that needs an agent
-# with no billing account signs up as BOB and can assert that it has none.
-ALICE_USER = "alice@acme.local"
-BOB_USER = "bob@acme.local"
-ALICE_PASSWORD = "Alice12345!"
+# The provider logins are re-exported: the suites that sign up import them from
+# here, beside the sign-up that uses them. The `X as X` form marks the two this
+# module does not use itself as deliberate re-exports.
+from .provider_login import (
+    ALICE_PASSWORD,
+    ALICE_USER,
+    BOB_USER as BOB_USER,
+    CAROL_USER as CAROL_USER,
+    Browser,
+    Login,
+    Registration,
+    pass_provider,
+)
 
-# The harness's OAuth redirect — never actually dialed (we stop at /callback), but
-# it must be registered and echoed consistently through the authorize flow.
-_CLIENT_REDIRECT = "http://127.0.0.1:5599/callback"
+
+# The harness's OAuth redirect — never actually dialed (the flow stops before the
+# browser would follow it), but it must be registered and echoed consistently
+# through the authorize flow.
+CLIENT_REDIRECT = "http://127.0.0.1:5599/callback"
+
+# The authorization server's metadata (RFC 8414), at a fixed path on its issuer.
+_METADATA_PATH = "/.well-known/oauth-authorization-server"
+
+_TIMEOUT_SEC = 15.0
 
 # The consent page renders two spans with class "sub" — the subdomain and the
 # redirect URI — so the id is what disambiguates them. The Go integration test
 # asserts this same fragment, so a template edit that breaks this regex fails
 # there first.
 _SUB_RE = re.compile(r'<span class="sub" id="agent-subdomain">([^<]+)</span>')
-_INPUT_RE = re.compile(r"(?s)<input\b[^>]*>")
-_FORM_ACTION_RE = re.compile(r'(?s)<form\b[^>]*\baction="([^"]+)"')
+# The consent form's one hidden input: the token the approval has to echo.
+_CSRF_RE = re.compile(r'<input type="hidden" name="csrf_token" value="([^"]+)">')
 
 
 def _body_excerpt(html: str, limit: int = 400) -> str:
@@ -71,22 +92,174 @@ class SignupError(RuntimeError):
     """A sign-up leg did not produce the expected result."""
 
 
-def provision_agent(identity_base: str, zitadel_base: str, *, login_name: str = ALICE_USER) -> str:
-    """Run a full sign-up as ``login_name`` and return the minted agent subdomain.
+def provision_agent(
+    identity_base: str,
+    *,
+    login_name: str = ALICE_USER,
+    password: str = ALICE_PASSWORD,
+    registration: Registration | None = None,
+    browser: Browser | None = None,
+) -> str:
+    """Run a full sign-up and return the minted agent subdomain.
 
-    identity_base and zitadel_base are the in-network origins (http://identity,
-    http://zitadel:8080). Cookies are kept per origin: one jar for identity (the
-    authorize→callback session) and a separate jar inside the Zitadel login.
+    The provider is passed as ``login_name`` with ``password``, or, given a
+    ``registration``, by signing up a new account there. ``browser`` keeps the
+    provider's session for the caller to inspect afterwards.
+
+    identity_base is the in-network origin (http://identity); the provider's
+    address is whatever identity's authorize redirect names. Cookies are kept
+    per origin: one client for identity (the authorize→callback session) and a
+    separate per-host browser inside the provider login. ``password`` is the
+    bootstrap logins' shared one unless the caller minted a login of its own.
     """
     # A single identity client carries the flow cookie authorize sets and
     # callback reads. Redirects are followed manually so each Location is visible.
-    with httpx.Client(base_url=identity_base, timeout=15.0, follow_redirects=False) as idc:
+    with _identity_client(identity_base) as idc:
         client_id = _register_client(idc)
         _, challenge = _pkce()
-        upstream_url = _authorize(idc, client_id, challenge)
-        code, state = _zitadel_login(zitadel_base, upstream_url, identity_base, login_name)
-        _callback(idc, code, state)
-        return _scrape_subdomain(idc)
+        _through_callback(
+            idc,
+            identity_base,
+            client_id,
+            challenge,
+            Login(login_name, password, registration),
+            browser,
+        )
+        subdomain, _ = _consent(idc)
+        return subdomain
+
+
+@dataclass(frozen=True)
+class SignIn:
+    """A sign-in carried to its end: the agent, the authorization response, the token.
+
+    ``response`` holds the parameters the consent approval redirected back to the
+    client with (``code``, ``state`` and ``iss``), and ``access_token`` is what the
+    token endpoint answered for that code.
+    """
+
+    subdomain: str
+    response: dict[str, str]
+    access_token: str
+
+
+def sign_in(identity_base: str, *, login_name: str, password: str) -> SignIn:
+    """Sign in as ``login_name`` the way an MCP client does, through to the access token.
+
+    The same sign-up as :func:`provision_agent`, then the two steps it skips: the
+    developer approves the consent screen, and the client redeems the code with its
+    PKCE verifier at the token endpoint.
+    """
+    with _identity_client(identity_base) as idc:
+        client_id = _register_client(idc)
+        verifier, challenge = _pkce()
+        _through_callback(idc, identity_base, client_id, challenge, Login(login_name, password))
+        subdomain, csrf = _consent(idc)
+        approved = idc.post("/consent", data={"csrf_token": csrf, "decision": "approve"})
+        if approved.status_code != httpx.codes.FOUND:
+            raise SignupError(f"consent POST: {approved.status_code} {approved.text[:256]}")
+        target, response = _split_redirect(approved.headers.get("location", ""))
+        if target != CLIENT_REDIRECT or not response.get("code"):
+            raise SignupError(f"the approval redirected to {target!r} with {response}")
+        redeemed = idc.post(
+            "/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": response["code"],
+                "code_verifier": verifier,
+                "client_id": client_id,
+                "redirect_uri": CLIENT_REDIRECT,
+            },
+        )
+    if redeemed.status_code != httpx.codes.OK:
+        raise SignupError(f"token: {redeemed.status_code} {redeemed.text[:256]}")
+    token = str(redeemed.json().get("access_token", ""))
+    if not token:
+        raise SignupError(f"the token endpoint answered no access_token: {redeemed.text[:256]}")
+    return SignIn(subdomain=subdomain, response=response, access_token=token)
+
+
+@dataclass(frozen=True)
+class AuthorizationAnswer:
+    """How ``/authorize`` answered: its status, and where and with what it redirected."""
+
+    status: HTTPStatus
+    #: The redirect target without its query, empty when the answer did not redirect.
+    target: str
+    #: The query parameters of the redirect.
+    params: dict[str, str]
+
+
+def authorize_with(identity_base: str, *, challenge_method: str | None) -> AuthorizationAnswer:
+    """Send an authorization request whose PKCE challenge uses ``challenge_method``.
+
+    ``None`` sends no challenge at all. ``"plain"`` sends the verifier itself as the
+    challenge, which is what the plain method means (RFC 7636 §4.2). The client is
+    registered first, so the server trusts its redirect and answers through it.
+    """
+    with _identity_client(identity_base) as idc:
+        client_id = _register_client(idc)
+        verifier, _ = _pkce()
+        params = {
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": CLIENT_REDIRECT,
+            "state": "e2e-state",
+            "scope": "openid",
+        }
+        if challenge_method is not None:
+            params["code_challenge"] = verifier
+            params["code_challenge_method"] = challenge_method
+        resp = idc.get("/authorize", params=params)
+    target, query = _split_redirect(resp.headers.get("location", ""))
+    return AuthorizationAnswer(status=HTTPStatus(resp.status_code), target=target, params=query)
+
+
+@dataclass(frozen=True)
+class TokenAnswer:
+    """How the token endpoint answered: its status, the OAuth error, and any token."""
+
+    status: HTTPStatus
+    #: The RFC 6749 ``error`` code, empty when the answer named none.
+    error: str
+    #: The access token, empty when none was issued.
+    access_token: str
+
+
+def token_grant(identity_base: str, *, grant_type: str) -> TokenAnswer:
+    """POST a token request of ``grant_type`` as a freshly registered client."""
+    with _identity_client(identity_base) as idc:
+        client_id = _register_client(idc)
+        resp = idc.post("/token", data={"grant_type": grant_type, "client_id": client_id})
+    is_json = resp.headers.get("content-type", "").startswith("application/json")
+    body = resp.json() if is_json else {}
+    return TokenAnswer(
+        status=HTTPStatus(resp.status_code),
+        error=str(body.get("error", "")),
+        access_token=str(body.get("access_token", "")),
+    )
+
+
+def authorization_server_metadata(identity_base: str) -> dict[str, Any]:
+    """The authorization server's RFC 8414 metadata document."""
+    resp = httpx.get(f"{identity_base}{_METADATA_PATH}", timeout=_TIMEOUT_SEC)
+    if resp.status_code != httpx.codes.OK:
+        raise SignupError(f"metadata: {resp.status_code} {resp.text[:256]}")
+    document: dict[str, Any] = resp.json()
+    return document
+
+
+def provider_login_page(identity_base: str, browser: Browser) -> httpx.Response:
+    """The provider's login page, reached the way identity sends a developer there."""
+    with _identity_client(identity_base) as idc:
+        return browser.get(_upstream_authorize_url(idc))
+
+
+def _upstream_authorize_url(idc: httpx.Client) -> str:
+    """Register the harness at identity and start its authorize flow; return
+    the provider's authorize address identity sends the browser to."""
+    _, challenge = _pkce()
+    return _authorize(idc, _register_client(idc), challenge)
 
 
 def mint_bearer(
@@ -112,11 +285,39 @@ def mint_bearer(
     return jwt.encode(claims, key, algorithm="EdDSA", headers={"typ": "JWT"})
 
 
+def _identity_client(identity_base: str) -> httpx.Client:
+    """A client for identity that keeps its cookies and shows every redirect."""
+    return httpx.Client(base_url=identity_base, timeout=_TIMEOUT_SEC, follow_redirects=False)
+
+
+def _split_redirect(location: str) -> tuple[str, dict[str, str]]:
+    """A redirect's target without its query, and the query as a mapping."""
+    if not location:
+        return "", {}
+    parts = urlsplit(location)
+    return f"{parts.scheme}://{parts.netloc}{parts.path}", dict(parse_qsl(parts.query))
+
+
+def _through_callback(
+    idc: httpx.Client,
+    identity_base: str,
+    client_id: str,
+    challenge: str,
+    login: Login,
+    browser: Browser | None = None,
+) -> None:
+    """Authorize, get past the provider as ``login`` says (in ``browser`` when
+    given), and deliver its code to identity's /callback."""
+    upstream_url = _authorize(idc, client_id, challenge)
+    code, state = _zitadel_login(upstream_url, identity_base, login, browser)
+    _callback(idc, code, state)
+
+
 def _register_client(idc: httpx.Client) -> str:
     """Dynamically register the harness as an OAuth client; return its client_id."""
     resp = idc.post(
         "/register",
-        json={"redirect_uris": [_CLIENT_REDIRECT], "client_name": "fora-e2e"},
+        json={"redirect_uris": [CLIENT_REDIRECT], "client_name": "fora-e2e"},
         headers={"Content-Type": "application/json"},
     )
     if resp.status_code != httpx.codes.CREATED:
@@ -141,7 +342,7 @@ def _authorize(idc: httpx.Client, client_id: str, challenge: str) -> str:
         params={
             "response_type": "code",
             "client_id": client_id,
-            "redirect_uri": _CLIENT_REDIRECT,
+            "redirect_uri": CLIENT_REDIRECT,
             "state": "e2e-state",
             "code_challenge": challenge,
             "code_challenge_method": "S256",
@@ -163,8 +364,8 @@ def _callback(idc: httpx.Client, code: str, state: str) -> None:
         raise SignupError(f"callback: {resp.status_code} {resp.text[:256]}")
 
 
-def _scrape_subdomain(idc: httpx.Client) -> str:
-    """GET /consent and read the minted subdomain the render shows.
+def _consent(idc: httpx.Client) -> tuple[str, str]:
+    """GET /consent; return the minted subdomain the render shows, and its form token.
 
     The consent screen names the identity it is about to grant a client access
     to, which is the same subdomain /callback just provisioned. It renders from
@@ -177,131 +378,33 @@ def _scrape_subdomain(idc: httpx.Client) -> str:
     m = _SUB_RE.search(resp.text)
     if not m:
         raise SignupError(f"consent render carried no subdomain: {_body_excerpt(resp.text)}")
-    return m.group(1).strip()
-
-
-class _Session:
-    """A tiny HTTP session that threads cookies by hand across the login hops.
-
-    Zitadel binds the auth request to a userAgentID carried in the
-    ``zitadel.useragent`` cookie, whose Domain is the single-label service name
-    ``zitadel``. Python's cookie policy silently refuses to SEND a cookie scoped
-    to a dot-less domain, so httpx's own jar drops it on the redirect that follows
-    login and Zitadel then rejects the request with "User Agent does not
-    correspond". Threading the cookies as a plain name→value map and setting the
-    Cookie header explicitly sidesteps that policy — the one wrinkle of driving a
-    real provider by docker-DNS name.
-    """
-
-    def __init__(self, base: str) -> None:
-        self._c = httpx.Client(timeout=15.0, follow_redirects=False)
-        self._jar: dict[str, str] = {}
-        self._base = base
-
-    def __enter__(self) -> _Session:
-        return self
-
-    def __exit__(self, *_exc: object) -> None:
-        self._c.close()
-
-    def _cookie_header(self) -> dict[str, str]:
-        return {"Cookie": "; ".join(f"{k}={v}" for k, v in self._jar.items())} if self._jar else {}
-
-    def _absorb(self, resp: httpx.Response) -> None:
-        for raw in resp.headers.get_list("set-cookie"):
-            jar = SimpleCookie()
-            jar.load(raw)
-            for name, morsel in jar.items():
-                self._jar[name] = morsel.value
-
-    def _abs(self, loc: str) -> str:
-        return self._base + loc if loc.startswith("/") else loc
-
-    def get_following(
-        self, url: str, *, stop_prefix: str | None = None
-    ) -> tuple[httpx.Response, str]:
-        """GET url, following redirects (threading cookies), until a 2xx or until a
-        Location starts with stop_prefix. Returns (last response, matched location).
-        """
-        for _ in range(20):
-            resp = self._c.get(url, headers=self._cookie_header())
-            self._absorb(resp)
-            if resp.status_code not in (301, 302, 303, 307, 308):
-                return resp, ""
-            loc = self._abs(resp.headers.get("location", ""))
-            if stop_prefix and loc.startswith(stop_prefix):
-                return resp, loc
-            if not loc:
-                raise SignupError("redirect with no Location")
-            url = loc
-        raise SignupError("redirect hop limit")
-
-    def post(self, url: str, data: dict[str, str]) -> httpx.Response:
-        resp = self._c.post(url, data=data, headers=self._cookie_header())
-        self._absorb(resp)
-        return resp
+    csrf = _CSRF_RE.search(resp.text)
+    if not csrf:
+        raise SignupError(f"consent render carried no form token: {_body_excerpt(resp.text)}")
+    return m.group(1).strip(), csrf.group(1)
 
 
 def _zitadel_login(
-    zitadel_base: str, authorize_url: str, redirect_prefix: str, login_name: str
+    authorize_url: str, redirect_prefix: str, login: Login, browser: Browser | None
 ) -> tuple[str, str]:
-    """Drive Zitadel v3's server-rendered Login V1 UI headlessly to the callback.
+    """Pass the provider's login UI in browser (a fresh one when None) and
+    return the callback's code+state.
 
-    Mirrors the Go testutil.HeadlessLogin: scrape the login-name form, submit the
-    login name, scrape the password form, submit the password, then chase the
-    redirect chain until it reaches identity's /callback and pull the code+state.
-    Deliberately the only thing coupled to Zitadel's login HTML.
+    The login itself is the shared provider driver's. What is particular here
+    is where it stops: at identity's /callback, which is NOT followed, because
+    delivering it is identity's own client's job -- that client carries the
+    flow cookie authorize set.
     """
     callback_prefix = redirect_prefix.rstrip("/") + "/callback"
-    with _Session(zitadel_base) as s:
-        login_resp, _ = s.get_following(authorize_url)
-        csrf, req_id, action = _parse_form(login_resp.text, "login-name", want_req_id=True)
-
-        pw_resp = s.post(
-            zitadel_base + action,
-            {
-                "gorilla.csrf.Token": csrf,
-                "authRequestID": req_id,
-                "loginName": login_name,
-            },
-        )
-        pw_resp = _follow_to_page(s, pw_resp)
-        csrf2, _, action2 = _parse_form(pw_resp.text, "password", want_req_id=False)
-
-        submit = s.post(
-            zitadel_base + action2,
-            {
-                "gorilla.csrf.Token": csrf2,
-                "authRequestID": req_id,
-                "password": ALICE_PASSWORD,
-            },
-        )
-        first = s._abs(submit.headers.get("location", ""))  # noqa: SLF001 — same-module helper
-        if not first:
-            raise SignupError(f"password submit did not redirect: {submit.text[:300]}")
-        _, matched = s.get_following(first, stop_prefix=callback_prefix)
-        return _code_state(matched)
-
-
-def _follow_to_page(s: _Session, resp: httpx.Response) -> httpx.Response:
-    """If resp is a redirect, follow it (threading cookies) to the next rendered page."""
-    if resp.status_code not in (301, 302, 303, 307, 308):
-        return resp
-    loc = s._abs(resp.headers.get("location", ""))  # noqa: SLF001 — same-module helper
-    page, _ = s.get_following(loc)
-    return page
-
-
-def _parse_form(html: str, which: str, *, want_req_id: bool) -> tuple[str, str, str]:
-    """Extract (csrf, authRequestID, form action) from a Zitadel login page."""
-    csrf = _hidden(html, "gorilla.csrf.Token")
-    action = _action(html)
-    req_id = _hidden(html, "authRequestID") if want_req_id else ""
-    if not (csrf and action) or (want_req_id and not req_id):
-        raise SignupError(
-            f"zitadel {which} form parse (csrf={bool(csrf)} action={bool(action)}): {html[:400]}"
-        )
-    return csrf, req_id, action
+    own = browser or Browser()
+    try:
+        _, matched = pass_provider(own, own.get(authorize_url), login, stop_prefix=callback_prefix)
+    finally:
+        if browser is None:
+            own.close()
+    if not matched:
+        raise SignupError(f"the login did not reach {callback_prefix}")
+    return _code_state(matched)
 
 
 def _code_state(callback_url: str) -> tuple[str, str]:
@@ -313,16 +416,3 @@ def _code_state(callback_url: str) -> tuple[str, str]:
     if not code:
         raise SignupError(f"reached callback without code: {callback_url}")
     return code, q.get("state", "")
-
-
-def _hidden(html: str, name: str) -> str:
-    for tag in _INPUT_RE.findall(html):
-        if f'name="{name}"' in tag:
-            m = re.search(r'value="([^"]*)"', tag)
-            return m.group(1) if m else ""
-    return ""
-
-
-def _action(html: str) -> str:
-    m = _FORM_ACTION_RE.search(html)
-    return m.group(1) if m else ""

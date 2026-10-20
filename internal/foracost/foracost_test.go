@@ -76,3 +76,48 @@ func TestBatchTotal(t *testing.T) {
 		}
 	})
 }
+
+// TestPerCurrency pins the per-currency totals the Broker reports: one entry per
+// currency in the order each first appears, exact decimal sums never mixed
+// across currencies, nothing for uncosted items, and a hard error on a malformed
+// amount.
+func TestPerCurrency(t *testing.T) {
+	t.Run("one entry per currency in first-appearance order", func(t *testing.T) {
+		got, err := foracost.PerCurrency([]*forav1.TransactionResultItem{
+			item("1.10", "EUR"), item("2.5", "USD"), item("", ""), item("0.90", "EUR"), item("5", "USD"),
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []struct{ amount, currency string }{{"2", "EUR"}, {"7.5", "USD"}}
+		if len(got) != len(want) {
+			t.Fatalf("got %d totals (%v), want %d", len(got), got, len(want))
+		}
+		for i, w := range want {
+			if got[i].GetAmount() != w.amount || got[i].GetCurrency() != w.currency {
+				t.Errorf("totals[%d] = %s %s, want %s %s",
+					i, got[i].GetAmount(), got[i].GetCurrency(), w.amount, w.currency)
+			}
+			if got[i].UnitCost != nil {
+				t.Errorf("totals[%d] carries unit_cost %q, want it unset", i, got[i].GetUnitCost())
+			}
+		}
+	})
+
+	t.Run("no costed items yields no totals", func(t *testing.T) {
+		got, err := foracost.PerCurrency([]*forav1.TransactionResultItem{item("", ""), item("0.10", "")})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("got %v, want no totals", got)
+		}
+	})
+
+	t.Run("malformed amount errors", func(t *testing.T) {
+		_, err := foracost.PerCurrency([]*forav1.TransactionResultItem{item("1", "USD"), item("x", "EUR")})
+		if err == nil {
+			t.Fatal("want error on malformed amount, got nil")
+		}
+	})
+}

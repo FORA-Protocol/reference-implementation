@@ -16,7 +16,6 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forareason"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/agentsign"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/exchacct"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/foraclient"
 )
 
 // errNoIdentity is returned when a tool runs without an authenticated agent on
@@ -31,11 +30,12 @@ import (
 var errNoIdentity = fmt.Errorf("mcp: no authenticated agent on the request: %w",
 	agentsign.ErrNoIdentity)
 
-// errIdentityMismatch is returned when the session's agent and the bearer on the
-// current request disagree. Failing closed is the only safe reading: two answers
-// to "whose key signs this" is not a case to pick a winner in.
+// errIdentityMismatch is returned when the agent on the request context and the
+// bearer the SDK reports for the same request disagree. Failing closed is the
+// only safe reading: two answers to "whose key signs this" is not a case to pick
+// a winner in.
 var errIdentityMismatch = errors.New(
-	"mcp: the bearer on this request names a different agent than the session it was sent on",
+	"mcp: the bearer on this request names a different agent than the request context",
 )
 
 // deliveryReason renders a failed content fetch for the agent.
@@ -135,14 +135,18 @@ const notSignableMessage = "the calling agent's signing key could not be produce
 // credentials a call is signed with, rather than a peer's refusal or a check on
 // something the caller supplied.
 //
-// Two clauses, because the condition arrives in two shapes. A leg that resolves
-// the key itself before building a request says so with the SDK's class — the
-// three SDK verbs and the relay purchase. A leg that leaves the resolution to
-// the signing transport cannot: the failure surfaces from inside RoundTrip, so
-// net/http and then the RPC client wrap it in their own transport errors and the
-// class is gone. Only the sentinel chain crosses both, which is why the second
-// clause is the one that matters — without it, the two account tools answer with
-// a transport code and hand the agent the key store's own diagnostics.
+// Two clauses, because the condition can arrive in two shapes. A leg that
+// resolves the key itself before building a request says so with the SDK's
+// class, and every outbound leg does that today — the SDK verbs, the purchase
+// among them. A leg that left the resolution to the signing transport could
+// not: the failure surfaces from inside RoundTrip, so net/http and then the RPC
+// client wrap it in their own transport errors and the class is gone.
+//
+// The second clause is what covered the two account tools while they were that
+// second shape. They are not any more, and the clause is KEPT rather than
+// removed on the strength of that: it reads a sentinel off the chain, so it
+// costs nothing, and it is the only thing standing between a future leg written
+// the old way and an agent receiving the key store's own diagnostics.
 func isNotSignable(err error) bool {
 	var callErr *forasdkconnect.CallError
 	if errors.As(err, &callErr) && callErr.Kind == forasdkconnect.CallNotSignable {
@@ -179,7 +183,7 @@ func (t *toolset) failed(ctx context.Context, who caller, op string, err error) 
 // an operator line through failed above is bounded, so the line's shape — event
 // name, level, fields — is still decided in one place.
 func (t *toolset) logFailure(ctx context.Context, who caller, op string, err error, cause string) {
-	t.logger(ctx, who).WarnContext(ctx, "identity.mcp.call_failed",
+	t.logger(ctx).WarnContext(ctx, "identity.mcp.call_failed",
 		"subdomain", who.subdomain, "op", op, "reason", reasonOf(err),
 		"err", cause)
 }
@@ -260,46 +264,63 @@ func boundPeerText(s string) string {
 // so the typed reason is surfaced when present and the transport code is the
 // fallback.
 //
-// Both outbound shapes land here: the Connect legs carry the detail on a
-// *connect.Error, and the relay leg carries it on a *foraclient.Error. Rendering
-// for BOTH happens at this layer, which is why foraclient returns its refusal as
-// a value rather than a sentence — a reason rendered into prose one layer down
-// cannot be recovered here without parsing it back out.
+// Every outbound shape lands here, and detailOf below is where the two are
+// walked: the SDK's typed failure, and a Connect error underneath it.
+// Rendering happens at this layer for both, because a reason rendered into
+// prose one layer down cannot be recovered here without parsing it back out.
 func foraError(op string, err error) error {
+	// The input field a peer blamed is added to either arm, so an agent knows
+	// which argument to correct. It is read apart from the reason because the
+	// Broker's validation failures name a field and no reason.
+	var field string
+	if name := fieldOf(err); name != "" {
+		field = " (field: " + name + ")"
+	}
 	if reason := reasonOf(err); reason != "" {
-		return fmt.Errorf("%s: %s: %s", op, reason, messageOf(err))
+		return fmt.Errorf("%s: %s: %s%s", op, reason, messageOf(err), field)
 	}
-	var connErr *connect.Error
-	if errors.As(err, &connErr) {
-		return fmt.Errorf("%s: %s: %s", op, connErr.Code(), connErr.Message())
-	}
-	// Neither a peer that named a reason nor one that answered at all: the relay
-	// leg's own refusals, which carry a kind this layer does not render, and the
+	// Neither a peer that named a reason nor one that answered at all: the
 	// failures raised before a request exists. Those have no reason to surface and
 	// their own text is the useful part.
+	//
+	// There used to be an arm between these two, rendering a Connect error's code
+	// and message. It is gone because nothing can reach it. Every leg that speaks
+	// Connect now answers with the SDK's typed failure, and reasonOf answers for
+	// one of those on its SECOND branch when the first finds no usable detail —
+	// ReasonOf falls back to the failure's own class and never returns empty, so
+	// reasonOf never reaches this line for them.
+	//
+	// Which branch answers is worth stating correctly, because it moved: detailOf
+	// now SKIPS a call failure whose detail names no reason, so the shape that
+	// used to be caught by the first branch is exactly the shape that now falls to
+	// the second. The rendering is unchanged either way: the SDK's reason for a
+	// peer refusal IS the Connect code, and messageOf still falls through to the
+	// peer's sentence.
 	//
 	// A signing failure does NOT arrive here, despite being local — it is named by
 	// condition above, so it takes the first arm with a token and a fixed
 	// sentence.
-	return fmt.Errorf("%s: %w", op, err)
+	return fmt.Errorf("%s: %w%s", op, err, field)
 }
 
 // detailOf pulls the FORA ErrorDetail out of whichever outbound error shape
 // carries one, or nil.
 //
-// The three shapes are walked in ONE place because the reason and the message
+// The shapes are walked in ONE place because the reason and the message
 // are two views of the same detail, and reading them in two functions meant
 // every new outbound error type had to be added to both in lockstep. They had
 // already drifted apart on what happens when a shape matches but carries no
 // detail, which is the drift this removes.
 func detailOf(err error) *forav1.ErrorDetail {
 	var callErr *forasdkconnect.CallError
-	if errors.As(err, &callErr) && callErr.Detail != nil {
+	// A detail that names no reason is SKIPPED rather than returned, which is the
+	// same rule connectDetail below applies and has to be applied here too. The
+	// SDK hands over the FIRST ErrorDetail a peer attached, whatever it carries,
+	// where the Connect reader walks past the empty ones — so without this, a peer
+	// attaching an empty detail ahead of a real one would mask the real one on
+	// exactly the legs that now route through the SDK.
+	if errors.As(err, &callErr) && forareason.Name(callErr.Detail) != "" {
 		return callErr.Detail
-	}
-	var foraErr *foraclient.Error
-	if errors.As(err, &foraErr) && foraErr.Detail != nil {
-		return foraErr.Detail
 	}
 	var connErr *connect.Error
 	if errors.As(err, &connErr) {
@@ -322,9 +343,11 @@ func detailOf(err error) *forav1.ErrorDetail {
 // call whose key is resolved inside the signing transport fails as a transport
 // error the RPC client has already wrapped, so there is no class left to read
 // and the transport code would be reported instead — which names the peer for a
-// fault that never left this process. Reading the condition here is what keeps
-// one token on one condition across every leg, so an alert keyed on it covers
-// all five tools rather than the three that happen to classify for themselves.
+// fault that never left this process. No leg is in that shape today, since every
+// one of them resolves the key before it builds a request. Reading the condition
+// here is what keeps one token on one condition whatever a later leg does, so an
+// alert keyed on it covers all five tools rather than whichever happen to
+// classify for themselves.
 func reasonOf(err error) string {
 	if name := forareason.Name(detailOf(err)); name != "" {
 		return name
@@ -371,18 +394,53 @@ func messageOf(err error) string {
 // returned, so a peer that attached an empty one does not mask a later detail
 // that named the cause.
 func connectDetail(connErr *connect.Error) *forav1.ErrorDetail {
-	for _, d := range connErr.Details() {
-		msg, err := d.Value()
-		if err != nil {
-			continue
-		}
-		detail, ok := msg.(*forav1.ErrorDetail)
-		if !ok {
-			continue
-		}
+	for _, detail := range connectDetails(connErr) {
 		if forareason.Name(detail) != "" {
 			return detail
 		}
 	}
 	return nil
+}
+
+// connectDetails decodes every FORA ErrorDetail attached to a Connect error, in
+// order, skipping attachments of any other type.
+func connectDetails(connErr *connect.Error) []*forav1.ErrorDetail {
+	var out []*forav1.ErrorDetail
+	for _, d := range connErr.Details() {
+		msg, err := d.Value()
+		if err != nil {
+			continue
+		}
+		if detail, ok := msg.(*forav1.ErrorDetail); ok {
+			out = append(out, detail)
+		}
+	}
+	return out
+}
+
+// fieldOf returns the input field a peer named in ErrorDetail.metadata["field"],
+// or "" when no detail names one.
+//
+// It reads every detail on the chain rather than the one detailOf picks, and
+// that is deliberate. detailOf skips a detail that names no reason, and the
+// Broker's own validation failures are exactly that shape: a generic transport
+// error whose only structured content is the field. Reading them through
+// detailOf would lose the field, and the Broker's message writes the key with a
+// space rather than as the path the agent sent, so it cannot stand in for it.
+func fieldOf(err error) string {
+	var details []*forav1.ErrorDetail
+	var callErr *forasdkconnect.CallError
+	if errors.As(err, &callErr) {
+		details = append(details, callErr.Detail)
+	}
+	var connErr *connect.Error
+	if errors.As(err, &connErr) {
+		details = append(details, connectDetails(connErr)...)
+	}
+	for _, detail := range details {
+		if field := detail.GetMetadata()["field"]; field != "" {
+			return field
+		}
+	}
+	return ""
 }

@@ -4,8 +4,6 @@ package transport_test
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -16,6 +14,7 @@ import (
 	connect "connectrpc.com/connect"
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	foraconnect "github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
+	"github.com/FORA-Protocol/protocol/sdk/go/core"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -25,15 +24,23 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/budget"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/exa"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/probe"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/purchase"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/repo"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/resolve"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/signing"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/xclient"
 )
 
 type fixture struct {
 	resolveHandler *resolve.Service
-	exchange       *mockExchange
+	purchase       *purchase.Service
+	// exchange is the package's mock Exchange at mp.acme.example. It is set only
+	// when fixtureOpts.upstream is nil, for the tests whose assertion depends on
+	// an Exchange's answer and that no e2e test covers yet.
+	exchange *mockExchange
+	// wire is fixtureOpts.upstream: the network endpoint at mp.acme.example for a
+	// test whose subject is what the Broker does before or instead of contacting
+	// an Exchange. nil when the mock is wired.
+	wire *wireExchange
 	// exchange2 is the SECOND exchange, wired only when fixtureOpts.secondary is
 	// set (the multi-publisher / cross-group selection-audit scenario). nil for
 	// the single-exchange suites.
@@ -66,7 +73,14 @@ type fixtureOpts struct {
 	// manifest carrying no ver member at all, which is a distinct refusal from a
 	// ver this reader does not recognise. nil serves the working version.
 	providerVer *string
-	budgetMinor int64
+	// providerRole, when non-empty, makes the publisher serve a manifest
+	// describing that role instead of ROLE_PUBLISHER. It stages the other
+	// content-based refusal: a document that arrived and broke a rule, which is
+	// as settled as a refused version and must not read as an outage.
+	providerRole string
+	// providerDown maps the publisher's domain to a loopback port nothing
+	// listens on: the origin that did not answer, an outage rather than a verdict.
+	providerDown bool
 	// secondary, when non-nil, wires a SECOND publisher domain + SECOND exchange
 	// into the resolve fixture so a route-per-URL resolve fans a multi-URI batch
 	// across two distinct provider domains (one OfferGroup per domain). Each
@@ -86,6 +100,41 @@ type fixtureOpts struct {
 	// exposes it as fixture.logs. Off by default so the suite stays quiet; a
 	// test turns it on when the log record itself is the behavior under test.
 	captureLogs bool
+	// query, when non-nil, enables the Broker's catalog search (Deps.Query).
+	query resolve.QuerySearcher
+	// upstream, when non-nil, is what sits at mp.acme.example's address instead
+	// of the mock Exchange: a sink, or a network condition
+	// (exchange_wire_fixture_test.go). A test whose subject is what the Broker
+	// does before or instead of contacting an Exchange sets it, and no Exchange
+	// is emulated for that test.
+	upstream *wireExchange
+	// relayKey, when non-nil, makes the Broker sign every request it sends an
+	// Exchange with this key, through the production relay transport
+	// (xclient.NewSigningTransport). nil sends them unsigned, which is all a
+	// test about what the Broker routes where needs.
+	relayKey *xclient.RelayKey
+}
+
+// fixtureRelayClient is the HTTP client the fixture's Broker sends Exchange
+// requests through: signed with key when one is given, plain otherwise.
+func fixtureRelayClient(tb testing.TB, key *xclient.RelayKey) *http.Client {
+	tb.Helper()
+	if key == nil {
+		return &http.Client{}
+	}
+	rt, err := xclient.NewSigningTransport(nil, key, "https://broker.local", 30*time.Second, clock.System{})
+	if err != nil {
+		tb.Fatalf("broker relay signing transport: %v", err)
+	}
+	return &http.Client{Transport: rt}
+}
+
+// newSinkFixture is newFixture with a sink at mp.acme.example: the test fails if
+// the Broker sends that Exchange anything.
+func newSinkFixture(tb testing.TB, ctx context.Context, opts fixtureOpts) *fixture {
+	tb.Helper()
+	opts.upstream = startExchangeSink(tb)
+	return newFixture(tb, ctx, opts)
 }
 
 // secondaryProvider parameterises the second publisher domain + its exchange's
@@ -116,18 +165,7 @@ func newFixture(tb testing.TB, ctx context.Context, opts fixtureOpts) *fixture {
 	exchangeRepo := repo.NewExchangeRepo(pool)
 	logRepo := repo.NewSelectionLogRepo(pool)
 
-	// Start the mock Exchange Connect-Go server. The mock surfaces an offer
-	// with EstimatedQuantity=42 so the relay-path test can assert the Broker
-	// actually forwards Usage.ConsumedQuantity. A non-zero
-	// value is required because zero quantities also pass the validator's
-	// zero-estimate REJECT rule by reporting consumed=0; using 42 makes both
-	// the propagation AND the equality assertion non-vacuous.
-	exSrv := &mockExchange{
-		offerUnitCost:          0.10,
-		signedURL:              "https://edge.example/signed?tok=abc",
-		offerEstimatedQuantity: 42,
-	}
-	exchangeURL := startMockExchange(tb, exSrv)
+	exSrv, exchangeURL := startFixtureExchange(tb, opts.upstream)
 
 	// Upsert exchange row pointing at the mock Exchange.
 	if _, err := exchangeRepo.UpsertFromBootstrap(ctx, repo.Exchange{
@@ -146,6 +184,10 @@ func newFixture(tb testing.TB, ctx context.Context, opts fixtureOpts) *fixture {
 	switch {
 	case opts.unlicensed:
 		providerBase = startUnlicensedProvider(tb).URL
+	case opts.providerDown:
+		providerBase = refusingOrigin
+	case opts.providerRole != "":
+		providerBase = startProviderFixtureWith(tb, exchangeURL, "1.0", opts.providerRole).URL
 	case opts.providerVer != nil:
 		providerBase = startProviderFixtureAtVersion(tb, exchangeURL, *opts.providerVer).URL
 	default:
@@ -219,34 +261,20 @@ func newFixture(tb testing.TB, ctx context.Context, opts fixtureOpts) *fixture {
 	discovery := &exa.StaticClient{Candidates: exaCandidates}
 
 	// Production offer-signing-key resolver: the SAME constructor the broker
-	// wires (offerkeys.New). It backs the default fixtureOfferVerifier, which runs
+	// wires (offerkeys.New), reading through the rewriting client as an
+	// http.Client Transport. It backs the default fixtureOfferVerifier, which runs
 	// in mode Off for the legacy 'sig-x' fixtures (offerSigningPub unset), so the
 	// resolver is never called by these suites — verification-drop behaviour is
 	// exercised instead by injecting a fixtureOpts.verifier (the Deps.OfferVerifier
 	// seam), not by mock-Exchange WBA key resolution.
-	offerKeyResolver := offerkeys.New(offerkeys.Config{Client: probeClient, Scheme: "http"})
+	offerKeyResolver := offerkeys.New(offerkeys.Config{Client: &http.Client{Transport: probeClient}})
 
 	// Default offer-verification seam: pass-through (mode Off) for the legacy
 	// fixtures. A test may OVERRIDE it via fixtureOpts.verifier to inject a
 	// specific verify/reject decision without mocking the Exchange (pt 6).
-	var verifier resolve.OfferVerifier = fixtureOfferVerifier{ex: exSrv, resolver: offerKeyResolver}
-	if opts.verifier != nil {
-		verifier = opts.verifier
-	}
+	verifier := fixtureVerifier(opts.verifier, exSrv, offerKeyResolver)
 
-	// Build the co-signer directly rather than through LoadFromEnv: the fixture
-	// wants a working signer, not a test of the environment contract. Going
-	// through the env would also make every test here depend on the
-	// ephemeral-key opt-out, which production is required NOT to set.
-	_, signerKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		tb.Fatalf("signer key: %v", err)
-	}
-	signer, err := signing.NewCoSigner("broker.local", "broker-test", signerKey, nil)
-	if err != nil {
-		tb.Fatalf("signer: %v", err)
-	}
-	xpool := xclient.NewPool(&http.Client{})
+	xpool := xclient.NewPool(fixtureRelayClient(tb, opts.relayKey))
 	// Anchor the budget period bucket at a fixed instant so the per-agent
 	// accumulation tests land every resolve in one deterministic period
 	// ("2026-04") regardless of wall clock — no month-rollover flake. Redis is
@@ -262,17 +290,52 @@ func newFixture(tb testing.TB, ctx context.Context, opts fixtureOpts) *fixture {
 		Prober:    prober,
 		Exchange:  xpool,
 		Budget:    budgetSvc,
-		Signer:    signer,
 		// Discovery now resolves the exchange endpoint via the exchange's OWN
 		// well-known (registry = trust allowlist only). The fake maps the registered
 		// exchange domain to the mock Exchange URL, as the real resolver would from
 		// the exchange's /.well-known/fora.json.
 		Endpoints: endpoints,
 		Verifier:  verifier,
+		Query:     opts.query,
 	})
 	return &fixture{
-		resolveHandler: resolver, exchange: exSrv, exchange2: exchange2,
+		resolveHandler: resolver, purchase: purchase.New(exchangeRepo, endpoints, xpool),
+		exchange: exSrv, wire: opts.upstream, exchange2: exchange2,
 		logger: logger, logs: logs, endpoints: endpoints, pool: pool,
+	}
+}
+
+// startFixtureExchange puts what the test chose at mp.acme.example: its
+// wireExchange when it set one, otherwise the mock Exchange, returned with its
+// URL. The mock surfaces an offer with EstimatedQuantity=42, so the budget
+// projection unit_cost x quantity is non-trivial in every test that leaves it
+// unset.
+func startFixtureExchange(tb testing.TB, upstream *wireExchange) (*mockExchange, string) {
+	tb.Helper()
+	if upstream != nil {
+		return nil, upstream.url
+	}
+	exSrv := &mockExchange{
+		offerUnitCost:          0.10,
+		signedURL:              "https://edge.example/signed?tok=abc",
+		offerEstimatedQuantity: 42,
+	}
+	return exSrv, startMockExchange(tb, exSrv)
+}
+
+// fixtureVerifier picks the offer-verification seam: the test's own when it
+// injected one, pass-through when no mock is wired (there is no armed offer to
+// verify), and otherwise the mock-aware fixtureOfferVerifier.
+func fixtureVerifier(
+	injected resolve.OfferVerifier, exSrv *mockExchange, keys *offerkeys.Resolver,
+) resolve.OfferVerifier {
+	switch {
+	case injected != nil:
+		return injected
+	case exSrv == nil:
+		return core.NewVerifier(core.Off, nil, time.Now)
+	default:
+		return fixtureOfferVerifier{ex: exSrv, resolver: keys}
 	}
 }
 
@@ -293,6 +356,8 @@ type reqOpts struct {
 	uris        []string
 	budgetMinor int64
 	maxHops     *int32
+	// scopes, when set, is sent as requester.scopes.
+	scopes []string
 }
 
 // buildDiscoveryRequest maps budgetMinor from minor to major currency units.
@@ -307,6 +372,7 @@ func buildDiscoveryRequest(agentID string, o reqOpts) *forav1.DiscoveryRequest {
 			// refused for the shape of a field they are not testing.
 			Domain: requesterDomain,
 			Type:   forav1.RequesterType_REQUESTER_TYPE_AGENT,
+			Scopes: o.scopes,
 		},
 	}
 	if o.query != "" {
@@ -333,6 +399,10 @@ func buildDiscoveryRequest(agentID string, o reqOpts) *forav1.DiscoveryRequest {
 	return req
 }
 
+// resolveCaller is the agent every resolveOverConnect test resolves as; none of
+// those tests is about who the caller is.
+const resolveCaller = "agent-1"
+
 // resolveOverConnect spins up the real Connect+RFC9421 harness for a SIGNED
 // caller acting on its own behalf (keyID == requester.id), issues the Resolve
 // through the generated client, and returns the server fixture + decoded
@@ -340,67 +410,16 @@ func buildDiscoveryRequest(agentID string, o reqOpts) *forav1.DiscoveryRequest {
 // 9421 signature → httpsig middleware → registered Connect handler → shared
 // resolve core → toDiscoveryResponse → typed *forav1.DiscoveryResponse. The 200-OK
 // happy/refusal tests share this setup to avoid duplicated harness wiring.
-func resolveOverConnect(t *testing.T, fx *fixture, callerID string, o reqOpts) (*brokerConnectFixture, *forav1.DiscoveryResponse) {
+func resolveOverConnect(t *testing.T, fx *fixture, o reqOpts) (*brokerConnectFixture, *forav1.DiscoveryResponse) {
 	t.Helper()
 	pub, priv := newBrokerKeyPair(t)
-	srv := startBrokerConnectServer(t, fx, callerID, pub)
-	client := signingBrokerClient(srv.base, srv.server.URL, callerID, priv)
-	resp, err := client.Resolve(context.Background(), connect.NewRequest(buildDiscoveryRequest(callerID, o)))
+	srv := startBrokerConnectServer(t, fx, pub)
+	client := signingBrokerClient(srv.base, srv.server.URL, resolveCaller, priv)
+	resp, err := client.Resolve(context.Background(), connect.NewRequest(buildDiscoveryRequest(resolveCaller, o)))
 	if err != nil {
 		t.Fatalf("Resolve returned transport error: %v", err)
 	}
 	return srv, resp.Msg
-}
-
-// TestResolve_DiscoversRankedOffers pins the R7
-// DISCOVERY-ONLY contract: a licensed resolve DISCOVERS and RANKS the
-// already-signed Offers and RETURNS them in DiscoveryResponse.offer_groups (winner
-// first), and does so WITHOUT executing a transaction, minting a signed URL, or
-// recording broker-side spend. The Exchange is the sole executor and biller (at
-// ExecuteTransaction time); resolve must not double-bill. Every leg is a
-// genuine protocol round-trip (signed Connect client → httpsig → handler →
-// resolve core → toDiscoveryResponse → typed DiscoveryResponse).
-func TestResolve_DiscoversRankedOffers(t *testing.T) {
-	ctx := context.Background()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
-
-	srv, out := resolveOverConnect(t, fx, "agent-1", reqOpts{
-		query:       "FORA intro",
-		budgetMinor: 10000,
-	})
-
-	// Licensed-discovery signal: NON-EMPTY offer_groups carrying the ranked signed
-	// Offers (best first). The discovery path mints NO signed URL and NO tx id.
-	groups := out.GetOfferGroups()
-	if len(groups) == 0 {
-		t.Fatal("expected non-empty offer_groups (licensed-discovery signal)")
-	}
-	offers := groups[0].GetOffers()
-	if len(offers) == 0 {
-		t.Fatal("expected ranked offers in the first offer_group")
-	}
-	if offers[0].GetOfferId() != "offer-1" {
-		t.Errorf("ranked winner offer_id = %q, want %q", offers[0].GetOfferId(), "offer-1")
-	}
-	if offers[0].GetSignature() == "" {
-		t.Error("ranked offer is missing its signature — discovery must return the already-signed Offer")
-	}
-	// ADR-019: the agent-facing response is PURE canonical typed
-	// DiscoveryResponse — zero fora.broker.* ext smuggle keys.
-	assertNoBrokerExt(t, out)
-	if srv.exchange.discoverCalls != 1 {
-		t.Errorf("discover calls = %d, want 1", srv.exchange.discoverCalls)
-	}
-	// R7: resolve retires the broker-authored execute. The Exchange's
-	// ExecuteTransaction MUST NOT be called at resolve (it executes/bills at the
-	// agent's own ExecuteTransaction) — this is the no-double-billing pin.
-	if srv.exchange.executeCalls != 0 {
-		t.Errorf("execute calls = %d, want 0 (resolve is discovery-only)", srv.exchange.executeCalls)
-	}
-	// Usage reporting is an execute-time concern, not a resolve concern.
-	if srv.exchange.reportCalls != 0 {
-		t.Errorf("report calls = %d, want 0 (resolve does not report usage)", srv.exchange.reportCalls)
-	}
 }
 
 // TestResolve_RefusalKeepsZeroValuedFieldsOnJSONWire pins the wire-codec half of
@@ -415,10 +434,10 @@ func TestResolve_DiscoversRankedOffers(t *testing.T) {
 // exercise a different response shape than production.
 func TestResolve_RefusalKeepsZeroValuedFieldsOnJSONWire(t *testing.T) {
 	ctx := context.Background()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "bare.example", unlicensed: true})
+	fx := newSinkFixture(t, ctx, fixtureOpts{providerDomain: "bare.example", unlicensed: true})
 
 	pub, priv := newBrokerKeyPair(t)
-	srv := startBrokerConnectServer(t, fx, "agent-1", pub)
+	srv := startBrokerConnectServer(t, fx, pub)
 	client, capture := signingBrokerJSONClient(srv.base, srv.server.URL, "agent-1", priv)
 
 	// Refusal path: 200-OK DiscoveryResponse carrying only ver + absence_reason,
@@ -458,232 +477,51 @@ func TestResolve_RefusalKeepsZeroValuedFieldsOnJSONWire(t *testing.T) {
 	body := capture.Body(t)
 	testutil.AssertWireCarries(t, body, resp.Msg, "offer_groups")
 	testutil.AssertCanonicalWireNames(t, body, resp.Msg)
+	assertNothingSent(t, fx.wire)
 }
 
-func TestResolve_BudgetExhausted(t *testing.T) {
-	ctx := context.Background()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
-
-	srv, out := resolveOverConnect(t, fx, "agent-1", reqOpts{
-		uri:         "https://acme.example/article-42",
-		budgetMinor: 1, // deliberately tiny: $0.01 cap vs offer cost $0.10 (1e6 vs 1e7 at 1e8 fixed-point)
-	})
-
-	// ADR-019: budget exhaustion is a REFUSAL, surfaced ONLY via the
-	// typed DiscoveryResponse.absence_reason below — never via a fora.broker.error ext
-	// key. Assert the contractual ext keys are gone (was: extStringMsg "budget").
-	assertNoBrokerExt(t, out)
-	// budget-exhausted maps to the TYPED DiscoveryResponse.absence_reason
-	// NOT_AUTHORIZED (budgetExhaustedResponse -> pickResolveAbsenceReason ->
-	// NOT_AUTHORIZED), asserted instead of the fora.broker.absence_reason ext.
-	if got := out.GetAbsenceReason(); got != forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_NOT_AUTHORIZED {
-		t.Errorf("typed absence_reason = %v, want %v",
-			got, forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_NOT_AUTHORIZED)
-	}
-	if srv.exchange.executeCalls != 0 {
-		t.Errorf("budget-exhausted must not call ExecuteTransaction: got %d", srv.exchange.executeCalls)
-	}
-}
-
-// TestResolve_BudgetExhausted_Refused is the budget-guard negative path: an
-// over-budget resolve is refused before any offer is licensed. The guard keys on
-// the authenticated agent identity (always present, never forgeable), so a
-// declared budget below the cheapest offer's cost yields a typed refusal. Every
-// leg is a genuine protocol round-trip (signed Connect client → httpsig →
-// handler → resolve core → toDiscoveryResponse → typed DiscoveryResponse); the
-// refusal is observed at that same public surface (typed NOT_AUTHORIZED, empty
-// offer_groups, no execute).
-func TestResolve_BudgetExhausted_Refused(t *testing.T) {
-	ctx := context.Background()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
-
-	srv, out := resolveOverConnect(t, fx, "agent-1", reqOpts{
-		uri:         "https://acme.example/article-42",
-		budgetMinor: 1, // $0.01 cap vs the fixture's $0.10 offer cost — over budget
-	})
-
-	if got := out.GetAbsenceReason(); got != forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_NOT_AUTHORIZED {
-		t.Fatalf("over-budget resolve must be refused by the identity-keyed guard: "+
-			"absence_reason = %v, want NOT_AUTHORIZED", got)
-	}
-	if groups := out.GetOfferGroups(); len(groups) != 0 {
-		t.Errorf("budget-denied resolve must return empty offer_groups, got %d groups", len(groups))
-	}
-	// Discovery WAS reached (the guard runs after selection); the refusal is a
-	// budget denial, not a discovery miss — and no execute fires.
-	if srv.exchange.discoverCalls != 1 {
-		t.Errorf("discover calls = %d, want 1 (the budget guard runs post-discovery)", srv.exchange.discoverCalls)
-	}
-	if srv.exchange.executeCalls != 0 {
-		t.Errorf("budget-denied resolve must not execute: got %d", srv.exchange.executeCalls)
-	}
-}
-
-// TestResolve_BudgetAccumulatesPerAgent pins the per-agent accumulation D2
-// introduces. The guard now calls Budget.Record for the admitted
-// winner, so an agent's period counter carries spend ACROSS requests. Three
-// resolves share one fixture (one Redis keyspace, one deterministic period):
-//
-//  1. agent-accum, cap empty  → ALLOWED, records the $0.05 winner.
-//  2. agent-accum, same period → REFUSED, because the first consumed the cap
-//     (proves Record accumulated across requests, not a per-request check).
-//  3. agent-other, same period → ALLOWED, because its counter is keyed on its
-//     OWN identity (proves the key is per-agent, not global).
-//
-// Every leg is a genuine protocol round-trip (signed Connect client → httpsig →
-// handler → resolve core → typed DiscoveryResponse); allow/deny is observed at
-// that public surface (non-empty offer_groups vs the typed NOT_AUTHORIZED).
-func TestResolve_BudgetAccumulatesPerAgent(t *testing.T) {
-	ctx := context.Background()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
-	// Single-unit offer at $0.05 so exactly one resolve consumes a $0.05 cap.
-	fx.exchange.offerUnitCost = 0.05
-	fx.exchange.offerEstimatedQuantity = 1
-
-	// (1) First resolve for agent-accum — cap empty → ALLOWED.
-	_, out1 := resolveOverConnect(t, fx, "agent-accum", reqOpts{
-		uri:         "https://acme.example/article-42",
-		budgetMinor: 5, // $0.05 cap == one offer
-	})
-	if len(out1.GetOfferGroups()) == 0 {
-		t.Fatalf("first resolve must be ALLOWED against an empty cap: absence_reason = %v",
-			out1.GetAbsenceReason())
-	}
-
-	// (2) Second resolve, SAME agent + SAME period — the first consumed the cap,
-	// so the accumulated counter now refuses this one.
-	srv2, out2 := resolveOverConnect(t, fx, "agent-accum", reqOpts{
-		uri:         "https://acme.example/article-42",
-		budgetMinor: 5,
-	})
-	if got := out2.GetAbsenceReason(); got != forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_NOT_AUTHORIZED {
-		t.Fatalf("second resolve for the SAME agent must be refused — the first consumed the cap and "+
-			"Budget.Record carried the spend across requests (per-agent accumulation): absence_reason = %v, "+
-			"want NOT_AUTHORIZED", got)
-	}
-	if len(out2.GetOfferGroups()) != 0 {
-		t.Errorf("refused resolve must return empty offer_groups, got %d", len(out2.GetOfferGroups()))
-	}
-	if srv2.exchange.executeCalls != 0 {
-		t.Errorf("budget-denied resolve must not execute: got %d", srv2.exchange.executeCalls)
-	}
-
-	// (3) A DIFFERENT agent in the SAME period is unaffected — its counter is
-	// keyed on its own identity, so it still sees the licensed offer.
-	_, out3 := resolveOverConnect(t, fx, "agent-other", reqOpts{
-		uri:         "https://acme.example/article-42",
-		budgetMinor: 5,
-	})
-	if len(out3.GetOfferGroups()) == 0 {
-		t.Fatalf("a DIFFERENT agent must be unaffected by another agent's spend (per-agent key): "+
-			"absence_reason = %v", out3.GetAbsenceReason())
-	}
-}
-
-// TestResolve_ScopeInsufficientRefusal locks the propagation contract
-// for the OFFER_ABSENCE_REASON_SCOPE_INSUFFICIENT path: when an upstream
-// Exchange returns zero offers plus an OfferGroup tagged
-// SCOPE_INSUFFICIENT, the Broker surfaces "proof missing" as the error
-// vocabulary and MUST NOT call ExecuteTransaction or mint a signed URL.
-func TestResolve_ScopeInsufficientRefusal(t *testing.T) {
-	ctx := context.Background()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
-	fx.exchange.scopeRestricted = true
-
-	srv, out := resolveOverConnect(t, fx, "agent-1", reqOpts{uri: "https://acme.example/article-42"})
-
-	// ADR-019: the refusal cause rides ONLY on the typed
-	// DiscoveryResponse.absence_reason — the free-text fora.broker.error ext key
-	// ("proof missing") is gone (was: extStringMsg "proof missing").
-	if got := out.GetAbsenceReason(); got != forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_SCOPE_INSUFFICIENT {
-		t.Errorf("typed absence_reason = %v, want SCOPE_INSUFFICIENT", got)
-	}
-	assertNoBrokerExt(t, out)
-	if srv.exchange.executeCalls != 0 {
-		t.Errorf("SCOPE_INSUFFICIENT must not call ExecuteTransaction: got %d", srv.exchange.executeCalls)
-	}
-}
-
-// TestResolve_NoVerifiedCaller_Unauthenticated pins the self-action invariant:
-// an UNSIGNED Resolve (no httpsig context) is rejected with Unauthenticated and
+// TestResolve_NoVerifiedCaller_Unauthenticated pins the identity derivation's
+// guard: an UNSIGNED Resolve (no httpsig context) is rejected with Unauthenticated and
 // no upstream side effects fire. brokerConnectSigPredicate lets the unsigned
 // /fora. request through (no Signature-Input), the handler finds no verified
 // context, and returns Unauthenticated.
 func TestResolve_NoVerifiedCaller_Unauthenticated(t *testing.T) {
 	ctx := context.Background()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
+	fx := newSinkFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
 
 	const callerID = "agent-1"
 	pub, _ := newBrokerKeyPair(t)
-	srv := startBrokerConnectServer(t, fx, callerID, pub)
+	srv := startBrokerConnectServer(t, fx, pub)
 
 	// PLAIN unsigned client — NOT the signing transport.
 	client := foraconnect.NewBrokerServiceClient(srv.server.Client(), srv.server.URL, connect.WithGRPC())
 
 	_, err := client.Resolve(ctx, connect.NewRequest(buildDiscoveryRequest(callerID, reqOpts{query: "FORA intro"})))
 	assertConnectCodeLocal(t, err, connect.CodeUnauthenticated)
-	if srv.exchange.discoverCalls != 0 || srv.exchange.executeCalls != 0 {
-		t.Errorf("upstream calls leaked: discover=%d execute=%d",
-			srv.exchange.discoverCalls, srv.exchange.executeCalls)
-	}
+	assertNothingSent(t, fx.wire)
 }
 
-// TestResolve_CallerImpersonation_PermissionDenied pins the self-action
-// invariant through the REAL httpsig stack: the ATTACKER key is registered in
-// the resolver AND the request is SIGNED with it, while the DiscoveryRequest names
-// the VICTIM as requester.id. The verified keyID (attacker) != req.AgentID
-// (victim) → PermissionDenied, and no upstream side effects fire.
-func TestResolve_CallerImpersonation_PermissionDenied(t *testing.T) {
+// TestResolve_MaxHopsIsNotEnforced pins that the Broker refuses no Resolve for
+// its RequestConstraints.max_hops. At the pinned protocol the field rides only on
+// the DiscoveryRequest, which ends at the Broker: the Broker originates its own
+// queries rather than forwarding the agent's, so no party receives or enforces
+// it. A Resolve stating max_hops 0, which the Broker once refused as leaving no
+// room for its own relay hop, is answered like any other: the fan-out reaches the
+// Exchange and its offers come back. Bringing any max_hops refusal back into
+// validateResolveRequest fails this test.
+func TestResolve_MaxHopsIsNotEnforced(t *testing.T) {
 	ctx := context.Background()
 	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
 
-	const attackerID = "agent-attacker"
-	const victimID = "agent-victim"
-	attackerPub, attackerPriv := newBrokerKeyPair(t)
-	// Seed the resolver with the ATTACKER key (this is who actually signs).
-	srv := startBrokerConnectServer(t, fx, attackerID, attackerPub)
-	// Sign with the attacker key, but claim to be the victim.
-	client := signingBrokerClient(srv.base, srv.server.URL, attackerID, attackerPriv)
-
-	_, err := client.Resolve(ctx, connect.NewRequest(buildDiscoveryRequest(victimID, reqOpts{query: "FORA intro"})))
-	assertConnectCodeLocal(t, err, connect.CodePermissionDenied)
-	if srv.exchange.discoverCalls != 0 || srv.exchange.executeCalls != 0 {
-		t.Errorf("impersonation must not reach upstream: discover=%d execute=%d",
-			srv.exchange.discoverCalls, srv.exchange.executeCalls)
-	}
-}
-
-// TestResolve_MaxHopsBelowBrokerHopBudget_Rejected pins the RequestConstraints
-// max_hops self-cap: a request whose max_hops cannot accommodate the Broker's
-// own relay hop is rejected with InvalidArgument before any upstream
-// discovery/execute fires. Reverting the enforceHopBudget call in
-// validateAndCanonicalizeRequest (or dropping the json:"max_hops" tag) makes this case
-// proceed to discovery and the assertion fails — the wiring is exercised end to
-// end through a real signed Connect call, not just the isolated enforceHopBudget
-// unit.
-func TestResolve_MaxHopsBelowBrokerHopBudget_Rejected(t *testing.T) {
-	ctx := context.Background()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
-
-	const callerID = "agent.example"
-	pub, priv := newBrokerKeyPair(t)
-	srv := startBrokerConnectServer(t, fx, callerID, pub)
-	client := signingBrokerClient(srv.base, srv.server.URL, callerID, priv)
-
-	maxHops := int32(0) // 0 < 1 broker relay hop ⇒ the chain is impossible.
-	_, err := client.Resolve(ctx, connect.NewRequest(buildDiscoveryRequest(callerID, reqOpts{
-		query:   "FORA intro",
-		maxHops: &maxHops,
-	})))
-	assertConnectCodeLocal(t, err, connect.CodeInvalidArgument)
-	// ADR-019 §1 obligation: the offending field rides as TYPED
-	// ErrorDetail.metadata["field"]=="max_hops", never baked into the message.
-	// FAILS on HEAD: enforceHopBudget bakes "max_hops=%d" into the message and
-	// attaches no metadata (broker.Error has no Metadata field yet).
-	assertBrokerErrorField(t, err, "field", "max_hops")
-	if srv.exchange.discoverCalls != 0 || srv.exchange.executeCalls != 0 {
-		t.Errorf("max_hops rejection must not reach upstream: discover=%d execute=%d",
-			srv.exchange.discoverCalls, srv.exchange.executeCalls)
+	zero := int32(0)
+	_, out := resolveOverConnect(t, fx, reqOpts{
+		query:       "FORA intro",
+		budgetMinor: 10000,
+		maxHops:     &zero,
+	})
+	if len(out.GetOfferGroups()) == 0 {
+		t.Fatalf("a Resolve stating max_hops 0 was answered with no offers (absence_reason %v); "+
+			"no party enforces max_hops", out.GetAbsenceReason())
 	}
 }
 
@@ -717,11 +555,13 @@ func assertNoBrokerExt(t *testing.T, out *forav1.DiscoveryResponse) {
 // retrieval_endpoint. Every leg is a genuine protocol round-trip (signed Connect
 // client → httpsig → handler → resolve core → toDiscoveryResponse → typed
 // DiscoveryResponse).
+//
+// Needs an e2e test: no fora.broker.* ext key on a licensed Resolve answer built from a real Exchange's offers.
 func TestResolve_NoContractualExtKeys_LicensedFlow(t *testing.T) {
 	ctx := context.Background()
 	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
 
-	_, out := resolveOverConnect(t, fx, "agent-1", reqOpts{
+	_, out := resolveOverConnect(t, fx, reqOpts{
 		query:       "FORA intro",
 		budgetMinor: 10000,
 	})
@@ -739,14 +579,15 @@ func TestResolve_NoContractualExtKeys_LicensedFlow(t *testing.T) {
 // dropped.
 func TestResolve_NoContractualExtKeys_RefusalFlow(t *testing.T) {
 	ctx := context.Background()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "bare.example", unlicensed: true})
+	fx := newSinkFixture(t, ctx, fixtureOpts{providerDomain: "bare.example", unlicensed: true})
 
-	_, out := resolveOverConnect(t, fx, "agent-1", reqOpts{uri: "https://bare.example/item"})
+	_, out := resolveOverConnect(t, fx, reqOpts{uri: "https://bare.example/item"})
 	// The typed refusal-cause surface stays — it is the sole refusal channel now.
 	if out.GetAbsenceReason() != forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_NOT_IN_CATALOG {
 		t.Errorf("typed absence_reason = %v, want NOT_IN_CATALOG", out.GetAbsenceReason())
 	}
 	assertNoBrokerExt(t, out)
+	assertNothingSent(t, fx.wire)
 }
 
 // TestResolve_FaultCarriesErrorDetail pins the ADR-019 fault
@@ -761,11 +602,11 @@ func TestResolve_NoContractualExtKeys_RefusalFlow(t *testing.T) {
 // the exchange suite's assertDenialReason.
 func TestResolve_FaultCarriesErrorDetail(t *testing.T) {
 	ctx := context.Background()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
+	fx := newSinkFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
 
 	const callerID = "agent-1"
 	pub, _ := newBrokerKeyPair(t)
-	srv := startBrokerConnectServer(t, fx, callerID, pub)
+	srv := startBrokerConnectServer(t, fx, pub)
 
 	// PLAIN unsigned client — no httpsig context → Unauthenticated fault.
 	client := foraconnect.NewBrokerServiceClient(srv.server.Client(), srv.server.URL, connect.WithGRPC())
@@ -773,4 +614,5 @@ func TestResolve_FaultCarriesErrorDetail(t *testing.T) {
 	_, err := client.Resolve(ctx, connect.NewRequest(buildDiscoveryRequest(callerID, reqOpts{query: "FORA intro"})))
 	assertConnectCodeLocal(t, err, connect.CodeUnauthenticated)
 	assertBrokerErrorDetail(t, err, "fora.v1.BrokerService")
+	assertNothingSent(t, fx.wire)
 }

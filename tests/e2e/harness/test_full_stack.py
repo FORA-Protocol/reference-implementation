@@ -3,7 +3,7 @@
 Proves the 3-way cryptographic chain works end-to-end against a real
 dockerised stack, driven entirely against the demo-catalog resources the real
 ``fora-ingest`` binary ingested (one signed PushResources RPC per feed) —
-there is no ``push_catalog`` of demo content anywhere in this suite.
+no test in this suite pushes demo content.
 
 Each demo publisher domain resolves in-network to its edge runtime via a
 docker-compose network alias on port 80:
@@ -19,95 +19,61 @@ fora.transaction_log backs every successful resolve.
 
 from __future__ import annotations
 
-from pathlib import Path
+from http import HTTPStatus
 
-import httpx
+from wire.models import TransactionResultItem
 
-from .broker_client import execute_first_offer
+from .broker_purchase import buy_through_broker
 from .conftest import StackURLs
-from .edge_fetch import fetch_signed, tamper_query_param
-from .resolve_carriers import first_item_of, licensed_of, retrieval_endpoint_of
+from .edge_fetch import fetch_signed, fetch_without_proof, tamper_query_param
+from .obligation_registry import Obligation, obligation
 from .seed import DemoResource, SeededFixture
-from .signing import build_pop_headers
+
+# The refusal tests below fetch through ``edge_fetch.fetch_without_proof``. The
+# ed25519 edges enforce binding, so a bound URL fetched without proof is refused
+# 403 ``missing_agent_key``, which is what the two "refused without the key" tests
+# assert; the tamper negatives send no proof either. A positive fetch goes through
+# ``edge_fetch.fetch_signed``, which presents the proof through the SDK.
 
 
-def _fetch(
-    signed_url: str, *, timeout: float = 30.0, key_path: Path | None = None
-) -> httpx.Response:
-    """Fetch a broker-returned signed URL directly (demo domain resolves to its edge).
+def _delivered_url(item: TransactionResultItem) -> str:
+    """The signed delivery URL of one bought item; fails closed when there is none."""
+    assert item.retrieval_endpoint, f"the purchase answered no delivery URL: {item}"
+    return item.retrieval_endpoint
 
-    When ``key_path`` is set AND the agent-bound URL carries ``agent_id=``, merge
-    proof-of-possession headers (X-FORA-Agent-Key + RFC 9421 GET signature over
-    the agent's bound key). Those headers are load-bearing: the ed25519 edges
-    enforce binding, so a bound URL fetched without them is refused 403
-    ``missing_agent_key`` — which is what the two "refused without the key" tests
-    below assert. RSA (aws) URLs carry no ``agent_id=`` and need no key; the
-    tamper-negative fetches stay plain deliberately.
+
+def _deliver_demo(compose_stack: StackURLs, res: DemoResource) -> TransactionResultItem:
+    """Resolve a DemoResource at the Broker and buy the winner through the Broker.
+
+    Broker Resolve is discovery-only, so the signed URL is minted on the
+    purchase, not on Resolve. intended_use ``ai-input`` is a real function every
+    demo term permits. Buyer is the currency-matched demo buyer.
     """
-    headers: dict[str, str] = {}
-    if key_path is not None and "agent_id=" in signed_url:
-        headers = build_pop_headers(url=signed_url, key_path=key_path)
-    return httpx.get(signed_url, headers=headers, follow_redirects=True, timeout=timeout)
-
-
-def _delivered_url(resp: httpx.Response) -> str:
-    """Return items[0].retrievalEndpoint of an EXECUTE TransactionResponse.
-
-    The EXECUTE response is an items[] envelope, so the signed
-    URL (and every per-result field) lives on items[0], never the top level.
-    Fails closed if the envelope carries no items[0] or no retrievalEndpoint.
-    """
-    item = first_item_of(resp.json())
-    assert item is not None, f"execute response carried no items[0]: {resp.text}"
-    url = retrieval_endpoint_of(item)
-    assert url, f"items[0] carried no retrievalEndpoint: {resp.text}"
-    return url
-
-
-def _deliver_demo(compose_stack: StackURLs, res: DemoResource) -> httpx.Response:
-    """Two-phase deliver a DemoResource: Broker discover → relay-execute the winner.
-
-    Two-phase relay: Broker Resolve is discovery-only, so the signed URL is
-    minted on the relay EXECUTE (TransactionResponse), not on Resolve. The agent
-    relay-executes the winning Offer (agent sig1 + Broker sig2 + offer-acceptance)
-    through the Broker to the Exchange. intended_use ``ai-input`` is a real
-    function every demo term permits (Exchange term-eligibility filter admits it);
-    the per-call nonce inside resolve keeps the signature unique for the replay
-    store. Buyer is the currency-matched demo buyer.
-    """
-    return execute_first_offer(
+    _, item = buy_through_broker(
         compose_stack,
-        {"agent_id": res.buyer_agent_id, "uri": res.uri, "intended_use": "ai-input"},
+        res.uri,
         agent_id=res.buyer_agent_id,
-        domain=res.domain,
         key_path=res.buyer_key_path,
     )
+    return item
 
 
 def test_broker_resolve_returns_signed_url_and_writes_tx_log(
     compose_stack: StackURLs,
     seeded: SeededFixture,
 ) -> None:
-    """Relay-execute mints an Exchange-backed signed URL and persists a tx.
+    """A purchase through the Broker mints an Exchange-backed signed URL and a tx.
 
-    Observed through the relay-execute (TransactionResponse) only (Testing
-    Doctrine pt9): a populated transaction_id means the Exchange committed the
-    transaction_log row before returning the signed URL (the write-before-sign
-    invariant). R7: Resolve is discovery-only, so the URL + transaction_id are
-    minted on the EXECUTE, not Resolve. Driven on the FREE demo resource
-    (socrates) as the EUR buyer through the full two-phase relay chain.
+    Observed through the purchase's answer only (Testing Doctrine pt9): a
+    populated transaction_id means the Exchange committed the transaction_log row
+    before returning the signed URL (the write-before-sign invariant). Resolve is
+    discovery-only, so the URL and transaction_id are minted on the purchase, not
+    on Resolve. Driven on the FREE demo resource (socrates) as the EUR buyer.
     """
     res = seeded.free
-    resp = _deliver_demo(compose_stack, res)
-    assert resp.status_code == httpx.codes.OK, resp.text
-    # The EXECUTE response is an items[] envelope — read the
-    # per-result fields (licensed/retrievalEndpoint/transactionId) from items[0].
-    payload = resp.json()
-    item = first_item_of(payload)
-    assert item is not None, f"execute response carried no items[0]: {payload}"
-    assert licensed_of(item) is True, f"expected licensed=true, got {payload}"
-    assert item.get("retrieval_endpoint"), f"retrievalEndpoint missing from items[0]: {payload}"
-    assert item.get("transaction_id"), f"transactionId missing from items[0]: {payload}"
+    item = _deliver_demo(compose_stack, res)
+    assert item.retrieval_endpoint, f"retrieval_endpoint missing from the item: {item}"
+    assert item.transaction_id, f"transaction_id missing from the item: {item}"
 
 
 def test_signed_url_fetches_origin_content_via_cloudflare_edge(
@@ -116,34 +82,11 @@ def test_signed_url_fetches_origin_content_via_cloudflare_edge(
 ) -> None:
     """The Exchange-signed URL on the demo domain verifies at the Cloudflare edge and delivers bytes."""
     res = seeded.cloudflare  # socrates, demo.fora-protocol.org → Cloudflare
-    resp = _deliver_demo(compose_stack, res)
-    assert resp.status_code == httpx.codes.OK, resp.text
-    signed_url = _delivered_url(resp)
-    content_resp = _fetch(signed_url, key_path=res.buyer_key_path)
-    assert content_resp.status_code == httpx.codes.OK, content_resp.text
+    signed_url = _delivered_url(_deliver_demo(compose_stack, res))
     # socrates body is the real Stoa Press article content. Assert the ACTUAL
     # delivered article ("Socrates"), never a bare non-empty fallback — that
     # would pass on a 200 edge error-stub or a wrong-route body.
-    assert "Socrates" in content_resp.text, content_resp.text
-
-
-def _refusal_reason(resp: httpx.Response) -> str:
-    """The edge's refusal token, or a description of why there wasn't one.
-
-    ``resp.json()`` raises on a non-JSON body, and a 403 that arrives as HTML or
-    empty is exactly the failure worth diagnosing — so the raw parse would blow up
-    before the assertion could say what it saw. Returning a marker keeps the
-    assertion's message the thing the reader gets.
-    """
-    if not resp.headers.get("content-type", "").startswith("application/json"):
-        return f"<non-JSON body: {resp.text[:120]!r}>"
-    try:
-        payload = resp.json()
-    except ValueError:
-        return f"<unparseable JSON: {resp.text[:120]!r}>"
-    if not isinstance(payload, dict):
-        return f"<JSON is {type(payload).__name__}, not an object>"
-    return str(payload.get("reason", "<no reason field>"))
+    fetch_signed(signed_url, compose_stack, expect_marker="Socrates", key_path=res.buyer_key_path)
 
 
 def _assert_bound_url_refused_without_key(
@@ -155,24 +98,23 @@ def _assert_bound_url_refused_without_key(
     runtimes reach the check through different Ed25519 primitives), two copies of
     the assertions are not — they had already drifted in wording.
     """
-    resp = _deliver_demo(compose_stack, res)
-    assert resp.status_code == httpx.codes.OK, resp.text
-    signed_url = _delivered_url(resp)
+    signed_url = _delivered_url(_deliver_demo(compose_stack, res))
 
     # The URL must be agent-bound, or there is nothing to enforce and the refusal
     # below would be proving something else.
     assert "agent_id=" in signed_url, f"delivery URL is not agent-bound: {signed_url}"
 
     # No proof of possession -> refused, and refused for the RIGHT reason.
-    plain = _fetch(signed_url)
-    assert plain.status_code == httpx.codes.FORBIDDEN, (
+    plain = fetch_without_proof(signed_url)
+    assert plain.status == HTTPStatus.FORBIDDEN, (
         f"a bound URL fetched with no proof of possession must be refused, "
-        f"got {plain.status_code}: {plain.text[:256]}"
+        f"got {plain.status}: {plain.text[:256]}"
     )
-    assert _refusal_reason(plain) == "missing_agent_key", _refusal_reason(plain)
+    assert plain.reason == "missing_agent_key", plain.reason
     assert body_marker not in plain.text, f"the refusal leaked the body ({body_marker})"
 
 
+@obligation(Obligation.DELIVERY_004, negative=True)
 def test_bound_url_is_refused_without_the_key_at_cloudflare_edge(
     compose_stack: StackURLs,
     seeded: SeededFixture,
@@ -195,10 +137,9 @@ def test_tampered_signature_is_rejected(
 ) -> None:
     """Mutating the ed25519 signature flips the Cloudflare edge verify to 403."""
     res = seeded.cloudflare
-    resp = _deliver_demo(compose_stack, res)
-    tampered = tamper_query_param(_delivered_url(resp))
-    bad = _fetch(tampered)
-    assert bad.status_code == httpx.codes.FORBIDDEN, bad.text
+    tampered = tamper_query_param(_delivered_url(_deliver_demo(compose_stack, res)))
+    bad = fetch_without_proof(tampered)
+    assert bad.status == HTTPStatus.FORBIDDEN, bad.text
 
 
 def test_aws_path_resolve_returns_cloudfront_signed_url(
@@ -207,14 +148,7 @@ def test_aws_path_resolve_returns_cloudfront_signed_url(
 ) -> None:
     """The sfx demo tenant (AWS_CLOUDFRONT_RSA scheme) mints a canned-policy signed URL."""
     res = seeded.aws  # rain-on-tin-roof, sfx.demo.fora-protocol.org → AWS
-    resp = _deliver_demo(compose_stack, res)
-    assert resp.status_code == httpx.codes.OK, resp.text
-    # C2: read licensed + the CloudFront signed URL from items[0].
-    payload = resp.json()
-    item = first_item_of(payload)
-    assert item is not None, f"execute response carried no items[0]: {payload}"
-    assert licensed_of(item) is True, payload
-    signed = _delivered_url(resp)
+    signed = _delivered_url(_deliver_demo(compose_stack, res))
     for name in ("Expires", "Signature", "Key-Pair-Id"):
         assert name in signed, f"{name} missing in {signed}"
 
@@ -225,14 +159,17 @@ def test_aws_signed_url_fetches_origin_via_cloudfront_shim(
 ) -> None:
     """RSA canned policy verifies at the AWS shim, which proxies to the publisher origin."""
     res = seeded.aws
-    resp = _deliver_demo(compose_stack, res)
-    assert resp.status_code == httpx.codes.OK, resp.text
-    content_resp = _fetch(_delivered_url(resp))
-    assert content_resp.status_code == httpx.codes.OK, content_resp.text
+    delivered = _deliver_demo(compose_stack, res)
     # seeded.aws is rain-on-tin-roof (foleyworks sfx JSON). Assert the ACTUAL
     # delivered asset by its unique slug, not merely non-empty — a 200 edge
-    # error-stub or wrong-route body must fail.
-    assert "rain-on-tin-roof" in content_resp.text, content_resp.text
+    # error-stub or wrong-route body must fail. An RSA URL carries no binding: the
+    # SDK's fetch presents the buyer's proof anyway and the shim ignores it.
+    fetch_signed(
+        _delivered_url(delivered),
+        compose_stack,
+        expect_marker="rain-on-tin-roof",
+        key_path=res.buyer_key_path,
+    )
 
 
 def test_aws_tampered_signature_is_rejected(
@@ -241,10 +178,10 @@ def test_aws_tampered_signature_is_rejected(
 ) -> None:
     """Mutating a byte inside the CloudFront Signature flips the AWS shim verifier to 403."""
     res = seeded.aws
-    resp = _deliver_demo(compose_stack, res)
-    tampered = tamper_query_param(_delivered_url(resp), param="Signature")
-    bad = _fetch(tampered)
-    assert bad.status_code == httpx.codes.FORBIDDEN, bad.text
+    delivered = _deliver_demo(compose_stack, res)
+    tampered = tamper_query_param(_delivered_url(delivered), param="Signature")
+    bad = fetch_without_proof(tampered)
+    assert bad.status == HTTPStatus.FORBIDDEN, bad.text
 
 
 def test_fastly_signed_url_fetches_origin_via_viceroy(
@@ -253,19 +190,17 @@ def test_fastly_signed_url_fetches_origin_via_viceroy(
 ) -> None:
     """Ed25519-signed URL on the music demo domain verifies on Fastly Compute (Viceroy)."""
     res = seeded.fastly  # paper-satellites, music.demo.fora-protocol.org → Fastly
-    resp = _deliver_demo(compose_stack, res)
-    assert resp.status_code == httpx.codes.OK, resp.text
-    # C2: licensed is derived from items[0].retrievalEndpoint presence.
-    item = first_item_of(resp.json())
-    assert item is not None, f"execute response carried no items[0]: {resp.text}"
-    assert licensed_of(item) is True, resp.text
-    content_resp = _fetch(_delivered_url(resp), key_path=res.buyer_key_path)
-    assert content_resp.status_code == httpx.codes.OK, content_resp.text
     # seeded.fastly is paper-satellites (harmonia-records lyrics). Assert the
     # ACTUAL delivered lyric by its title, not merely non-empty.
-    assert "Paper Satellites" in content_resp.text, content_resp.text
+    fetch_signed(
+        _delivered_url(_deliver_demo(compose_stack, res)),
+        compose_stack,
+        expect_marker="Paper Satellites",
+        key_path=res.buyer_key_path,
+    )
 
 
+@obligation(Obligation.DELIVERY_004, negative=True)
 def test_bound_url_is_refused_without_the_key_at_fastly_edge(
     compose_stack: StackURLs,
     seeded: SeededFixture,
@@ -290,10 +225,9 @@ def test_fastly_tampered_signature_is_rejected(
 ) -> None:
     """Mutating the sig param trips Fastly Compute's ed25519 verify."""
     res = seeded.fastly
-    resp = _deliver_demo(compose_stack, res)
-    tampered = tamper_query_param(_delivered_url(resp))
-    bad = _fetch(tampered)
-    assert bad.status_code == httpx.codes.FORBIDDEN, bad.text
+    tampered = tamper_query_param(_delivered_url(_deliver_demo(compose_stack, res)))
+    bad = fetch_without_proof(tampered)
+    assert bad.status == HTTPStatus.FORBIDDEN, bad.text
 
 
 def test_discover_execute_delivers_content(
@@ -303,9 +237,9 @@ def test_discover_execute_delivers_content(
     """discover → execute → fetch delivers the real publisher payload end to end.
 
     The one test that walks the whole agent story on the demo catalog: resolve an
-    offer, license it through the relay (x2f94 collapsed execute — a one-resource
-    call is the degenerate n=1 batch), then fetch the signed URL the Exchange
-    minted and confirm the bytes are the publisher's.
+    offer, buy it through the Broker (a one-resource purchase is a batch of one),
+    then fetch the signed URL the Exchange minted and confirm the bytes are the
+    publisher's.
 
     It drives the Broker over HTTP as an agent does. It used to import the Python
     shim's tool functions in-process; the shim is gone, and the MCP surface itself
@@ -317,25 +251,7 @@ def test_discover_execute_delivers_content(
     # fields). It is fronted by the Fastly demo edge.
     res = seeded.fastly
 
-    exec_resp = execute_first_offer(
-        compose_stack,
-        {
-            "agent_id": res.buyer_agent_id,
-            "uri": res.uri,
-            "intended_use": "ai-input",
-        },
-        agent_id=res.buyer_agent_id,
-        domain=res.domain,
-        key_path=res.buyer_key_path,
-    )
-    assert exec_resp.status_code == httpx.codes.OK, exec_resp.text
-
-    payload = exec_resp.json()
-    item = first_item_of(payload)
-    assert item is not None, f"relay response carried no items[0]: {payload}"
-    assert licensed_of(item) is True, f"execute did not license the offer: {payload}"
-    signed_url = retrieval_endpoint_of(item)
-    assert signed_url, f"execute licensed the offer but minted no URL: {payload}"
+    signed_url = _delivered_url(_deliver_demo(compose_stack, res))
 
     # Assert the ACTUAL delivered lyric by its title, not merely a 200: an edge
     # error-stub or a wrong-route body would otherwise pass.

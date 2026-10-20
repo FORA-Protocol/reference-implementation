@@ -27,16 +27,13 @@ It listens on **two ports**: the public Exchange listener (`EXCHANGE_ADDR`,
 default `:8081`) and a separate internal admin listener (`ADMIN_ADDR`, default
 `:8082`). The container image publishes 8081 only.
 
-Three things are worth knowing up front because operators often look for them and
+Two things are worth knowing up front because operators often look for them and
 they do not exist:
 
 - **There are no command-line flags.** Configuration is 100% environment
   variables, and there is no configuration file. The binary does accept one
   subcommand: `exchange healthcheck` probes its own `/healthz` and exits,
   so a container health check can run the service binary itself.
-- **There is no `LOG_LEVEL`.** The Exchange always writes structured JSON logs at
-  `INFO` level to standard output. ("Structured" means each log line is
-  machine-readable data, not free text.) `DEBUG` lines are never emitted.
 - **There is no `/metrics` endpoint** and no Prometheus support. Alerting is done
   on log events — see [`RUNBOOK.md`](RUNBOOK.md) §2.2.
 
@@ -71,17 +68,55 @@ called out in §3 and §5.
 | `EXCHANGE_SOR_DSN` | **Required** | The PostgreSQL connection string for the **account registry**, a **second, separate database**. Not a second schema in the catalog database — a different database. The Exchange exits immediately if this is unset. See §2.6. | `postgres://fora:PASSWORD@db.internal:5432/fora_sor?sslmode=require` |
 | `FORA_SOR_ADAPTER` | Optional | Which account registry to use. Only `postgres` exists, and it is the default. **Any other value stops the boot** — see §2.6. | *(leave unset)* |
 | `EXCHANGE_SOR_CACHE_TTL` | Optional | How long the Exchange reuses an account's on/off status before re-reading it. Default `30s`. A value it cannot parse stops the boot. | `30s` |
-| `EXCHANGE_DEFAULT_TENANT` | Optional, **set it** | The publisher whose "activate new agents automatically" policy applies when an agent registers. Falls back to `EXCHANGE_DOMAIN` when unset. **If no tenant row matches this name, every agent registration fails** — the Exchange warns about it at boot (§2.6). | `www.publisher.example` |
-| `EXCHANGE_DEFAULT_AGENT_CREDIT` | Optional | One-time credit granted to each newly registered agent, in **whole units** of the deployment ledger currency — `100` on an EUR ledger grants €100.00 per agent, not 100 cents. This variable is the **sole owner** of the default tenant's `default_agent_credit` column: every boot replaces the stored value with it, and unset (or `0`) disables the grant on the next restart — there is no admin RPC, and a value edited into the database by hand does not survive a restart. A plain decimal only — digits with an optional fraction, at most 8 decimal places. **Anything else stops the boot.** | `100` |
+| `EXCHANGE_DEFAULT_TENANT` | Optional | The seat whose "activate new agents automatically" policy applies when an agent registers. A tenant row is this Exchange's seat, so the value is this Exchange's own hostname — the same string as `EXCHANGE_DOMAIN`, which is what it falls back to when unset. Leaving it unset is therefore normally right. A publisher's hostname is not a tenant, and **if no tenant row matches this name, every agent registration fails** — the Exchange warns about it at boot (§2.6). | `exchange.example` |
+| `EXCHANGE_DEFAULT_AGENT_CREDIT` | Optional | One-time credit granted to each newly registered agent, **per currency**, written as comma-separated `CODE=AMOUNT` pairs. Amounts are in **whole units** — `EUR=100` grants €100.00 per agent, not 100 cents. A currency you bill in but do not list gets no grant; a currency you do **not** bill in stops the boot. This variable is the **only** place the welcome credit is set: the Exchange reads it once at boot and grants from it at every agent's first `Register`, so dropping a currency from the list removes its grant and unset (or empty) disables the grant everywhere, each from the next restart. Nothing is stored in the database and there is no admin RPC; a default tenant created after the Exchange started grants the credit without a restart. Each amount is a plain decimal only — digits with an optional fraction, at most 8 decimal places. **Anything else stops the boot, including a bare number** (the single-currency format this variable used to take): there is no longer a currency to infer. | `EUR=100,USD=100` |
 | `EXCHANGE_ADDR` | Optional | Address the public listener binds to. Default `:8081`. The image publishes 8081, so change the published port too if you change this. | `:8081` |
+| `EXCHANGE_LOG_LEVEL` | Optional | The lowest level of log record the Exchange writes: `DEBUG`, `INFO`, `WARN` or `ERROR`, in any case. Default `INFO`. **Any other value stops the boot**, with an `exchange.exit` line naming the variable. Read the section below before raising it. | `INFO` |
 | `ADMIN_ADDR` | Optional | Address the internal admin listener binds to. Default `:8082`. Bind it to an internal interface — see [`DEPLOYMENT.md`](DEPLOYMENT.md) §7. | `127.0.0.1:8082` |
 | `ADMIN_ALLOWED_CIDRS` | Optional, **set it** | Comma-separated IPs and CIDR ranges permitted to call the admin listener. **Empty means deny everything.** An unparseable entry stops the Exchange booting, naming the token. | `10.0.4.0/24,10.0.5.17` |
 | `FORA_TRUST_PROXY_HEADERS` | **Required** behind a TLS-terminating proxy, forbidden otherwise | Makes signature verification use the scheme from `X-Forwarded-Proto`, so requests signed for `https` verify behind a proxy that forwards plain `http`. Only the exact values `true` or `1` enable it — anything else keeps it off. **Never set it on a directly-exposed Exchange** — see §4. | `true` |
 | `EXCHANGE_DOMAIN` | Optional, **set it** | The public hostname of this Exchange. Written into the documents it publishes and into every offer it signs, and it is the key a publisher's own manifest is matched against, so it must be the name callers actually use. Default `exchange.fora.local`. | `exchange.example` |
 | `EXCHANGE_PUBLIC_ORIGIN` | Optional | The origin (scheme + host) advertised as this Exchange's RPC endpoint. Default `https://<EXCHANGE_DOMAIN>`. It must match the endpoint the Broker has registered for you. | `https://exchange.example` |
 | `REDIS_URL` | Optional, **set it** | Redis connection string, used to remember which signed requests have already been seen. Username, password and TLS all travel inside the URL; there is no separate variable for them. Leave it unset and each process remembers on its own — see the warning below. | `rediss://:PASSWORD@cache.internal:6379/0` |
-| `EXCHANGE_MAX_INTERMEDIARY_HOPS` | Optional | How many relay hops a signed request may carry. Default `4`. A non-numeric or out-of-range value silently falls back to `4` (§3). | `4` |
+| `EXCHANGE_MAX_INTERMEDIARY_HOPS` | Optional | How many signatures a request may carry, every signature counted, the agent's included; a request with more is refused `resource_exhausted`. Published as `max_intermediary_hops`. Default `4`. A non-numeric or out-of-range value silently falls back to `4` (§3). | `4` |
 | `EXCHANGE_CATALOG_URI_SCHEME` | Optional | Overrides the scheme written into stored catalog URLs. Default `https`. Leave unset in production. | *(leave unset)* |
+| `EXCHANGE_CONSOLE_WELLKNOWN_URL` | Optional | The address of the publisher console's published key directory. Setting it turns the publisher-registration routes on; leaving it unset means this deployment runs no console and those routes answer `404`. The Exchange verifies every registration request against **this** directory and no other: a request is accepted only when its signature names the URL's https origin as its `Signature-Agent`, so a caller signing with a key from some directory of its own is refused. **Boot fails** when it is set to anything but an https URL. | `https://console.example/.well-known/http-message-signatures-directory` |
+| `EXCHANGE_TERMS_CURRENCY` | Optional | The currency every arrangement a publisher registers through the console is priced in. The console reads it from the Exchange and previews terms in it, so the console never sets it. The catalog importer (`fora-import`) reads the same variable and prices every imported entry in it on each run, so it must carry the same value on both; a change re-prices every imported page at the next run. Default `EUR`. | `EUR` |
+| `EXCHANGE_TERMS_UNIT` | Optional | What a charging arrangement counts. Read by the console and the catalog importer the same way, and it must match on both for the same reason. Default `fetches`. | `fetches` |
+| `EXCHANGE_CATALOG_CONTRIBUTOR_HOST` | **Required** with a console | The hostname of the catalog contributor you operate: the party that submits every publisher's catalog on this deployment. A publisher's own document has to authorize it, and a domain check does not pass until it does. It must equal the `kid` of the key the catalog importer (`fora-import`) signs with, or every push the importer makes is refused. **Boot fails if the console is on and this is unset** — see below. | `catalog-contributor.exchange.example` |
+
+#### The publisher console, and why the contributor host is required with it
+
+The console is a separate service of yours. A person signs in there, and the
+console calls the Exchange on their behalf over a signed connection. Two
+variables describe that arrangement, and they belong together:
+
+- `EXCHANGE_CONSOLE_WELLKNOWN_URL` is how the Exchange knows the request really
+  came from your console. Only a request signed by a key that directory
+  publishes is allowed to say which person is acting.
+- `EXCHANGE_CATALOG_CONTRIBUTOR_HOST` is the party that will submit those
+  publishers' catalogs. The document each publisher serves has to name it, and
+  the Exchange checks for it before it activates that publisher's site.
+
+Setting the first without the second stops the boot:
+
+```
+EXCHANGE_CATALOG_CONTRIBUTOR_HOST is required when EXCHANGE_CONSOLE_WELLKNOWN_URL is set:
+the generated publisher manifest names the operator's catalog contributor, and a domain
+check cannot pass without it
+```
+
+The refusal is deliberate. Without a contributor to name, publishers would
+register, their sites would go live, and nothing could ever submit their
+content — a failure that would surface days later as a rejected import rather
+than at the boot that caused it.
+
+One line tells you which state the Exchange is in:
+
+```
+{"level":"INFO","msg":"exchange.console.enabled","console_wellknown_url":"...","catalog_contributor_host":"..."}
+{"level":"INFO","msg":"exchange.console.disabled","reason":"EXCHANGE_CONSOLE_WELLKNOWN_URL is not set"}
+```
 
 #### `REDIS_URL` — what "unset" actually costs
 
@@ -104,6 +139,32 @@ single string to grep for the answer.
 If you run more than one instance, `REDIS_URL` is mandatory, and every instance
 must point at **the same** Redis. Do not give each instance its own. Redis's own
 settings are in [`deploy/storage/redis/CONFIGURATION.md`](../../deploy/storage/redis/CONFIGURATION.md).
+
+#### `EXCHANGE_LOG_LEVEL` — what each level hides
+
+The Exchange writes structured JSON logs to standard output. ("Structured" means
+each log line is machine-readable data, not free text.) `EXCHANGE_LOG_LEVEL` sets
+the lowest level it writes, and it is read once, at start-up, so a change needs a
+restart. Unset means `INFO`, which is what the Exchange wrote before the setting
+existed.
+
+- **`DEBUG`** adds routine detail for troubleshooting, such as an `http request`
+  line for every request. Expect far more output.
+- **`WARN`** still writes every event the alerts in [`RUNBOOK.md`](RUNBOOK.md) §2.3
+  are built on, but it hides every `INFO` line. That includes the boot lines
+  [`DEPLOYMENT.md`](DEPLOYMENT.md) and this document tell you to read — the
+  `replay_store` line above among them — and the `exchange.execute_transaction`
+  and `exchange.report_usage` records of the purchases and usage reports that
+  succeeded.
+- **`ERROR`** also hides those `WARN` alert events, `exchange.httpsig.reject`
+  among them. Choose it only if nothing alerts on the Exchange's logs.
+
+Run `INFO` in production. Whatever the setting, messages the Go HTTP server
+writes on its own, such as a recovered panic, are logged at `ERROR`, so no level
+hides them. One writer is outside the setting: when `REDIS_URL` is set, the Redis
+client library writes its own messages, such as a connection it failed to close,
+as plain text on standard error. They are not JSON records and no level hides
+them.
 
 ### 2.2 Signing keys
 
@@ -136,7 +197,7 @@ Leaving it out is safe rather than silent. At start-up the Exchange notes that i
 has no RSA key and carries on:
 
 ```
-{"level":"INFO","msg":"no RSA signing key configured; AWS_CLOUDFRONT_RSA tenants will be refused","rsa_key_ref":"cf-rsa-primary"}
+{"level":"INFO","msg":"no RSA signing key configured; requests for AWS_CLOUDFRONT_RSA sites will be refused","rsa_key_ref":"cf-rsa-primary"}
 ```
 
 If a CloudFront publisher is then configured, the request that would need the key
@@ -168,23 +229,59 @@ missing:
 
 ### 2.3 HTTP-signature verification and key resolution
 
-Callers sign their requests using a scheme called HTTP Message Signatures
-(RFC 9421). These settings control which keys the Exchange will accept.
+Callers sign their requests using the Web Bot Auth profile of HTTP Message
+Signatures (RFC 9421). Each signature names its signer's key directory, an
+https origin, in its own signed `Signature-Agent` member. These settings
+control which keys the Exchange will accept.
 
 There is no key file. The Exchange learns every verification key over the
-network, from the key owner's own published documents:
+network, from the directory each signature names, and verifies each signature
+on its own:
 
-1. **The Broker's directory first** (`EXCHANGE_BROKER_WELLKNOWN_URL`). It
+1. **A signature naming the Broker's origin** (the origin of
+   `EXCHANGE_BROKER_WELLKNOWN_URL`) is resolved in the Broker's directory. It
    carries the Broker's relay key and the withdrawn-key list, and its verdict
    on a withdrawn or expired key is final.
-2. **The signer's own directory second.** For any other key, the Exchange
-   fetches the directory named by the request's signed `Signature-Agent`
-   header and looks the key up there. A signer that does not publish its key
-   gets `401`.
+2. **Any other signature** is resolved in the directory its own member names,
+   under that directory's own withdrawn-key list. The Broker's directory and
+   list never decide it. A signer that does not publish its key gets `401`.
+3. **A catalog push** is the one exception to rule 2: its key is resolved by
+   the push's `caller_id`, the contributor hostname. The Exchange learns that
+   key from the directory at `https://<caller_id>` on the first push and reads
+   that directory again when a later push fails to verify. The ingest tools
+   always sign as `https://<caller_id>`, so that is also the origin the push's
+   own member names.
+
+Every key directory is fetched over https from the named origin, never through
+a redirect, and must answer under the media type
+`application/http-message-signatures-directory+json` with a response signed by
+the keys it lists; a key that did not sign the response is not used. A
+`Signature-Agent` member that is not an https origin is refused with `401`
+before anything is fetched. A directory body over 1 MiB is refused.
+
+The Exchange reads a directory the way the protocol SDK does, whether it is
+verifying a request or registering a signer: a key needs no `use` or `alg`
+member, `kty` and `crv` match in any letter case, a directory may list any
+number of keys within the 1 MiB, and a key whose `not_before` or `not_after`
+is missing or does not parse is never active.
+
+When the Exchange registers a signer from its directory (on an agent's first
+signed request, on a contributor's first catalog push, or on
+`POST /exchange/v1/agents/register`), the read takes at most 5 seconds, and a
+failure is answered in one of two ways:
+
+- **The signer's to repair:** no directory (`404`), a redirect, another media
+  type, a response its keys did not sign, or no key valid now. The request is
+  refused `401` (`400` on the register route), because the next read returns
+  the same answer.
+- **Transient:** the host cannot be reached, does not answer in time, answers
+  another status, or serves a body that is not a key directory at all (not
+  JSON, JSON of another shape, or over 1 MiB). The request is answered `503`
+  (`502` on the register route), and the signer may retry.
 
 | Name | Required? | What it is | Example |
 |---|---|---|---|
-| `EXCHANGE_BROKER_WELLKNOWN_URL` | **Required** | The address of the Broker's published document. The Exchange consults the Broker's withdrawn-key list *first* on every verification, and resolves the Broker's own relay key from the same document. Boot fails without it — see below. | `https://broker.example/.well-known/fora.json` |
+| `EXCHANGE_BROKER_WELLKNOWN_URL` | **Required** | The address of the Broker's published document. Its https origin is the Broker's identity: a signature whose `Signature-Agent` is exactly that origin is the Broker's, its key is resolved in the Broker's key directory under the Broker's withdrawn-key list, and a purchase it signs is recognised as relayed. Every other signature is resolved in the directory it names itself, and the Broker's list never decides it. Boot fails without it, and when it is not an https URL — see below. | `https://broker.example/.well-known/fora.json` |
 | `EXCHANGE_REVOCATION_POLL_INTERVAL` | Optional | How often to re-read the Broker's withdrawn-key list. Unset leaves the built-in interval in place. A malformed value silently falls back (§3). | `5m` |
 | `EXCHANGE_DIRECTORY_TTL` | Optional | How long a fetched key directory is cached. Unset leaves the built-in TTL in place. A malformed value silently falls back (§3). | `10m` |
 
@@ -210,8 +307,8 @@ than risk accepting a withdrawn key. See [`RUNBOOK.md`](RUNBOOK.md) §2.3.
 
 | Name | Required? | What it is | Example |
 |---|---|---|---|
-| `FORA_WELLKNOWN_SCHEME` | Optional | Which protocol the Exchange uses when fetching other parties' public documents. Default `https`. **Must stay `https` in production.** | `https` |
-| `FORA_WELLKNOWN_PORT` | Optional | Appends a port when fetching those documents. Only needed inside a local test network. Leave unset. | *(leave unset)* |
+| `FORA_WELLKNOWN_SCHEME` | Optional | Which protocol the Exchange uses when fetching other parties' `/.well-known/fora.json` documents. Default `https`. **Must stay `https` in production.** A key directory is always fetched over https from the host's own address, with no redirect followed and a signed response required, whatever this says. | `https` |
+| `FORA_WELLKNOWN_PORT` | Optional | Appends a port when fetching those documents. Only needed inside a local test network. Leave unset. It does not apply to key directories. | *(leave unset)* |
 | `SKIP_SSRF` | Optional — **leave unset** | Setting this removes the guard that stops the Exchange being tricked into calling internal addresses. Development only. | *(leave unset)* |
 | `ALLOW_INSECURE` | Optional — **leave unset** | Setting this allows plain unencrypted `http` for those same calls. Development only. | *(leave unset)* |
 | `EXCHANGE_REGISTRATION_SCHEMA` | Optional | A JSON Schema describing the registration details this Exchange expects. Published in its `/.well-known/fora.json`. A schema the Exchange cannot use stops the boot. See below. | *(leave unset)* |
@@ -334,11 +431,46 @@ settings all live under the `EXCHANGE_BILLING_` prefix.
 |---|---|---|---|
 | `FORA_BILLING_ADAPTER` | Optional | One of `free`, `inmemory`, `tigerbeetle`. Default `free` — every charge is approved and nothing is recorded. An **unrecognised value logs a warning and falls back to `free`**, so a typo here means you are not billing at all. | `tigerbeetle` |
 | `EXCHANGE_BILLING_SEED` | `inmemory` only | JSON object of starting balances, `{"agent-id": {"value": "100.00", "currency": "USD"}}`. **`USD` is the only accepted currency** — the `inmemory` tier denominates every balance in it, and a balance in another currency can neither receive the Register welcome credit nor be spent safely. Entries that are malformed, or in any other currency, are logged and skipped; that agent simply starts with no balance. | *(leave unset)* |
-| `EXCHANGE_BILLING_LEDGER` | **Required** for `tigerbeetle` | The ISO 4217 **numeric** currency code, which is also the ledger id. Only `978` (EUR) and `840` (USD) are supported; anything else is a boot failure. | `978` |
+| `EXCHANGE_BILLING_LEDGER` | **Required** for `tigerbeetle` | The ISO 4217 **numeric** currency codes this deployment bills in, comma-separated. Each code is also its ledger id. Only `978` (EUR) and `840` (USD) are supported; an unknown code, a repeated code, and a non-numeric entry are each a boot failure. **The order decides the advertised `base_currency`** — see below. | `978,840` |
 | `EXCHANGE_BILLING_TB_ADDRESS` | **Required** for `tigerbeetle` | TigerBeetle address as `IP:port`. **Hostnames are rejected** — supply an IP. | `10.0.6.20:3000` |
 | `EXCHANGE_BILLING_TB_CLUSTER_ID` | Optional | TigerBeetle cluster id. Default `0`. A non-numeric value is a boot failure. | `0` |
 | `EXCHANGE_BILLING_HOLD_GRACE` | Optional | How long a reservation outlives the delivery URL. Default `1m`, giving a 6-minute hold against the 5-minute URL. A malformed value is a boot failure. | `1m` |
 | `EXCHANGE_BILLING_TB_OP_TIMEOUT` | Optional | Deadline for a single ledger call. Unset leaves the built-in 5s. A malformed value is a boot failure. | `5s` |
+
+### The order of `EXCHANGE_BILLING_LEDGER` decides `base_currency`
+
+The Exchange keeps one ledger per currency. An agent holds one balance per
+currency, a charge is taken from the balance in the charge's own currency, and
+nothing is ever converted between them.
+
+The well-known document, however, advertises a single `base_currency`, because
+the protocol field holds one value. **That value is the FIRST code in
+`EXCHANGE_BILLING_LEDGER`.** So:
+
+| Value | Bills in | Advertises |
+|---|---|---|
+| `978` | EUR | `EUR` |
+| `978,840` | EUR and USD | `EUR` |
+| `840,978` | USD and EUR | `USD` |
+
+The publisher console's revenue totals use the same value: a totals request that
+names no currency is read in it.
+
+Two consequences for operators:
+
+- **Add a new currency at the END of the list.** Appending leaves the advertised
+  value untouched. Putting the new code first silently changes what every other
+  party is told this Exchange prices in.
+- **Reordering the list is a deliberate change**, never a cleanup. `base_currency`
+  is a claim that the prices in our offers are denominated in that currency, and
+  agents comparing offers across exchanges read our numbers through it.
+
+The resolved list and the advertised value are both printed at boot, so the
+running configuration can be checked without reading the environment:
+
+```
+billing adapter: tigerbeetle currencies=EUR,USD base_currency=EUR address=… hold_timeout=6m0s
+```
 
 **A selected TigerBeetle that cannot be reached fails the boot.** It never
 quietly falls back to `free`. The Exchange constructs the client, runs a health
@@ -380,11 +512,12 @@ does not.** This is deliberate and it is the one contrast to remember:
 
 **A missing default tenant is warned about, not fatal.** At boot the Exchange
 looks for the tenant named by `EXCHANGE_DEFAULT_TENANT` (or `EXCHANGE_DOMAIN` if
-that is unset). If there is no such row it logs a warning and carries on, because
-you may create tenants after the process starts:
+that is unset). That row is this Exchange's seat, and it is keyed on the
+Exchange's own hostname. If there is no such row it logs a warning and carries
+on, because the seat may be created after the process starts:
 
 ```
-{"level":"WARN","msg":"default tenant not found yet — Register will fail until it is seeded","default_tenant_domain":"www.publisher.example"}
+{"level":"WARN","msg":"default tenant not found yet — Register will fail until it is seeded","default_tenant_domain":"exchange.example"}
 ```
 
 Take the warning seriously. Until that tenant row exists, **every** agent
@@ -429,7 +562,7 @@ choose and nothing tells you.
 
 | Setting | On a malformed value | Why it matters |
 |---|---|---|
-| `EXCHANGE_MAX_INTERMEDIARY_HOPS` | Falls back to `4`. Non-numeric, negative, or above 1048576 all qualify. | The value is published to Brokers as the number of relay hops you accept. |
+| `EXCHANGE_MAX_INTERMEDIARY_HOPS` | Falls back to `4`. Non-numeric, zero, negative, or above 1048576 all qualify. | The value is published as `max_intermediary_hops` and enforced as the number of signatures a request may carry. |
 | `EXCHANGE_REVOCATION_POLL_INTERVAL` | Falls back to the built-in interval. A negative duration also qualifies. | You may believe you are polling the withdrawn-key list every minute when you are not. |
 | `EXCHANGE_DIRECTORY_TTL` | Falls back to the built-in TTL. | A rotated key may be picked up later than you planned. |
 
@@ -489,10 +622,10 @@ carried into production:
 
 | Setting | Why it is there | Why it must not ship |
 |---|---|---|
-| `FORA_WELLKNOWN_SCHEME: "http"` | The test network has no certificates. | Public documents would be fetched unencrypted and could be tampered with in transit. |
+| `FORA_WELLKNOWN_SCHEME: "http"` | The services serve plain http on the test networks. | Public documents would be fetched unencrypted and could be tampered with in transit. |
 | `SKIP_SSRF: "true"` | Test services live on private addresses the guard blocks. | Removes the protection against the Exchange being steered into your internal network. |
 | `ALLOW_INSECURE: "true"` | Same reason. | Same consequence. |
-| `EXCHANGE_CATALOG_URI_SCHEME: "http"` | Compose traffic is http-only. | Every catalog URL would be stored as plaintext `http`. |
+| `EXCHANGE_CATALOG_URI_SCHEME: "http"` | The test sites serve plain http. | Every catalog URL would be stored as plaintext `http`. |
 | `sslmode=disable` in the DSN | The database is on the same private bridge. | Correct only while the connection stays on one host. On a network you do not control exclusively TLS is required: without it every row travels in the clear, and what the login exposes depends on the cluster's authentication method ([`deploy/storage/postgres/CONFIGURATION.md`](../../deploy/storage/postgres/CONFIGURATION.md) §2.3). |
 | `FORA_BILLING_ADAPTER: "inmemory"` | The test suite needs a deny path without a real ledger. | Balances live in process memory and vanish on restart. Nothing is ever settled. |
 
@@ -506,11 +639,14 @@ Values marked *fill in* are specific to your environment.
 EXCHANGE_DSN=postgres://fora:<password>@<db-host>:5432/fora?sslmode=require
 EXCHANGE_SOR_DSN=postgres://fora:<password>@<db-host>:5432/fora_sor?sslmode=require
 EXCHANGE_ADDR=:8081
+EXCHANGE_LOG_LEVEL=INFO
 ADMIN_ADDR=127.0.0.1:8082
 ADMIN_ALLOWED_CIDRS=10.0.4.0/24
 EXCHANGE_DOMAIN=exchange.example
 EXCHANGE_PUBLIC_ORIGIN=https://exchange.example
-EXCHANGE_DEFAULT_TENANT=www.publisher.example
+# The seat, which is this Exchange's own hostname — never a publisher's. It may
+# be omitted entirely, because EXCHANGE_DOMAIN above is the fallback.
+EXCHANGE_DEFAULT_TENANT=exchange.example
 REDIS_URL=rediss://:<password>@<redis-host>:6379/0
 FORA_ED25519_PRIVATE_PEM_FILE=/keys/ed25519-private.pem
 FORA_RSA_PRIVATE_PEM_FILE=/keys/rsa-private.pem

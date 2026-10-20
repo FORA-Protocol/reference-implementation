@@ -3,6 +3,7 @@
 package transport_test
 
 import (
+	"regexp"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
 )
 
@@ -39,8 +41,8 @@ func executeOfferRawWithID(
 
 // executeTransactionFor pushes a catalog entry, discovers an offer, executes
 // the transaction, and returns the transaction_id and billing_id. estimatedQty
-// controls the offer's EstimatedQuantity (drives the obligation's
-// estimated_quantity column, used by the tolerance check). The pre-rename
+// controls the offer's EstimatedQuantity (stated on the term; 0 or less states
+// none), which the obligation records as its estimated_quantity. The pre-rename
 // `executeAndReport` was a misnomer — this helper only executes, it never
 // reports.
 func executeTransactionFor(t *testing.T, h *testHarness, estimatedQty int32) (txID, billingID string) {
@@ -51,8 +53,7 @@ func executeTransactionFor(t *testing.T, h *testHarness, estimatedQty int32) (tx
 
 // executeOne runs one transaction for the default caller and returns the
 // delivered item, failing the test if the item was denied. estQty rides onto the
-// obligation's estimated_quantity, which the tolerance check compares a report
-// against.
+// obligation's estimated_quantity.
 //
 // The denial check is the reason this is the single execute round-trip: a
 // refusal the execute path classifies as a denial arrives in-body under HTTP
@@ -72,7 +73,8 @@ func executeOne(t *testing.T, h *testHarness, key string, estQty int32) *forav1.
 }
 
 // reportFor files a conformant report for one delivered item and fails the test
-// if it is not accepted. consumed must sit inside the obligation's tolerance.
+// if it is not accepted. The callers report the estimate itself, so the
+// quantity is never what the test is about.
 func reportFor(t *testing.T, h *testHarness, key string, item *forav1.TransactionResultItem, consumed int32) string {
 	t.Helper()
 	resp, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(newUsageReport(
@@ -144,52 +146,16 @@ func TestReportUsage_AfterDeadline_Accepted(t *testing.T) {
 	start := time.Now().UTC()
 	det := clock.NewDeterministic(start)
 	h := newTestHarnessWithClock(t, det)
-	txID, billingID := executeTransactionFor(t, h, 0)
+	txID, billingID := executeTransactionFor(t, h, 1)
 
 	det.Advance(pastReportingWindow)
 
-	resp, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(newUsageReport("r-window", txID, billingID, &forav1.Usage{ConsumedQuantity: 0})))
+	resp, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(newUsageReport("r-window", txID, billingID, &forav1.Usage{ConsumedQuantity: 1})))
 	if err != nil {
 		t.Fatalf("report filed after the deadline must be accepted, got: %v", err)
 	}
 	if resp.Msg.GetReportId() == "" {
 		t.Error("accepted report returned no report_id")
-	}
-	assertObligationState(t, h, txID, "RECEIVED", "VALIDATED")
-}
-
-// TestReportUsage_ToleranceViolation sends a consumed quantity outside ±20%.
-func TestReportUsage_ToleranceViolation(t *testing.T) {
-	h := newTestHarness(t)
-	txID, billingID := executeTransactionFor(t, h, 100)
-
-	_, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(newUsageReport("r-tol", txID, billingID, &forav1.Usage{ConsumedQuantity: 200})))
-	assertConnectError(t, err, connect.CodeInvalidArgument, "outside")
-	assertReportRejectionField(t, err, "consumed_quantity")
-	assertObligationState(t, h, txID, "PENDING", "REJECTED_TOLERANCE")
-}
-
-// TestReportUsage_ToleranceAtBoundary_Plus20 verifies exactly +20% passes.
-func TestReportUsage_ToleranceAtBoundary_Plus20(t *testing.T) {
-	h := newTestHarness(t)
-	txID, billingID := executeTransactionFor(t, h, 100)
-
-	_, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(newUsageReport("r-bound-plus", txID, billingID, &forav1.Usage{ConsumedQuantity: 120})))
-	if err != nil {
-		t.Fatalf("expected pass at +20%%, got: %v", err)
-	}
-	assertObligationState(t, h, txID, "RECEIVED", "VALIDATED")
-}
-
-// TestReportUsage_ToleranceAtBoundary_Minus20 mirrors the +20% boundary test
-// in the negative direction.
-func TestReportUsage_ToleranceAtBoundary_Minus20(t *testing.T) {
-	h := newTestHarness(t)
-	txID, billingID := executeTransactionFor(t, h, 100)
-
-	_, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(newUsageReport("r-bound-minus", txID, billingID, &forav1.Usage{ConsumedQuantity: 80})))
-	if err != nil {
-		t.Fatalf("expected pass at -20%%, got: %v", err)
 	}
 	assertObligationState(t, h, txID, "RECEIVED", "VALIDATED")
 }
@@ -212,30 +178,60 @@ func TestReportUsage_UnknownTransaction(t *testing.T) {
 	assertConnectCode(t, err, connect.CodeNotFound)
 }
 
-// TestReportUsage_ZeroEstimate_NonZeroConsumed_Rejected exercises the Q2
-// strict-reject decision: an obligation with estimated_quantity=0 must
-// reject any non-zero consumed_quantity.
-func TestReportUsage_ZeroEstimate_NonZeroConsumed_Rejected(t *testing.T) {
+// TestReportUsage_NoEstimate_NonZeroConsumed_Accepted files a report of 3
+// against a metered offer that states no estimate (executeTransactionFor with 0
+// states none) and expects it accepted and recorded with its quantity. The
+// pinned protocol (fora.proto UsageReport): "The report is a record of the
+// quantity consumed (Usage.consumed_quantity). The Exchange accepts it whatever
+// that quantity is".
+//
+// The Exchange still refuses a non-zero quantity against an offer with no
+// estimate, so the report leg is a strict expected failure. It holds only while
+// the refusal is that defect's own message: a failure in the purchase leg, which
+// runs outside the marker, or any other failure in the report leg fails the test.
+// Once the Exchange accepts the report the test fails as XPASS(strict); the fix
+// then removes the marker, and the body below runs directly on t.
+func TestReportUsage_NoEstimate_NonZeroConsumed_Accepted(t *testing.T) {
 	h := newTestHarness(t)
 	txID, billingID := executeTransactionFor(t, h, 0)
 
-	_, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(newUsageReport("r-ze", txID, billingID, &forav1.Usage{ConsumedQuantity: 1})))
-	assertConnectError(t, err, connect.CodeInvalidArgument, "zero-estimate")
-	assertReportRejectionField(t, err, "consumed_quantity")
-	assertObligationState(t, h, txID, "PENDING", "REJECTED_TOLERANCE")
+	testutil.StrictXFail(t, refusesReportWithoutEstimate, refusesReportWithoutEstimateSignature, func(tb testing.TB) {
+		report := newUsageReport("r-ne", txID, billingID, &forav1.Usage{ConsumedQuantity: 3})
+		resp, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(report))
+		if err != nil {
+			tb.Fatalf("a report of 3 against an offer with no estimate must be accepted, got: %v", err)
+		}
+		if resp.Msg.GetReportId() == "" {
+			tb.Error("accepted report returned no report_id")
+		}
+		assertReportRecorded(tb, h, txID, "3")
+	})
 }
 
-// TestReportUsage_ZeroEstimate_ZeroConsumed_Accepted is the paired
-// counterpart — zero against zero passes (boundary case).
-func TestReportUsage_ZeroEstimate_ZeroConsumed_Accepted(t *testing.T) {
+// refusesReportWithoutEstimate is the known defect the test above documents:
+// the Exchange refuses a usage report with a non-zero quantity against a metered
+// offer that states no estimate, although the protocol accepts a report whatever
+// its quantity. Its signature is the refusal the Exchange's report validator
+// returns, carried through the Connect error message.
+const refusesReportWithoutEstimate = "the Exchange refuses a non-zero usage report against an offer with no estimate"
+
+var refusesReportWithoutEstimateSignature = regexp.MustCompile(
+	`invalid_argument: invalid_request: consumed quantity \d+ reported against zero-estimate obligation`)
+
+// TestReportUsage_NoEstimate_ZeroConsumed_Accepted is the same purchase with a
+// report of 0: accepted, and recorded with a consumed quantity of 0.
+func TestReportUsage_NoEstimate_ZeroConsumed_Accepted(t *testing.T) {
 	h := newTestHarness(t)
 	txID, billingID := executeTransactionFor(t, h, 0)
 
-	_, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(newUsageReport("r-zz", txID, billingID, &forav1.Usage{ConsumedQuantity: 0})))
+	resp, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(newUsageReport("r-nz", txID, billingID, &forav1.Usage{ConsumedQuantity: 0})))
 	if err != nil {
-		t.Fatalf("expected pass, got: %v", err)
+		t.Fatalf("expected the report to be accepted, got: %v", err)
 	}
-	assertObligationState(t, h, txID, "RECEIVED", "VALIDATED")
+	if resp.Msg.GetReportId() == "" {
+		t.Error("accepted report returned no report_id")
+	}
+	assertReportRecorded(t, h, txID, "0")
 }
 
 // TestReportUsage_NegativeConsumed_Rejected pins that the validator rejects
@@ -324,7 +320,7 @@ func TestReportUsage_NamesAnotherExchange_Rejected(t *testing.T) {
 	// message uses. Neither was asserted anywhere: the interceptor could have
 	// returned an empty domain, or the field of a different message shape, with
 	// the whole suite passing.
-	assertErrorDomain(t, err, exchangeServiceDomainLiteral)
+	assertErrorDomain(t, err)
 	assertReportRejectionField(t, err, "exchange")
 	assertObligationState(t, h, txID, "PENDING", "")
 }
@@ -438,10 +434,10 @@ func TestReportUsage_RejectedThenCorrected(t *testing.T) {
 	h := newTestHarness(t)
 	txID, billingID := executeTransactionFor(t, h, 100)
 
-	// First call — outside tolerance.
-	_, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(newUsageReport("r-bad", txID, billingID, &forav1.Usage{ConsumedQuantity: 200})))
+	// First call — the wrong billing_id, which the Exchange refuses.
+	_, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(newUsageReport("r-bad", txID, "wrong-billing-id", &forav1.Usage{ConsumedQuantity: 100})))
 	assertConnectCode(t, err, connect.CodeInvalidArgument)
-	assertObligationState(t, h, txID, "PENDING", "REJECTED_TOLERANCE")
+	assertObligationState(t, h, txID, "PENDING", "REJECTED_BILLING_ID")
 
 	// Second call — corrected.
 	if _, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(newUsageReport("r-good", txID, billingID, &forav1.Usage{ConsumedQuantity: 100}))); err != nil {

@@ -11,25 +11,21 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
+	"time"
 
-	foraconnect "github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
-	"github.com/FORA-Protocol/protocol/sdk/go/connectserver"
-	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	"github.com/FORA-Protocol/protocol/sdk/go/resolvers"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/db"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/foraaudience"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/server"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/replay"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/logging"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/runhttp"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/agentreg"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing"
@@ -48,19 +44,44 @@ func main() {
 	// distroless image has no shell or curl, so the compose healthcheck
 	// execs the service binary itself.
 	runhttp.MaybeHealthcheck("EXCHANGE_ADDR", ":8081")
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	// Tie the lifecycle context to the process shutdown signals so background
-	// goroutines started on it (the per-agent WBA revocation poller) stop on
-	// shutdown instead of leaking. runhttp.ServeGroup installs its own signal
-	// handler for HTTP drain; both registrations receive the signal. stop() is
-	// called explicitly (not deferred) so it runs before a non-zero os.Exit.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err := run(ctx, logger)
-	stop()
+	// An EXCHANGE_LOG_LEVEL that is not a level stops the boot here, before
+	// anything connects, through the same exchange.exit record as every other
+	// start-up failure.
+	const levelVar = "EXCHANGE_LOG_LEVEL"
+	logger, err := logging.Setup(os.Stdout, levelVar, runhttp.EnvTrimmed(levelVar))
+	if err == nil {
+		// Tie the lifecycle context to the process shutdown signals so background
+		// goroutines started on it (the per-agent WBA revocation poller) stop on
+		// shutdown instead of leaking. runhttp.ServeGroup installs its own signal
+		// handler for HTTP drain; both registrations receive the signal. stop() is
+		// called explicitly (not deferred) so it runs before a non-zero os.Exit.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err = run(ctx, logger)
+		stop()
+	}
 	if err != nil {
 		logger.Error("exchange.exit", "err", err)
 		os.Exit(1)
 	}
+}
+
+// setupExchangeDB opens the Exchange's database and applies its migrations.
+// EXCHANGE_DSN is required: an Exchange cannot run without its catalog and
+// transaction store.
+func setupExchangeDB(ctx context.Context, logger *slog.Logger) (*pgxpool.Pool, error) {
+	pool, err := db.Setup(ctx, db.SetupOptions{
+		DSN:             runhttp.EnvOr("EXCHANGE_DSN", ""),
+		Migrations:      exchangedb.Migrations,
+		MigrationsDir:   exchangedb.MigrationsDir,
+		MigrationsTable: exchangedb.MigrationsTable,
+	}, logger)
+	if err != nil {
+		return nil, fmt.Errorf("db setup: %w", err)
+	}
+	if pool == nil {
+		return nil, errors.New("EXCHANGE_DSN is required")
+	}
+	return pool, nil
 }
 
 // run is main() minus the os.Exit call; splitting it this way lets defers fire
@@ -77,17 +98,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	pool, err := db.Setup(ctx, db.SetupOptions{
-		DSN:             runhttp.EnvOr("EXCHANGE_DSN", ""),
-		Migrations:      exchangedb.Migrations,
-		MigrationsDir:   exchangedb.MigrationsDir,
-		MigrationsTable: exchangedb.MigrationsTable,
-	}, logger)
+	pool, err := setupExchangeDB(ctx, logger)
 	if err != nil {
-		return fmt.Errorf("db setup: %w", err)
-	}
-	if pool == nil {
-		return errors.New("EXCHANGE_DSN is required")
+		return err
 	}
 	defer pool.Close()
 
@@ -106,58 +119,63 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	fetchClient := resolvers.NewGuardedClientFromEnv()
 
 	queries := sqlc.New(pool)
-	if err := bootTenantConfig(ctx, logger, pool, queries); err != nil {
-		return err
-	}
-	// Gate-1 self-signup fetches a caller's own Web Bot Auth key directory to
-	// learn its signing key. It honors the SAME FORA_WELLKNOWN_{SCHEME,PORT} the
-	// Gate-2 publisher-manifest cache uses (newManifestCache), so a compose/local
-	// http edge is reachable without a DB key pre-seed. The two gates read
-	// different documents on the same host: keys come from the directory, and the
-	// publisher's commercial overlay carries none.
-	agentRegistry := agentreg.New(agentreg.Config{
-		Repo:   repo.NewAgentRepo(queries),
-		HTTP:   fetchClient,
-		Scheme: runhttp.EnvOr("FORA_WELLKNOWN_SCHEME", "https"),
-		Port:   runhttp.EnvOr("FORA_WELLKNOWN_PORT", ""),
-	})
+	agentRegistry := buildAgentRegistry(queries, fetchClient)
 	catalogSvc, err := buildCatalog(ctx, pool, queries, agentRegistry, fetchClient)
 	if err != nil {
 		return err
 	}
-	billingAdapter, ledgerCurrency, sorAdapter, adaptersCleanup, err := selectAdapters(ctx, logger)
+	billingAdapter, ledgerCurrencies, sorAdapter, adaptersCleanup, err := selectAdapters(ctx, logger)
 	if err != nil {
 		return err
 	}
 	defer adaptersCleanup()
-	exchangeSvc := buildExchange(buildSvcDeps{
+	// The tenant boot step runs AFTER the billing adapter is selected, because
+	// the welcome-credit configuration is validated against the currencies that
+	// adapter bills in: a credit in a currency the deployment does not carry
+	// fails boot here rather than failing the first Register.
+	defaultAgentCredits, err := bootTenantConfig(ctx, logger, queries, ledgerCurrencies)
+	if err != nil {
+		return err
+	}
+	// The reporting window agents are held to when a seat sets none: the
+	// Exchange mints obligations with it and the console's reads show it.
+	reportWindow := service.DefaultReportWindow
+	// Empty in a production build; the e2e build's control service otherwise.
+	controls := e2eControls(logger, queries)
+	exchangeSvc, err := buildExchange(buildSvcDeps{
 		pool: pool, queries: queries, catalog: catalogSvc,
-		offerSigner:    offerSigner,
-		keystore:       keystore,
-		billing:        billingAdapter,
-		ledgerCurrency: ledgerCurrency,
-		agentRegistry:  agentRegistry,
-		sor:            sorAdapter,
-		registration:   registration,
+		offerSigner:         offerSigner,
+		keystore:            keystore,
+		billing:             billingAdapter,
+		ledgerCurrencies:    ledgerCurrencies,
+		defaultAgentCredits: defaultAgentCredits,
+		reportWindow:        reportWindow,
+		agentRegistry:       agentRegistry,
+		sor:                 sorAdapter,
+		registration:        registration,
+		lifetimes:           controls.lifetimes,
 	})
+	if err != nil {
+		return err
+	}
 	admission, err := buildAdmissionDeps(ctx, logger, fetchClient)
 	if err != nil {
 		return err
 	}
-	mux, wk, err := buildMux(muxDeps{
-		pool:           pool,
-		exchange:       exchangeSvc,
-		catalog:        catalogSvc,
-		agentRegistry:  agentRegistry,
-		offerSigner:    offerSigner,
-		resolver:       admission.resolver,
-		replay:         admission.replay,
-		audience:       admission.audience,
-		ledgerHealth:   ledgerHealthCheck(billingAdapter),
-		maxSignatures:  admission.maxSignatures,
-		registration:   registration,
-		ledgerCurrency: ledgerCurrency,
+	console, err := buildConsoleDeps(ctx, logger, consoleWiring{
+		pool: pool, queries: queries, fetchClient: fetchClient,
+		manifests: newManifestCache(fetchClient), replay: admission.replayStore,
+		billing: billingAdapter, ledgerCurrencies: ledgerCurrencies, reportWindow: reportWindow,
 	})
+	if err != nil {
+		return err
+	}
+	wrapped, wk, err := buildSurface(logger, newMuxDeps(muxInputs{
+		pool: pool, exchange: exchangeSvc, catalog: catalogSvc,
+		agentRegistry: agentRegistry, offerSigner: offerSigner,
+		billing: billingAdapter, ledgerCurrencies: ledgerCurrencies,
+		admission: admission, registration: registration, console: console,
+	}))
 	if err != nil {
 		return err
 	}
@@ -166,8 +184,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// periodically or it eventually serves only lapsed windows.
 	go wk.RunRefresher(ctx, wellknown.RebuildInterval, logger)
 
-	wrapped := buildWrapped(logger, mux)
-	return serveExchangeAndAdmin(ctx, logger, pool, queries, wrapped, admission.audience)
+	return serveExchangeAndAdmin(ctx, logger, pool, queries, wrapped, admission.audience, controls.adminRoutes)
 }
 
 // buildCatalog wires the catalog service and brings its discovery trie up from
@@ -182,11 +199,16 @@ func buildCatalog(
 	// EXCHANGE_CATALOG_URI_SCHEME defaults to https; compose overrides to http
 	// so catalog URIs route through the in-network edge worker.
 	service.SetCatalogURIScheme(runhttp.EnvOr("EXCHANGE_CATALOG_URI_SCHEME", ""))
-	svc := service.NewCatalogService(
-		repo.NewCatalogRepo(queries), repo.NewTenantReadRepo(queries),
-		agentRegistry, newManifestCache(fetchClient), db.PoolRunner{Pool: pool},
-		exchangeDomain(),
-	)
+	svc := service.NewCatalogService(service.CatalogDeps{
+		Catalog:        repo.NewCatalogRepo(queries),
+		Tenants:        repo.NewTenantReadRepo(queries),
+		Sites:          repo.NewPublisherDomainReadRepo(queries),
+		Listings:       repo.NewPublisherListingReadRepo(queries),
+		Registry:       agentRegistry,
+		Manifests:      newManifestCache(fetchClient),
+		TxRunner:       db.PoolRunner{Pool: pool},
+		ExchangeDomain: exchangeDomain(),
+	})
 	// Pre-render CoMP for the advertised profiles at rebuild. Same
 	// single source as the manifest + ExchangeConfig; set BEFORE Bootstrap so the
 	// first rebuild renders.
@@ -206,33 +228,70 @@ type buildSvcDeps struct {
 	offerSigner *signing.Ed25519Signer
 	keystore    *signing.InMemoryKeyStore
 	billing     billing.Adapter
-	// ledgerCurrency is the selected billing backend's ledger currency,
-	// threaded into ExchangeConfig.LedgerCurrency so the welcome-credit grant
-	// and the adapter agree on the denomination.
-	ledgerCurrency string
-	agentRegistry  agentreg.Registry
-	sor            sor.Adapter
+	// ledgerCurrencies are the selected billing backend's ledger currencies in
+	// configuration order, threaded into ExchangeConfig.LedgerCurrencies so the
+	// welcome-credit grants and the adapter agree on what may be granted.
+	ledgerCurrencies []string
+	// defaultAgentCredits is the welcome credit parsed once at boot from
+	// EXCHANGE_DEFAULT_AGENT_CREDIT, threaded into
+	// ExchangeConfig.DefaultAgentCredits, where Register reads it.
+	defaultAgentCredits map[string]*big.Rat
+	// reportWindow is the reporting window an obligation gets when the seat's
+	// policy sets none. The console's publisher reads show agents that duty,
+	// so run passes one value to both.
+	reportWindow  time.Duration
+	agentRegistry agentreg.Registry
+	sor           sor.Adapter
 	// registration is the operator's registration settings, read once by
 	// loadRegistrationConfig. buildExchange threads its terms digest into
 	// ExchangeConfig so the Register gate holds callers to exactly the digest the
 	// manifest publishes, rather than reading the environment a second time.
 	registration registrationConfig
+	// lifetimes shortens a tenant's offer and delivery-URL lifetimes. nil in a
+	// production build; the e2e control service in an e2e build.
+	lifetimes service.Lifetimes
+}
+
+// buildAgentRegistry wires Gate-1 self-signup, which reads a caller's own Web
+// Bot Auth key directory to learn its signing key. The read is the SDK's
+// directory fetcher: always over https from the identity's own authority, with
+// no redirect and a signed response, so FORA_WELLKNOWN_{SCHEME,PORT} — which
+// still shape the Gate-2 publisher-manifest fetch (newManifestCache) — do not
+// reach it. The two gates read different documents on the same host: keys come
+// from the directory, and the publisher's commercial overlay carries none.
+func buildAgentRegistry(queries *sqlc.Queries, fetchClient *http.Client) agentreg.Registry {
+	return agentreg.New(agentreg.Config{
+		Repo: repo.NewAgentRepo(queries),
+		HTTP: fetchClient,
+	})
 }
 
 // buildExchange wires the ExchangeService that serves the canonical
 // DiscoverResources / ExecuteTransaction / ReportUsage RPCs. The deprecated
 // OffersService (ListOffers / AcceptOffer / Report) was removed in
 // W3 of the proto-rename wave.
-func buildExchange(d buildSvcDeps) *service.ExchangeService {
+//
+// It reads the Broker's directory host here, beside the Exchange's own domain and
+// the default tenant, because all three are identities this composition root
+// resolves once from the environment. The read fails the boot when
+// EXCHANGE_BROKER_WELLKNOWN_URL is unset or names no host — the same refusal the
+// transport's revocation resolver makes, arriving earlier.
+func buildExchange(d buildSvcDeps) (*service.ExchangeService, error) {
+	brokerHost, err := brokerDirectoryHost()
+	if err != nil {
+		return nil, err
+	}
 	return service.NewExchangeService(service.ExchangeDeps{
 		TxRunner:      db.PoolRunner{Pool: d.pool},
 		Catalog:       d.catalog,
 		Tenants:       repo.NewTenantReadRepo(d.queries),
+		Sites:         repo.NewPublisherDomainReadRepo(d.queries),
 		Agents:        repo.NewAgentRepo(d.queries),
 		AgentReg:      d.agentRegistry,
 		Transactions:  repo.NewTransactionRepo(d.queries),
 		Obligations:   repo.NewObligationRepo(d.queries),
 		Evidence:      repo.NewEvidenceRepo(d.queries),
+		Events:        repo.NewTransactionEventRepo(d.queries),
 		FeeOverrides:  repo.NewFeeOverrideRepo(d.queries),
 		Billing:       d.billing,
 		OfferSigner:   d.offerSigner,
@@ -242,16 +301,20 @@ func buildExchange(d buildSvcDeps) *service.ExchangeService {
 		Audit:         repo.NewAuditRepo(d.queries),
 		BillingRefGen: uuid.NewString,
 		Clk:           clock.System{},
+		Lifetimes:     d.lifetimes,
 		Config: service.ExchangeConfig{
 			Exchange:          exchangeDomain(),
 			SupportedProfiles: exchangeSupportedProfiles(),
 			// The single default tenant a Register reads its
 			// activate_new_agents_by_default policy from (ADR-021 §5 decision 1).
 			DefaultTenantDomain: defaultTenantDomain(),
-			LedgerCurrency:      d.ledgerCurrency,
+			LedgerCurrencies:    d.ledgerCurrencies,
+			DefaultAgentCredits: d.defaultAgentCredits,
+			ReportWindow:        d.reportWindow,
 			TermsDigest:         d.registration.termsDigest,
+			BrokerHost:          brokerHost,
 		},
-	})
+	}), nil
 }
 
 // exchangeDomain is this Exchange's published IDENTITY: the domain it stamps
@@ -279,185 +342,13 @@ func exchangeDomain() string {
 // ExchangeService and CatalogService RPC verification is delegated to
 // connectserver handlers (registered in registerConnect), which each carry
 // their own request-id + RFC 9421 verify layers.
-func buildWrapped(logger *slog.Logger, mux http.Handler) http.Handler {
-	return transport.WrapPublicSurface(logger, mux, runhttp.PublicSurfaceOptionsFromEnv())
-}
-
-// muxDeps collects everything buildMux needs so run() can stay linear and
-// tests can assemble the Exchange's HTTP surface without booting real services.
-type muxDeps struct {
-	pool          interface{ Ping(context.Context) error }
-	exchange      *service.ExchangeService
-	catalog       *service.CatalogService
-	agentRegistry agentreg.Registry
-	offerSigner   *signing.Ed25519Signer
-	// RFC 9421 verify deps for the ExchangeService mount, and for that mount
-	// alone: they are injected into connectserver.NewExchangeServiceHandler,
-	// whose verify seam resolves a caller by signature keyid.
-	//
-	// CatalogService reaches none of them. It mounts on the raw generated
-	// handler (registerConnect below says why) and verifies its caller in
-	// CatalogHandler.verifyCallerSignature, against a key resolved by caller_id
-	// out of the agent registry rather than by keyid — after the Web Bot Auth
-	// split the keyid is a thumbprint, which the agents table is not keyed on.
-	resolver      helpers.KeyResolver
-	replay        *replay.CoreAdapter
-	maxSignatures int
-	// ledgerCurrency is the selected billing backend's ledger currency, the
-	// denomination every offer this Exchange signs is priced in. The well-known
-	// document publishes it as base_currency. Never empty: the demo tiers return
-	// their own constant and the TigerBeetle path refuses to boot on an unset or
-	// unsupported EXCHANGE_BILLING_LEDGER.
-	ledgerCurrency string
-	// audience refuses a request addressed to a different Exchange. It is built
-	// from EXCHANGE_DOMAIN — the identity this Exchange publishes and stamps into
-	// its offers — and mounted on BOTH Connect surfaces, because an addressed
-	// request reaches the catalog mount too.
-	audience *foraaudience.Interceptor
-	// ledgerHealth probes the billing ledger for /readyz. Nil when the selected
-	// billing backend has no ledger (free, in-memory), which is the common case.
-	ledgerHealth func(context.Context) error
-	// registration carries the operator's registration schema and terms
-	// versioning, read once so the manifest publishes exactly what the Register
-	// gate will hold a caller to.
-	registration registrationConfig
-}
-
-// buildMux wires the Exchange's HTTP surface: healthz, Connect-Go RPCs, the
-// well-known endpoints, and the public agents/register route. Admin-plane
-// endpoints have been removed; any request to
-// /admin/* falls through to http.ServeMux's 404. The well-known handler pair
-// is returned alongside the mux so run() can start its periodic refresher.
-func buildMux(d muxDeps) (*http.ServeMux, server.Handlers, error) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", healthzHandler(d.pool))
-	mux.HandleFunc("GET /readyz", readyzHandler(d.pool, d.ledgerHealth))
-	if err := registerConnect(mux, d); err != nil {
-		return nil, server.Handlers{}, err
+func buildWrapped(logger *slog.Logger, mux http.Handler, console consoleDeps) http.Handler {
+	inner := mux
+	if console.enabled() {
+		// Inside WrapPublicSurface, so a refused console request still carries
+		// its request id; outside the mux, so the signature is checked before
+		// routing decides which registration handler would have run.
+		inner = transport.ConsoleSignatureMiddleware(console.resolver, console.replay, mux)
 	}
-	wk, err := registerWellKnown(mux, d)
-	if err != nil {
-		return nil, server.Handlers{}, err
-	}
-	transport.NewAgentsRegisterHandler(d.agentRegistry, transport.AgentsRegisterOptions{}).
-		RegisterRoutes(mux)
-	return mux, wk, nil
-}
-
-func registerConnect(mux *http.ServeMux, d muxDeps) error {
-	// connectserver.NewExchangeServiceHandler wraps the generated handler with
-	// request-id (outermost) → RFC 9421 verify middleware → connect interceptors
-	// (protovalidate bidirectional, via WithValidation). KeyResolver and
-	// ReplayStore are injected by the application; the SDK orchestrates the
-	// verify pass and replay dedup.
-	//
-	// The option set comes from the function the integration harness also calls,
-	// so the mount those tests drive is this mount rather than a hand-kept copy
-	// of it. A construction failure is a boot-time config fault: surfaced up the
-	// boot chain (run() → main()) so the process exits non-zero, not a panic.
-	svrOpts, err := transport.ExchangeMountOptions(d.resolver, d.replay, d.maxSignatures, d.audience)
-	if err != nil {
-		return fmt.Errorf("exchange mount options: %w", err)
-	}
-	path, h := connectserver.NewExchangeServiceHandler(transport.NewExchangeHandler(d.exchange), svrOpts...)
-	mux.Handle(path, h)
-	// CatalogService keeps the raw generated mount (its per-contributor RFC 9421
-	// verification runs in CatalogSignatureMiddleware, not the SDK seam) but shares
-	// the ExchangeService codec + protovalidate contract through the raw-mount
-	// options transport.CatalogMountOptions composes — the SAME shared validation
-	// engine, helpers.SharedValidator, that the ExchangeService path composes
-	// through connectserver.WithValidation, so the mounts cannot drift onto forked
-	// rulesets — plus the message read cap, so the push endpoint, which accepts
-	// contributor-supplied payloads, decodes under the same bound as every other
-	// RPC. The integration harness calls the same function, so the cap the tests
-	// drive is the cap that ships. A construction failure is a boot-time config
-	// fault: surfaced up the boot chain (run() → main()) so the process exits
-	// non-zero, not a panic.
-	catalogOpts, err := transport.CatalogMountOptions(d.audience)
-	if err != nil {
-		return fmt.Errorf("catalog mount options: %w", err)
-	}
-	cpath, ch := foraconnect.NewCatalogServiceHandler(
-		transport.NewCatalogHandler(d.catalog, d.agentRegistry), catalogOpts...,
-	)
-	mux.Handle(cpath, ch)
-	return nil
-}
-
-// exchangeSupportedProfiles is the single source of truth for the extension
-// profiles the Exchange advertises (WellKnownManifest.supported_profiles) AND
-// projects on the discovery path (service.ExchangeConfig).
-// fora-comp-v1 renders the CoMP projection; fora-news-v1 predates it.
-func exchangeSupportedProfiles() []string {
-	return []string{"fora-news-v1", "fora-comp-v1"}
-}
-
-func registerWellKnown(mux *http.ServeMux, d muxDeps) (server.Handlers, error) {
-	hops := exchangeMaxIntermediaryHops()
-	// Endpoint is the ExchangeService ORIGIN (e.g. http://exchange:8081), NOT a
-	// service path: the manifest's top-level endpoint (WellKnownManifest.endpoint)
-	// is what a broker's well-known resolver reads to route a re-packaged execute,
-	// and Connect appends "/fora.v1.ExchangeService/<Method>" to that origin
-	// itself. A service-path value would double the path. Sourced from
-	// EXCHANGE_PUBLIC_ORIGIN (default https://<EXCHANGE_DOMAIN>); CatalogEndpoint
-	// likewise rides the origin.
-	domain := exchangeDomain()
-	origin := runhttp.EnvOr("EXCHANGE_PUBLIC_ORIGIN", "https://"+domain)
-	wk, err := wellknown.New(wellknown.Config{
-		Domain:                 domain,
-		Endpoint:               origin,
-		CatalogEndpoint:        origin,
-		BaseCurrency:           d.ledgerCurrency,
-		SupportedProfiles:      exchangeSupportedProfiles(),
-		MaxIntermediaryHops:    &hops,
-		TermsURI:               d.registration.termsURI,
-		TermsDigest:            d.registration.termsDigest,
-		RegistrationDataSchema: d.registration.schema,
-		OfferKey:               d.offerSigner.PublicKey(),
-		Clock:                  clock.System{},
-		KeyLifetime:            wellknown.OfferKeyLifetime,
-	})
-	if err != nil {
-		// The terms pair is the half an operator sets by hand, and its rules live
-		// in the protocol as protovalidate constraints on the manifest message.
-		// They fire two layers down and report a constraint violation on a
-		// manifest field, naming neither variable. Name them here so the boot
-		// failure points at what to edit.
-		return server.Handlers{}, fmt.Errorf("register well-known (EXCHANGE_TERMS_URI=%q EXCHANGE_TERMS_DIGEST=%q): %w",
-			d.registration.termsURI, d.registration.termsDigest, err)
-	}
-	wk.RegisterRoutes(mux)
-	return wk, nil
-}
-
-// exchangeMaxIntermediaryHops reads EXCHANGE_MAX_INTERMEDIARY_HOPS (default 4):
-// the chain-depth tolerance the Exchange publishes so Brokers can prune before
-// forwarding (FORA WellKnownManifest.max_intermediary_hops). Vacuous at the
-// current single-hop depth; declared so multi-hop deployments inherit a bound.
-func exchangeMaxIntermediaryHops() int32 {
-	const def int32 = 4
-	raw := runhttp.EnvOr("EXCHANGE_MAX_INTERMEDIARY_HOPS", "")
-	if raw == "" {
-		return def
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 0 || n > 1<<20 {
-		return def
-	}
-	return int32(n) //nolint:gosec // bounded to [0, 2^20] above
-}
-
-// newManifestCache builds the publisher-manifest cache over the shared
-// SSRF-guarded fetch client. Honors FORA_WELLKNOWN_{SCHEME,PORT} for
-// docker-compose / local-dev stacks; production leaves both unset (defaults to
-// https + scheme-default port). ExpectRole pins every fetched manifest to
-// ROLE_PUBLISHER so a misrouted document (e.g. an agent or exchange manifest)
-// is rejected at the cache.
-func newManifestCache(client forawellknown.HTTPDoer) *forawellknown.Cache {
-	return forawellknown.NewCache(forawellknown.CacheOptions{
-		Client:     client,
-		Scheme:     runhttp.EnvOr("FORA_WELLKNOWN_SCHEME", "https"),
-		Port:       runhttp.EnvOr("FORA_WELLKNOWN_PORT", ""),
-		ExpectRole: forawellknown.RolePublisher,
-	})
+	return transport.WrapPublicSurface(logger, inner, runhttp.PublicSurfaceOptionsFromEnv())
 }

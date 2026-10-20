@@ -33,7 +33,7 @@ func TestPushResources_ProtovalidateOwnedReject(t *testing.T) {
 
 	// A valid PER_UNIT pricing so the restriction-token case clears the pricing
 	// CEL and isolates the restriction.permitted.format violation.
-	pricedUnit := &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.02", Currency: "USD", Unit: proto.String("accesses")}
+	pricedUnit := &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.02", Currency: "USD", Unit: proto.String("accesses"), EstimatedQuantity: proto.Int32(1)}
 
 	cases := []struct {
 		name         string

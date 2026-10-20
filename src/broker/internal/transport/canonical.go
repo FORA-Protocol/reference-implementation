@@ -8,18 +8,20 @@ import (
 )
 
 // foraRequestToInput maps the canonical wire DiscoveryRequest onto the Broker's
-// internal resolve input. requester.id becomes the self-act identity; uris and
-// acceptable_restrictions now ride on the DiscoveryRequest message itself (the
-// requester is identity-only after the Universal Licensing Core overhaul). The
+// internal resolve input. requester.id is carried as the RequesterID wire label
+// (the handler fills AgentID from the verified caller, not from here), and
+// requester.scopes is carried as Scopes for the Exchange to select terms by.
+// uris and acceptable_restrictions ride on the DiscoveryRequest message itself,
+// because the requester carries identity and entitlements only. The
 // first uri is taken (multi-URI batch is forward-looking) and the first
 // FUNCTION-axis acceptable-restriction value is taken as the advisory intended
-// use. max_hops is mapped only when present: DiscoveryRequest.constraints.max_hops
-// is optional, and GetMaxHops()==0 on absent would be read by enforceHopBudget as
-// an impossible chain — 400'ing every constraint-less request.
+// use. constraints.max_hops is not mapped: it rides only on the DiscoveryRequest,
+// which ends here, and no party enforces it in this protocol version.
 func foraRequestToInput(rr *forav1.DiscoveryRequest) resolve.Request {
 	in := resolve.Request{
-		AgentID:      rr.GetRequester().GetId(),
+		RequesterID:  rr.GetRequester().GetId(),
 		RequesterDom: rr.GetRequester().GetDomain(),
+		Scopes:       rr.GetRequester().GetScopes(),
 		Query:        rr.GetQuery(),
 	}
 	if uris := rr.GetUris(); len(uris) > 0 {
@@ -38,9 +40,6 @@ func foraRequestToInput(rr *forav1.DiscoveryRequest) resolve.Request {
 			// truncated sub-cent budgets. moneyStringToFixedPoint maps empty/malformed
 			// to 0 (no cap), so the assignment cannot fail the request.
 			in.BudgetMinor, _ = moneyStringToFixedPoint(pb.GetAmount())
-		}
-		if c.MaxHops != nil {
-			in.MaxHops = c.MaxHops
 		}
 	}
 	return in

@@ -23,21 +23,18 @@ agent software discovers and calls tools.)
 | HashiCorp Vault | **Yes** | The only place agent private keys are stored. See [`deploy/storage/vault/`](../../deploy/storage/vault/CONFIGURATION.md), and §4 below for the one surprise. |
 | An OIDC provider | **Yes** | OIDC is OpenID Connect, the standard way one service hands sign-in to another. This is where developers actually sign in. The binary exits if it cannot reach it at start-up. See [`deploy/zitadel/`](../../deploy/zitadel/CONFIGURATION.md). |
 | A Broker address | **Yes** | Where discovery and purchase calls are sent. Only the address is needed at start-up; the Broker does not have to be answering yet. Exchange endpoints are resolved from their manifests at runtime. |
-| Outbound HTTPS to publishers' delivery addresses | Yes, at runtime | When an agent buys content, this service fetches the licensed content itself from the address the Exchange's answer names, and returns it inside the tool result. Those addresses are not known in advance, so the service needs general outbound HTTPS, not a fixed allow-list. |
+| Outbound HTTPS to publishers' delivery addresses | Yes, at runtime | When an agent buys content, this service by default fetches the licensed content itself from the address the Exchange's answer names, and returns it inside the tool result. Those addresses are not known in advance, so the service needs general outbound HTTPS, not a fixed allow-list. |
 | A wildcard DNS record and a matching wildcard TLS certificate | Yes, at runtime | Every agent gets its own subdomain, and other parties fetch its public key from there. See §3. |
 
 It listens on **one port, `:8083`**. There is no admin port and no second listener.
 
-Four things are worth knowing before you start, because operators often look for them
+Three things are worth knowing before you start, because operators often look for them
 and they do not exist:
 
 - **There are no command-line flags.** Configuration is 100% environment variables.
   The binary does accept one argument: `healthcheck`, which probes the service's own
   `/healthz` and exits. It exists so a container health check can run the binary
   itself — the image has no shell or `curl` to probe with.
-- **There is no `LOG_LEVEL`.** The service always writes structured JSON logs at
-  `INFO` level to standard output. ("Structured" means each log line is
-  machine-readable data, not free text.)
 - **There is no `/metrics` endpoint** and no Prometheus support. Alerting is done on
   log events — see [`RUNBOOK.md`](RUNBOOK.md) §2.2.
 - **There is no switch to turn the MCP endpoint off.** See §2.
@@ -79,12 +76,13 @@ than replaced by the default.
 | `IDENTITY_KV_MOUNT` | Optional | Which Vault secrets engine holds the keys. Default `secret`. | `fora-agents` |
 | `IDENTITY_KV_PREFIX` | Optional | The folder inside that engine. Default `agents`. Lets Vault hold unrelated secrets alongside without colliding. | `agents` |
 | `IDENTITY_ADDR` | Optional | The address the service listens on. Default `:8083`. The container image publishes port 8083, so if you change this you must change the published port too. | `:8083` |
-| `IDENTITY_BASE_DOMAIN` | Optional, **set it** | The identity zone — every agent gets a subdomain of it. Default **`foramcp.org`**, which is almost certainly not yours. See §3. | `agents.example` |
+| `IDENTITY_LOG_LEVEL` | Optional | The lowest level of log record the service writes: `DEBUG`, `INFO`, `WARN` or `ERROR`, in any case. Default `INFO`. One setting covers the whole service: the agent directories, developer sign-up and the MCP endpoint. Any other value **stops start-up** with an `identity.exit` line naming the variable. Read the section below before raising it. | `INFO` |
+| `IDENTITY_BASE_DOMAIN` | Optional, **set it** | The identity zone — every agent gets a subdomain of it. Default **`foramcp.org`**, which is almost certainly not yours. Every request the service signs as an agent names `https://<slug>.<zone>` as its `Signature-Agent`, so each agent's key directory must be reachable at that https origin, with the `Host` header preserved by any proxy in front. **The service refuses to start** when `https://<zone>` is not an https origin (an uppercase letter, a path or a bad port). See §3. | `agents.example` |
 | `IDENTITY_SESSION_KEY` | Optional, **set it** | Encrypts the browser cookies used during sign-up, as 32 bytes in standard base64. Created automatically when unset — see below. | `<44-character base64 string>` |
 | `IDENTITY_TOKEN_SIGNING_KEY` | Optional, **set it** | Signs the access tokens agents present to the MCP endpoint, as a 32-byte Ed25519 seed in standard base64. Created automatically when unset — see below. | `<44-character base64 string>` |
-| `IDENTITY_TOKEN_AUDIENCE` | Optional | What those tokens are valid for, and what the MCP endpoint advertises as its own identifier. Defaults to `IDENTITY_AUTH_ISSUER`, which is correct for a single deployment. Leave it alone unless you know why you are changing it. | *(leave unset)* |
+| `IDENTITY_TOKEN_AUDIENCE` | Optional, **set it when `/mcp` has its own hostname** | The origin agent software connects to for `/mcp`: what the access tokens are valid for, and what the MCP endpoint advertises as its protected resource. Defaults to `IDENTITY_AUTH_ISSUER`, which is right only while `/mcp` is served from the issuer's hostname. When the MCP endpoint answers under a hostname of its own, set this to that bare origin — scheme and host, no `/mcp` path. Agent software compares the advertised resource with the origin it connected to and refuses to start sign-in when they differ. | `https://mcp.example` |
 | `IDENTITY_DIRECTORY_TTL` | Optional | How long a published document may be cached before it is rebuilt, and the `max-age` the service advertises to caches. Default `5m`. It bounds how quickly **this service's own** published documents reflect a change such as a revocation. The Broker and the Exchange add their own refresh delay on top, which this setting does not control — [`RUNBOOK.md`](RUNBOOK.md) §4.2 has the full timing. | `5m` |
-| `IDENTITY_WELLKNOWN_SCHEME` | Optional | Which protocol appears in the addresses this service publishes about itself. Default `https`. **Must stay `https` in production.** | `https` |
+| `IDENTITY_WELLKNOWN_SCHEME` | Optional | Which protocol appears in the revocation-list address each agent's directory advertises. Default `https`. **Must stay `https` in production.** An agent's own directory origin, the one its signatures name, is always https. | `https` |
 | `IDENTITY_OIDC_SCOPES` | Optional | What the service asks the OIDC provider for, space-separated. Default `openid profile email`. | `openid profile email` |
 | `IDENTITY_MCP_WELLKNOWN_SCHEME` | Optional | The protocol used when looking up an Exchange named in an account call or offer. Falls back to `IDENTITY_WELLKNOWN_SCHEME`, then `https`. Leave unset. | *(leave unset)* |
 | `IDENTITY_MCP_CALL_TIMEOUT` | Optional | How long one outbound call to the Broker or an Exchange may take. Default `30s`. | `30s` |
@@ -99,6 +97,31 @@ than replaced by the default.
 | `IDENTITY_ROTATION_INTERVAL` | Optional | How often the service checks whether any agent is due. Default `1h`. | `1h` |
 | `SKIP_SSRF` | Optional — **leave unset** | Setting this to `true` removes the guard that stops the service being tricked into calling internal addresses. Development only. | *(leave unset)* |
 | `ALLOW_INSECURE` | Optional — **leave unset** | Setting this to `true` allows plain unencrypted `http` for those same calls. Development only. | *(leave unset)* |
+
+### `IDENTITY_LOG_LEVEL` — what each level hides
+
+The service writes structured JSON logs to standard output. ("Structured" means
+each log line is machine-readable data, not free text.) `IDENTITY_LOG_LEVEL` sets
+the lowest level it writes, and it is read once, at start-up, so a change needs a
+restart. Unset means `INFO`, which is what the service wrote before the setting
+existed.
+
+- **`DEBUG`** adds routine detail for troubleshooting, such as an `http request`
+  line for every request. Expect far more output.
+- **`WARN`** still writes every event the alerts in [`RUNBOOK.md`](RUNBOOK.md) §2.3
+  are built on, but it hides every `INFO` line: the start-up lines
+  [`DEPLOYMENT.md`](DEPLOYMENT.md) tells you to expect, the sign-up lines that are
+  the audit record of who signed up, one line per agent tool call, and the
+  rotation lines the key procedures in [`RUNBOOK.md`](RUNBOOK.md) §4.2 search for.
+- **`ERROR`** also hides those `WARN` alert events, `identity.directory.unavailable`
+  and `identity.signup.ephemeral_token_key` among them. Choose it only if nothing
+  alerts on the service's logs.
+
+Run `INFO` in production. Whatever the setting, messages the Go HTTP server writes
+on its own, such as a recovered panic, are logged at `ERROR`, so no level hides
+them. The setting governs the service only: the revocation command
+(`go run ./src/identity/cmd/operator`) always writes at `INFO`, because its
+`identity.revoke` line is the record of the revocation.
 
 ### The two keys that generate themselves
 
@@ -191,10 +214,20 @@ It is not just a label. Everything below is derived from it:
 
 - Every address the service advertises to agent software — the sign-in, token and
   registration endpoints in its published discovery document.
+- The `iss` value on every redirect the service sends back to agent software, whether
+  the sign-in was approved or refused (RFC 9207). Agent software compares it, character
+  for character, with the `issuer` in that discovery document. Both come from this one
+  value.
 - **The redirect address your OIDC provider must have on file**, which is exactly
   `IDENTITY_AUTH_ISSUER` + `/callback`. If the two disagree by even a trailing slash,
   sign-in fails at the provider with a redirect-URI error.
-- What access tokens are valid for, unless `IDENTITY_TOKEN_AUDIENCE` overrides it.
+- What access tokens are valid for, and what the MCP endpoint advertises as its
+  protected resource, unless `IDENTITY_TOKEN_AUDIENCE` overrides it. The two must be
+  split when `/mcp` is served under a different hostname than this service: the
+  audience follows the hostname agent software connects to, while this value stays on
+  this service's own hostname, because the `/callback` address on file at the OIDC
+  provider is derived from it. Changing the audience invalidates every access token
+  issued before the change.
 - Whether sign-up cookies are marked secure — that switches on automatically when the
   value starts with `https://`.
 
@@ -279,11 +312,11 @@ network. Several of their settings are deliberately unsafe:
 
 | Setting | Why it is there | Why it must not ship |
 |---|---|---|
-| `IDENTITY_WELLKNOWN_SCHEME: "http"` | The test network has no certificates. | Agent identities would be published as `http` addresses, and every party that fetches them would do so unencrypted. |
+| `IDENTITY_WELLKNOWN_SCHEME: "http"` | The services serve plain http on the test networks. | Agent identities would be published as `http` addresses, and every party that fetches them would do so unencrypted. |
 | `SKIP_SSRF: "true"` | Test services live on private addresses the guard blocks. | Removes the protection against the service being steered into your internal network. |
 | `ALLOW_INSECURE: "true"` | Same reason. | Same consequence. |
 | `sslmode=disable` in the DSN | The database is on the same private bridge. | Correct only while the connection stays on one host. On a network you do not control exclusively TLS is required: without it every row travels in the clear, and what the login exposes depends on the cluster's authentication method ([`deploy/storage/postgres/CONFIGURATION.md`](../../deploy/storage/postgres/CONFIGURATION.md) §2.3). |
-| `VAULT_TOKEN: "root"` against a `-dev` Vault | The test Vault starts unsealed with a fixed token and no storage. | It keeps nothing across a restart and grants unlimited access. Every agent key in it would be lost on restart and readable by anyone who reached it. |
+| A `-dev` Vault, and `VAULT_TOKEN: "e2e-identity-scoped-token"` | The test Vault starts unsealed with the root token `root` and no storage. The Identity Service never gets that root token. The one-shot `identity-vault-init` container uses it for setup, and the test runner uses it to arrange and check state the scoped token must not reach. `identity-vault-init` writes the policy from [`deploy/storage/vault/identity-policy.hcl`](../../deploy/storage/vault/identity-policy.hcl) and creates this token with that policy only (`-no-default-policy`, 768 h TTL) before the Identity Service starts ([`tests/e2e/identity-vault-init.sh`](../../tests/e2e/identity-vault-init.sh)). | A dev-mode Vault keeps nothing across a restart, so every agent key in it would be lost. Its root token is fixed and published in this repository, so anyone who reaches that Vault can read every key. The scoped token's id is published here too. |
 | `IDENTITY_TOKEN_SIGNING_KEY: "AAAA…"` | A fixed value so tests can create their own tokens. | It is published in this repository. Anyone could sign a token that this service accepts as any agent. |
 | `IDENTITY_BASE_DOMAIN: "foramcp.org"` | The zone the test stack resolves internally. | Not a domain you control. |
 | `user: "0"` and `IDENTITY_ADDR: ":80"` | The test stack needs the agent subdomains on the default port. | Runs the service as root for no benefit; put a proxy in front instead. |
@@ -297,6 +330,7 @@ Values marked *fill in* are specific to your environment.
 ```
 IDENTITY_DSN=postgres://fora:<password>@<db-host>:5432/identity?sslmode=require
 IDENTITY_ADDR=:8083
+IDENTITY_LOG_LEVEL=INFO
 IDENTITY_BASE_DOMAIN=agents.example
 IDENTITY_AUTH_ISSUER=https://id.example
 IDENTITY_OIDC_ISSUER=https://login.example

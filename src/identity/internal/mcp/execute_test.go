@@ -5,38 +5,43 @@ package mcp_test
 import (
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
+	"connectrpc.com/connect"
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
+	"github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // TestExecute_SignsAcceptanceAsTheCallerAndReturnsTheDeliveryURL is the ticket's
 // core execute property, driven end to end: the tool licenses an offer through
-// the relay signed as the caller, and hands back the signed delivery URL.
+// the Broker's ExecuteTransaction signed as the caller, and hands back the signed
+// delivery URL.
 //
-// Two independent signatures ride this call and both are checked. The relay's
-// transport signature (sig1) is verified by the production gate and its keyid
-// recorded — proving the POST went out as this agent. The detached acceptance in
+// Two independent signatures ride this call and both are checked. The request's
+// transport signature is verified by the production gate and its keyid
+// recorded — proving the call went out as this agent. The detached acceptance in
 // the body is verified against the SAME agent's key here, proving the binding the
 // Exchange would check is present and correct, not merely that a field was filled.
 func TestExecute_SignsAcceptanceAsTheCallerAndReturnsTheDeliveryURL(t *testing.T) {
 	f := newFixture(t)
-	f.broker.relayResp = &forav1.TransactionResponse{
-		Ver:               helpers.ProtocolVersion,
-		AgentIdentityHash: "thumb-xyz",
+	a := f.provision(t, "dev-one")
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
+		Ver:       helpers.ProtocolVersion,
+		Exchanges: []*forav1.ExchangeOutcome{{AgentIdentityHash: "thumb-xyz"}},
 		Items: []*forav1.TransactionResultItem{{
-			OfferId:           "offer-1",
-			TransactionId:     "tx-1",
-			RetrievalEndpoint: strPtr("https://edge.example/deliver?sig=abc&agent_id=thumb-xyz"),
+			OfferId:       "offer-1",
+			TransactionId: "tx-1",
+			RetrievalEndpoint: strPtr(f.exchange.SignDelivery(t,
+				"https://edge.example/deliver?agent_id="+a.Thumbprint)),
 		}},
 	}
-	a := f.provision(t, "dev-one")
 
 	out := callTool[executeResult](t, f.connect(t, a.Token), "fora_execute", map[string]any{
-		"offers": []map[string]any{signedOffer("offer-1", "exchange.example")},
+		"offers": []map[string]any{signedOffer("offer-1", f.exchange.Domain(t))},
 	})
 
 	if len(out.Items) != 1 {
@@ -49,17 +54,17 @@ func TestExecute_SignsAcceptanceAsTheCallerAndReturnsTheDeliveryURL(t *testing.T
 	if item["retrieval_endpoint"] == nil || item["retrieval_endpoint"] == "" {
 		t.Errorf("result carried no delivery URL: %v", item)
 	}
-	if out.AgentIdentityHash != "thumb-xyz" {
-		t.Errorf("agent_identity_hash = %q, want thumb-xyz", out.AgentIdentityHash)
+	if len(out.Exchanges) != 1 || out.Exchanges[0]["agent_identity_hash"] != "thumb-xyz" {
+		t.Errorf("exchanges = %v, want the Broker's one outcome carrying thumb-xyz", out.Exchanges)
 	}
 
-	// The relay POST was signed as this agent (transport sig1).
+	// The purchase went to the Broker's RPC, signed as this agent.
 	call := onlyCall(t, f.broker)
-	if call.Path != "/broker/v1/exchange/execute" {
-		t.Fatalf("broker saw %q, want the execute relay route", call.Path)
+	if call.Path != forav1connect.BrokerServiceExecuteTransactionProcedure {
+		t.Fatalf("broker saw %q, want BrokerService.ExecuteTransaction", call.Path)
 	}
 	if call.KeyID != a.Thumbprint {
-		t.Errorf("relay signed with %q, want the caller's key %q", call.KeyID, a.Thumbprint)
+		t.Errorf("purchase signed with %q, want the caller's key %q", call.KeyID, a.Thumbprint)
 	}
 
 	// The body carries a detached acceptance that verifies against the caller's
@@ -91,7 +96,7 @@ func assertRequesterIsCaller(t *testing.T, f *fixture, a agent) *forav1.Requeste
 	requester := f.broker.LastExecute().GetRequester()
 	// The directory origin, not the bare subdomain: that is what the Broker and
 	// Exchange match against the signed Signature-Agent.
-	if want := "http://" + a.Subdomain; requester.GetId() != want {
+	if want := "https://" + a.Subdomain; requester.GetId() != want {
 		t.Errorf("requester id = %q, want the caller's directory %q", requester.GetId(), want)
 	}
 	if got := requester.GetType(); got != forav1.RequesterType_REQUESTER_TYPE_AGENT {
@@ -105,7 +110,7 @@ func assertRequesterIsCaller(t *testing.T, f *fixture, a agent) *forav1.Requeste
 // item out — with no separate single-offer shape.
 func TestExecute_BatchOfOneIsNotSpecialCased(t *testing.T) {
 	f := newFixture(t)
-	f.broker.relayResp = &forav1.TransactionResponse{
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
 		Ver:   helpers.ProtocolVersion,
 		Items: []*forav1.TransactionResultItem{{OfferId: "solo", TransactionId: "tx-solo"}},
 	}
@@ -131,7 +136,7 @@ func TestExecute_BatchOfOneIsNotSpecialCased(t *testing.T) {
 // adapter substituted. This reads the relayed key directly instead.
 func TestExecute_CallerIdempotencyKeyReachesRelay(t *testing.T) {
 	f := newFixture(t)
-	f.broker.relayResp = &forav1.TransactionResponse{
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
 		Ver:   helpers.ProtocolVersion,
 		Items: []*forav1.TransactionResultItem{{OfferId: "offer-1", TransactionId: "tx-1"}},
 	}
@@ -153,7 +158,7 @@ func TestExecute_CallerIdempotencyKeyReachesRelay(t *testing.T) {
 // rather than relaying an empty key (which the Exchange could not dedupe on).
 func TestExecute_OmittedIdempotencyKeyIsMinted(t *testing.T) {
 	f := newFixture(t)
-	f.broker.relayResp = &forav1.TransactionResponse{
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
 		Ver:   helpers.ProtocolVersion,
 		Items: []*forav1.TransactionResultItem{{OfferId: "offer-1", TransactionId: "tx-1"}},
 	}
@@ -175,7 +180,7 @@ func TestExecute_OmittedIdempotencyKeyIsMinted(t *testing.T) {
 func TestExecute_PerItemDenialIsCarriedNotErrored(t *testing.T) {
 	f := newFixture(t)
 	denied := forav1.DenialReason_DENIAL_REASON_OFFER_EXPIRED
-	f.broker.relayResp = &forav1.TransactionResponse{
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
 		Ver: helpers.ProtocolVersion,
 		Items: []*forav1.TransactionResultItem{{
 			OfferId:      "offer-1",
@@ -199,33 +204,82 @@ func TestExecute_PerItemDenialIsCarriedNotErrored(t *testing.T) {
 	}
 }
 
-// TestExecute_WholeRequestRefusalSurfacesTypedReason drives the transport-level
-// refusal: a non-2xx from the relay must reach the agent as a failed tool call
-// carrying the typed reason, not a bare status.
+// TestExecute_WholeRequestRefusalSurfacesTypedReason drives a refusal of the
+// Broker's own: a purchase whose requester the Broker will not accept for the
+// signing directory. It must reach the agent as a failed tool call carrying the
+// typed reason, not a bare status — nothing was bought, so there is no result to
+// render.
 func TestExecute_WholeRequestRefusalSurfacesTypedReason(t *testing.T) {
 	f := newFixture(t)
-	denial := &forav1.ErrorDetail{
-		Message: "offer no longer valid",
-		Reason: &forav1.ErrorDetail_TransactionDenial{
-			TransactionDenial: &forav1.TransactionDenial{
-				Reason: forav1.DenialReason_DENIAL_REASON_OFFER_EXPIRED,
-			},
-		},
-	}
-	body, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(denial)
+	refusal := connect.NewError(connect.CodeUnauthenticated, errors.New("requester is not the signer"))
+	detail, err := connect.NewErrorDetail(helpers.RequestAuthFailureDetail("fora.v1.BrokerService",
+		"requester is not the signer", forav1.RequestAuthFailureReason_REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID))
 	if err != nil {
-		t.Fatalf("marshal ErrorDetail: %v", err)
+		t.Fatalf("build ErrorDetail: %v", err)
 	}
-	f.broker.relayErrStatus = 403
-	f.broker.relayErrBody = body
+	refusal.AddDetail(detail)
+	f.broker.executeErr = refusal
 	a := f.provision(t, "dev-one")
 
 	msg := callToolErr(t, f.connect(t, a.Token), "fora_execute", map[string]any{
 		"offers": []map[string]any{signedOffer("offer-1", "exchange.example")},
 	})
 
-	if !strings.Contains(msg, "DENIAL_REASON_OFFER_EXPIRED") {
-		t.Errorf("tool error %q, want it to carry the typed denial reason", msg)
+	if !strings.Contains(msg, "REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID") {
+		t.Errorf("tool error %q, want it to carry the typed reason", msg)
+	}
+}
+
+// TestExecute_AnExchangeRefusalIsCarriedPerItem pins that an Exchange refusing
+// the Broker's whole sub-request is a partial result, not a failed call: the
+// refused item carries the protocol's refusal object — the Exchange, the code
+// and the Exchange's typed reason — beside the other Exchange's delivered item,
+// and the outcomes and totals ride along in the protocol's own encoding.
+func TestExecute_AnExchangeRefusalIsCarriedPerItem(t *testing.T) {
+	f := newFixture(t)
+	exchange := "refusing.example"
+	reason := helpers.TransactionDenialDetail("fora.v1.ExchangeService", "relay not accepted",
+		forav1.DenialReason_DENIAL_REASON_RELAY_NOT_ACCEPTED)
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
+		Ver: helpers.ProtocolVersion,
+		Items: []*forav1.TransactionResultItem{
+			{OfferId: "offer-1", Refusal: &forav1.UpstreamRefusal{
+				Party: exchange, Code: "permission_denied", Detail: reason,
+			}},
+			{OfferId: "offer-2", TransactionId: "tx-2", Cost: &forav1.Cost{Amount: "0.05", Currency: "USD"}},
+		},
+		Exchanges: []*forav1.ExchangeOutcome{
+			{Exchange: exchange, OfferIds: []string{"offer-1"}},
+			{Exchange: "exchange.example", OfferIds: []string{"offer-2"}, AgentIdentityHash: "thumb"},
+		},
+		Totals: []*forav1.Cost{{Amount: "0.05", Currency: "USD"}},
+	}
+	a := f.provision(t, "dev-one")
+
+	out := callTool[executeResult](t, f.connect(t, a.Token), "fora_execute", map[string]any{
+		"offers":        []map[string]any{signedOffer("offer-1", exchange), signedOffer("offer-2", "exchange.example")},
+		"embed_content": false,
+	})
+
+	if len(out.Items) != 2 {
+		t.Fatalf("got %d items, want 2", len(out.Items))
+	}
+	refused, ok := out.Items[0]["refusal"].(map[string]any)
+	if !ok {
+		t.Fatalf("items[0] = %v, want it to carry the refusal", out.Items[0])
+	}
+	if refused["party"] != exchange || refused["code"] != "permission_denied" {
+		t.Errorf("refusal = %v, want %s / permission_denied", refused, exchange)
+	}
+	denial, _ := refused["detail"].(map[string]any)["transaction_denial"].(map[string]any)
+	if denial["reason"] != "DENIAL_REASON_RELAY_NOT_ACCEPTED" {
+		t.Errorf("refusal detail = %v, want the Exchange's typed reason", refused["detail"])
+	}
+	if out.Items[1]["transaction_id"] != "tx-2" {
+		t.Errorf("items[1] = %v, want the other Exchange's result", out.Items[1])
+	}
+	if len(out.Exchanges) != 2 || len(out.Totals) != 1 || out.Totals[0]["amount"] != "0.05" {
+		t.Errorf("exchanges = %v, totals = %v, want both carried across", out.Exchanges, out.Totals)
 	}
 }
 
@@ -274,13 +328,13 @@ func TestExecute_RequiresAtLeastOneOffer(t *testing.T) {
 // reported without the agent inventing identifiers.
 func TestExecute_ReportsUsingTheReturnedTransaction(t *testing.T) {
 	f := newFixture(t)
-	f.broker.relayResp = &forav1.TransactionResponse{
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
 		Ver: helpers.ProtocolVersion,
 		Items: []*forav1.TransactionResultItem{{
 			OfferId:           "offer-1",
 			TransactionId:     "tx-99",
 			BillingId:         "bill-99",
-			RetrievalEndpoint: strPtr("https://edge.example/deliver?sig=abc"),
+			RetrievalEndpoint: strPtr(f.exchange.SignDelivery(t, "https://edge.example/deliver")),
 		}},
 	}
 	f.issuer.reportResp = &forav1.UsageReportResponse{Ver: helpers.ProtocolVersion, ReportId: "rep-99"}
@@ -288,7 +342,7 @@ func TestExecute_ReportsUsingTheReturnedTransaction(t *testing.T) {
 	session := f.connect(t, a.Token)
 
 	exec := callTool[executeResult](t, session, "fora_execute", map[string]any{
-		"offers": []map[string]any{signedOffer("offer-1", "exchange.example")},
+		"offers": []map[string]any{signedOffer("offer-1", f.exchange.Domain(t))},
 	})
 	txID, _ := exec.Items[0]["transaction_id"].(string)
 	if txID == "" {
@@ -313,8 +367,9 @@ func TestExecute_ReportsUsingTheReturnedTransaction(t *testing.T) {
 // that served the manifest, so fora_report resolves through the offer-named Exchange's
 // OWN manifest and refuses if that endpoint points at a different host — otherwise a
 // hostile manifest could redirect an agent-signed usage report (carrying a real
-// transaction id) to any public host it names. The control lives in foraclient; this
-// proves fora_report wires it, so deleting the refusal fails here rather than passing.
+// transaction id) to any public host it names. The control lives in the SDK's
+// endpoint resolver; this proves fora_report wires it, so deleting the refusal fails
+// here rather than passing.
 func TestReport_RefusesEndpointOnAnotherHost(t *testing.T) {
 	f := newFixture(t)
 	a := f.provision(t, "dev-one")
@@ -360,7 +415,7 @@ func TestReport_RefusesEndpointOnAnotherHost(t *testing.T) {
 // each result item's offer_id.
 func TestExecute_BatchSignsEachAcceptanceOverItsOwnOffer(t *testing.T) {
 	f := newFixture(t)
-	f.broker.relayResp = &forav1.TransactionResponse{
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
 		Ver: helpers.ProtocolVersion,
 		Items: []*forav1.TransactionResultItem{
 			{OfferId: "offer-1", TransactionId: "tx-1"},
@@ -408,9 +463,10 @@ func TestExecute_BatchSignsEachAcceptanceOverItsOwnOffer(t *testing.T) {
 }
 
 type executeResult struct {
-	AgentIdentityHash string           `json:"agent_identity_hash"`
-	Items             []map[string]any `json:"items"`
-	RequestID         string           `json:"request_id"`
+	Exchanges []map[string]any `json:"exchanges"`
+	Totals    []map[string]any `json:"totals"`
+	Items     []map[string]any `json:"items"`
+	RequestID string           `json:"request_id"`
 }
 
 // signedOffer builds the offer object an agent hands back to fora_execute — the

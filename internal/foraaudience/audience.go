@@ -24,6 +24,7 @@ import (
 
 	connect "connectrpc.com/connect"
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
+	"github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
 	"github.com/FORA-Protocol/protocol/sdk/go/connectserver"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	"google.golang.org/protobuf/proto"
@@ -85,7 +86,7 @@ func (i *Interceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 			return next(ctx, req)
 		}
 		msg, ok := req.Any().(proto.Message)
-		if !ok {
+		if !ok || terminatesHere(req.Spec().Procedure) {
 			return next(ctx, req)
 		}
 		claimed, addressed := Recipients(msg)
@@ -269,6 +270,17 @@ func serviceDomain(procedure string) string {
 func (i *Interceptor) log(ctx context.Context, level slog.Level, path, verdict, message string) {
 	reqctx.FromContext(ctx).Log(ctx, level, "foraaudience.refused",
 		"path", path, "verdict", verdict, "self", i.self, "reason", message)
+}
+
+// terminatesHere reports whether a procedure receives a TransactionRequest whose
+// items do NOT name this recipient: BrokerService.ExecuteTransaction. There the
+// request is addressed to the Broker, which re-packages it into one new request
+// per Exchange, and each item's offer.exchange names the Exchange the Broker
+// routes that item to. Checking those values against the Broker's own identity
+// would refuse every purchase. The every-item rule binds at each Exchange
+// instead, on the request the Broker sends it, where this same interceptor runs.
+func terminatesHere(procedure string) bool {
+	return procedure == forav1connect.BrokerServiceExecuteTransactionProcedure
 }
 
 // Recipients returns the recipient values a request states, and whether the

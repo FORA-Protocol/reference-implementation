@@ -15,6 +15,7 @@ import (
 	"time"
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
@@ -34,19 +35,29 @@ import (
 // callers can drive the periodic refresher. The identity signer is freshly
 // generated per call; the RELAY key, when a test needs one, goes into keys —
 // the registry the served directory publishes alongside the identity key.
-func brokerDiscovery(t *testing.T, clk clock.Clock, keys *transport.KeyRegistry, revURL string,
+//
+// relays are the relay keys the registry publishes; their private halves sign
+// the directory response beside the identity key, as in production.
+func brokerDiscovery(t *testing.T, clk clock.Clock, revURL string, relays ...ed25519.PrivateKey,
 ) (*httptest.Server, ed25519.PublicKey, server.Handlers) {
 	t.Helper()
+	pubs := make([]ed25519.PublicKey, 0, len(relays))
+	relaySigners := make([]helpers.Signer, 0, len(relays))
+	for _, priv := range relays {
+		pubs = append(pubs, priv.Public().(ed25519.PublicKey))
+		relaySigners = append(relaySigners, rwtestutil.DirectorySigner(priv))
+	}
+	keys := transporttest.MustRegistry(t, pubs...)
 	identityPub, identityPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("identity keygen: %v", err)
 	}
-	signer, err := signing.NewCoSigner("broker.example", "broker-1", identityPriv, clk)
+	signer, err := signing.NewCoSigner("broker.example", identityPriv, clk)
 	if err != nil {
 		t.Fatalf("cosigner: %v", err)
 	}
 	h, err := transport.NewWellKnown(transport.WellKnownConfig{
-		Signer: signer, BrokerID: "broker-1", Keys: keys, RevocationURL: revURL,
+		Signer: signer, BrokerID: "broker-1", Keys: keys, KeySigners: relaySigners, RevocationURL: revURL,
 	})
 	if err != nil {
 		t.Fatalf("new well-known: %v", err)
@@ -112,13 +123,12 @@ func getBody(t *testing.T, url string) []byte {
 // (the relay key).
 func TestWellKnownHandler_ServesBrokerDiscovery(t *testing.T) {
 	t.Parallel()
-	relayPub, _, err := ed25519.GenerateKey(rand.Reader)
+	relayPub, relayPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("relay keygen: %v", err)
 	}
-	reg := transporttest.MustRegistry(t, relayPub)
 
-	srv, identityPub, _ := brokerDiscovery(t, nil, reg, "")
+	srv, identityPub, _ := brokerDiscovery(t, nil, "", relayPriv)
 
 	m, _ := sharedtestutil.FetchManifest(t, srv.URL, forawellknown.RoleBroker)
 	if m.GetDomain() != "broker.example" {
@@ -140,6 +150,47 @@ func TestWellKnownHandler_ServesBrokerDiscovery(t *testing.T) {
 	}
 }
 
+// TestWellKnownHandler_DirectoryIsSignedByEveryKeyItLists pins that the
+// Broker's key directory answers under the directory media type with a
+// response signature by each key it lists — the identity key and the relay key
+// — covering the authority the request named. An Exchange resolves the relay
+// key only from a directory the relay key signed, so a directory unsigned by it
+// would refuse every relayed purchase.
+func TestWellKnownHandler_DirectoryIsSignedByEveryKeyItLists(t *testing.T) {
+	t.Parallel()
+	buildTime := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	relayPub, relayPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("relay keygen: %v", err)
+	}
+	srv, identityPub, _ := brokerDiscovery(t, clock.NewDeterministic(buildTime), "", relayPriv)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+forawellknown.WBAPath, http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "broker.example"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); ct != server.DirectoryMediaType {
+		t.Fatalf("Content-Type = %q, want %s", ct, server.DirectoryMediaType)
+	}
+	verified, err := helpers.VerifyDirectoryResponse("broker.example", resp.Header, body,
+		[]ed25519.PublicKey{identityPub, relayPub}, buildTime.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("directory response: %v", err)
+	}
+	for name, pub := range map[string]ed25519.PublicKey{"identity": identityPub, "relay": relayPub} {
+		if !verified[rwtestutil.MustThumbprint(t, pub)] {
+			t.Errorf("the %s key did not sign the directory response", name)
+		}
+	}
+}
+
 // TestWellKnownHandler_KeysCarryBoundedWindows asserts every key in the served
 // WBA directory carries a bounded validity window anchored to the signer clock
 // at document build — exactly [now - 1h, now + 90 days) for the identity key
@@ -158,13 +209,12 @@ func TestWellKnownHandler_KeysCarryBoundedWindows(t *testing.T) {
 	buildTime := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	clk := clock.NewDeterministic(buildTime)
 
-	relayPub, _, err := ed25519.GenerateKey(rand.Reader)
+	relayPub, relayPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("relay keygen: %v", err)
 	}
-	reg := transporttest.MustRegistry(t, relayPub)
 
-	srv, identityPub, _ := brokerDiscovery(t, clk, reg, "")
+	srv, identityPub, _ := brokerDiscovery(t, clk, "", relayPriv)
 	f, err := forawellknown.ParseWBA(getBody(t, srv.URL+forawellknown.WBAPath))
 	if err != nil {
 		t.Fatalf("served WBA directory invalid: %v", err)
@@ -196,7 +246,7 @@ func TestWellKnownHandler_RefresherKeepsWindowsFresh(t *testing.T) {
 	t.Parallel()
 	buildTime := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	clk := clock.NewDeterministic(buildTime)
-	srv, identityPub, h := brokerDiscovery(t, clk, transporttest.MustRegistry(t), "")
+	srv, identityPub, h := brokerDiscovery(t, clk, "")
 	tp := rwtestutil.MustThumbprint(t, identityPub)
 
 	f, err := forawellknown.ParseWBA(getBody(t, srv.URL+forawellknown.WBAPath))
@@ -238,7 +288,7 @@ func TestWellKnownHandler_RefresherKeepsWindowsFresh(t *testing.T) {
 func TestWellKnownHandler_AdvertisesRevocationURL(t *testing.T) {
 	t.Parallel()
 	const revURL = "https://broker.example/.well-known/fora-key-revocations.json"
-	srv, _, _ := brokerDiscovery(t, nil, transporttest.MustRegistry(t), revURL)
+	srv, _, _ := brokerDiscovery(t, nil, revURL)
 	f, err := forawellknown.ParseWBA(getBody(t, srv.URL+forawellknown.WBAPath))
 	if err != nil {
 		t.Fatalf("served WBA directory invalid: %v", err)

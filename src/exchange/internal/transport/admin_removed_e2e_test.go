@@ -3,8 +3,6 @@
 package transport_test
 
 import (
-	"bytes"
-	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -204,16 +202,4 @@ func getJSON(t *testing.T, h *testHarness, path, wantContentType string) *http.R
 		t.Fatalf("%s: Content-Type = %q, want %q", path, got, wantContentType)
 	}
 	return resp
-}
-
-func decodeJSONBody(t *testing.T, resp *http.Response, dst any) {
-	t.Helper()
-	defer func() { _ = resp.Body.Close() }()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read body: %v", err)
-	}
-	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(dst); err != nil {
-		t.Fatalf("decode body %q: %v", string(raw), err)
-	}
 }

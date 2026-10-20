@@ -45,6 +45,7 @@ service_id = ""
       CATALOG_CONTRIBUTORS_JSON = $(printf '%s' "${CATALOG_CONTRIBUTORS_JSON:-}" | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0,"utf8")))')
       WBA_KEYS_JSON = $(printf '%s' "${WBA_KEYS_JSON:-}" | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0,"utf8")))')
       WBA_REVOCATION_URL = "${WBA_REVOCATION_URL:-}"
+      WBA_SIGNED_DIRECTORY_JSON = $(printf '%s' "${WBA_SIGNED_DIRECTORY_JSON:-}" | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0,"utf8")))')
 
 [setup]
 EOF

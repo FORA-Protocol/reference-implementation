@@ -92,7 +92,7 @@ func (s *ExchangeService) executeBatch(
 	// is returned whether the replay hits this process or another (post
 	// restart/failover).
 	if outcome.lastTxID != "" {
-		s.logOutcome(ctx, "execute_transaction", "VALIDATED",
+		s.logOutcome(ctx, "execute_transaction", outcomeValidated,
 			Caller{KeyID: agent.id, Kind: CallerAgent, AgentID: agent.id}, nil, agent.id, outcome.lastTxID, nil)
 	}
 	resp, err := buildBatchTxResponse(outcome.results, outcome.sharedThumbprint)
@@ -134,6 +134,7 @@ func (s *ExchangeService) runBatchItems(
 	// ONCE here at the service boundary and carried to persistence as data. No
 	// layer below reaches into the context for a value it writes.
 	correlation := resolveRequestCorrelation(ctx)
+	denials := s.newDenialRecorder(req, agent.id, binding)
 	out := batchOutcome{results: make([]*forav1.TransactionResultItem, 0, len(req.GetItems()))}
 	for _, item := range req.GetItems() {
 		res, thumb, execErr := s.executeBatchItem(ctx, req, item, agent, correlation)
@@ -146,6 +147,7 @@ func (s *ExchangeService) runBatchItems(
 			continue
 		}
 		if denied, ok := batchDenialResult(item, execErr); ok {
+			denials.record(ctx, item, denied, execErr)
 			out.results = append(out.results, denied)
 			continue
 		}
@@ -209,8 +211,36 @@ func (s *ExchangeService) executeBatchItem(
 	itemReq := itemRequest(req, item)
 	resolved, err := s.resolveOfferForTx(itemReq)
 	if err != nil {
-		return nil, "", err
+		return nil, "", s.attributeUnresolved(item.GetOffer(), err)
 	}
+	result, thumbprint, err := s.executeResolvedItem(ctx, resolvedItem{
+		itemReq: itemReq, item: item, agent: agent, correlation: correlation, resolved: resolved,
+	})
+	if err != nil {
+		// Every denial raised from here on is attributable: the offer's signature
+		// verified and its catalog entry resolved.
+		return nil, "", attributeResolved(err, resolved.entry)
+	}
+	return result, thumbprint, nil
+}
+
+// resolvedItem is one batch item whose offer verified and whose catalog entry
+// resolved, with the request-scoped values its execution needs.
+type resolvedItem struct {
+	itemReq     *forav1.TransactionRequest
+	item        *forav1.TransactionItem
+	agent       resolvedAgent
+	correlation requestCorrelation
+	resolved    resolvedOffer
+}
+
+// executeResolvedItem runs the rest of the single-offer pipeline for an item
+// whose catalog entry resolved: authorization, the reporting-overdue gate, the
+// fee resolution, and billing, signing and persistence.
+func (s *ExchangeService) executeResolvedItem(
+	ctx context.Context, in resolvedItem,
+) (*forav1.TransactionResultItem, string, error) {
+	itemReq, item, agent, correlation, resolved := in.itemReq, in.item, in.agent, in.correlation, in.resolved
 	tenant, err := s.tenants.ByID(ctx, resolved.entry.TenantID)
 	if err != nil {
 		return nil, "", exchange.Wrap(exchange.KindInternal, err, "load tenant")
@@ -237,18 +267,17 @@ func (s *ExchangeService) executeBatchItem(
 	// migration 000018 — the catalog push gate requires owner attestation before
 	// an entry can be transacted; rows predating that migration must be
 	// backfilled before settlement (see the operations doc).
-	override, err := s.feeOverrides.ByOwner(ctx, tenant.ID, resolved.entry.ResourceOwnerID)
+	feeRate, err := effectiveFeeRate(ctx, s.feeOverrides, tenant, resolved.entry.ResourceOwnerID)
 	if err != nil {
-		return nil, "", exchange.Wrap(exchange.KindInternal, err, "resolve fee override")
+		return nil, "", err
 	}
-	feeRateBps := ResolveFeeRateBps(tenant.FeeRateBps, override)
 	// Derived per-item dedup key: distinct offer_ids ⇒ distinct keys, so neither
 	// the idempotency_key UNIQUE backstop nor the billing dedup collapses the items.
-	derivedKey := transactionkey.DerivedItemKey(req.GetIdempotencyKey(), item.GetOffer().GetOfferId())
+	derivedKey := transactionkey.DerivedItemKey(itemReq.GetIdempotencyKey(), item.GetOffer().GetOfferId())
 	result, err := s.runBatchItemBilling(ctx, batchItemBilling{
 		tenant: tenant, resolved: resolved, itemReq: itemReq, item: item,
 		agentID: agent.id, billingRef: agent.billingRef, binding: binding, derivedKey: derivedKey,
-		resourceOwnerID: resolved.entry.ResourceOwnerID, feeRateBps: feeRateBps,
+		resourceOwnerID: resolved.entry.ResourceOwnerID, feeRateBps: feeRate.Bps,
 		correlation: correlation,
 	})
 	if err != nil {
@@ -451,22 +480,4 @@ func buildBatchTxResponse(
 		AgentIdentityHash: agentThumbprint,
 		TotalCost:         total,
 	}, nil
-}
-
-// batchDenialResult classifies a per-item execution error: a denial Kind
-// (DenialReasonForKind ok) becomes an in-body TransactionResultItem carrying the
-// denial_reason and offer_id; any other Kind (envelope-invalid / internal /
-// not-found) returns ok=false so the caller aborts the whole batch.
-func batchDenialResult(
-	item *forav1.TransactionItem, err error,
-) (*forav1.TransactionResultItem, bool) {
-	reason, ok := DenialReasonForKind(err)
-	if !ok {
-		return nil, false
-	}
-	r := reason
-	return &forav1.TransactionResultItem{
-		OfferId:      item.GetOffer().GetOfferId(),
-		DenialReason: &r,
-	}, true
 }

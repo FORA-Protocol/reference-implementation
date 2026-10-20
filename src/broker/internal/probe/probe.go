@@ -2,11 +2,12 @@
 // Broker's pre-existing Probe API.
 //
 // v1 requires every publisher to host /.well-known/fora.json. The probe
-// surfaces three typed error shapes — ErrManifestMissing (the domain
-// returned 404 / no manifest), ErrManifestVersionRefused (a manifest was
-// read and carries a document version this build does not accept), and
-// ErrProbeFailed (transient fetch, decode, or non-2xx failures). The first
-// two are VERDICTS and the third is an outage, which is the distinction
+// surfaces four typed error shapes — ErrManifestMissing (the domain returned
+// 404 / no manifest), ErrManifestVersionRefused (a manifest was read and
+// carries a document version this build does not accept), ErrManifestUnusable
+// (a manifest arrived and broke a document rule), and ErrProbeFailed
+// (everything else that stopped a manifest being read). The first three are
+// VERDICTS and the fourth is treated as an outage, which is the distinction
 // that decides the absence reason: callers MUST refuse a verdict with a
 // settled vocabulary (NOT_IN_CATALOG) and only an outage with
 // TEMPORARILY_UNAVAILABLE. The broker no longer silently accepts an
@@ -47,9 +48,9 @@ type Manifest struct {
 }
 
 // Result carries a successfully fetched manifest. Probe returns a typed
-// error (ErrManifestMissing, ErrManifestVersionRefused, ErrProbeFailed,
-// ErrInvalidDomain) when the domain has no usable manifest; on the error
-// paths Result is zero-valued.
+// error (ErrManifestMissing, ErrManifestVersionRefused, ErrManifestUnusable,
+// ErrProbeFailed, ErrInvalidDomain) when the domain has no usable manifest;
+// on the error paths Result is zero-valued.
 type Result struct {
 	Manifest  Manifest
 	FetchedAt time.Time
@@ -78,6 +79,22 @@ var ErrProbeFailed = errors.New("probe: fora.json fetch failed")
 // about a publisher whose manifest this Broker cannot read would retry forever.
 var ErrManifestVersionRefused = errors.New("probe: publisher manifest version not accepted")
 
+// ErrManifestUnusable wraps a manifest that was fetched and parsed but broke a
+// document rule — the wire shape the embedded schema decides
+// (forawellknown ErrSchemaInvalid), or a document describing a role other than
+// the publisher one this probe pins (forawellknown ErrRoleMismatch).
+//
+// It is a VERDICT for the same reason ErrManifestVersionRefused is: the origin
+// serves those bytes, and the next fetch returns them again. Callers MUST refuse
+// with a settled absence reason (NOT_IN_CATALOG), never TEMPORARILY_UNAVAILABLE.
+// The separation from ErrProbeFailed is what stops the Broker re-probing a
+// publisher whose manifest names the wrong role for as long as it stays wrong.
+//
+// A body that never parsed is NOT in here. It reaches ErrProbeFailed, because a
+// proxy answering 200 with an error page establishes nothing about what the
+// publisher serves and the next fetch may return the real document.
+var ErrManifestUnusable = errors.New("probe: publisher manifest broke a document rule")
+
 // HTTPDoer is the minimal interface the Prober needs from an *http.Client.
 type HTTPDoer = forawellknown.HTTPDoer
 
@@ -101,9 +118,10 @@ type manifestGetter interface {
 }
 
 // Prober is a thin adapter over forawellknown.Cache that translates
-// ErrNoDocument, ErrVersionRefused and fetch failures into the typed
-// ErrManifestMissing / ErrManifestVersionRefused / ErrProbeFailed surface
-// the Broker resolve handler refuses on.
+// ErrNoDocument, ErrVersionRefused, the document-rule failures and fetch
+// failures into the typed ErrManifestMissing / ErrManifestVersionRefused /
+// ErrManifestUnusable / ErrProbeFailed surface the Broker resolve handler
+// refuses on.
 type Prober struct {
 	cache  manifestGetter
 	logger *slog.Logger
@@ -154,9 +172,19 @@ func NewFromCache(cache *forawellknown.Cache, logger *slog.Logger, clk clock.Clo
 // error. A domain that does not host fora.json yields
 // (Result{}, ErrManifestMissing); a manifest at a document version this
 // reader does not accept (forawellknown ErrVersionRefused) yields
-// (Result{}, ErrManifestVersionRefused); a transient fetch / decode / non-2xx
-// failure (forawellknown ErrFetch / ErrSchemaInvalid / ErrRoleMismatch)
-// yields (Result{}, ErrProbeFailed) wrapping the underlying cause.
+// (Result{}, ErrManifestVersionRefused); a manifest that arrived and broke a
+// document rule (forawellknown ErrSchemaInvalid or ErrRoleMismatch) yields
+// (Result{}, ErrManifestUnusable); everything else that stopped a manifest being
+// read yields (Result{}, ErrProbeFailed) wrapping the underlying cause.
+//
+// The split between the last two is the one that decides whether a caller is
+// told to try again. A transport failure, a non-2xx status, or a body that never
+// parsed (ErrNotJSON, which the fetch path wraps in ErrFetch) may all clear on
+// the next attempt, so they stay on the outage side. A document that arrived and
+// broke a rule returns the same answer forever, so it gets a verdict of its own
+// the way a refused document version already does. Without that arm a publisher
+// whose manifest names the wrong role is re-probed for as long as it stays
+// wrong, and the agent asking about it is told the origin is momentarily down.
 func (p *Prober) Probe(ctx context.Context, domain string) (Result, error) {
 	domain = strings.TrimSpace(strings.ToLower(domain))
 	if domain == "" {
@@ -171,6 +199,11 @@ func (p *Prober) Probe(ctx context.Context, domain string) (Result, error) {
 		}, nil
 	case errors.Is(err, forawellknown.ErrNoDocument):
 		return Result{}, ErrManifestMissing
+	case errors.Is(err, forawellknown.ErrSchemaInvalid), errors.Is(err, forawellknown.ErrRoleMismatch):
+		// Deliberately not logged here, for the reason the version arm below
+		// states: the caller records this refusal under its own event, with the
+		// request_id a line from this plain logger could not carry.
+		return Result{}, fmt.Errorf("%w: %w", ErrManifestUnusable, err)
 	case errors.Is(err, forawellknown.ErrVersionRefused):
 		// Deliberately not logged here, unlike the arm below. This Prober holds a
 		// plain logger with no request on it, and the one caller of Probe already
@@ -179,7 +212,11 @@ func (p *Prober) Probe(ctx context.Context, domain string) (Result, error) {
 		// makes it traceable.
 		return Result{}, fmt.Errorf("%w: %w", ErrManifestVersionRefused, err)
 	default:
-		p.logger.InfoContext(ctx, "broker.probe",
+		// DEBUG, for the reason the arms above are silent: the one caller
+		// records this failure itself, at WARN and with the request_id this
+		// plain logger cannot carry, so this line only repeats it for whoever
+		// is tracing the probe.
+		p.logger.DebugContext(ctx, "broker.probe",
 			"domain", domain, "err", err)
 		return Result{}, fmt.Errorf("%w: %w", ErrProbeFailed, err)
 	}

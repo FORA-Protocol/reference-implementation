@@ -41,11 +41,29 @@ const (
 // ObligationState is the domain view of the fora_obligation_state PG enum.
 type ObligationState string
 
-// ObligationState values. Literals match the PG enum strings 1:1.
+// ObligationState values. Literals match the PG enum strings 1:1. The
+// Exchange writes only PENDING and RECEIVED; the other three are declared
+// because the PG enum carries them, so a reader can name every value a row can
+// hold.
 const (
-	ObligationStatePending  ObligationState = "PENDING"
-	ObligationStateReceived ObligationState = "RECEIVED"
+	ObligationStatePending    ObligationState = "PENDING"
+	ObligationStateReceived   ObligationState = "RECEIVED"
+	ObligationStateAccepted   ObligationState = "ACCEPTED"
+	ObligationStateChallenged ObligationState = "CHALLENGED"
+	ObligationStateExpired    ObligationState = "EXPIRED"
 )
+
+// ObligationStates lists every state the fora_obligation_state enum holds, in
+// the enum's order. It is read from the list sqlc generates from the schema,
+// so a state added by a migration is listed without an edit here.
+func ObligationStates() []ObligationState {
+	all := sqlc.AllForaObligationStateValues()
+	out := make([]ObligationState, 0, len(all))
+	for _, s := range all {
+		out = append(out, ObligationState(s))
+	}
+	return out
+}
 
 // sqlcValidationOutcome translates a domain enum value to the sqlc-generated
 // PG enum. The repo passes the result straight to sqlc query params.

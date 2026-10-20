@@ -20,6 +20,8 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    # Parallel test execution - reduces wall time by 2-4x on multi-core machines
+    "pytest-xdist>=3.6",
     # RFC 9421 signer in tests/e2e/harness/catalog_push.py (PushResources RPC).
     "cryptography>=44.0.0",
     "rfc8785>=0.1.4",
@@ -41,36 +43,54 @@ dependencies = [
     # rides on another package's dependency tree stops running the day that tree
     # changes, and nothing would say so.
     "pyyaml>=6.0",
+    # The obligation registry's entry models (harness/obligation_registry.py).
+    "pydantic>=2.9",
     # L1 protocol-mechanics helpers (thumbprint, RFC 9421 sign, JCS acceptance,
     # base64url) — the harness's former hand-rolled copies now import these.
-    "fora-protocol-sdk",
+    # Pinned exactly, and to the SAME version as the wire types below: the harness
+    # signs the requests the Go services verify and the delivery proof the
+    # TypeScript edge worker verifies, so a version split here surfaces as a
+    # signature that does not check out.
+    "fora-protocol-sdk==1.1.0",
     # Generated wire types (the `wire` package). fora_sdk.acceptance imports
     # `wire.models`, so the SDK is unusable without it. The harness used to get
     # this transitively through the in-tree Python shim; the shim is gone (the MCP
     # surface is the Go adapter), so it is named directly here.
-    "fora-protocol",
+    "fora-protocol==1.1.0",
+    # Web Bot Auth conformance oracle (harness/wba_oracle.py). A third-party RFC
+    # 9421 implementation, so the WBA conformance tests check FORA against code
+    # FORA did not write. Pinned exactly: the oracle extends its component
+    # resolver, and a release that changes that class would change what the
+    # oracle signs and verifies without any test here naming the cause.
+    "http-message-signatures==2.0.1",
+    # http-message-signatures 2.0.1 imports typing_extensions from its bundled
+    # structured-field parser but does not declare it. It is installed here only
+    # through other packages (mcp among them), so it is named directly.
+    "typing-extensions>=4.15.0",
+    # RFC 7638 JWK thumbprints for the same oracle (the WBA keyid). Already
+    # installed through fastmcp, which depends on authlib, which depends on it;
+    # named here so the oracle does not depend on another package's dependency
+    # tree.
+    "joserfc>=1.6.5",
 ]
-
-[tool.uv.sources]
-# Pinned off-commit from the protocol git repo (subdirectory=sdk/python). The pin
-# must match the Go module pin in the root go.mod, so the harness signs with the
-# same canonical wire form the services verify. No sibling checkout required.
-# Switch to a published release pin once one exists.
-fora-protocol-sdk = { git = "https://github.com/FORA-Protocol/protocol.git", subdirectory = "sdk/python", rev = "307f54b7fa64c76ca80ac9bd4854012a035ef0f0" }
-# Generated wire types, pinned off the SAME revision as the SDK above — a split
-# between the two would mean the harness signs one payload shape and the services
-# verify another.
-fora-protocol = { git = "https://github.com/FORA-Protocol/protocol.git", subdirectory = "gen/python", rev = "307f54b7fa64c76ca80ac9bd4854012a035ef0f0" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["harness"]
 # ADR-008 D5 — unknown markers fail the run so a typo'd
 # `@pytest.mark.stack_isoaltion("...")` doesn't silently no-op.
-addopts = "--strict-markers"
+# Sequential execution: Lambda Runtime Interface Emulator serves ONE invocation at a time
+# Concurrent tests crash RIE with "ReserveFailed: AlreadyReserved"
+# -n 1: run tests sequentially (workaround for lambda-edge RIE limitation)
+# Can be overridden with PYTEST_XDIST_AUTO=1 for non-lambda tests in future
+addopts = "--strict-markers -n 1"
 strict_markers = true
+# ADR-008 D3: an xfail that starts passing breaks the run, so a marker cannot outlive
+# the defect it records.
+xfail_strict = true
 markers = [
     "stack_isolation(mode): declare per-test isolation contract (ADR-008 D5) — one of 'isolated', 'shared-clean-fixtures', 'shared-without-cleanup'",
+    "xdist_group(name): group tests that must run in the same worker (pytest-xdist)",
 ]
 
 [dependency-groups]
@@ -82,6 +102,7 @@ markers = [
 dev = [
     "ruff>=0.9.0",
     "mypy>=1.13",
+    "vulture>=2.16",
 ]
 
 [tool.uv]
@@ -101,13 +122,79 @@ target-version = "py312"
 select = [
     "E4", "E7", "E9",  # pycodestyle errors (ruff default subset)
     "F",               # pyflakes (includes F401 unused-import, F841 unused-local)
+    "TID251",          # banned-api: the bans below, and nothing else from TID
 ]
+
+# ADR-028 D3 and D8 H2: every SDK client the harness builds is strict, so every
+# answer passes the published strict JSON Schema before a test reads it. That
+# holds only while one function builds the SDK's ClientConfig, so importing it
+# anywhere else is refused. The SDK re-exports the class from three modules.
+#
+# The other harness bans of ADR-028 D8 live in ruff-harness.toml, which reaches
+# only the test modules. This one stays here because it has to reach every
+# harness module: a second ClientConfig builder is as likely in a helper as in a
+# test.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"fora_sdk.ClientConfig".msg = "build SDK clients through harness/sdk_client.py, which sets strict=True"
+"fora_sdk.client.ClientConfig".msg = "build SDK clients through harness/sdk_client.py, which sets strict=True"
+"fora_sdk.sync.ClientConfig".msg = "build SDK clients through harness/sdk_client.py, which sets strict=True"
+
+# The one module the ban above exempts: it is the single place a ClientConfig is
+# built, which is the property the ban protects.
+[tool.ruff.lint.per-file-ignores]
+"harness/sdk_client.py" = ["TID251"]
+
+# ADR-028 D8 H8: no dead harness code. `make deadcode` runs vulture with this table.
+#
+# The paths match the typecheck scope in the Makefile: the harness, the standalone
+# drivers that import it, and ../e2e-aws/. A driver left out would make every harness
+# helper only it calls look unused. vulture_whitelist.py is in the list because it is
+# how vulture learns of the symbols it cannot see being used; its header says what
+# may go there.
+#
+# 60 is the lowest confidence vulture reports at, and the one it gives an unused
+# function, class, method, variable or attribute; an unused import is reported at 90.
+# Anything higher would let every unused definition through.
+#
+# Vulture already skips test_* functions and methods and the Test classes in test
+# files, and every file under tests/ counts as one. The two ignore lists below are the
+# only exclusions, each a pattern for what pytest reaches by name:
+# - pytest_*: pytest calls hook functions and plugin hook methods by name, and reads
+#   a module's pytest_plugins list.
+# - pytestmark: pytest reads a module's marks from this name.
+# - @pytest.fixture: a test or another fixture requests a fixture by naming it as a
+#   parameter, and an autouse fixture is requested by no one.
+# Anything else reached by name is listed, with its reason, in vulture_whitelist.py.
+[tool.vulture]
+paths = [
+    "harness/",
+    "demo_proof.py",
+    "register_staging_agent.py",
+    "smoke_staging.py",
+    "../e2e-aws/",
+    "vulture_whitelist.py",
+]
+min_confidence = 60
+ignore_names = ["pytest_*", "pytestmark"]
+ignore_decorators = ["@pytest.fixture"]
 
 [tool.mypy]
 python_version = "3.12"
+# Reads pydantic models the way pydantic builds them, so a field with a default is
+# optional at a constructor call, as it is at run time.
+plugins = ["pydantic.mypy"]
 # Deliberately not strict — see tests/e2e/Makefile:typecheck for why. The point
 # is that a Python type gate exists and runs in `make quality` again; tightening
 # it is a separate, incremental job.
 ignore_missing_imports = true
 check_untyped_defs = true
 warn_unused_ignores = true
+
+# The harness's own modules are never "missing". Without this, the global
+# ignore_missing_imports above reads an import of a harness module that no
+# longer exists as an untyped third-party import and passes it, so a vulture
+# whitelist entry for a deleted module would excuse nothing in silence. The
+# option matches the IMPORTED module's name.
+[[tool.mypy.overrides]]
+module = ["harness", "harness.*"]
+ignore_missing_imports = false

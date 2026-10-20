@@ -46,12 +46,13 @@ const sdkconnectPath = "github.com/FORA-Protocol/protocol/sdk/go/connect"
 //     request addressed to a different Exchange.
 //   - WithOnReject: the audit line for every gate rejection. Dropped, a refusal
 //     leaves no trace at all.
-//   - WithMaxSignatures and WithMaxRequestBytes are the ExchangeService mount's
-//     alone: the hop bound is Exchange-terminal policy, and the request cap
-//     bounds both the raw body the verify face buffers before authentication
-//     and the decompressed message the handler decodes. Dropped, the mount
-//     falls back to the SDK's own default rather than to no cap at all, which
-//     is exactly why nothing else in the suite would notice.
+//   - WithMaxSignatures is the ExchangeService mount's alone: the hop bound is
+//     Exchange-terminal policy.
+//   - WithMaxRequestBytes is on both protocol mounts: the request cap bounds
+//     both the raw body the verify face buffers before authentication and the
+//     decompressed message the handler decodes. Dropped, a mount falls back to
+//     the SDK's own default rather than to no cap at all, which is exactly why
+//     nothing else in the suite would notice.
 //   - WithReadMaxBytes is the catalog mount's message cap, the one quantity a
 //     raw connect mount can bound through an option. The raw body on that
 //     mount is bounded by the middleware that captures it, which no option
@@ -63,11 +64,6 @@ const sdkconnectPath = "github.com/FORA-Protocol/protocol/sdk/go/connect"
 //     delegate is a gap rather than a rearrangement.
 //   - WithVerifyGate is the Broker's alone: it is what makes an unsigned Resolve
 //     reach the handler instead of being refused at the seam.
-//
-// The Broker's set names no request cap. Since the SDK began modelling one its
-// mount runs under the SDK default rather than under nothing, but no option
-// here pins that value and this map cannot see a default — recorded as an
-// absence rather than left for a reader to infer from a shorter list.
 var mountProviders = map[string][]string{
 	"RawValidatedMountOptions": {
 		"WithCodec",
@@ -96,6 +92,7 @@ var mountProviders = map[string][]string{
 		"WithInterceptors",
 		"WithVerifyGate",
 		"WithOnReject",
+		"WithMaxRequestBytes",
 	},
 }
 
@@ -303,7 +300,8 @@ const brokerOptions = `		connectserver.WithKeyResolver(nil),
 		connectserver.WithEmitUnpopulated(),
 		connectserver.WithInterceptors(nil),
 		connectserver.WithVerifyGate(nil),
-		connectserver.WithOnReject(nil),`
+		connectserver.WithOnReject(nil),
+		connectserver.WithMaxRequestBytes(0),`
 
 // TestMeta_ProviderDetectorPassesACompleteSet is the negative case. Without it
 // the cases below are satisfied by a check that reports every provider.
@@ -324,7 +322,8 @@ func TestMeta_ProviderDetectorFlagsADeletedOption(t *testing.T) {
 		connectserver.WithValidation(sdkconnect.ValidationStrict),
 		connectserver.WithEmitUnpopulated(),
 		connectserver.WithInterceptors(nil),
-		connectserver.WithVerifyGate(nil),`
+		connectserver.WithVerifyGate(nil),
+		connectserver.WithMaxRequestBytes(0),`
 	f := parseSnippet(t, optionSource("connectserver", "connect", "sdkconnect", withoutReject))
 	gaps := providerGaps(f, providerBodyOf(t, f), mountProviders["BrokerMountOptions"])
 	if len(gaps) != 1 || gaps[0] != "WithOnReject" {
@@ -343,7 +342,8 @@ func TestMeta_ProviderDetectorResolvesImportAliases(t *testing.T) {
 		srv.WithEmitUnpopulated(),
 		srv.WithInterceptors(nil),
 		srv.WithVerifyGate(nil),
-		srv.WithOnReject(nil),`
+		srv.WithOnReject(nil),
+		srv.WithMaxRequestBytes(0),`
 	f := parseSnippet(t, optionSource("srv", "rpc", "sdkc", aliased))
 	if gaps := providerGaps(f, providerBodyOf(t, f), mountProviders["BrokerMountOptions"]); len(gaps) > 0 {
 		t.Errorf("reported %v for an aliased but complete set, want none", gaps)

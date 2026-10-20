@@ -25,7 +25,11 @@ type SetupOptions struct {
 // database.
 func Setup(ctx context.Context, opts SetupOptions, logger *slog.Logger) (*pgxpool.Pool, error) {
 	if opts.DSN == "" {
-		logger.Info("database disabled: no DSN set")
+		// DEBUG, because every caller reports the missing DSN itself, at ERROR,
+		// as the reason it refuses to start; at INFO this line would only
+		// announce, just before that exit, a database the service cannot run
+		// without.
+		logger.DebugContext(ctx, "database disabled: no DSN set")
 		return nil, nil
 	}
 	cfg := opts.PoolConfig

@@ -8,8 +8,8 @@ import "testing"
 //
 // These are PRODUCTION switches a local stack sets, not a test-only bypass, and
 // the guards they open are real — they refuse these peers by default, which is
-// what TestRegister_DialsUnderTheSSRFGuard in the identity service's outbound
-// client asserts by clearing both and watching the dial be refused.
+// what TestAccountLegs_DialUnderTheSSRFGuard in the identity service's SDK-backed
+// outbound package asserts by clearing both and watching the dial be refused.
 //
 // The SDK reads both variables when a transport is CONSTRUCTED, so this must run
 // before the code under test builds one. t.Setenv is also why a test that dials

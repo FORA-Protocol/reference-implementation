@@ -37,6 +37,8 @@ func DowngradeToProxiedWire(req *http.Request) {
 // call DowngradeToProxiedWire directly.
 type TLSTerminatingProxyTransport struct{ Base http.RoundTripper }
 
+// RoundTrip downgrades a clone of req to the plain-HTTP listener and hands it
+// to Base.
 func (p TLSTerminatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r2 := req.Clone(req.Context())
 	DowngradeToProxiedWire(r2)

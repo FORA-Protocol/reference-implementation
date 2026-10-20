@@ -64,27 +64,37 @@ func (e ForaDeliveryMethod) Valid() bool {
 	return false
 }
 
+func AllForaDeliveryMethodValues() []ForaDeliveryMethod {
+	return []ForaDeliveryMethod{
+		ForaDeliveryMethodDIRECT,
+		ForaDeliveryMethodINSTRUCTIONS,
+		ForaDeliveryMethodSTREAMING,
+	}
+}
+
 type ForaDenialReason string
 
 const (
-	ForaDenialReasonACCOUNTINACTIVE         ForaDenialReason = "ACCOUNT_INACTIVE"
-	ForaDenialReasonACCOUNTNOTREGISTERED    ForaDenialReason = "ACCOUNT_NOT_REGISTERED"
-	ForaDenialReasonINSUFFICIENTBALANCE     ForaDenialReason = "INSUFFICIENT_BALANCE"
-	ForaDenialReasonRATELIMITED             ForaDenialReason = "RATE_LIMITED"
-	ForaDenialReasonCONTENTUNAVAILABLE      ForaDenialReason = "CONTENT_UNAVAILABLE"
-	ForaDenialReasonRESTRICTIONNOTSATISFIED ForaDenialReason = "RESTRICTION_NOT_SATISFIED"
-	ForaDenialReasonREPORTINGOVERDUE        ForaDenialReason = "REPORTING_OVERDUE"
-	ForaDenialReasonOFFEREXPIRED            ForaDenialReason = "OFFER_EXPIRED"
-	ForaDenialReasonSIGNATUREINVALID        ForaDenialReason = "SIGNATURE_INVALID"
-	ForaDenialReasonQUOTAEXCEEDED           ForaDenialReason = "QUOTA_EXCEEDED"
-	ForaDenialReasonDELEGATIONINVALID       ForaDenialReason = "DELEGATION_INVALID"
-	ForaDenialReasonSCOPEINSUFFICIENT       ForaDenialReason = "SCOPE_INSUFFICIENT"
-	ForaDenialReasonENTITLEMENTMISSING      ForaDenialReason = "ENTITLEMENT_MISSING"
-	ForaDenialReasonENTITLEMENTMALFORMED    ForaDenialReason = "ENTITLEMENT_MALFORMED"
-	ForaDenialReasonENTITLEMENTEXPIRED      ForaDenialReason = "ENTITLEMENT_EXPIRED"
-	ForaDenialReasonENTITLEMENTWRONGBUYER   ForaDenialReason = "ENTITLEMENT_WRONG_BUYER"
-	ForaDenialReasonSUBSCRIPTIONLAPSED      ForaDenialReason = "SUBSCRIPTION_LAPSED"
-	ForaDenialReasonENTITLEMENTNOTGRANTED   ForaDenialReason = "ENTITLEMENT_NOT_GRANTED"
+	ForaDenialReasonACCOUNTINACTIVE          ForaDenialReason = "ACCOUNT_INACTIVE"
+	ForaDenialReasonACCOUNTNOTREGISTERED     ForaDenialReason = "ACCOUNT_NOT_REGISTERED"
+	ForaDenialReasonINSUFFICIENTBALANCE      ForaDenialReason = "INSUFFICIENT_BALANCE"
+	ForaDenialReasonRATELIMITED              ForaDenialReason = "RATE_LIMITED"
+	ForaDenialReasonCONTENTUNAVAILABLE       ForaDenialReason = "CONTENT_UNAVAILABLE"
+	ForaDenialReasonRESTRICTIONNOTSATISFIED  ForaDenialReason = "RESTRICTION_NOT_SATISFIED"
+	ForaDenialReasonREPORTINGOVERDUE         ForaDenialReason = "REPORTING_OVERDUE"
+	ForaDenialReasonOFFEREXPIRED             ForaDenialReason = "OFFER_EXPIRED"
+	ForaDenialReasonSIGNATUREINVALID         ForaDenialReason = "SIGNATURE_INVALID"
+	ForaDenialReasonQUOTAEXCEEDED            ForaDenialReason = "QUOTA_EXCEEDED"
+	ForaDenialReasonDELEGATIONINVALID        ForaDenialReason = "DELEGATION_INVALID"
+	ForaDenialReasonSCOPEINSUFFICIENT        ForaDenialReason = "SCOPE_INSUFFICIENT"
+	ForaDenialReasonENTITLEMENTMISSING       ForaDenialReason = "ENTITLEMENT_MISSING"
+	ForaDenialReasonENTITLEMENTMALFORMED     ForaDenialReason = "ENTITLEMENT_MALFORMED"
+	ForaDenialReasonENTITLEMENTEXPIRED       ForaDenialReason = "ENTITLEMENT_EXPIRED"
+	ForaDenialReasonENTITLEMENTWRONGBUYER    ForaDenialReason = "ENTITLEMENT_WRONG_BUYER"
+	ForaDenialReasonSUBSCRIPTIONLAPSED       ForaDenialReason = "SUBSCRIPTION_LAPSED"
+	ForaDenialReasonENTITLEMENTNOTGRANTED    ForaDenialReason = "ENTITLEMENT_NOT_GRANTED"
+	ForaDenialReasonRELAYNOTACCEPTED         ForaDenialReason = "RELAY_NOT_ACCEPTED"
+	ForaDenialReasonUNKNOWNCRITICALEXTENSION ForaDenialReason = "UNKNOWN_CRITICAL_EXTENSION"
 )
 
 func (e *ForaDenialReason) Scan(src interface{}) error {
@@ -141,10 +151,159 @@ func (e ForaDenialReason) Valid() bool {
 		ForaDenialReasonENTITLEMENTEXPIRED,
 		ForaDenialReasonENTITLEMENTWRONGBUYER,
 		ForaDenialReasonSUBSCRIPTIONLAPSED,
-		ForaDenialReasonENTITLEMENTNOTGRANTED:
+		ForaDenialReasonENTITLEMENTNOTGRANTED,
+		ForaDenialReasonRELAYNOTACCEPTED,
+		ForaDenialReasonUNKNOWNCRITICALEXTENSION:
 		return true
 	}
 	return false
+}
+
+func AllForaDenialReasonValues() []ForaDenialReason {
+	return []ForaDenialReason{
+		ForaDenialReasonACCOUNTINACTIVE,
+		ForaDenialReasonACCOUNTNOTREGISTERED,
+		ForaDenialReasonINSUFFICIENTBALANCE,
+		ForaDenialReasonRATELIMITED,
+		ForaDenialReasonCONTENTUNAVAILABLE,
+		ForaDenialReasonRESTRICTIONNOTSATISFIED,
+		ForaDenialReasonREPORTINGOVERDUE,
+		ForaDenialReasonOFFEREXPIRED,
+		ForaDenialReasonSIGNATUREINVALID,
+		ForaDenialReasonQUOTAEXCEEDED,
+		ForaDenialReasonDELEGATIONINVALID,
+		ForaDenialReasonSCOPEINSUFFICIENT,
+		ForaDenialReasonENTITLEMENTMISSING,
+		ForaDenialReasonENTITLEMENTMALFORMED,
+		ForaDenialReasonENTITLEMENTEXPIRED,
+		ForaDenialReasonENTITLEMENTWRONGBUYER,
+		ForaDenialReasonSUBSCRIPTIONLAPSED,
+		ForaDenialReasonENTITLEMENTNOTGRANTED,
+		ForaDenialReasonRELAYNOTACCEPTED,
+		ForaDenialReasonUNKNOWNCRITICALEXTENSION,
+	}
+}
+
+type ForaImportOutcome string
+
+const (
+	ForaImportOutcomeComplete    ForaImportOutcome = "complete"
+	ForaImportOutcomeFailed      ForaImportOutcome = "failed"
+	ForaImportOutcomePartial     ForaImportOutcome = "partial"
+	ForaImportOutcomeUnconfirmed ForaImportOutcome = "unconfirmed"
+)
+
+func (e *ForaImportOutcome) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = ForaImportOutcome(s)
+	case string:
+		*e = ForaImportOutcome(s)
+	default:
+		return fmt.Errorf("unsupported scan type for ForaImportOutcome: %T", src)
+	}
+	return nil
+}
+
+type NullForaImportOutcome struct {
+	ForaImportOutcome ForaImportOutcome `json:"fora_import_outcome"`
+	Valid             bool              `json:"valid"` // Valid is true if ForaImportOutcome is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullForaImportOutcome) Scan(value interface{}) error {
+	if value == nil {
+		ns.ForaImportOutcome, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.ForaImportOutcome.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullForaImportOutcome) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.ForaImportOutcome), nil
+}
+
+func (e ForaImportOutcome) Valid() bool {
+	switch e {
+	case ForaImportOutcomeComplete,
+		ForaImportOutcomeFailed,
+		ForaImportOutcomePartial,
+		ForaImportOutcomeUnconfirmed:
+		return true
+	}
+	return false
+}
+
+func AllForaImportOutcomeValues() []ForaImportOutcome {
+	return []ForaImportOutcome{
+		ForaImportOutcomeComplete,
+		ForaImportOutcomeFailed,
+		ForaImportOutcomePartial,
+		ForaImportOutcomeUnconfirmed,
+	}
+}
+
+type ForaListingState string
+
+const (
+	ForaListingStatePENDINGMANIFEST ForaListingState = "PENDING_MANIFEST"
+	ForaListingStateACTIVE          ForaListingState = "ACTIVE"
+)
+
+func (e *ForaListingState) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = ForaListingState(s)
+	case string:
+		*e = ForaListingState(s)
+	default:
+		return fmt.Errorf("unsupported scan type for ForaListingState: %T", src)
+	}
+	return nil
+}
+
+type NullForaListingState struct {
+	ForaListingState ForaListingState `json:"fora_listing_state"`
+	Valid            bool             `json:"valid"` // Valid is true if ForaListingState is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullForaListingState) Scan(value interface{}) error {
+	if value == nil {
+		ns.ForaListingState, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.ForaListingState.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullForaListingState) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.ForaListingState), nil
+}
+
+func (e ForaListingState) Valid() bool {
+	switch e {
+	case ForaListingStatePENDINGMANIFEST,
+		ForaListingStateACTIVE:
+		return true
+	}
+	return false
+}
+
+func AllForaListingStateValues() []ForaListingState {
+	return []ForaListingState{
+		ForaListingStatePENDINGMANIFEST,
+		ForaListingStateACTIVE,
+	}
 }
 
 type ForaObligationState string
@@ -202,6 +361,16 @@ func (e ForaObligationState) Valid() bool {
 		return true
 	}
 	return false
+}
+
+func AllForaObligationStateValues() []ForaObligationState {
+	return []ForaObligationState{
+		ForaObligationStatePENDING,
+		ForaObligationStateRECEIVED,
+		ForaObligationStateACCEPTED,
+		ForaObligationStateCHALLENGED,
+		ForaObligationStateEXPIRED,
+	}
 }
 
 type ForaRequesterType string
@@ -263,6 +432,17 @@ func (e ForaRequesterType) Valid() bool {
 	return false
 }
 
+func AllForaRequesterTypeValues() []ForaRequesterType {
+	return []ForaRequesterType{
+		ForaRequesterTypeAGENT,
+		ForaRequesterTypeHUMANTOOL,
+		ForaRequesterTypeSERVICE,
+		ForaRequesterTypeDELEGATED,
+		ForaRequesterTypeRESEARCH,
+		ForaRequesterTypeBROKER,
+	}
+}
+
 type ForaSigningScheme string
 
 const (
@@ -312,6 +492,68 @@ func (e ForaSigningScheme) Valid() bool {
 		return true
 	}
 	return false
+}
+
+func AllForaSigningSchemeValues() []ForaSigningScheme {
+	return []ForaSigningScheme{
+		ForaSigningSchemeED25519,
+		ForaSigningSchemeAWSCLOUDFRONTRSA,
+	}
+}
+
+type ForaTransactionEventType string
+
+const (
+	ForaTransactionEventTypeBILLINGAUTHORIZATION ForaTransactionEventType = "BILLING_AUTHORIZATION"
+)
+
+func (e *ForaTransactionEventType) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = ForaTransactionEventType(s)
+	case string:
+		*e = ForaTransactionEventType(s)
+	default:
+		return fmt.Errorf("unsupported scan type for ForaTransactionEventType: %T", src)
+	}
+	return nil
+}
+
+type NullForaTransactionEventType struct {
+	ForaTransactionEventType ForaTransactionEventType `json:"fora_transaction_event_type"`
+	Valid                    bool                     `json:"valid"` // Valid is true if ForaTransactionEventType is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullForaTransactionEventType) Scan(value interface{}) error {
+	if value == nil {
+		ns.ForaTransactionEventType, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.ForaTransactionEventType.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullForaTransactionEventType) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.ForaTransactionEventType), nil
+}
+
+func (e ForaTransactionEventType) Valid() bool {
+	switch e {
+	case ForaTransactionEventTypeBILLINGAUTHORIZATION:
+		return true
+	}
+	return false
+}
+
+func AllForaTransactionEventTypeValues() []ForaTransactionEventType {
+	return []ForaTransactionEventType{
+		ForaTransactionEventTypeBILLINGAUTHORIZATION,
+	}
 }
 
 type ForaValidationOutcome string
@@ -375,6 +617,18 @@ func (e ForaValidationOutcome) Valid() bool {
 	return false
 }
 
+func AllForaValidationOutcomeValues() []ForaValidationOutcome {
+	return []ForaValidationOutcome{
+		ForaValidationOutcomeVALIDATED,
+		ForaValidationOutcomeREJECTEDFIELDS,
+		ForaValidationOutcomeREJECTEDWINDOW,
+		ForaValidationOutcomeREJECTEDTOLERANCE,
+		ForaValidationOutcomeREJECTEDBILLINGID,
+		ForaValidationOutcomeREJECTEDTIMESTAMP,
+		ForaValidationOutcomeREJECTEDEXCHANGE,
+	}
+}
+
 type ForaAgent struct {
 	AgentID             string             `json:"agent_id"`
 	PublicKey           []byte             `json:"public_key"`
@@ -409,6 +663,71 @@ type ForaCatalog struct {
 	Metadata        []byte             `json:"metadata"`
 	ResourceOwnerID string             `json:"resource_owner_id"`
 	Title           pgtype.Text        `json:"title"`
+	AutoImported    bool               `json:"auto_imported"`
+	Domain          string             `json:"domain"`
+}
+
+type ForaPublisher struct {
+	PublisherID string             `json:"publisher_id"`
+	DisplayName string             `json:"display_name"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type ForaPublisherDomain struct {
+	Domain              string             `json:"domain"`
+	PublisherID         string             `json:"publisher_id"`
+	SigningScheme       ForaSigningScheme  `json:"signing_scheme"`
+	CloudfrontKeyPairID pgtype.Text        `json:"cloudfront_key_pair_id"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	Cdn                 string             `json:"cdn"`
+}
+
+type ForaPublisherDomainListing struct {
+	TenantID                  string                `json:"tenant_id"`
+	Domain                    string                `json:"domain"`
+	State                     ForaListingState      `json:"state"`
+	ContentPathScope          []string              `json:"content_path_scope"`
+	VerifiedAt                pgtype.Timestamptz    `json:"verified_at"`
+	LastCheckedAt             pgtype.Timestamptz    `json:"last_checked_at"`
+	CreatedAt                 pgtype.Timestamptz    `json:"created_at"`
+	UpdatedAt                 pgtype.Timestamptz    `json:"updated_at"`
+	Terms                     []byte                `json:"terms"`
+	SitemapUrl                string                `json:"sitemap_url"`
+	LastImportAttemptAt       pgtype.Timestamptz    `json:"last_import_attempt_at"`
+	LastImportSuccessAt       pgtype.Timestamptz    `json:"last_import_success_at"`
+	LastImportOutcome         NullForaImportOutcome `json:"last_import_outcome"`
+	LastImportFailureReason   pgtype.Text           `json:"last_import_failure_reason"`
+	LastImportEntries         int32                 `json:"last_import_entries"`
+	LastImportAccepted        int32                 `json:"last_import_accepted"`
+	LastImportRefused         int32                 `json:"last_import_refused"`
+	LastImportUnconfirmed     int32                 `json:"last_import_unconfirmed"`
+	LastImportUnsent          int32                 `json:"last_import_unsent"`
+	ImportReplacesManualTerms bool                  `json:"import_replaces_manual_terms"`
+	LastImportSkipped         int32                 `json:"last_import_skipped"`
+}
+
+type ForaPublisherGrant struct {
+	TenantID    string             `json:"tenant_id"`
+	PublisherID string             `json:"publisher_id"`
+	OidcIssuer  string             `json:"oidc_issuer"`
+	OidcSubject string             `json:"oidc_subject"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type ForaPublisherTransaction struct {
+	TransactionID  string             `json:"transaction_id"`
+	TenantID       string             `json:"tenant_id"`
+	PublisherID    string             `json:"publisher_id"`
+	ResourceID     string             `json:"resource_id"`
+	ResourceUri    string             `json:"resource_uri"`
+	AgentID        string             `json:"agent_id"`
+	UnitCost       pgtype.Numeric     `json:"unit_cost"`
+	Currency       string             `json:"currency"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ResourceTitle  pgtype.Text        `json:"resource_title"`
+	ResourceDomain string             `json:"resource_domain"`
+	BillingID      pgtype.Text        `json:"billing_id"`
 }
 
 type ForaReportingObligation struct {
@@ -435,14 +754,11 @@ type ForaTenant struct {
 	Ed25519KeyRef              string             `json:"ed25519_key_ref"`
 	ReportingPolicy            []byte             `json:"reporting_policy"`
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
-	SigningScheme              ForaSigningScheme  `json:"signing_scheme"`
 	RsaKeyRef                  pgtype.Text        `json:"rsa_key_ref"`
-	CloudfrontKeyPairID        pgtype.Text        `json:"cloudfront_key_pair_id"`
 	AllowBrokerRelay           bool               `json:"allow_broker_relay"`
 	FeeRateBps                 int32              `json:"fee_rate_bps"`
 	FeeRateNotes               pgtype.Text        `json:"fee_rate_notes"`
 	ActivateNewAgentsByDefault bool               `json:"activate_new_agents_by_default"`
-	DefaultAgentCredit         pgtype.Numeric     `json:"default_agent_credit"`
 }
 
 type ForaTenantResourceOwnerFee struct {
@@ -451,6 +767,19 @@ type ForaTenantResourceOwnerFee struct {
 	FeeRateBps      int32              `json:"fee_rate_bps"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ForaTransactionEvent struct {
+	EventID         string                   `json:"event_id"`
+	EventType       ForaTransactionEventType `json:"event_type"`
+	CreatedAt       pgtype.Timestamptz       `json:"created_at"`
+	TenantID        string                   `json:"tenant_id"`
+	IdempotencyKey  string                   `json:"idempotency_key"`
+	OfferID         string                   `json:"offer_id"`
+	AgentID         string                   `json:"agent_id"`
+	ResourceID      string                   `json:"resource_id"`
+	ResourceOwnerID string                   `json:"resource_owner_id"`
+	DenialReason    ForaDenialReason         `json:"denial_reason"`
 }
 
 type ForaTransactionEvidence struct {
@@ -477,22 +806,21 @@ type ForaTransactionEvidence struct {
 }
 
 type ForaTransactionLog struct {
-	TransactionID     string               `json:"transaction_id"`
-	IdempotencyKey    string               `json:"idempotency_key"`
-	TenantID          string               `json:"tenant_id"`
-	AgentID           string               `json:"agent_id"`
-	ResourceID        string               `json:"resource_id"`
-	OfferID           string               `json:"offer_id"`
-	AgentIdentityHash []byte               `json:"agent_identity_hash"`
-	SignedUrlHash     []byte               `json:"signed_url_hash"`
-	Expiry            pgtype.Timestamptz   `json:"expiry"`
-	BillingID         pgtype.Text          `json:"billing_id"`
-	UnitCost          pgtype.Numeric       `json:"unit_cost"`
-	Currency          string               `json:"currency"`
-	ConsumedUnit      pgtype.Text          `json:"consumed_unit"`
-	DenialReason      NullForaDenialReason `json:"denial_reason"`
-	CreatedAt         pgtype.Timestamptz   `json:"created_at"`
-	ResultPayload     []byte               `json:"result_payload"`
+	TransactionID     string             `json:"transaction_id"`
+	IdempotencyKey    string             `json:"idempotency_key"`
+	TenantID          string             `json:"tenant_id"`
+	AgentID           string             `json:"agent_id"`
+	ResourceID        string             `json:"resource_id"`
+	OfferID           string             `json:"offer_id"`
+	AgentIdentityHash []byte             `json:"agent_identity_hash"`
+	SignedUrlHash     []byte             `json:"signed_url_hash"`
+	Expiry            pgtype.Timestamptz `json:"expiry"`
+	BillingID         pgtype.Text        `json:"billing_id"`
+	UnitCost          pgtype.Numeric     `json:"unit_cost"`
+	Currency          string             `json:"currency"`
+	ConsumedUnit      pgtype.Text        `json:"consumed_unit"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	ResultPayload     []byte             `json:"result_payload"`
 }
 
 type ForaTransactionRequestClaim struct {

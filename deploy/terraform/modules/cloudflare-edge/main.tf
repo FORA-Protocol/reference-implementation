@@ -22,8 +22,10 @@ locals {
     CATALOG_CONTRIBUTORS_JSON = var.catalog_contributors_json
     WBA_KEYS_JSON             = var.wba_keys_json
     WBA_REVOCATION_URL        = var.wba_revocation_url
+    WBA_SIGNED_DIRECTORY_JSON = var.wba_signed_directory_json
     BOT_UA_ALLOW_JSON         = var.bot_ua_allow_json
     BOT_UA_DENY_JSON          = var.bot_ua_deny_json
+    LICENSED_PATHS_JSON       = var.licensed_paths_json
   }
 
   plain_text_bindings = merge(

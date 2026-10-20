@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/oidcup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/oauth"
 )
 
@@ -14,6 +15,11 @@ const maxRegisterBytes = 8 << 10
 // handleMetadata serves the RFC 8414 authorization-server metadata an MCP client
 // reads to discover the endpoints. All URLs are built from the configured Issuer, so
 // the document is identical regardless of which host served it.
+//
+// The authorization_response_iss_parameter_supported flag (RFC 9207 §3) and
+// redirectWith change together. A client that reads the flag rejects any
+// authorization response without iss, and a server that sends iss must advertise
+// the flag (RFC 9207 §2.3).
 func (s *Server) handleMetadata(w http.ResponseWriter, _ *http.Request) {
 	iss := s.cfg.Issuer
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -26,6 +32,9 @@ func (s *Server) handleMetadata(w http.ResponseWriter, _ *http.Request) {
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
 		"scopes_supported":                      []string{"openid", "profile", "email"},
+
+		// RFC 9207 §3. Every authorization response carries iss (see redirectWith).
+		"authorization_response_iss_parameter_supported": true,
 	})
 }
 
@@ -56,7 +65,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, err := randomToken(16)
+	id, err := oidcup.RandomToken(16)
 	if err != nil {
 		logError(r, "oauthserver.register.entropy", err)
 		oauthError(w, http.StatusInternalServerError, "server_error", "")

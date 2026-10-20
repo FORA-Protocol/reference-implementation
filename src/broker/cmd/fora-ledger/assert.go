@@ -10,7 +10,6 @@ import (
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/agentid"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/evidenceview"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/transactionkey"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/repo"
@@ -205,28 +204,31 @@ func selectionOffers(sel *repo.SelectionLogEntry, offerID string) bool {
 	return false
 }
 
-// brokerSawThisAgent checks the two sides name the same agent. The signed
-// Requester.id is whatever the agent spelled its directory as; the Broker keys
-// its audit on the canonical directory host. They name one agent but are not
-// byte-equal, so the comparison goes through the same normalization the
-// Exchange's own agent identity does.
+// noTransactionAgent explains an evidence response without the transaction's
+// agent_id, which an Exchange that predates the field sends. There is no
+// fallback to a requester field: neither names the agent on every path.
+const noTransactionAgent = "not checked: the Exchange evidence carries no transaction agent_id " +
+	"(an older Exchange), so the Broker identity cannot be correlated"
+
+// brokerSawThisAgent checks the two sides name the same agent. Both are
+// canonical hosts each service derived from a verified signature: the agent the
+// Exchange attributed the transaction to, and the agent the Broker recorded for
+// the selection. Requester.id and Requester.domain play no part.
 func brokerSawThisAgent(s Sources) Assertion {
 	const name = "Broker's agent and the signing agent are the same identity"
+	exchangeAgent := s.Transaction.AgentID
+	if exchangeAgent == "" {
+		return unchecked(name, noTransactionAgent)
+	}
 	if s.Selection == nil {
 		return unchecked(name, s.SelectionAbsence)
 	}
-	signed := s.Evidence.RequesterID
-	canonical, err := agentid.FromDirectory(signed)
-	if err != nil {
+	if exchangeAgent != s.Selection.AgentID {
 		return Assertion{Name: name, Detail: fmt.Sprintf(
-			"signed requester id %q does not name a directory host: %v", signed, err)}
-	}
-	if canonical != s.Selection.AgentID {
-		return Assertion{Name: name, Detail: fmt.Sprintf(
-			"signed %q normalizes to %q, Broker recorded %q", signed, canonical, s.Selection.AgentID)}
+			"Exchange attributed the transaction to %q, Broker recorded %q", exchangeAgent, s.Selection.AgentID)}
 	}
 	return Assertion{Name: name, OK: true, Detail: fmt.Sprintf(
-		"signed %q normalizes to the Broker's %q", signed, canonical)}
+		"Exchange and Broker both name %q", exchangeAgent)}
 }
 
 // deliveryHashMatches is the delivery join: the digest the Exchange stored when

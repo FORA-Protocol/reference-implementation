@@ -1,0 +1,176 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} — Publisher console</title>
+<link rel="stylesheet" href="/static/bootstrap.min.css">
+<link rel="stylesheet" href="/static/console.css">
+{{if .Nav}}<script src="/static/sidebar.js"></script>{{end}}
+</head>
+<body class="bg-body-tertiary">
+{{if .Nav}}
+<div class="app">
+  <aside class="sidebar d-none d-md-flex" aria-label="Console">
+    <div class="sidebar-brand">
+      <a class="brand-mark" href="/" aria-label="Publisher console">F</a>
+      <div class="brand-text">
+        <strong>Publisher console</strong>
+        {{if .Session}}<small title="{{.Session.Email}}">{{.Session.Email}}</small>{{end}}
+      </div>
+      <button class="sidebar-toggle" id="sidebar-toggle" type="button" aria-expanded="true"
+              aria-controls="sidebar-sections" title="Collapse the menu">{{template "icon-chevron"}}</button>
+    </div>
+    <div id="sidebar-sections">{{template "sections" .Nav}}</div>
+    {{if .Session}}
+    <form class="sidebar-foot" method="post" action="/logout">
+      <button class="nav-link" type="submit" title="Sign out">{{template "icon-signout"}}<span class="nav-label">Sign out</span></button>
+    </form>
+    {{end}}
+  </aside>
+  <div class="app-main">
+    <nav class="navbar bg-white border-bottom d-md-none">
+      <div class="container-fluid">
+        <details class="menu">
+          <summary class="btn btn-sm btn-outline-secondary">Menu</summary>
+          <div class="menu-panel">{{template "sections" .Nav}}</div>
+        </details>
+        <a class="navbar-brand me-auto" href="/">Publisher console</a>
+        {{if .Session}}
+        <form method="post" action="/logout" class="m-0">
+          <button class="btn btn-sm btn-outline-secondary" type="submit">Sign out</button>
+        </form>
+        {{end}}
+      </div>
+    </nav>
+    <main class="dashboard-main">
+    {{template "alerts" .}}
+    {{template "content" .}}
+    </main>
+  </div>
+</div>
+{{else}}
+<nav class="navbar navbar-expand bg-white border-bottom">
+  <div class="container">
+    <a class="navbar-brand" href="/">Publisher console</a>
+    {{if .Session}}
+    <div class="d-flex align-items-center gap-3 ms-auto">
+      <span class="text-secondary small d-none d-sm-inline">{{.Session.Email}}</span>
+      <form method="post" action="/logout" class="m-0">
+        <button class="btn btn-sm btn-outline-secondary" type="submit">Sign out</button>
+      </form>
+    </div>
+    {{end}}
+  </div>
+</nav>
+<main class="container py-4" style="max-width: 46rem">
+{{template "alerts" .}}
+{{template "content" .}}
+</main>
+{{end}}
+</body>
+</html>{{end}}
+
+{{define "alerts"}}
+{{if .Error}}<div class="alert alert-danger" role="alert">{{.Error}}</div>{{end}}
+{{if .Notice}}<div class="alert alert-success" role="alert">{{.Notice}}</div>{{end}}
+{{end}}
+
+{{define "sections"}}
+<nav aria-label="Sections">
+  <ul class="nav flex-column sections">
+    <li class="nav-item"><a class="nav-link{{if .Is "overview"}} active{{end}}" {{if .Is "overview"}}aria-current="page" {{end}}href="{{.Overview}}" title="Overview">{{template "icon-overview"}}<span class="nav-label">Overview</span></a></li>
+    <li class="nav-item"><a class="nav-link{{if .Is "transactions"}} active{{end}}" {{if .Is "transactions"}}aria-current="page" {{end}}href="{{.Transactions}}" title="Transactions">{{template "icon-transactions"}}<span class="nav-label">Transactions</span></a></li>
+    <li class="nav-item"><a class="nav-link{{if .Is "income"}} active{{end}}" {{if .Is "income"}}aria-current="page" {{end}}href="{{.Income}}" title="Income">{{template "icon-income"}}<span class="nav-label">Income</span></a></li>
+    <li class="nav-item"><a class="nav-link{{if .Is "catalog"}} active{{end}}" {{if .Is "catalog"}}aria-current="page" {{end}}href="{{.Catalog}}" title="Catalog">{{template "icon-catalog"}}<span class="nav-label">Catalog</span></a></li>
+    <li class="nav-item"><a class="nav-link{{if .Is "domains"}} active{{end}}" {{if .Is "domains"}}aria-current="page" {{end}}href="/domains" title="My domains">{{template "icon-domains"}}<span class="nav-label">My domains</span></a></li>
+  </ul>
+</nav>
+{{end}}
+
+{{/* The sidebar's icons: 24-unit line drawings in the text colour, so each takes
+     the colour of the link it sits in. */}}
+{{define "icon-overview"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 20h18M6 16v-5M11 16V6M16 16v-8M21 16v-3"/></svg>{{end}}
+{{define "icon-transactions"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h15M15 3l4 4-4 4M20 17H5M9 13l-4 4 4 4"/></svg>{{end}}
+{{define "icon-income"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6.5 9.5h.01M17.5 14.5h.01"/></svg>{{end}}
+{{define "icon-catalog"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5zM5 19.5A1.5 1.5 0 0 0 6.5 21H19M9 7h6"/></svg>{{end}}
+{{define "icon-domains"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9M12 3c-2.5 2.5-3.5 5.5-3.5 9s1 6.5 3.5 9"/></svg>{{end}}
+{{define "icon-signout"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4M10 16l-4-4 4-4M6 12h10"/></svg>{{end}}
+{{define "icon-chevron"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 6l-6 6 6 6"/></svg>{{end}}
+
+{{/* The links between the pages of a list, taking the dot as the list's Page.
+     Previous is left out on the first page and Next on the last. */}}
+{{define "pager"}}
+{{if or .Prev .Next}}
+<nav class="d-flex gap-2" aria-label="Pages">
+  {{if .Prev}}<a class="btn btn-outline-primary" href="{{.Prev}}" rel="prev">Previous</a>{{end}}
+  {{if .Next}}<a class="btn btn-outline-primary" href="{{.Next}}" rel="next">Next</a>{{end}}
+</nav>
+{{end}}
+{{end}}
+
+{{/* The domain filter. Rendered from the domains every dashboard page
+     already reads to learn which publisher the person holds, so it costs no
+     extra call. It is a select rather than a typed name: a publisher has a
+     handful of domains and no reason to remember how one is spelled. It takes
+     the page's own view as its dot, which the transaction list, the catalog
+     and the income report each hand it. */}}
+{{define "domain-filter"}}
+<div>
+  <label class="form-label small mb-0" for="filter-domain">Domain</label>
+  <select class="form-select form-select-sm" id="filter-domain" name="domain">
+    <option value="">All domains</option>
+    {{$chosen := .Domain}}
+    {{range .Domains}}
+    <option value="{{.}}"{{if eq . $chosen}} selected{{end}}>{{.}}</option>
+    {{end}}
+  </select>
+</div>
+{{end}}
+
+{{define "money"}}{{/* A dashboard.Money: the amount, and its currency beside a
+     real one. */}}{{.Amount}}{{with .Currency}} <small>{{.}}</small>{{end}}{{end}}
+
+{{define "period-fields"}}
+{{/* The period travels in the two hidden fields: daterange.js writes the
+     chosen days into them and submits their form, so the server reads the
+     same from/to whichever way the page was reached. */}}
+<input type="hidden" name="from" value="{{.Period.FromValue}}">
+<input type="hidden" name="to" value="{{.Period.ToValue}}">
+<div class="daterange" data-daterange data-daterange-rules="{{.Period.PickerRules}}">
+  <button class="daterange-trigger" type="button" data-daterange-trigger
+          aria-haspopup="dialog" aria-expanded="false">
+    {{template "icon-calendar"}}<span data-daterange-label>{{.Period.Label}}</span>
+  </button>
+
+  <div class="daterange-panel" data-daterange-panel role="dialog"
+       aria-label="Choose a period" hidden>
+    <ul class="daterange-presets" data-daterange-presets></ul>
+
+    <div class="daterange-body">
+      <div class="daterange-months">
+        <div class="daterange-month" data-daterange-month="0"></div>
+        <div class="daterange-month" data-daterange-month="1"></div>
+      </div>
+      <p class="daterange-note" data-daterange-note role="status"></p>
+    </div>
+
+    <div class="daterange-foot">
+      <p class="daterange-selected mb-0">Selected:
+        <strong data-daterange-summary></strong></p>
+      <div class="daterange-actions">
+        <button class="btn btn-sm btn-outline-secondary" type="button"
+                data-daterange-cancel>Cancel</button>
+        <button class="btn btn-sm btn-primary" type="button"
+                data-daterange-apply>Apply range</button>
+      </div>
+    </div>
+  </div>
+</div>
+{{/* Loaded from the partial rather than from each page, so a page that adopts
+     the period picker cannot forget the script that drives it. Each page uses
+     the partial once, so the tag is emitted once. */}}
+<script type="module" src="/static/daterange.js"></script>
+{{end}}
+
+{{define "icon-calendar"}}<svg class="daterange-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>{{end}}

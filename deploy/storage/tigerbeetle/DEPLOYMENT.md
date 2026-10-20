@@ -277,7 +277,7 @@ Add the ledger settings to the Exchange's environment
 
 ```
 FORA_BILLING_ADAPTER=tigerbeetle
-EXCHANGE_BILLING_LEDGER=978
+EXCHANGE_BILLING_LEDGER=978,840
 EXCHANGE_BILLING_TB_ADDRESS=10.0.1.7:3000
 EXCHANGE_BILLING_TB_CLUSTER_ID=1
 ```
@@ -286,8 +286,9 @@ Three things that often go wrong in those four lines:
 
 1. **`EXCHANGE_BILLING_TB_ADDRESS` must be `IP:port`.** The client rejects
    hostnames, so `tigerbeetle:3000` does not work. Use the address literally.
-2. **`EXCHANGE_BILLING_LEDGER` fixes the deployment's currency.** `978` means
-   every catalog term must be priced in EUR; anything else is denied
+2. **`EXCHANGE_BILLING_LEDGER` fixes the currencies the deployment bills in.**
+   `978,840` means catalog terms may be priced in EUR or USD — one ledger each,
+   and no conversion between them. A term in any other currency is denied
    ([`CONFIGURATION.md`](CONFIGURATION.md) §4).
 3. **`EXCHANGE_BILLING_TB_CLUSTER_ID` must match the `--cluster` you formatted
    with** (§4), or the Exchange's boot health check fails.
@@ -342,8 +343,8 @@ docker compose logs exchange | grep tigerbeetle
 # they are wrapped here to fit the page.
 #   {"level":"INFO","msg":"tigerbeetle connected","cluster":1,
 #    "addresses":["10.0.1.7:3000"]}
-#   {"level":"INFO","msg":"billing adapter: tigerbeetle","ledger":978,
-#    "currency":"EUR","address":"10.0.1.7:3000","hold_timeout":"6m0s"}
+#   {"level":"INFO","msg":"billing adapter: tigerbeetle","currencies":"EUR,USD",
+#    "base_currency":"EUR","address":"10.0.1.7:3000","hold_timeout":"6m0s"}
 ```
 
 If neither line appears, the Exchange is running on a different billing backend

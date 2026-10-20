@@ -1,47 +1,47 @@
 """Lazy agent registration (ADR-009 D2) through the real Agent -> Broker -> Exchange chain.
 
-A fresh agent — absent from fora.agents, serving its own Web Bot Auth key
-directory on the ``lazy-agent-e2e`` network alias (== its keyID/domain),
-billing-seeded in docker-compose.e2e.yml — discovers an offer and
-relay-executes it. Both the Broker (sig1 boundary verify) and the Exchange resolve
-its transport key from that directory at
-/.well-known/http-message-signatures-directory; the Exchange then LAZILY persists
-the fora.agents row. The host also serves a ROLE_AGENT fora.json, but nothing on
-either path reads it — the overlay carries no keys.
+A fresh agent — one the seed never introduces to any Exchange, serving its own
+Web Bot Auth key directory on the ``lazy-agent-e2e`` network alias (== its
+keyID/domain), and never registered for an account — resolves an offer at the Broker and buys it
+through the Broker, with the SDK's own ``BrokerClient``. The Broker verifies the
+agent's request signature against the key in that directory; the Exchange the
+Broker re-packages the purchase to resolves the agent's acceptance key from the
+same directory, and LAZILY records the agent's identity. The host also serves a
+ROLE_AGENT fora.json, but nothing on either path reads it — the overlay carries
+no keys.
 
-This is the only test that exercises the lazy-registration SUCCESS path through the
-genuine two-phase relay chain: seed.py pre-registers every other signing agent, so
-the existing suite never fires the well-known fetch on the relay path.
+Every other buyer in the suite is learned the same way, at its first signed
+call, which is its Register. This is the only test whose agent is first seen on
+a purchase relayed by the Broker, and the only one that never registers.
 
-Both paths drive the modern model: discover via the Broker
-``Resolve`` then relay-execute the winning Offer (agent sig1 + Broker sig2 +
-offer-acceptance) through ``POST /broker/v1/exchange/execute``. ``broker_client``'s
-combined :func:`execute_first_offer` runs both phases with the fresh agent's own key,
-so the Exchange binds + lazily registers THAT agent. The per-result fields ride on
-``items[0]``.
+Whether an Exchange holds an agent's identity is read back through the agent's
+own GetAccountStatus at that Exchange. An identity the Exchange holds, with no
+account, is answered not_found ("not registered for paid content yet"); a key the
+Exchange cannot resolve is refused unauthenticated before any account is read.
 """
 
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
-from typing import Any, cast
 
-import httpx
-import psycopg
 import pytest
+from fora_sdk import ProtocolVersion
+from fora_sdk.client import CallError
 
-from .broker_client import execute_first_offer, resolve
-from .conftest import COMPOSE_FILE, StackURLs
-from .resolve_carriers import first_item_of, retrieval_endpoint_of
-from .seed import DEMO_PHILOSOPHY_DOMAIN, SeededFixture, _resolve_pg_dsn
+from .broker_purchase import only_item, resolve_offer
+from .conftest import StackURLs
+from .exchanges import EXCHANGE_A_DOMAIN, exchange_url
+from .sdk_client import sdk_account_client, sdk_broker_client
+from .seed import DEMO_PHILOSOPHY_DOMAIN, SeededFixture
 
 # ADR-008 D5 — declare stack-isolation contract.
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
-# Fresh agent: published manifest on the `lazy-agent-e2e` alias, USD billing-seeded
-# in docker-compose.e2e.yml, but NOT seeded into fora.agents.
+# Fresh agent: published directory on the `lazy-agent-e2e` alias, and never
+# registered for an account (the seed's Register calls leave it out on purpose).
 LAZY_AGENT_ID = "lazy-agent-e2e"
 LAZY_KEY_PATH = _FIXTURES / "agent_lazy_e2e_key.json"
 
@@ -52,25 +52,27 @@ GHOST_KEY_PATH = _FIXTURES / "agent_ghost_e2e_key.json"
 
 # epicurus: PER_UNIT 0.0001/characters USD — a PAID resource. A lazily registered
 # agent has an identity row but NO billing account (D1 / ADR-021), so the
-# paid execute is denied ACCOUNT_NOT_REGISTERED while the lazy-registration side
+# paid purchase is denied ACCOUNT_NOT_REGISTERED while the lazy-registration side
 # effect still fires. Buying paid content requires an explicit Register first.
 _RESOURCE_URI = f"http://{DEMO_PHILOSOPHY_DOMAIN}/articles/philosophers/epicurus.txt"
 
+_ACCOUNT_NOT_REGISTERED = "DENIAL_REASON_ACCOUNT_NOT_REGISTERED"
 
-def _agent_row_exists(agent_id: str) -> bool:
-    """BLACK-BOX e2e DB read: observe the lazily-persisted fora.agents row.
 
-    Lazy registration is an internal Exchange side effect with no protocol read
-    surface by design — there is no RPC that reports whether an agent row exists.
-    Reading the deployment datastore directly is the only way to assert the side
-    effect end-to-end (consistent with the transaction_log read in
-    obligations/test_00_happy_03_usage_record_paid_access.py); it is a full-stack
-    e2e observation, not an in-process layer bypass.
+def _account_read_refusal(stack: StackURLs, *, agent_id: str, key_path: Path) -> CallError:
+    """The refusal exchange-a answers the agent's own GetAccountStatus with.
+
+    Neither agent here holds an account at exchange-a, so the read is always
+    refused; what the refusal says is the observation. ``not_found`` means the
+    Exchange resolved the agent's identity and found no account for it.
+    ``unauthenticated`` means it could not resolve the agent's key at all.
     """
-    dsn = _resolve_pg_dsn(str(COMPOSE_FILE))
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM fora.agents WHERE agent_id = %s", (agent_id,))
-        return cur.fetchone() is not None
+    client = sdk_account_client(
+        exchange_url(stack, EXCHANGE_A_DOMAIN), agent_id=agent_id, key_path=key_path
+    )
+    with closing(client), pytest.raises(CallError) as refused:
+        client.get_account_status({"ver": ProtocolVersion, "exchange": EXCHANGE_A_DOMAIN})
+    return refused.value
 
 
 def test_lazy_registration_fires_but_paid_needs_register(
@@ -79,53 +81,46 @@ def test_lazy_registration_fires_but_paid_needs_register(
 ) -> None:
     """A never-seen agent is lazily registered (identity), but a PAID buy needs Register.
 
-    Round-trip: discover (Broker Resolve, sig1 over the agent's own key resolved
-    from http://lazy-agent-e2e/.well-known/http-message-signatures-directory) ->
-    relay-execute the winning
-    Offer (agent sig1 + Broker sig2 + offer-acceptance). Lazy registration
-    (ADR-009 D2) persists the fora.agents IDENTITY row from the verified well-known
-    — enough for free crawling, but NOT a billing account. Per ADR-021 D1 /
-    ADR-021, an agent with no billing_ref cannot buy paid content, so the PAID
-    epicurus item is denied in-body with DENIAL_REASON_ACCOUNT_NOT_REGISTERED (the
-    agent must call Register first). The test asserts BOTH: the in-body paid denial
-    AND the lazy-registration side effect — the agents row flips False -> True even
-    on the denied paid request, because resolveAgentID persists the row before the
-    billing check.
+    Round-trip: resolve at the Broker, signed with the agent's own key, which the
+    Broker resolves from http://lazy-agent-e2e/.well-known/http-message-signatures-directory;
+    then buy the winning offer through the Broker. Lazy registration (ADR-009 D2)
+    records the agent's IDENTITY from the verified directory — enough for free
+    crawling, but NOT a billing account. Per ADR-021 D1, an agent with no
+    billing_ref cannot buy paid content, so the PAID epicurus item is denied
+    in-body with DENIAL_REASON_ACCOUNT_NOT_REGISTERED (the agent must call
+    Register first).
+
+    The denial is itself the evidence that the Exchange accepted the agent's
+    identity from its directory: an agent whose key resolves nowhere is refused
+    unauthenticated before any per-item decision (see the ghost test below).
+
+    Then the agent reads its own account at exchange-a: the Exchange answers
+    not_found, so it holds the agent's identity and no account. That leg is the
+    agent's own signed call, through the Exchange's public RPC. It cannot show
+    that the identity was recorded BY the purchase rather than by the read
+    itself, because an unknown agent's first signed call of any kind is what
+    records it, and the agent is a fixed identity that a stack the suite has
+    already run against holds from the first run.
     """
-    assert not _agent_row_exists(LAZY_AGENT_ID), (
-        "precondition violated: lazy-agent-e2e is already in fora.agents"
-    )
+    buyer = sdk_broker_client(compose_stack, agent_id=LAZY_AGENT_ID, key_path=LAZY_KEY_PATH)
+    with closing(buyer) as client:
+        offer = resolve_offer(client, _RESOURCE_URI)
+        item = only_item(client.execute([offer]), "the lazy agent's paid purchase")
 
-    resp = execute_first_offer(
-        compose_stack,
-        {"agent_id": LAZY_AGENT_ID, "uri": _RESOURCE_URI, "domain": DEMO_PHILOSOPHY_DOMAIN},
-        agent_id=LAZY_AGENT_ID,
-        domain=DEMO_PHILOSOPHY_DOMAIN,
-        key_path=LAZY_KEY_PATH,
+    # A lazily registered identity is not a registered billing account, so the
+    # paid purchase is refused in-body.
+    assert item.denial_reason is not None and item.denial_reason.value == _ACCOUNT_NOT_REGISTERED, (
+        f"a paid buy by an identity-only lazy agent must be denied {_ACCOUNT_NOT_REGISTERED} "
+        f"(Register mints the account first): {item}"
     )
-    # The paid item is denied IN-BODY (per-item denial, HTTP 200), not a transport error.
-    assert resp.status_code == httpx.codes.OK, (
-        f"relay execute should return an in-body denial, not a transport error; "
-        f"got {resp.status_code}: {resp.text[:512]}"
-    )
+    assert not item.retrieval_endpoint, f"a denied paid item must carry no signed URL: {item}"
 
-    # C2 (the items-only collapse): read the per-item result from items[0]. A lazily registered
-    # identity is not a registered billing account, so the paid buy is refused.
-    accept_payload = cast(dict[str, Any], resp.json())
-    item = first_item_of(accept_payload)
-    assert item is not None, f"relay response carried no items[0]: {accept_payload}"
-    assert item.get("denial_reason") == "DENIAL_REASON_ACCOUNT_NOT_REGISTERED", (
-        f"a paid buy by an identity-only lazy agent must be denied ACCOUNT_NOT_REGISTERED "
-        f"(Register mints the account first): {accept_payload}"
-    )
-    assert not retrieval_endpoint_of(item), (
-        f"a denied paid item must carry no signed URL: {accept_payload}"
-    )
-
-    # The side effect that proves lazy registration still fired on the real relay
-    # path — the identity row is persisted even though the paid charge was refused.
-    assert _agent_row_exists(LAZY_AGENT_ID), (
-        "agent was not lazily registered after the relayed execute"
+    # The Exchange holds the agent's identity and, the paid charge having been
+    # refused, still no account for it.
+    held = _account_read_refusal(compose_stack, agent_id=LAZY_AGENT_ID, key_path=LAZY_KEY_PATH)
+    assert held.code == "not_found", (
+        f"exchange-a must answer the lazily registered agent's account read not_found "
+        f"(identity held, no account); it answered {held.code!r}: {held}"
     )
 
 
@@ -135,31 +130,30 @@ def test_unresolvable_agent_refused_before_execute(
 ) -> None:
     """Negative control: a fresh agent with NO well-known host is refused; not registered.
 
-    The ghost agent holds a valid signing key but no well-known host serves its
-    key directory — and directories are the ONLY path a verifier learns a key
-    by — so its key resolves NOWHERE. The
-    Broker's httpsig middleware verifies the self-act keyID on EVERY signed
-    ``/fora.*`` call against the agent's resolvable key (resolve.go
-    authorizeAgentSelfAct sits behind that middleware); with no key to resolve, the
-    rejection surfaces as a TRANSPORT error (HTTP 401 Unauthenticated), not a
-    per-item in-body denial.
-
-    The refusal lands on the FIRST signed leg — Broker ``Resolve`` (discovery) —
-    so the relay-execute is never reached: an unresolvable agent cannot even
-    discover, let alone execute. We therefore drive and assert the rejection
-    directly on the ``Resolve`` leg (the combined ``execute_first_offer`` asserts a
-    200 discover internally, which would mask the 401 as an AssertionError).
-    Lazy registration never fires.
+    Control first: the lazy agent, which differs only in having a directory,
+    resolves the same URI. Then the ghost agent, which holds a valid signing key
+    that no directory publishes, sends the same resolve. Directories are the ONLY
+    path a verifier learns a key by, so the Broker cannot verify the signature and
+    refuses the call with request_auth_failure. The refusal lands on the first
+    signed leg, so the ghost never reaches an Exchange and lazy registration never
+    fires. The ghost's own account read at exchange-a is refused unauthenticated:
+    the Exchange cannot resolve its key either, so it holds no identity for it.
     """
-    resp = resolve(
-        compose_stack,
-        {"agent_id": GHOST_AGENT_ID, "uri": _RESOURCE_URI, "domain": DEMO_PHILOSOPHY_DOMAIN},
-        key_path=GHOST_KEY_PATH,
-    )
-    assert resp.status_code == httpx.codes.UNAUTHORIZED, (
-        f"ghost agent (no well-known) must be refused at the Broker sig1 boundary; "
-        f"got {resp.status_code}: {resp.text[:512]}"
-    )
-    assert not _agent_row_exists(GHOST_AGENT_ID), (
-        "ghost agent must not be lazily registered after a refused signed call"
+    control = sdk_broker_client(compose_stack, agent_id=LAZY_AGENT_ID, key_path=LAZY_KEY_PATH)
+    with closing(control) as client:
+        resolve_offer(client, _RESOURCE_URI)
+
+    ghost = sdk_broker_client(compose_stack, agent_id=GHOST_AGENT_ID, key_path=GHOST_KEY_PATH)
+    with closing(ghost) as client, pytest.raises(CallError) as refused:
+        resolve_offer(client, _RESOURCE_URI)
+
+    error = refused.value
+    assert error.code == "unauthenticated", f"refused as {error.code!r}: {error}"
+    block = error.detail.request_auth_failure if error.detail is not None else None
+    assert block is not None, f"the refusal carries no request_auth_failure reason: {error}"
+    assert block.reason.value == "REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID", block
+    unknown = _account_read_refusal(compose_stack, agent_id=GHOST_AGENT_ID, key_path=GHOST_KEY_PATH)
+    assert unknown.code == "unauthenticated", (
+        f"exchange-a must refuse the ghost agent's account read unauthenticated (no key "
+        f"to resolve, so no identity to hold); it answered {unknown.code!r}: {unknown}"
     )

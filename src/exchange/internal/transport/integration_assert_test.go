@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	connect "connectrpc.com/connect"
-	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	foraconnect "github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	"github.com/shopspring/decimal"
@@ -67,7 +66,7 @@ func ceAs(err error, target **connect.Error) bool {
 // assertConnectCode fails the test unless err is a *connect.Error whose Code
 // equals want. The error MUST be non-nil. Consolidated here so every
 // transport-layer integration test asserts Connect codes with the same shape.
-func assertConnectCode(t *testing.T, err error, want connect.Code) {
+func assertConnectCode(t testing.TB, err error, want connect.Code) {
 	t.Helper()
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -91,28 +90,6 @@ func assertConnectError(t *testing.T, err error, want connect.Code, wantInMsg st
 	_ = ceAs(err, &ce)
 	if wantInMsg != "" && !strings.Contains(ce.Message(), wantInMsg) {
 		t.Errorf("message %q does not contain %q", ce.Message(), wantInMsg)
-	}
-}
-
-// assertDenialReason fails unless err is a *connect.Error carrying a typed
-// proto ErrorDetail whose transaction_denial reason equals want. This pins the
-// ADR-019 contract: the machine-readable denial reason travels as a typed
-// detail on the transport error (read here through the generated SDK type),
-// never as a server-side string the client must parse.
-func assertDenialReason(t *testing.T, err error, want forav1.DenialReason) {
-	t.Helper()
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	ed := testutil.SingleErrorDetail(t, err)
-	if got := ed.GetTransactionDenial().GetReason(); got != want {
-		t.Fatalf("denial reason = %v, want %v", got, want)
-	}
-	// The exchange stamps Domain on every fault, the same ErrorInfo-compatible
-	// grouping key the broker uses, so a generic client attributes exchange and
-	// broker failures identically.
-	if got := ed.GetDomain(); got != exchangeServiceDomainLiteral {
-		t.Fatalf("ErrorDetail.Domain = %q, want %q", got, exchangeServiceDomainLiteral)
 	}
 }
 
@@ -241,7 +218,14 @@ func assertOfferCount(t *testing.T, h *pushHarness, uri string, want int) {
 // sink accumulates one line per refused entry of every push a test makes.
 func assertCatalogRejectLogged(t *testing.T, h *pushHarness, path, wantReason string) {
 	t.Helper()
-	uri := "https://" + h.publisherDom + path
+	assertCatalogRejectLoggedForURI(t, h, "https://"+h.publisherDom+path, wantReason)
+}
+
+// assertCatalogRejectLoggedForURI is assertCatalogRejectLogged for an entry that
+// was pushed for some other site than the harness's default one, where the
+// caller already holds the whole URI.
+func assertCatalogRejectLoggedForURI(t *testing.T, h *pushHarness, uri, wantReason string) {
+	t.Helper()
 	line := findLogRecord(t, h.logs.String(), "exchange.catalog_push.reject",
 		func(rec map[string]any) bool { return rec["uri"] == uri })
 	if got, _ := line["reason"].(string); got != wantReason {
@@ -290,16 +274,17 @@ func assertRefusedItemIndex(t *testing.T, err error, wantIndex string) {
 }
 
 // assertErrorDomain fails unless err is a *connect.Error carrying a typed proto
-// ErrorDetail whose Domain equals want. This pins the ADR-019 §1 contract that
+// ErrorDetail whose Domain is the exchange's. This pins the ADR-019 §1 contract that
 // EVERY exchange fault — including DiscoverResources faults and non-denial
 // ExecuteTransaction faults — stamps the ErrorInfo-compatible grouping key, the
 // same way the broker stamps "fora.v1.BrokerService" on every fault, so a generic
 // client attributes exchange and broker failures identically. It mirrors
-// assertDenialReason / assertReportRejectionField but checks only GetDomain(),
-// read through the public Connect error envelope (Testing Doctrine §9 — never past
-// the transport boundary).
-func assertErrorDomain(t *testing.T, err error, want string) {
+// assertReportRejectionField but checks only GetDomain(), read through the
+// public Connect error envelope (Testing Doctrine §9 — never past the transport
+// boundary).
+func assertErrorDomain(t *testing.T, err error) {
 	t.Helper()
+	const want = exchangeServiceDomainLiteral
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -316,7 +301,7 @@ func assertErrorDomain(t *testing.T, err error, want string) {
 //
 // wantOutcome "" means no report has been validated yet, which the route renders
 // by omitting validation_outcome rather than sending an empty string.
-func assertObligationState(t *testing.T, h *testHarness, txID string, wantState, wantOutcome string) {
+func assertObligationState(t testing.TB, h *testHarness, txID string, wantState, wantOutcome string) {
 	t.Helper()
 	ob := mustObligationView(t, h, txID)
 	if ob.State != wantState {
@@ -331,6 +316,24 @@ func assertObligationState(t *testing.T, h *testHarness, txID string, wantState,
 	}
 	if wantOutcome != "" && ob.ValidatedAt == nil {
 		t.Errorf("validated_at not set; expected timestamp for outcome %q", wantOutcome)
+	}
+}
+
+// assertReportRecorded asserts, through the evidence route, that txID's usage
+// report was accepted and recorded with the consumed quantity want (a decimal
+// string, compared by value).
+func assertReportRecorded(t testing.TB, h *testHarness, txID, want string) {
+	t.Helper()
+	ob := mustObligationView(t, h, txID)
+	if ob.State != "RECEIVED" {
+		t.Errorf("obligation state = %q, want RECEIVED: the report was not recorded", ob.State)
+	}
+	if ob.ConsumedQuantity == nil {
+		t.Fatalf("the obligation records no consumed quantity, want %s", want)
+	}
+	got, err := decimal.NewFromString(*ob.ConsumedQuantity)
+	if err != nil || !got.Equal(decimal.RequireFromString(want)) {
+		t.Errorf("recorded consumed quantity = %q, want %s", *ob.ConsumedQuantity, want)
 	}
 }
 
@@ -352,9 +355,8 @@ func readTenant(t *testing.T, h *testHarness) repo.Tenant {
 // assertion that counted every row for the tenant would therefore count that one
 // as well, so every admin count below names the actions it means.
 var adminAuditActions = map[string]bool{
-	"SetTenantFeeRate":      true,
-	"SetReportingPolicy":    true,
-	"SetDefaultAgentCredit": true,
+	"SetTenantFeeRate":   true,
+	"SetReportingPolicy": true,
 }
 
 // readAuditRows returns the ADMIN audit rows for tenantID through the production

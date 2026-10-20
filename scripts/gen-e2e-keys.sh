@@ -16,13 +16,13 @@
 #   agent-nobilling-e2e              agent_nobilling_e2e_key.json
 #   broker.broker-local.v1           broker_relay_key.json   (mounted into broker)
 #   test-signer-e2e.v1               test_signer_key.json
-#   revocation-throwaway-e2e         revocation_throwaway_key.json
 #   agent-demo-eur                   agent_demo_eur_key.json
 #   lazy-agent-e2e                   agent_lazy_e2e_key.json
 #   ghost-agent-e2e                  agent_ghost_e2e_key.json  (served NOWHERE)
 #   demo.fora-protocol.org           selfpub_philosophy_key.json  (self-publish, kid=domain)
 #   music.demo.fora-protocol.org     selfpub_music_key.json       (self-publish, kid=domain)
 #   sfx.demo.fora-protocol.org       selfpub_sfx_key.json         (self-publish, kid=domain)
+#   archive.demo.fora-protocol.org   selfpub_archive_key.json     (self-publish, kid=domain; no edge)
 #
 # NOTE: the kid values above (agent-e2e, broker.broker-local.v1, etc.) are
 # E2E/demo FIXTURES, not real public DNS domains. In the demo they act as the
@@ -69,8 +69,7 @@
 #   tests/e2e/harness/fixtures/<identity>_key.json       (gitignored — private keys)
 #   deploy/edge-keys/<service>.env                       (gitignored — derived pubkeys)
 #
-# Run once before `docker compose -f docker-compose.e2e.yml up` (wired into
-# `make e2e-keys` / `make e2e-up`).
+# `make e2e-keys` runs it before every `make e2e-up`.
 
 set -euo pipefail
 
@@ -85,12 +84,16 @@ mkdir -p "$FIXTURES_DIR" "$EDGE_KEYS_DIR"
 
 "${PYTHON[@]}" - "$REPO_ROOT/scripts/lib" "$FIXTURES_DIR" "$EDGE_KEYS_DIR" <<'PY'
 import json
-import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[1])
-from ed25519_keys import materialize_keypair, wba_directory_key, wba_validity_window
+from ed25519_keys import (
+    materialize_keypair,
+    wba_directory_key,
+    wba_validity_window,
+    write_text_atomic,
+)
 
 fixtures_dir, edge_keys_dir = sys.argv[2:4]
 
@@ -115,12 +118,9 @@ IDENTITIES = [
     ("agent-nobilling-e2e", "agent_nobilling_e2e_key.json"),
     ("broker.broker-local.v1", "broker_relay_key.json"),
     ("test-signer-e2e.v1", "test_signer_key.json"),
-    # Throwaway identity the cross-container revocation e2e revokes
-    # (test_revocation_channel); used by no other scenario.
-    ("revocation-throwaway-e2e", "revocation_throwaway_key.json"),
-    # Phase-2 demo buyer funded in EUR (the demo catalog denominates most terms
-    # in EUR/GBP; the baseline agent-e2e is USD-only and the in-memory billing
-    # adapter authorizes every term — incl. FREE — on a currency match).
+    # Phase-2 demo buyer the EUR-priced terms are bought as (the demo catalog
+    # denominates most terms in EUR/GBP). The e2e seed funds it, like agent-e2e,
+    # through its own Register and the welcome credit.
     ("agent-demo-eur", "agent_demo_eur_key.json"),
     # The lazy-registration e2e's fresh agent: resolvable only via its own
     # well-known host, absent from fora.agents, so a transaction registers it
@@ -129,6 +129,11 @@ IDENTITIES = [
     # Resolvable nowhere at all — the negative control. Valid signature, no
     # well-known host, so every resolution route must come up empty.
     ("ghost-agent-e2e", "agent_ghost_e2e_key.json"),
+    # The archive publisher's self-publish key (kid == its domain). Listed here
+    # rather than in SELF_PUBLISH_IDENTITIES because that site has no edge to
+    # hand an env file to: its directory is served by the archive-jwks host,
+    # which mounts this fixture like any other identity host does.
+    ("archive.demo.fora-protocol.org", "selfpub_archive_key.json"),
 ]
 
 # Self-publish identities: kid == publisher domain. Each domain's edge
@@ -179,10 +184,12 @@ for domain, filename, edge_service in SELF_PUBLISH_IDENTITIES:
     # matching the canonical fora-wba-directory.json schema the edge serves.
     wba_keys = [wba_directory_key(pub_b64, _not_before, _not_after)]
     env_path = Path(edge_keys_dir) / f"{edge_service}.env"
-    env_path.write_text(
-        "WBA_KEYS_JSON=" + json.dumps(wba_keys, separators=(",", ":")) + "\n"
+    # Atomic: another stack of this checkout may be reading it at compose up.
+    write_text_atomic(
+        env_path,
+        "WBA_KEYS_JSON=" + json.dumps(wba_keys, separators=(",", ":")) + "\n",
+        0o644,
     )
-    os.chmod(env_path, 0o644)
 
 print(
     "gen-e2e-keys: wrote "

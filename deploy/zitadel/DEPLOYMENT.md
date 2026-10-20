@@ -126,6 +126,7 @@ Inside the project, create an application:
 | Grant types | Authorization code (plus refresh token) |
 | Response type | Code |
 | Redirect address | `https://id.example/callback` |
+| User Info inside ID Token | **On** |
 | Development mode | **Off** |
 
 The redirect address is the Identity Service's `IDENTITY_AUTH_ISSUER` with `/callback`
@@ -133,6 +134,10 @@ appended, and it must match **character for character**. A trailing slash, `http
 instead of `https`, or a different hostname all produce the same failure: sign-in stops
 here with a redirect-address error, and nothing appears in the Identity Service's logs
 at all, because the request never reaches it.
+
+User Info inside ID Token puts the developer's email address and name into the ID token,
+which is the only place the Identity Service reads them from
+([`CONFIGURATION.md`](CONFIGURATION.md) §3).
 
 Zitadel shows you a client id and a client secret at this point.
 
@@ -235,12 +240,82 @@ needs both.
 
 ---
 
-## 9. Where to go next
+## 9. Step 7 — the publishers' instance, for the publisher console
+
+Skip this step unless you run the publisher console. The console signs publishers in
+through a second instance of the same Zitadel, with its own hostname, accounts and
+sign-in pages ([`CONFIGURATION.md`](CONFIGURATION.md) §3). It is created through
+Zitadel's System API and needs no container, database or master key of its own.
+
+On a deployment from the compose bundle, Terraform and
+`deploy/terraform/scripts/bootstrap-identity.sh` do all of this: the bundle renders the
+System API user from the `zitadel_system_api_public_key` input, and on a stack that has
+the `console_login_url` output the script creates and provisions the instance. By hand,
+the steps are:
+
+1. **Make the System API key pair**, RSA-3072, outside any checkout of this repository,
+   and keep the private half with your other operator secrets. `system-key.sh` makes
+   it the way every stack does: the private key under `umask 077`, written whole or
+   not at all:
+   ```bash
+   sh deploy/zitadel/bootstrap/system-key.sh /secure/system-api-private.pem /secure/system-api-public.pem
+   ```
+   Outside the checkout, because `bootstrap-identity.sh` uploads the tracked files of
+   `deploy/zitadel/bootstrap` to a VM; a key kept anywhere in a checkout is one
+   mistake away from a copy.
+2. **Give Zitadel the public half** and restart it:
+   ```
+   ZITADEL_SYSTEMAPIUSERS={"fora-instance-admin":{"KeyData":"<base64 of system-api-public.pem>"}}
+   ```
+3. **Keep the routes a system permission opens off the internet.** The user holds
+   SYSTEM_OWNER, which creates and deletes instances and sets the system-wide features
+   every instance follows ([`CONFIGURATION.md`](CONFIGURATION.md) §3 lists the routes).
+   Whatever terminates TLS in front of Zitadel must answer 404 for each of them, on
+   every hostname. With Caddy, inside the site that serves Zitadel:
+   ```
+   @system {
+   	path /system/* /zitadel.system.v1.SystemService/*
+   	path /v2/features/system /v2/features/system/* /v2beta/features/system /v2beta/features/system/*
+   	path /zitadel.feature.v2.FeatureService/SetSystemFeatures /zitadel.feature.v2.FeatureService/ResetSystemFeatures /zitadel.feature.v2.FeatureService/GetSystemFeatures
+   	path /zitadel.feature.v2beta.FeatureService/SetSystemFeatures /zitadel.feature.v2beta.FeatureService/ResetSystemFeatures /zitadel.feature.v2beta.FeatureService/GetSystemFeatures
+   }
+   respond @system 404
+   ```
+4. **Point the publishers' hostname at the same Zitadel**, with DNS and TLS for it, the
+   way `ZITADEL_EXTERNALDOMAIN` is set up.
+5. **Create and provision the instance** from a machine on Zitadel's own network, with
+   the token and the secrets in a directory only you can read. `publishers.sh` runs the
+   instance step and then the provisioning:
+   ```bash
+   (umask 077 && sh deploy/zitadel/bootstrap/system-token.sh /secure/system-api-private.pem \
+     https://login.example > /secure/system.token)
+   ZITADEL_BASE_URL=http://zitadel:8080 ZITADEL_INSTANCE_HOST=login.console.example \
+     ZITADEL_PAT_FILE=/secure/publishers.pat ZITADEL_SYSTEM_TOKEN_FILE=/secure/system.token \
+     ZITADEL_ISSUER=https://login.console.example CONSOLE_PUBLIC_ORIGIN=https://console.example \
+     CONSOLE_OUT_DIR=/secure/console-oidc ZITADEL_ADMIN_PASSWORD_FILE=/secure/admin-password \
+     IMPORT_DEMO_USERS=0 sh deploy/zitadel/bootstrap/publishers.sh
+   rm /secure/system.token
+   ```
+   The instance step writes the instance's own bootstrap token, which Zitadel shows
+   only once, to `ZITADEL_PAT_FILE`; keep that file as you keep the master key. The
+   provisioning writes the console's client id and secret to `CONSOLE_OUT_DIR`.
+6. **Point the console at it**: `CONSOLE_OIDC_ISSUER=https://login.console.example`, and
+   the client files from step 5 ([`src/console/CONFIGURATION.md`](../../src/console/CONFIGURATION.md)).
+7. **Check it**: the discovery document at `https://login.console.example` names that
+   issuer; from outside, a POST to `https://login.example/system/v1/instances/_search`
+   and a PUT to `https://login.example/v2/features/system` both answer 404; and a
+   publisher can sign up at the console and confirm the address from the email, whose
+   subject starts with "FORA Publishers:".
+
+---
+
+## 10. Where to go next
 
 | Task | Where |
 |---|---|
 | Sign-in is failing with a redirect error | [`RUNBOOK.md`](RUNBOOK.md) §3 |
 | Rotating the client secret | [`RUNBOOK.md`](RUNBOOK.md) §4 |
+| The publishers' instance lost its token | [`RUNBOOK.md`](RUNBOOK.md) §4.6 |
 | Upgrading Zitadel | [`RUNBOOK.md`](RUNBOOK.md) §4.3 |
 | What to alert on | [`RUNBOOK.md`](RUNBOOK.md) §2.3 |
 | The settings from the service's side | [`src/identity/CONFIGURATION.md`](../../src/identity/CONFIGURATION.md) §2 |

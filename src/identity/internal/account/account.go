@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 )
 
@@ -45,47 +46,6 @@ type Developer struct {
 type ExchangeRegistration struct {
 	Exchange     string
 	RegisteredAt time.Time
-}
-
-// Requirements is what one Exchange asks of a registration, as of the fetch that
-// produced it: the schema its registration_data must match, and the terms
-// revision that submitting one accepts.
-//
-// It lives here, beside ExchangeRegistration, rather than in the package that
-// reads it. A consumer that named the reader's own result type would have its
-// contract defined inside the adapter it depends on, and the two packages could
-// not then be separated. Same reason RegistrationLog is here and not in repo.
-type Requirements struct {
-	// TermsDigest is the manifest's terms_digest, nil when the Exchange
-	// publishes none. It is copied onto RegisterRequest.terms_digest unchanged,
-	// where the request signature covers it and the Exchange records it as the
-	// revision the operator accepted.
-	TermsDigest *string
-
-	// Schema validates registration_data before anything is signed.
-	//
-	// It is nil in TWO cases, and Verdict is what tells them apart: the Exchange
-	// publishes no schema, and the Exchange publishes one this service cannot
-	// use. Both are deliberately the same VALUE, because a nil
-	// *RegistrationSchema reports no failures and that is the behaviour the SDK
-	// requires of a client in both cases. A local check that cannot run must not
-	// become a local veto: the Exchange's own check is the deciding one, and a
-	// client that refused here would block a registration the Exchange would
-	// have accepted, with no way for the agent to get past it.
-	Schema *helpers.RegistrationSchema
-
-	// Verdict is the SDK's answer for the published schema. SchemaNotPublished
-	// is the normal absent case; SchemaAccepted means Schema is usable; anything
-	// else names why a published schema was refused, which is worth logging and
-	// is never worth refusing the registration over.
-	Verdict helpers.SchemaVerdict
-}
-
-// SchemaRefused reports whether the Exchange published a schema this service
-// could not use. That is the state worth a log line: the agent is about to
-// register with no local pre-check against requirements that do exist.
-func (r Requirements) SchemaRefused() bool {
-	return r.Verdict != helpers.SchemaAccepted && r.Verdict != helpers.SchemaNotPublished
 }
 
 // MaxExchangeRegistrations is how many notes one agent may accumulate.
@@ -190,6 +150,20 @@ var ErrNotBareDomain = errors.New("account: exchange must be a bare domain, not 
 // the other is the peer.
 var ErrNotPermitted = errors.New("account: exchange not permitted by this deployment")
 
+// ErrRequirementsUnread reports that the target Exchange's manifest could not be
+// read, so there was nothing to pre-check a registration against and no terms
+// digest to echo. Nothing was signed and nothing was sent.
+//
+// It exists because the SDK seam this repository's reader plugs into classifies
+// on the SDK's own sentinels, and every failure that is not one of those is read
+// as a transport failure worth retrying. That verdict is right, and it is also
+// the same verdict a send failure gets -- so without a sentinel of our own the
+// two arrive at the caller as one condition, and "the manifest could not be
+// read" stops being a state a caller can name. It is declared here for the
+// reason ErrNoAccount is: it is part of what the requirements leg promises its
+// consumer, not one implementation's private vocabulary.
+var ErrRequirementsUnread = errors.New("account: exchange registration requirements could not be read")
+
 // ErrManifestVersionRefused reports an Exchange whose manifest was fetched and read
 // but carries a document version this service does not accept: another major,
 // or no version at all. Nothing was sent, and nothing will be — the document
@@ -201,6 +175,46 @@ var ErrNotPermitted = errors.New("account: exchange not permitted by this deploy
 // is a newer build of this service or a word with the Exchange, the other is a
 // retry.
 var ErrManifestVersionRefused = errors.New("account: exchange manifest version not accepted")
+
+// ErrFieldsRefused reports that the registration payload was refused against the
+// schema the target Exchange publishes, before anything was signed and before
+// anything was sent. The offending members travel as a typed detail on the
+// wrapped error, which is what lets a caller name them rather than quote a
+// sentence back at an agent.
+//
+// It is declared here for the reason ErrRequirementsUnread is, and the condition
+// it guards against is sharper. A peer that refuses the SAME payload answers
+// with the same shape of typed detail, so the detail alone cannot say which
+// happened; only the leg that computed the refusal knows nothing left the
+// process. Without a sentinel of our own, a consumer of the account port has to
+// recognise the outbound leg's own transport error class to tell a local refusal
+// from a remote one — which is a wire vocabulary leaking into a port whose other
+// promises are all stated here.
+var ErrFieldsRefused = errors.New("account: registration data refused against the published schema")
+
+// FieldsRefusedError is that refusal with the offending members attached, so a
+// consumer can name them instead of quoting a sentence back at an agent.
+//
+// The members keep the protocol's own type rather than a local copy of it. That
+// is the whole point: an Exchange refusing the same payload attaches this same
+// list, computed by the same validator, so a layer that renders one refusal
+// renders both — and asking it to parse member names back out of prose is
+// exactly what the protocol's typed error detail exists to prevent.
+//
+// The type is here rather than in the leg that builds it so the account port
+// stays satisfiable without importing a concrete outbound client. Err carries
+// the sentinel above, so errors.Is reaches it through Unwrap and a caller that
+// only wants to classify never touches this type.
+type FieldsRefusedError struct {
+	// Fields names each member at fault, in the order the validator reported them.
+	Fields []*forav1.RegistrationFieldError
+	// Err is the wrapped cause, carrying ErrFieldsRefused.
+	Err error
+}
+
+func (e *FieldsRefusedError) Error() string { return e.Err.Error() }
+
+func (e *FieldsRefusedError) Unwrap() error { return e.Err }
 
 // ErrNoAccount reports an Exchange's answer that an agent holds no account
 // there. It is a normal outcome rather than a failure, and a caller works it out

@@ -116,7 +116,7 @@ func TestLegacyNullClaim_CompleteRowsViaCancellationReconstructsWithoutRebilling
 	if err != nil {
 		t.Fatalf("original committed row must exist: %v", err)
 	}
-	balAfterOriginal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	balAfterOriginal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after original: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestLegacyNullClaim_CompleteRowsViaCancellationReconstructsWithoutRebilling
 	if got := retry.Msg.GetItems()[0].GetTransactionId(); got != committed.TransactionID {
 		t.Fatalf("reconstructed transaction_id = %q, want %q", got, committed.TransactionID)
 	}
-	balAfterRetry, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	balAfterRetry, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after retry: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestLegacyNullClaim_PartialRowsViaCancellationRefusesSafely(t *testing.T) {
 	rec.mu.Lock()
 	rec.beforeRecord, rec.afterRecord = nil, nil
 	rec.mu.Unlock()
-	balAfterOriginal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	balAfterOriginal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after original: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestLegacyNullClaim_PartialRowsViaCancellationRefusesSafely(t *testing.T) {
 	_, err = h.exchangeClient.ExecuteTransaction(h.ctx,
 		connect.NewRequest(signedExecuteRequest(t, h, idem, dire, cheap)))
 	assertConnectCode(t, err, connect.CodeAlreadyExists)
-	balAfterRetry, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	balAfterRetry, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after retry: %v", err)
 	}

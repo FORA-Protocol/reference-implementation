@@ -28,7 +28,7 @@ import (
 //	    (claims free) while the selected term is seedPricedTerm (PER_UNIT $0.05).
 //	    The merge MUST let the TERM win (0.05), not the publisher's 0.0.
 //
-// applyMetadata aliases this struct onto offer.Ext wholesale (metadata_codec.go),
+// applyMetadata aliases this struct onto offer.Ext wholesale (offer_metadata.go),
 // so offer.Ext["comp"] is the publisher base the renderer then deep-merges its
 // term-rendered comp OVER.
 func publisherShadowExt(t *testing.T) *structpb.Struct {
@@ -85,11 +85,11 @@ func TestComp_TermShadowsPublisherExt(t *testing.T) {
 	h := newPushHarness(t)
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 
 	const shadowPath = "/articles/comp-shadow"
 	entry := &forav1.ResourceEntry{

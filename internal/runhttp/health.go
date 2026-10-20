@@ -50,7 +50,7 @@ func ProbeHealthz(ctx context.Context, addr string) error {
 	if err != nil {
 		return fmt.Errorf("healthz request: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := probeClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("healthz probe: %w", err)
 	}
@@ -59,4 +59,21 @@ func ProbeHealthz(ctx context.Context, addr string) error {
 		return fmt.Errorf("healthz %s: status %d", url, resp.StatusCode)
 	}
 	return nil
+}
+
+// probeClient is the client one probe dials with: a private transport that
+// pools nothing, built fresh per call.
+//
+// It is deliberately not http.DefaultClient. httptest.Server.Close() calls
+// http.DefaultTransport.CloseIdleConnections() as a convenience, so in a test
+// binary where one parallel test closes its server while another is probing,
+// the close drops the idle connection the probe just took out of the shared
+// pool and the in-flight request fails with "connection broken: http:
+// CloseIdleConnections called". A private transport keeps no pool any peer can
+// reach, so nothing outside this function can disturb the request.
+//
+// Disabling keep-alives costs the probe nothing. MaybeHealthcheck sends one
+// request and then calls os.Exit, so a pooled connection is never reused.
+func probeClient() *http.Client {
+	return &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 }

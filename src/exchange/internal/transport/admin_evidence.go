@@ -135,6 +135,7 @@ func evidenceJSON(e repo.EvidenceRecord) *evidenceview.Evidence {
 func transactionStateJSON(t repo.TransactionRecord) *evidenceview.TransactionState {
 	return &evidenceview.TransactionState{
 		IdempotencyKey:  t.IdempotencyKey,
+		AgentID:         t.AgentID,
 		SignedURLHash:   t.SignedURLHash,
 		SignedURLExpiry: timeOrNil(t.Expiry),
 	}

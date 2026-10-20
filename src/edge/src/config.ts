@@ -1,12 +1,17 @@
 import { z } from 'zod';
 
-import { type Jwk, JwkSchema, MAX_WBA_KEYS, createKeyCache } from './keys.js';
+import type { Ed25519Verify } from '@fora-protocol/sdk/pop';
+
+import { createKeyCache } from './keys-cache.js';
+import { type Jwk, JwkSchema, MAX_WBA_KEYS } from './keys.js';
 import {
   type AppDeps,
   type CatalogContributor,
+  type SignedWbaDirectory,
   type WbaKey,
   buildPublisherManifest,
   buildPublisherWba,
+  signedDirectoryFrom,
 } from './types.js';
 
 const EnvSchema = z.object({
@@ -72,6 +77,17 @@ const EnvSchema = z.object({
    */
   WBA_REVOCATION_URL: z.string().url().optional(),
   /**
+   * Optional pre-signed Web Bot Auth directory response, a JSON object
+   * {body, content_digest, signature_input, signature}: the exact directory body
+   * and the three header values signDirectoryResponse produced for it, made
+   * offline by whoever holds the key, for the host this edge serves (see
+   * scripts/sign-wba-directory.mjs). When set, the directory route serves it
+   * byte for byte; the profile requires a directory response signed by every key
+   * it lists, and this edge holds no private key to sign with. When
+   * WBA_KEYS_JSON is also set, the body must list exactly those keys.
+   */
+  WBA_SIGNED_DIRECTORY_JSON: z.string().optional(),
+  /**
    * Optional overrides for the bot gate's pattern lists: JSON arrays of
    * regular-expression sources (compiled case-insensitive). ALLOW names the
    * search crawlers that read for free; DENY names the AI bots sent to
@@ -80,6 +96,13 @@ const EnvSchema = z.object({
    */
   BOT_UA_ALLOW_JSON: z.string().optional(),
   BOT_UA_DENY_JSON: z.string().optional(),
+  /**
+   * Optional JSON array of the path prefixes the publisher licenses, each
+   * starting with '/'. An unsigned read from an AI bot is sent to negotiate
+   * only inside them; the rest of the site passes to the origin. Unset or
+   * empty = the whole site. The discovery routes are unaffected either way.
+   */
+  LICENSED_PATHS_JSON: z.string().optional(),
   /**
    * Proof-of-possession enforcement on agent-bound delivery URLs (ADR-013
    * D6.1). Defaults ON: this edge can run the check, and the rule is "default
@@ -109,23 +132,33 @@ export function parseEnv(env: unknown): EdgeEnv {
   return EnvSchema.parse(env);
 }
 
-export function buildDeps(env: EdgeEnv): AppDeps {
+// buildDeps assembles the app from the parsed settings. `verifyEd25519` is the
+// runtime's Ed25519 primitive, for a runtime whose WebCrypto has none (Fastly
+// Compute): the key directory read, the signed-URL check and the delivery-proof
+// check all run through it. Omitted, each uses WebCrypto.
+export function buildDeps(env: EdgeEnv, verifyEd25519?: Ed25519Verify): AppDeps {
   const contributors = parseCatalogContributors(env.CATALOG_CONTRIBUTORS_JSON);
   const parsedExchanges = parseExchanges(env.EXCHANGES_JSON);
   const manifest = buildPublisherManifest(env.PROVIDER, parsedExchanges, contributors);
-  const wba = buildWba(env.WBA_KEYS_JSON, env.WBA_REVOCATION_URL);
+  const wbaKeys = parseWbaKeys(env.WBA_KEYS_JSON);
+  const wba =
+    wbaKeys !== undefined ? buildPublisherWba(wbaKeys, env.WBA_REVOCATION_URL) : undefined;
+  const wbaSigned = parseSignedDirectory(env.WBA_SIGNED_DIRECTORY_JSON, wbaKeys);
   const staticKeys = parseVerifyKeys(env.FORA_VERIFY_KEYS);
   const cache = createKeyCache({
     wbaUrl: env.EXCHANGE_WBA_URL,
     ...(staticKeys !== undefined ? { staticKeys } : {}),
+    ...(verifyEd25519 !== undefined ? { verifyEd25519 } : {}),
   });
   const acmeTokens = parseAcmeTokens(env.ACME_TOKENS_JSON);
   const botAllow = parseBotPatterns(env.BOT_UA_ALLOW_JSON);
   const botDeny = parseBotPatterns(env.BOT_UA_DENY_JSON);
+  const licensedPaths = parseLicensedPaths(env.LICENSED_PATHS_JSON);
   return {
     manifest,
     exchangeUrl: env.EXCHANGE_URL,
     resolveKey: (keyid) => cache.resolve(keyid),
+    ...(verifyEd25519 !== undefined ? { verifyEd25519 } : {}),
     // Default ON, per ADR-013 D6.1: this edge can run the proof-of-possession
     // check, so it does. The custodial-flow objection that once forced it off
     // is answered upstream rather than here — the registry, which holds the
@@ -133,13 +166,27 @@ export function buildDeps(env: EdgeEnv): AppDeps {
     // (ADR-023). Opting out is explicit and is a downgrade to bearer security.
     enforceBinding: env.FORA_ENFORCE_BINDING !== 'false',
     ...(wba !== undefined ? { wba } : {}),
+    ...(wbaSigned !== undefined ? { wbaSigned } : {}),
     ...(env.RSL_BODY !== undefined ? { rslBody: env.RSL_BODY } : {}),
     ...(acmeTokens !== undefined ? { acmeTokens } : {}),
     ...(env.ORIGIN_URL !== undefined ? { originUrl: env.ORIGIN_URL } : {}),
     ...(env.SAME_ZONE_ORIGIN === 'true' ? { sameZoneOrigin: true } : {}),
     ...(botAllow !== undefined ? { botAllowPatterns: botAllow } : {}),
     ...(botDeny !== undefined ? { botDenyPatterns: botDeny } : {}),
+    ...(licensedPaths !== undefined ? { licensedPaths } : {}),
   };
+}
+
+// parseLicensedPaths reads the publisher's scope. A malformed value throws
+// rather than being ignored: ignoring it would gate the whole site, and a
+// value that silently widened or narrowed what is licensed is worse than a
+// Worker that refuses to start. An empty array is the whole site, the same as
+// no value.
+function parseLicensedPaths(raw: string | undefined): readonly string[] | undefined {
+  if (!raw) return undefined;
+  const parsed: unknown = JSON.parse(raw);
+  const paths = z.array(z.string().startsWith('/').max(1024)).max(256).parse(parsed);
+  return paths.length > 0 ? paths : undefined;
 }
 
 // parseBotPatterns compiles a JSON array of regex sources into
@@ -237,10 +284,30 @@ const WbaKeySchema = z.object({
   not_after: z.string().regex(RFC3339),
 });
 
-function buildWba(rawKeys: string | undefined, revocationUrl: string | undefined): AppDeps['wba'] {
-  const keys = parseWbaKeys(rawKeys);
-  if (keys === undefined) return undefined;
-  return buildPublisherWba(keys, revocationUrl);
+// The directory a pre-signed body must be. The envelope is read by the shared
+// signedDirectoryFrom; the body is checked as a directory here rather than
+// trusted as one, so a malformed value fails on the first request instead of
+// being served as a directory every reader refuses.
+const WbaDirectoryBodySchema = z.object({
+  keys: z.array(WbaKeySchema).min(1).max(MAX_WBA_KEYS),
+  revocation_url: z.string().url().optional(),
+});
+
+function parseSignedDirectory(
+  raw: string | undefined,
+  keys: WbaKey[] | undefined,
+): SignedWbaDirectory | undefined {
+  if (!raw) return undefined;
+  const signed = signedDirectoryFrom(raw);
+  const doc = WbaDirectoryBodySchema.parse(JSON.parse(signed.body));
+  // Both are parsed through the same key schema, so their field order matches
+  // and the serializations compare the keys themselves.
+  if (keys !== undefined && JSON.stringify(doc.keys) !== JSON.stringify(keys)) {
+    throw new Error(
+      'WBA_SIGNED_DIRECTORY_JSON lists other keys than WBA_KEYS_JSON: re-sign the directory after changing the keys',
+    );
+  }
+  return signed;
 }
 
 function parseWbaKeys(raw: string | undefined): WbaKey[] | undefined {

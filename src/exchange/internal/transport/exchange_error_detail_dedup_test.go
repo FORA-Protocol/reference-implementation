@@ -7,46 +7,21 @@ import (
 	"testing"
 )
 
-// TestExchangeFault_SingleGenericEnvelopeSource is the structural red guard for
-// the generic (no-reason) ExchangeService ErrorDetail envelope having exactly
-// ONE source of truth.
+// TestExchangeFault_SingleGenericEnvelopeSource guards that the generic
+// (no-reason) ExchangeService ErrorDetail envelope has exactly ONE source:
+// connectserver.AttachErrorDetail, the shared SDK call that builds it, appears
+// once in the exchange transport package's non-test source, in
+// genericFaultError. executeTxError uses the distinct typed-reason
+// connectserver.AttachDetail path, so it is not counted.
 //
-// WHY A STRUCTURAL GUARD (not a behavioral one). The fix under test rewrites
-// reportUsageError to delegate to genericFaultError, producing a byte-identical
-// envelope (Domain=fora.v1.ExchangeService + non-authoritative Message + any
-// exchange.Error field metadata, no typed reason oneof). The change is
-// behavior-preserving: the ReportUsage and DiscoverResources fault envelopes are
-// identical BEFORE and AFTER the refactor. A behavioral assertion "ReportUsage
-// envelope == generic envelope" is therefore GREEN today and cannot serve as a
-// TDD-red artifact — the two bodies are already byte-identical. The behavior is
-// genuinely unobservable-to-change, so per the write-test structural-disease
-// exception the red artifact is the source-level guard that the later
-// sweep-verify re-runs, mirroring the disease-scan command
-//
-//	grep -rn 'connectserver.AttachErrorDetail(' src/ internal/ --include='*.go' | grep -v _test.go
-//
-// The disease: two public fault wrappers (genericFaultError, reportUsageError)
-// build the generic envelope with byte-identical connectserver.AttachErrorDetail
-// bodies under different names — two sources that can drift when the envelope
-// changes (a new metadata key, a per-RPC domain). Today jscpd misses it only
-// because the surrounding docstrings differ in length, defeating textual clone
-// detection.
-//
-// The behavioral regression guard stays elsewhere and MUST stay green across the
-// refactor: the 11 assertReportRejectionField assertions in
-// report_usage_integration_test.go pin the ReportUsage envelope (Domain +
-// metadata[field]) and assertErrorDomain in exchange_negatives_integration_test.go
-// pins the generic DiscoverResources envelope, both through the real Connect RPC
-// surface.
-//
-// The invariant this guard pins: connectserver.AttachErrorDetail — the shared SDK
-// call that constructs the generic no-reason envelope — appears exactly ONCE in
-// the exchange transport package's non-test source (only in genericFaultError).
-// executeTxError uses the distinct typed-reason connectserver.AttachDetail path,
-// so it is not counted. Both sanctioned fixes satisfy this: delegating
-// reportUsageError to genericFaultError, or deleting reportUsageError and routing
-// the handler through genericFaultError. It FAILS today (two call sites) and
-// passes once the duplicate body is collapsed.
+// It is a structural guard because the property is not observable through the
+// RPC surface: a second wrapper building a byte-identical envelope answers
+// exactly like the first, until the two drift when the envelope changes (a new
+// metadata key, a per-RPC domain). The behaviour itself is pinned elsewhere,
+// through the real Connect RPC surface: the assertReportRejectionField
+// assertions in report_usage_integration_test.go pin the ReportUsage envelope,
+// and assertErrorDomain in exchange_negatives_integration_test.go pins the
+// generic DiscoverResources envelope.
 func TestExchangeFault_SingleGenericEnvelopeSource(t *testing.T) {
 	t.Parallel()
 

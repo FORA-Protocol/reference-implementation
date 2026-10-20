@@ -32,13 +32,28 @@ const (
 // Absent (false, nil error) covers both a document with no registration block
 // and a block with no schema member. Both mean the Exchange asks for nothing in
 // particular, which is a normal state with its own contract — registration_data
-// is passed through uninspected — and never a refusal. A body that is not JSON
-// is an error, because ParseDocument already accepted it as a manifest and a
-// document that decodes as a message but not as JSON is a contradiction worth
+// is passed through uninspected — and never a refusal. A body that cannot be
+// read is an error, because ParseDocument already accepted it as a manifest and
+// a document that decodes as a message but not as JSON is a contradiction worth
 // reporting rather than reading as silence.
 func (d *Document) RegistrationSchemaBytes() ([]byte, bool, error) {
 	if d == nil || len(d.Raw) == 0 {
 		return nil, false, nil
+	}
+	// Two different facts arrive at the same unmarshal, so they are told apart
+	// before either is reported. A body that is not JSON never parsed and is
+	// ErrNotJSON; a body that parsed into something other than an object is a
+	// document that arrived and is the wrong shape, which is ErrSchemaInvalid.
+	// Reporting both as the second would call an unparseable body a schema
+	// violation, and reporting both as the first would say a JSON array never
+	// parsed.
+	//
+	// Neither is reachable through ParseDocument, which validates and decodes
+	// before a Document exists — so d.Raw is already known to be a JSON object
+	// there. They are reachable through the exported type, whose Raw a caller can
+	// set, and that is who this distinction is for.
+	if !json.Valid(d.Raw) {
+		return nil, false, fmt.Errorf("%w: read %s", ErrNotJSON, registrationBlock)
 	}
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(d.Raw, &top); err != nil {

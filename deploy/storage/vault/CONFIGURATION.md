@@ -45,8 +45,8 @@ These are read by the Identity Service, and are described from its side in
 
 | Name | Required? | What it is | Example |
 |---|---|---|---|
-| `VAULT_ADDR` | Optional, **set it** | Vault's address. Read by the Vault client library rather than by the service, so leaving it unset does not fail — it silently means `https://127.0.0.1:8200`, and every key operation then fails. | `https://vault.internal:8200` |
-| `VAULT_TOKEN` | Optional, **set it** | The token the Identity Service authenticates with. A token is the only authentication method implemented; the longer-lived methods Vault offers are not implemented yet. | `hvs.CAESI…` |
+| `VAULT_ADDR` | Optional, **set it** | Vault's address ([Vault's environment variable reference](https://developer.hashicorp.com/vault/docs/commands#environment-variables)). The Identity Service's own code never reads this variable. It builds its Vault client with the HashiCorp client library's [`DefaultConfig()`](https://pkg.go.dev/github.com/hashicorp/vault/api#DefaultConfig) (in `src/identity/internal/idconfig/idconfig.go`), and that call reads `VAULT_ADDR` from the environment through [`Config.ReadEnvironment()`](https://pkg.go.dev/github.com/hashicorp/vault/api#Config.ReadEnvironment). So leaving it unset does not fail — the library silently uses its default `https://127.0.0.1:8200`, and every key operation then fails. | `https://vault.internal:8200` |
+| `VAULT_TOKEN` | Optional, **set it** — unless a Vault Proxy holds the token | The token the Identity Service authenticates with ([Vault's environment variable reference](https://developer.hashicorp.com/vault/docs/commands#environment-variables)). The library's [`NewClient()`](https://pkg.go.dev/github.com/hashicorp/vault/api#NewClient) reads it from the environment, and the Identity Service reads it once more in the same `idconfig.go` and sets it on the client explicitly. A token is the only authentication method implemented in the service itself; the longer-lived methods Vault offers are not implemented yet. A Vault Proxy may hold the token instead: the service then sets `VAULT_ADDR` to the Proxy's listener (a `unix:///path/proxy.sock` address works, the client dials it directly) and no `VAULT_TOKEN` at all, and the Proxy attaches its own token to every request (its [API proxy](https://developer.hashicorp.com/vault/docs/agent-and-proxy/proxy/apiproxy) feature). The compose bundle's server mode (`vault_mode = "server"` in `deploy/terraform/modules/compose-stack`) uses this Proxy setup: the Identity Service container has no `VAULT_TOKEN`, its `VAULT_ADDR` is the Proxy's Unix socket, and the Proxy logs in to Vault with the auth method the deployment configures. | `hvs.CAESI…` |
 | `IDENTITY_KV_MOUNT` | Optional | Which secrets engine holds the keys. Default `secret`, which is the engine a new Vault already has. Give it a dedicated one instead. | `fora-agents` |
 | `IDENTITY_KV_PREFIX` | Optional | The folder inside that engine. Default `agents`. It exists so the engine can hold unrelated secrets without colliding. | `agents` |
 | `VAULT_CACERT` | Optional | Path to the certificate authority that signed Vault's TLS certificate, if it is not already trusted by the container. Read by the client library. | `/secrets/vault-ca.pem` |
@@ -67,20 +67,14 @@ while `/healthz` stays green.
 **Do not give the Identity Service a root token.** It performs four operations on one
 path prefix and needs nothing else.
 
-Two rules are enough. Replace `fora-agents` and `agents` with your own mount and
-prefix:
-
-```hcl
-# Read, create and update one agent key.
-path "fora-agents/data/agents/*" {
-  capabilities = ["create", "update", "read"]
-}
-
-# List the agents, list one agent's keys, and erase a key completely.
-path "fora-agents/metadata/agents/*" {
-  capabilities = ["read", "list", "delete"]
-}
-```
+Two rules are enough. They are in [`identity-policy.hcl`](identity-policy.hcl), the one
+copy of the policy: the e2e stack and the keystore test read it, and a deployment's own
+bootstrap should render it rather than keep a copy. `${KV_MOUNT}` in it stands for your
+mount name. The first rule grants `create`,
+`update` and `read` on `<mount>/data/agents/*`. The second grants `read`, `list` and
+`delete` on `<mount>/metadata/agents/*`. If you set `IDENTITY_KV_PREFIX` to something
+other than `agents`, change `agents` in both paths. [`DEPLOYMENT.md`](DEPLOYMENT.md) §4
+shows how to render and write it.
 
 The `data/` and `metadata/` split is how KV version 2 works: the secret's contents live
 under `data/`, and its listing and version history live under `metadata/`.
@@ -122,7 +116,7 @@ The compose files in this repository start Vault in `-dev` mode:
 |---|---|---|
 | `vault server -dev` | Starts unsealed, ready in a second, no configuration. | It keeps nothing across a restart. Every agent key in it is lost when the container stops. |
 | `VAULT_DEV_ROOT_TOKEN_ID` set to a fixed value | Tests need a known token. | It is published in this repository, and it is a root token. |
-| No TLS | The test network has no certificates. | Agent private keys would cross the network in the clear. |
+| No TLS | No certificate is issued for Vault on the test networks. | Agent private keys would cross the network in the clear. |
 | The default `secret/` mount | It is already there in dev mode. | Works, but mixes agent keys with anything else that ends up in the default engine. Use a dedicated mount. |
 
 ---

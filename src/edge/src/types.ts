@@ -1,5 +1,5 @@
-import type { PopInput, PopResult } from '@fora-protocol/sdk-l1/pop';
-import type { VerifyResult } from '@fora-protocol/sdk-l1/verify';
+import type { Ed25519Verify, PopInput, PopResult } from '@fora-protocol/sdk/pop';
+import type { VerifyResult } from '@fora-protocol/sdk/verify';
 import type { BotSignal } from './bot-classification.js';
 
 // AppVariables is the per-request state the middleware puts on the Hono
@@ -56,6 +56,17 @@ export interface WbaFile {
   revocation_url?: string;
 }
 
+// A Web Bot Auth key directory response signed offline
+// (WBA_SIGNED_DIRECTORY_JSON): the exact body the signatures cover, and the
+// three header values signDirectoryResponse produced for it. Served byte for
+// byte; a single changed byte breaks the Content-Digest.
+export interface SignedWbaDirectory {
+  body: string;
+  contentDigest: string;
+  signatureInput: string;
+  signature: string;
+}
+
 // FORA /.well-known/fora.json commercial overlay (role=ROLE_PUBLISHER for the
 // edge). Wire shape mirrors protojson of fora.v1.WellKnownManifest with
 // UseProtoNames=true: snake_case fields, full enum value names. Identity keys
@@ -80,13 +91,29 @@ export interface Manifest {
 }
 
 export interface AppDeps {
-  resolveKey: (keyid: string | undefined) => Promise<CryptoKey | undefined>;
+  // Resolves a delivery URL's keyid (RFC 7638 thumbprint) to the raw 32-byte
+  // Ed25519 public key it names.
+  resolveKey: (keyid: string | undefined) => Promise<Uint8Array<ArrayBuffer> | undefined>;
+  /**
+   * The runtime's Ed25519 primitive, in the SDK's (publicKey, signature,
+   * message) order. The signed-URL check and the delivery-proof check both run
+   * through it, and buildDeps hands the same one to the key directory read.
+   * Unset, WebCrypto verifies (webCryptoEd25519); Fastly Compute, whose
+   * SubtleCrypto has no Ed25519, sets it.
+   */
+  verifyEd25519?: Ed25519Verify;
   manifest: Manifest;
   // Web Bot Auth directory served at /.well-known/http-message-signatures-directory.
-  // The publisher's Ed25519 signing key(s) as a JWK Set. Absent on deployments
-  // that publish no signing key (e.g. the AWS CloudFront-native edge, whose
-  // verify key is provisioned out of band).
+  // The publisher's Ed25519 signing key(s). Absent on deployments that publish
+  // no signing key (e.g. the AWS CloudFront-native edge, whose verify key is
+  // provisioned out of band).
   wba?: WbaFile;
+  // The same directory as a pre-signed response (WBA_SIGNED_DIRECTORY_JSON),
+  // served verbatim in place of `wba` when set. The edge holds no private key,
+  // so the response signatures the Web Bot Auth profile requires are made
+  // offline by whoever holds the key, for the host the directory is served
+  // under.
+  wbaSigned?: SignedWbaDirectory;
   // Exchange base URL advertised to bots via the X-FORA-Exchange hint header.
   // Not part of the served unified manifest; sourced from EXCHANGE_URL.
   exchangeUrl?: string;
@@ -96,7 +123,8 @@ export interface AppDeps {
   verify?: (rawUrl: string) => Promise<VerifyResult>;
   /**
    * Proof-of-possession check for delivery-URL identity binding (ADR-013).
-   * Injectable for tests; defaults to pop.verifyAgentBinding.
+   * Injectable for tests; defaults to pop.verifyAgentBinding through
+   * verifyEd25519.
    */
   verifyBinding?: (input: PopInput) => Promise<PopResult>;
   /**
@@ -144,6 +172,11 @@ export interface AppDeps {
    */
   botAllowPatterns?: readonly RegExp[];
   botDenyPatterns?: readonly RegExp[];
+  /**
+   * The path prefixes the publisher licenses (LICENSED_PATHS_JSON). The bot
+   * gate applies only inside them. Unset = the whole site.
+   */
+  licensedPaths?: readonly string[];
 }
 
 // buildPublisherManifest/buildPublisherWba assemble the canonical ROLE_PUBLISHER
@@ -153,11 +186,13 @@ export interface AppDeps {
 // implementation directly. The body lives in the plain-JS ./well-known.mjs
 // (re-exported here) so the build-step-less AWS shim can import it without a
 // TypeScript toolchain; a protocol bump is edited once. Re-exported from types.ts
-// (not config.ts) so the Fastly shim still imports it without pulling zod into
-// its bundle.
+// (not config.ts) so the Fastly shim imports it without the edge's settings
+// schema.
 export {
   buildPublisherManifest,
   buildPublisherWba,
+  signedDirectoryFrom,
+  signedDirectoryHeaders,
   WELL_KNOWN_PATH,
   WBA_PATH,
   WBA_DIRECTORY_CONTENT_TYPE,

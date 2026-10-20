@@ -74,7 +74,6 @@ import (
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	foraconnect "github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
 	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/service"
@@ -297,7 +296,8 @@ func assertEntryStored(t *testing.T, c *corpusHarness, entry *forav1.ResourceEnt
 		return
 	}
 	uri := corpusURI(entry)
-	assertOfferCount(t, c.pushHarness, uri, 1)
+	// One offer per stored term: the entry's terms are all public in the corpus.
+	assertOfferCount(t, c.pushHarness, uri, len(entry.GetTerms()))
 	if name != aliasResolvedVector {
 		return
 	}
@@ -384,7 +384,8 @@ func assertEntryWireTier(t *testing.T, err error, v testutil.LicenseTermEntryVec
 // normalizeWireRefused names the normalize vectors the wire tier refuses, and
 // why. The corpus records what NormalizeLicenseTerm makes of them; through the
 // RPC the validate interceptor refuses them first, because the restriction
-// token pattern admits only clean ASCII and a term must carry pricing.
+// token pattern admits only clean ASCII and every term of an entry must carry
+// pricing.
 var normalizeWireRefused = map[string]wireRefusal{
 	"function_mixed_case_padding": {
 		field: "entries[0].terms[0].restrictions[0].permitted[0]", rule: "string.pattern",
@@ -403,8 +404,9 @@ var normalizeWireRefused = map[string]wireRefusal{
 		why: "the KELVIN SIGN is outside the ASCII token alphabet; the NBSP-padded second token is refused too",
 	},
 	"empty_term": {
-		field: "entries[0].terms[0].pricing", rule: "required",
-		why: "a term without pricing (and with unspecified semantics) never reaches the fold, which has nothing to touch in it",
+		field: "entries[0]", rule: "resource_entry.terms.pricing_required",
+		why: "a term without pricing (and with unspecified semantics) never reaches the fold, which has nothing to touch in it; " +
+			"the pinned protocol states the pricing requirement on the entry, not the term",
 	},
 }
 
@@ -429,10 +431,13 @@ func TestPushResources_CorpusNormalize(t *testing.T) {
 			}
 			acceptedPush(t, resp, err)
 			want := decodeCorpusTerm(t, v.Name, v.Normalized)
-			got := discoverTermsAs(t, c.pushHarness, corpusURI(entry), requesterWithScopes("agent-discover", "*"))
-			if len(got) != 1 || !proto.Equal(got[0], want) {
-				t.Fatalf("discovered terms = %v, want the one normalized term %v", got, want)
+			// One offer, selling the normalized term: its term copy is the
+			// normalized term without pricing, and its own price is the term's.
+			got := discoverOffersAs(t, c.pushHarness, corpusURI(entry), requesterWithScopes("agent-discover", "*"))
+			if len(got) != 1 {
+				t.Fatalf("discovered %d offers, want the one selling the normalized term %v", len(got), want)
 			}
+			findOfferSelling(t, got, want)
 		})
 	}
 }
@@ -446,8 +451,9 @@ var validateWireRefused = map[string]wireRefusal{
 		why: `"TOKENS" fails the bare-unit pattern, which admits lower case only; the membership check the corpus records never runs`,
 	},
 	"empty_term_accepted": {
-		field: "entries[0].terms[0].pricing", rule: "required",
-		why: "the per-term face accepts an empty term (nothing to membership-check); the wire requires pricing and a specified semantics",
+		field: "entries[0]", rule: "resource_entry.terms.pricing_required",
+		why: "the per-term face accepts an empty term (nothing to membership-check); the wire requires pricing on every " +
+			"term of an entry, stated as the entry's rule, and a specified semantics",
 	},
 	"unregistered_token_without_kind_names_the_unset_enum": {
 		field: "entries[0].terms[0].restrictions[0].kind", rule: "enum.not_in",

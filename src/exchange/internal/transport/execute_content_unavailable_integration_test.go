@@ -34,7 +34,7 @@ import (
 func missingResourceOffer(t *testing.T, h *testHarness, genuine *forav1.Offer, path string) *forav1.Offer {
 	t.Helper()
 	return resignedOffer(t, h, genuine, func(o *forav1.Offer) {
-		u := "https://" + h.tenantDomain + path
+		u := "https://" + h.siteDomain + path
 		o.Identity.CanonicalUrl = &u
 	})
 }
@@ -57,7 +57,7 @@ func TestExecuteTransaction_CatalogMissDeniesItemAndFinalizes(t *testing.T) {
 	missing := missingResourceOffer(t, h, discoverOffer(t, h, withdrawnURI), "/articles/content-withdrawn")
 
 	const idem = "tx-content-unavailable"
-	requester := agentRequester("agent-test")
+	requester := agentRequester()
 	items := []*forav1.TransactionItem{
 		{Offer: present, AgentAcceptance: signAcceptanceFor(t, h.callerPriv, present, requester, idem)},
 		{Offer: missing, AgentAcceptance: signAcceptanceFor(t, h.callerPriv, missing, requester, idem)},

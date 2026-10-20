@@ -141,8 +141,15 @@ func TestRegister_RefusesAPayloadThePublishedSchemaRejects(t *testing.T) {
 	}
 	// It points the agent at where the requirements are published, which is the
 	// tool description's claim and has to be true in the error too.
-	if !strings.Contains(msg, "account_registration.data_schema") {
-		t.Errorf("error %q does not say where the required shape is published", msg)
+	//
+	// The WHOLE pointer, not just the member path. Asserting the key alone would
+	// pass a message that named account_registration.data_schema and never said
+	// which document to read it from, and an agent cannot act on half a pointer.
+	wantPointer := fmt.Sprintf(
+		"https://%s/.well-known/fora.json under account_registration.data_schema",
+		f.exchange.Domain(t))
+	if !strings.Contains(msg, wantPointer) {
+		t.Errorf("error %q does not carry the published-shape pointer %q", msg, wantPointer)
 	}
 	if len(f.exchange.Calls()) != 0 {
 		t.Error("the refused payload was signed and sent anyway")
@@ -424,6 +431,52 @@ func TestRegister_BoundsAnExchangeThatEchoesThePayloadBack(t *testing.T) {
 	}
 }
 
+// TestRegister_NeverLogsAMemberNameTheCallerChose is the other half of the same
+// promise, and the half the payload-name guard cannot see.
+//
+// The sibling above uses a sentinel VALUE. This one uses a sentinel NAME,
+// because the schema pre-check reports each offending member as a JSON pointer
+// into the submitted payload -- and where the published schema constrains
+// members it does not itself name, that pointer is a member name the caller
+// invented. A schema with an additionalProperties subschema is the plainest way
+// to reach it: the Exchange never wrote the name down, so the only place it can
+// come from is the payload.
+//
+// The refusal is local, so nothing is signed and nothing is sent, and the whole
+// question is what reaches an operator's log line on the way back.
+func TestRegister_NeverLogsAMemberNameTheCallerChose(t *testing.T) {
+	const sentinel = "Zolvath_Kreznik_Ledger_8817"
+	f := newFixture(t)
+	// Not FullRegistration: this needs a schema whose constraint lands on a member
+	// the operator never named, which is the only way the pointer carries the
+	// caller's own word rather than the schema's.
+	f.exchange.setRegistration(rwtestutil.Registration{
+		DataSchemaJSON: `{"$schema":"https://json-schema.org/draft/2020-12/schema",` +
+			`"type":"object","additionalProperties":{"type":"number"}}`,
+	})
+	a := f.provision(t, "dev-one")
+	session := f.connect(t, a.Token)
+
+	msg := callToolErr(t, session, "fora_register", map[string]any{
+		"exchange": f.exchange.Domain(t),
+		"fields":   map[string]any{sentinel: "not a number"},
+	})
+	if msg == "" {
+		t.Fatal("a payload the published schema refuses was accepted")
+	}
+	// The agent DOES get the name back -- that is the point of the refusal, and it
+	// is the caller's own word being returned to the caller. The operator is who
+	// must not see it.
+	if !strings.Contains(msg, sentinel) {
+		t.Fatalf("the refusal %q does not name the offending member, so this test is "+
+			"not driving the path it claims to", msg)
+	}
+	assertUnlogged(t, f, sentinel, "a locally refused registration")
+	if len(f.exchange.Calls()) != 0 {
+		t.Error("the refused payload was signed and sent anyway")
+	}
+}
+
 // assertUnlogged fails when the sentinel appears anywhere in what the service
 // recorded.
 func assertUnlogged(t *testing.T, f *fixture, sentinel, what string) {
@@ -462,6 +515,19 @@ func TestRegister_LogsTheOperatorLineWhenTheManifestCannotBeRead(t *testing.T) {
 	}
 	if !strings.Contains(lines[0], "fora_register") {
 		t.Errorf("log line %s does not name the tool the operator would search for", lines[0])
+	}
+	// And it says WHICH failure, which matters because the outbound leg reports an
+	// unreadable manifest under the same class as a send that never completed.
+	// Those have different remedies and an operator has to tell them apart.
+	//
+	// The separating value is the KIND, carried in the rendered cause, not the
+	// reason token beside it. That token is the protocol's own vocabulary — the
+	// peer's typed reason where there is one, the SDK's class where there is not
+	// — and for a failure no peer ever saw the class is the coarse "unreachable".
+	// Asserting the kind here is asserting the thing that actually distinguishes
+	// the two.
+	if !strings.Contains(lines[0], "exchacct: requirements at") {
+		t.Errorf("log line %s does not report the failure as the requirements read", lines[0])
 	}
 	// Nothing was signed: the failure is the read, before any RPC.
 	if len(f.exchange.Calls()) != 0 {

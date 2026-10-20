@@ -84,16 +84,26 @@ var maxUint128Bytes = [16]byte{
 	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 }
 
-// AccountID maps (prefix, businessID) to a deterministic TigerBeetle account id:
-// the low 16 bytes of sha256(prefix || businessID). Phase 1 is single-currency,
-// so the ledger/currency is deliberately not folded in; multi-currency must key
-// the id by currency too, because a TigerBeetle id is unique per cluster, not per
-// ledger. Returns ErrEmptyID for an empty business id.
-func AccountID(p Prefix, businessID string) (tb.Uint128, error) {
-	if businessID == "" {
+// AccountID maps (prefix, currency, businessID) to a deterministic TigerBeetle
+// account id: the low 16 bytes of sha256(prefix || currency || ":" || businessID).
+//
+// The currency (ISO 4217 alpha code) is part of the hashed input because a
+// TigerBeetle id is unique per CLUSTER, not per ledger. Without it, one agent's
+// EUR and USD accounts would derive the same id and the second ledger could
+// never create its account — the create would be rejected as a conflicting
+// duplicate. Every account is keyed this way: the agent balance, the
+// resource-owner revenue account, the platform fee account, and the platform
+// liquidity account.
+//
+// Returns ErrEmptyID for an empty business id or an empty currency. An empty
+// currency would collapse every currency onto one id, which is the exact
+// collision this argument exists to prevent, so it is refused rather than
+// treated as a default.
+func AccountID(p Prefix, currency, businessID string) (tb.Uint128, error) {
+	if businessID == "" || currency == "" {
 		return tb.Uint128{}, ErrEmptyID
 	}
-	return reduce(sha256.Sum256([]byte(string(p) + businessID)))
+	return reduce(sha256.Sum256([]byte(string(p) + currency + ":" + businessID)))
 }
 
 // TransferID maps an idempotency key to a deterministic TigerBeetle transfer id

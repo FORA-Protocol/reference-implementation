@@ -11,11 +11,14 @@
 -- result off transaction_log; reuse of the key with a different item set is
 -- refused before side effects.
 --
--- agent_id is the caller identity resolved from the wire requester.id AND
--- authenticated before this row is written: admission verifies possession of
--- that identity's registered key (a body offer-acceptance signature) before
--- any claim insert, so a caller cannot reserve a key under an identity it does
--- not hold. The protocol scopes idempotency_key to the caller, so two
+-- agent_id is the caller identity the TRANSPORT proved, and it is authenticated
+-- twice over before this row is written. The identity itself comes from the
+-- signature: the canonical host of the covered Signature-Agent directory for a
+-- direct request, and Requester.domain for one a Broker re-packaged. It is never
+-- taken from Requester.id, which is a free label. Admission then verifies
+-- possession of that identity's registered key (a body offer-acceptance
+-- signature) before any claim insert, so a caller cannot reserve a key under an
+-- identity it does not hold. The protocol scopes idempotency_key to the caller, so two
 -- different agents may use the same key value independently — hence the
 -- composite primary key. That independence holds for each agent's OWN offers.
 -- An agent presenting ANOTHER agent's exact (key, offer) pair still lands on

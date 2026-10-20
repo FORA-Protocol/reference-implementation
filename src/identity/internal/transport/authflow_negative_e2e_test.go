@@ -71,13 +71,7 @@ func TestAuthFlow_CallbackRejectsStateMismatch(t *testing.T) {
 	// /callback with a state that does not match the sealed upstream state — the
 	// CSRF / session-binding control the ticket names as "bad state". The sealed
 	// state is server-minted randomness, so any fixed value here mismatches.
-	q := url.Values{
-		"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {flowClientURI},
-		"state": {"cli-state"}, "code_challenge": {challenge}, "code_challenge_method": {"S256"},
-	}
-	if ar := f.getAuthorize(t, q); ar.status != http.StatusFound {
-		t.Fatalf("authorize = %d, want 302", ar.status)
-	}
+	f.startAuthorize(t, clientID, flowClientURI, challenge)
 
 	cb := url.Values{"code": {"upstream-code"}, "state": {"not-the-sealed-state"}}
 	creq, _ := http.NewRequestWithContext(t.Context(), http.MethodGet,
@@ -161,13 +155,7 @@ func TestAuthFlow_CallbackRejectsUpstreamDenial(t *testing.T) {
 
 	// Authorize to seal the flow cookie; the fake records the server-minted upstream
 	// state so the callback's state check passes and we reach the denial branch.
-	q := url.Values{
-		"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {flowClientURI},
-		"state": {"cli-state"}, "code_challenge": {challenge}, "code_challenge_method": {"S256"},
-	}
-	if ar := f.getAuthorize(t, q); ar.status != http.StatusFound {
-		t.Fatalf("authorize = %d, want 302", ar.status)
-	}
+	f.startAuthorize(t, clientID, flowClientURI, challenge)
 	up, ok := f.up.(*fakeUpstream)
 	if !ok {
 		t.Fatal("expected the fake upstream fixture")
@@ -180,17 +168,7 @@ func TestAuthFlow_CallbackRejectsUpstreamDenial(t *testing.T) {
 	creq, _ := http.NewRequestWithContext(t.Context(), http.MethodGet,
 		f.srv.URL+oauthserver.CallbackPath+"?"+cb.Encode(), nil)
 	r := f.do(t, creq)
-	if r.status != http.StatusFound {
-		t.Fatalf("consent-denial callback = %d, want 302", r.status)
-	}
-	loc, err := url.Parse(r.location)
-	if err != nil {
-		t.Fatalf("parse location: %v", err)
-	}
-	if !strings.HasPrefix(r.location, flowClientURI) {
-		t.Fatalf("denial redirect = %q, want back to the client %q", r.location, flowClientURI)
-	}
-	if got := loc.Query().Get("error"); got != "access_denied" {
+	if got := clientRedirectQuery(t, r).Get("error"); got != "access_denied" {
 		t.Fatalf("denial error param = %q, want access_denied", got)
 	}
 	f.noDeveloperProvisioned(t)
@@ -202,21 +180,11 @@ func TestAuthFlow_ConsentDenialYieldsAccessDenied(t *testing.T) {
 
 	// DENY: the developer refuses the requesting client, so the server must return
 	// access_denied to the client and issue no authorization code.
-	r := f.decideConsent(t, consentDeny)
-	if r.status != http.StatusFound {
-		t.Fatalf("consent deny = %d, want 302", r.status)
-	}
-	loc, err := url.Parse(r.location)
-	if err != nil {
-		t.Fatalf("parse location: %v", err)
-	}
-	if !strings.HasPrefix(r.location, flowClientURI) {
-		t.Fatalf("deny redirect = %q, want back to the client %q", r.location, flowClientURI)
-	}
-	if got := loc.Query().Get("error"); got != "access_denied" {
+	q := clientRedirectQuery(t, f.decideConsent(t, consentDeny))
+	if got := q.Get("error"); got != "access_denied" {
 		t.Fatalf("deny error param = %q, want access_denied", got)
 	}
-	if code := loc.Query().Get("code"); code != "" {
+	if code := q.Get("code"); code != "" {
 		t.Fatalf("a denied consent must not issue a code; got %q", code)
 	}
 }
@@ -399,18 +367,8 @@ func TestAuthFlow_AuthorizeRejectsBadParams(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := f.getAuthorize(t, tc.params)
-			if r.status != http.StatusFound {
-				t.Fatalf("authorize (%s) = %d, want 302 error redirect", tc.name, r.status)
-			}
-			loc, err := url.Parse(r.location)
-			if err != nil {
-				t.Fatalf("parse location: %v", err)
-			}
-			if !strings.HasPrefix(r.location, flowClientURI) {
-				t.Fatalf("%s redirect = %q, want back to the client", tc.name, r.location)
-			}
-			if got := loc.Query().Get("error"); got != tc.wantErr {
+			q := clientRedirectQuery(t, f.getAuthorize(t, tc.params))
+			if got := q.Get("error"); got != tc.wantErr {
 				t.Errorf("%s error = %q, want %q", tc.name, got, tc.wantErr)
 			}
 			if up, ok := f.up.(*fakeUpstream); ok && up.state != "" {

@@ -91,7 +91,7 @@ func TestExecuteTransaction_ZeroCostSkipsBilling(t *testing.T) {
 	assertSignedURLHash(t, logged.SignedURLHash, signedURL)
 
 	// The billing adapter saw nothing (ADR-009 D2).
-	assertBillingLifecycle(t, rec, false, 0, 0)
+	assertBillingLifecycle(t, rec, false, 0)
 }
 
 // TestExecuteTransaction_PaidPathUnchanged is the contrast: a priced (PER_UNIT)
@@ -125,7 +125,7 @@ func TestExecuteTransaction_PaidPathUnchanged(t *testing.T) {
 	}
 	assertSignedURLHash(t, logged.SignedURLHash, signedURL)
 
-	assertBillingLifecycle(t, rec, true, 1, 0)
+	assertBillingLifecycle(t, rec, true, 1)
 }
 
 // TestExecuteTransaction_FreePathReleaseGuard pins the releaseHold
@@ -147,7 +147,7 @@ func TestExecuteTransaction_FreePathReleaseGuard(t *testing.T) {
 	// Authorize never ran (free) and Release short-circuited (no reservation
 	// handle); if the guard were removed, releaseHold("") would call Release and
 	// this would report releaseCallCount == 1.
-	assertBillingLifecycle(t, rec, false, 0, 0)
+	assertBillingLifecycle(t, rec, false, 0)
 }
 
 // TestExecuteTransaction_ZeroRatePerUnitSkipsBilling proves the bypass is keyed
@@ -173,7 +173,7 @@ func TestExecuteTransaction_ZeroRatePerUnitSkipsBilling(t *testing.T) {
 	if logged := loadFreePathTx(t, h, offer, "tx-"+t.Name()); logged.BillingID != "" {
 		t.Errorf("persisted billing_id = %q, want empty on the zero-rate path", logged.BillingID)
 	}
-	assertBillingLifecycle(t, rec, false, 0, 0)
+	assertBillingLifecycle(t, rec, false, 0)
 }
 
 // TestExecuteTransaction_MixedFreePaidBatch pins the per-item billing decision
@@ -192,7 +192,7 @@ func TestExecuteTransaction_MixedFreePaidBatch(t *testing.T) {
 	}
 
 	// Exactly one Record (the paid item), no Release (both succeeded).
-	assertBillingLifecycle(t, rec, true, 1, 0)
+	assertBillingLifecycle(t, rec, true, 1)
 
 	// Per-item persisted billing_id, keyed on each item's derived per-item key:
 	// paid non-empty, free empty.

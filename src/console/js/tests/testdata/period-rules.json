@@ -1,0 +1,5 @@
+{
+  "max_days": 366,
+  "reversed": "The last day comes before the first day.",
+  "too_long": "Choose a period of at most a year."
+}

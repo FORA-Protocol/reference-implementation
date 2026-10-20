@@ -169,6 +169,17 @@ variable "bot_ua_deny_json" {
   }
 }
 
+variable "licensed_paths_json" {
+  description = "LICENSED_PATHS_JSON binding: optional JSON array of the path prefixes the publisher licenses, each starting with '/'. An unsigned read from an AI bot is sent to negotiate only inside them. Unset = the whole site."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.licensed_paths_json == null || can(concat(jsondecode(coalesce(var.licensed_paths_json, "[]")), []))
+    error_message = "licensed_paths_json must be a JSON array of path prefixes (or null)."
+  }
+}
+
 variable "rsl_body" {
   description = "RSL_BODY binding: optional RSL document body served by the worker."
   type        = string
@@ -212,6 +223,20 @@ variable "wba_revocation_url" {
   description = "WBA_REVOCATION_URL binding: optional absolute URL advertised as the publisher WBA directory's revocation channel. Ignored by the worker unless wba_keys_json is also set."
   type        = string
   default     = null
+}
+
+variable "wba_signed_directory_json" {
+  description = "WBA_SIGNED_DIRECTORY_JSON binding: optional pre-signed Web Bot Auth directory response, {body, content_digest, signature_input, signature}, made offline for this host with src/edge/scripts/sign-wba-directory.mjs by whoever holds the key. Served verbatim in place of the unsigned directory; must list exactly the keys in wba_keys_json when both are set. Leave null to serve the directory unsigned."
+  type        = string
+  default     = null
+
+  validation {
+    condition = var.wba_signed_directory_json == null || can(
+      [for field in ["body", "content_digest", "signature_input", "signature"] :
+      tostring(jsondecode(coalesce(var.wba_signed_directory_json, "{}"))[field])]
+    )
+    error_message = "wba_signed_directory_json must be a JSON object carrying body, content_digest, signature_input and signature (or null)."
+  }
 }
 
 # ── Zone protections ─────────────────────────────────────────────────────────

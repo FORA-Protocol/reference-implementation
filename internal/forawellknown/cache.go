@@ -68,8 +68,7 @@ type Cache struct {
 // served it from.
 //
 // The URL is stored rather than rebuilt on read because ErrNoDocument names no
-// document — one sentinel covers the commercial overlay and the WBA key
-// directory, so the address is the only thing that says which one was missing
+// document, so the address is the only thing that says which one was missing
 // and where. A cached refusal that dropped it answered a later caller with less
 // than the first caller got, which is the opposite of what a cache should do.
 type negative struct {
@@ -168,9 +167,13 @@ func (c *Cache) load(ctx context.Context, host string) (*Manifest, error) {
 	if status < 200 || status >= 300 {
 		return nil, fmt.Errorf("%w: %s: status %d", ErrFetch, rawURL, status)
 	}
+	// asFetchFailure, because this IS a fetch even though it does not go through
+	// FetchDocument: the GET above is ours. Without it a body that never parsed
+	// would leave here as the validator's pure answer, and a caller reading the
+	// cache would be told nothing about the origin it just dialled.
 	m, err := ParseManifest(body, c.expectRole)
 	if err != nil {
-		return nil, err
+		return nil, asFetchFailure(err)
 	}
 	c.storePositive(host, m, c.ttlFrom(header))
 	return m, nil

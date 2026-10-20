@@ -17,15 +17,22 @@ once instead of being a contract seven test bodies each had to get right.
 
 WHAT REPEATS AND WHAT DOES NOT. Readiness and sign-up are session-scoped; only
 the bearer is minted per test, because only its ten-minute TTL forces that.
+
+A BEARER THE SERVICE NEVER ISSUED. :func:`forged_bearer` mints a token that has
+every claim a real one has and is signed by a key the service has never seen, for
+the tests that show such a token is refused. A caller with no usable bearer never
+gets an MCP session, so those refusals are read below the MCP client, in
+``mcp_transport.py``.
 """
 
 from __future__ import annotations
 
+import base64
 import os
 
 import pytest
 
-from .identity_signup import BOB_USER, mint_bearer, provision_agent
+from .identity_signup import BOB_USER, CAROL_USER, mint_bearer, provision_agent
 from .readiness import wait_healthy
 from .stack_urls import StackURLs
 
@@ -81,7 +88,7 @@ def mcp_session_agent(compose_stack: StackURLs) -> str:
     flow mints and persists: running this per test left one client row per test
     where one would do.
     """
-    return provision_agent(compose_stack.identity, compose_stack.zitadel)
+    return provision_agent(compose_stack.identity)
 
 
 def mcp_unregistered_agent(compose_stack: StackURLs) -> str:
@@ -95,7 +102,18 @@ def mcp_unregistered_agent(compose_stack: StackURLs) -> str:
     calls ``fora_register`` breaks every claim its consumers make, so they read
     ``fora_status`` before relying on it rather than assuming it.
     """
-    return provision_agent(compose_stack.identity, compose_stack.zitadel, login_name=BOB_USER)
+    return provision_agent(compose_stack.identity, login_name=BOB_USER)
+
+
+def mcp_spending_agent(compose_stack: StackURLs) -> str:
+    """Provision the agent only the balance suite registers and spends as.
+
+    The same sign-up again, as the bootstrap's third local login. The balance
+    suite measures how much one purchase takes off this agent's balance, so no
+    other suite may register it or buy with it. The welcome credit it receives
+    at its first registration is what it spends.
+    """
+    return provision_agent(compose_stack.identity, login_name=CAROL_USER)
 
 
 def mcp_session_bearer(subdomain: str) -> str:
@@ -113,3 +131,15 @@ def mcp_session_bearer(subdomain: str) -> str:
     issuer = required_env("IDENTITY_AUTH_ISSUER")
     seed_b64 = required_env("IDENTITY_TOKEN_SIGNING_KEY")
     return mint_bearer(subdomain, issuer=issuer, audience=issuer, seed_b64=seed_b64)
+
+
+def forged_bearer(subdomain: str) -> str:
+    """A bearer naming ``subdomain`` with the right issuer and audience, signed by a stranger.
+
+    Every claim is what :func:`mcp_session_bearer` would write. Only the signing
+    key differs: a fresh random seed the identity service has never held, so the
+    token is refused for its signature and for nothing else.
+    """
+    issuer = required_env("IDENTITY_AUTH_ISSUER")
+    stranger = base64.b64encode(os.urandom(32)).decode()
+    return mint_bearer(subdomain, issuer=issuer, audience=issuer, seed_b64=stranger)

@@ -85,7 +85,7 @@ describe('deploy/publisher-wellknown templates match what the Worker serves', ()
     expect(await res.json()).toEqual(manifestTemplate);
   });
 
-  it('the key-directory route serves the directory template as a JWK Set', async () => {
+  it('the key-directory route serves the directory template under the Web Bot Auth media type', async () => {
     const res = await app.request(WBA_PATH);
     expect(res.status).toBe(200);
     // Written out rather than compared against WBA_DIRECTORY_CONTENT_TYPE. The
@@ -93,7 +93,9 @@ describe('deploy/publisher-wellknown templates match what the Worker serves', ()
     // hold whatever the constant said and the assertion could never fail. This
     // string is the wire contract an off-the-shelf Web Bot Auth verifier reads
     // the directory by, and the README tells operators to curl for it.
-    expect(res.headers.get('content-type')).toBe('application/jwk-set+json');
+    expect(res.headers.get('content-type')).toBe(
+      'application/http-message-signatures-directory+json',
+    );
     expect(await res.json()).toEqual(wbaTemplate);
   });
 

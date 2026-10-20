@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/ingest"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/catalogfeed"
 )
 
 // sampleFeedPath resolves the committed reference sample JSON-L fixture
@@ -166,11 +166,11 @@ func TestRun_CheckRefusesAnEmptyFeed(t *testing.T) {
 	if err := os.WriteFile(empty, []byte("\n\n"), 0o600); err != nil {
 		t.Fatalf("write feed: %v", err)
 	}
-	// The sentinel, not its sentence. The package exports ErrEmptyFeed and the
+	// The sentinel, not its sentence. The feed package exports ErrEmptyFeed and the
 	// other two call sites match on it; matching the message here would fail on
 	// a reword that changed no behaviour, and would pass for any other error
 	// whose text happened to contain the phrase.
-	if err := run([]string{"-check", empty}, io.Discard); !errors.Is(err, ingest.ErrEmptyFeed) {
+	if err := run([]string{"-check", empty}, io.Discard); !errors.Is(err, catalogfeed.ErrEmptyFeed) {
 		t.Fatalf("--check over an empty feed returned %v; want ErrEmptyFeed", err)
 	}
 }

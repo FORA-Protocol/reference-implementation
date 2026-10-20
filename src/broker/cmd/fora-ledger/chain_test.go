@@ -400,3 +400,21 @@ func TestRender_failedAndUnreadAreCountedApart(t *testing.T) {
 		t.Errorf("summary should read %q\n%s", want, out.String())
 	}
 }
+
+// The agent row names the agent the Exchange attributed the transaction to. A
+// direct execute may carry an unrelated Requester.domain, and the row must not
+// present that signed field as the agent.
+func TestBuildLedger_agentRowUsesTheAttributedAgent(t *testing.T) {
+	f := newFixture(t)
+	f.Sources.Evidence.RequesterDomain = "unrelated.example"
+
+	row := rowAgentAccepted(f.Sources)
+	if want := "Agent " + fixtureReqHost; row.Party != want {
+		t.Errorf("agent row party = %q, want %q", row.Party, want)
+	}
+
+	f.Sources.Transaction.AgentID = ""
+	if row := rowAgentAccepted(f.Sources); row.Party != "Agent (identity not reported by the Exchange)" {
+		t.Errorf("without an attributed agent the row must say so, got %q", row.Party)
+	}
+}

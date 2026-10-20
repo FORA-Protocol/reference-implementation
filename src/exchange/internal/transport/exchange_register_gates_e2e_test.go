@@ -29,8 +29,7 @@ import (
 // stays a single scenario.
 
 // registrationAuditAction is the audit_log action a first registration writes.
-// It names the service method, the same way every other audit action does —
-// including SetDefaultAgentCredit, which has no RPC of its own.
+// It names the service method, the same way every other audit action does.
 //
 // This literal is written out here ON PURPOSE rather than read from production.
 // It is the filter the row count below is taken through, so pointing it at

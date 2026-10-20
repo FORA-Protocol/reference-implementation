@@ -202,7 +202,7 @@ func installRSAKey(logger *slog.Logger, keystore *signing.InMemoryKeyStore) erro
 		keystore.PutRSA(ref, priv)
 		return nil
 	}
-	logger.Info("no RSA signing key configured; AWS_CLOUDFRONT_RSA tenants will be refused",
+	logger.Info("no RSA signing key configured; requests for AWS_CLOUDFRONT_RSA sites will be refused",
 		"rsa_key_ref", ref)
 	keystore.PutRSAFunc(ref, func() (*rsa.PrivateKey, error) { return nil, errNoRSAKey })
 	return nil

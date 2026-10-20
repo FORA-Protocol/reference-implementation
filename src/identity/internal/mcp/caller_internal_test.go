@@ -13,10 +13,11 @@ import (
 
 // callerFrom decides whose custodied key signs a tool call, so its branches are
 // the anti-impersonation guard. The fail-closed mismatch branch cannot be staged
-// over the wire — the SDK pins a session to one TokenInfo.UserID and refuses a
-// second — so it is unreachable from the integration suite and would survive its
-// own deletion there. callerFrom is pure logic with four branches, which testing
-// doctrine point 2 admits for a unit test; this table drives each directly.
+// over the wire — the request context and TokenInfo both come from the same
+// request's bearer — so it is unreachable from the integration suite and would
+// survive its own deletion there. callerFrom is pure logic with four branches,
+// which testing doctrine point 2 admits for a unit test; this table drives each
+// directly.
 func TestCallerFrom(t *testing.T) {
 	t.Parallel()
 

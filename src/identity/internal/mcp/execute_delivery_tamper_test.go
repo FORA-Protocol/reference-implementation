@@ -126,15 +126,15 @@ func TestExecute_TamperedProofIsRefused(t *testing.T) {
 			a := f.provision(t, "dev-one")
 			// Minted against the proxy, so that is the URL the SDK signs and the
 			// authority the double reconstructs.
-			endpoint := strings.Replace(edge.URLFor(a.Thumbprint), edge.Origin(), via, 1)
-			f.broker.relayResp = &forav1.TransactionResponse{
-				Ver:               helpers.ProtocolVersion,
-				AgentIdentityHash: a.Thumbprint,
-				Items:             []*forav1.TransactionResultItem{deliveredItem("offer-1", endpoint)},
+			endpoint := f.exchange.SignDelivery(t, strings.Replace(edge.URLFor(a.Thumbprint), edge.Origin(), via, 1))
+			f.broker.executeResp = &forav1.BrokerTransactionResponse{
+				Ver:       helpers.ProtocolVersion,
+				Exchanges: []*forav1.ExchangeOutcome{{AgentIdentityHash: a.Thumbprint}},
+				Items:     []*forav1.TransactionResultItem{deliveredItem("offer-1", endpoint)},
 			}
 
 			out := callTool[deliveryResult](t, f.connect(t, a.Token), "fora_execute", map[string]any{
-				"offers": []map[string]any{signedOffer("offer-1", "exchange.example")},
+				"offers": []map[string]any{signedOffer("offer-1", f.exchange.Domain(t))},
 			})
 
 			if tc.wantReason == "" {

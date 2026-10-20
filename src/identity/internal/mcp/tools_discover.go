@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"github.com/FORA-Protocol/protocol/sdk/go/core"
@@ -15,24 +16,36 @@ import (
 	"google.golang.org/protobuf/reflect/protopath"
 	"google.golang.org/protobuf/reflect/protorange"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forareason"
 )
 
-// discoverInput asks for offers by URL, by free-form query, or both. At least one
-// is required — a request naming nothing to license has no answer.
+// discoverInput asks for offers by URL, by free-form query, by search filters, or
+// a mix. At least one is required — a request naming nothing to license has no
+// answer.
 type discoverInput struct {
 	// URIs are the exact resources to price. Each one comes back as its own
 	// group, so a batch never loses track of which offers belong to which URL.
 	URIs []string `json:"uris,omitempty"`
 	// Query is a free-form description of the wanted content, for when the agent
-	// has no URL yet.
+	// has no URL yet. The Broker resolves it to resources only where its catalog
+	// search is configured. URIs, when given, take priority and the query is
+	// not used.
 	Query string `json:"query,omitempty"`
+	// SearchFilters are required constraints on a search, keyed by a profile's
+	// filter names (fora-music-v1: "music.isrc", "music.bpm_range", ...). They
+	// are forwarded to the Broker unchanged. This service keeps no list of keys:
+	// the Broker owns the profile, validates each value, and ignores keys it does
+	// not define, so a second list here could only disagree with it. An empty
+	// object is the same as none.
+	SearchFilters map[string]any `json:"search_filters,omitempty"`
 }
 
 // discoverOutput is the DiscoveryResponse projection.
 type discoverOutput struct {
-	// OfferGroups holds one entry per requested URI, in request order.
+	// OfferGroups holds one entry per requested URI, in request order, or for a
+	// query one entry per matched resource, best match first.
 	OfferGroups []offerGroup `json:"offer_groups"`
 	// AbsenceReason explains a whole response that yielded nothing. Empty when
 	// any group carries offers. A refusal is a successful answer, not an error:
@@ -75,13 +88,10 @@ type offerGroup struct {
 	AbsenceReason string `json:"absence_reason,omitempty"`
 	// DiscoveryMethod says how the Broker found this URL: the agent named it, or
 	// the Broker chose it on the agent's behalf. The Broker decides the value,
-	// because it is the only component that knows which of those happened. This
-	// tool accepts a free-text query as well as uris, but the query path returns
-	// no groups yet, so every group an agent actually receives today came from a
-	// URL it named and reads DISCOVERY_METHOD_EXCHANGE. It is projected because
-	// that stops being true once the query path can answer, and an agent that
-	// never saw the field would have no way to tell a URL it asked for from one
-	// that was found for it.
+	// because it is the only component that knows which of those happened. A URL
+	// the agent named reads DISCOVERY_METHOD_EXCHANGE; a resource the Broker
+	// matched for a query reads DISCOVERY_METHOD_SEARCH. Without the field an
+	// agent could not tell a URL it asked for from one that was found for it.
 	DiscoveryMethod string `json:"discovery_method,omitempty"`
 }
 
@@ -109,8 +119,9 @@ func (t *toolset) handleDiscover(
 	if err != nil {
 		return nil, discoverOutput{}, err
 	}
-	if len(in.URIs) == 0 && in.Query == "" {
-		return nil, discoverOutput{}, errors.New("fora_discover needs at least one uri or a query")
+	if len(in.URIs) == 0 && in.Query == "" && len(in.SearchFilters) == 0 {
+		return nil, discoverOutput{}, errors.New(
+			"fora_discover needs at least one of uris, query or search_filters")
 	}
 	rpc := &forav1.DiscoveryRequest{
 		Ver:       helpers.ProtocolVersion,
@@ -120,7 +131,14 @@ func (t *toolset) handleDiscover(
 	if in.Query != "" {
 		rpc.Query = &in.Query
 	}
-	result, err := t.discovery.Resolve(t.callCtx(ctx, who), rpc)
+	if len(in.SearchFilters) > 0 {
+		// Decoded JSON holds only the types a Struct can carry, so this fails
+		// only on input the MCP layer could not have produced.
+		if rpc.SearchFilters, err = structpb.NewStruct(in.SearchFilters); err != nil {
+			return nil, discoverOutput{}, fmt.Errorf("fora_discover: search_filters: %w", err)
+		}
+	}
+	result, err := t.discovery.Resolve(ctx, rpc)
 	if err != nil {
 		return nil, discoverOutput{}, t.failed(ctx, who, "fora_discover", err)
 	}
@@ -132,10 +150,17 @@ func (t *toolset) handleDiscover(
 	// Rejections are logged as well as returned. The agent needs them to read its
 	// own result; an operator needs them because a whole exchange's offers failing
 	// verification is a key-rotation or manifest problem on that exchange, which
-	// no single agent's view would ever make visible.
-	t.logger(ctx, who).InfoContext(ctx, "identity.mcp.discover",
+	// no single agent's view would ever make visible. So a call where verification
+	// refused an offer is WARN: at INFO it sat among the routine per-call lines,
+	// out of sight of an operator filtering at WARN.
+	rejected := out.rejectedCount()
+	level := slog.LevelInfo
+	if rejected > 0 {
+		level = slog.LevelWarn
+	}
+	t.logger(ctx).Log(ctx, level, "identity.mcp.discover",
 		"subdomain", who.subdomain, "uris", len(in.URIs), "groups", len(out.OfferGroups),
-		"rejected", out.rejectedCount())
+		"rejected", rejected)
 	return nil, out, nil
 }
 
@@ -148,10 +173,15 @@ func (o discoverOutput) rejectedCount() int {
 	return n
 }
 
-// requester is the caller's FORA identity as every tool sends it. Built in one
-// place because the Broker and Exchange authorize a call by comparing this id to
-// the signed Signature-Agent: two constructions of the same value are two chances
-// for it to be spelled differently, and the failure that produces is a rejected
+// requester is the caller's FORA identity as every tool sends it: the directory
+// origin as id, and the bare subdomain as domain.
+//
+// Neither field is what authorizes the call — the Broker and the Exchange derive
+// the caller from the covered Signature-Agent header — but domain IS what the
+// Exchange reads to name the agent on a request a Broker re-packaged, and the
+// Broker refuses a purchase whose domain is not its caller's host. Built in one
+// place for that reason: two constructions of the same value are two chances for
+// it to be spelled differently, and the failure that produces is a rejected
 // request that names neither side.
 func (t *toolset) requester(subdomain string) *forav1.Requester {
 	return &forav1.Requester{

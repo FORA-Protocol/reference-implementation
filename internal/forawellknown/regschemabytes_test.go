@@ -36,7 +36,8 @@ func TestFetchDocument_ReturnsTheBodyTheOriginServed(t *testing.T) {
 	t.Parallel()
 	served := indented(t, testutil.ExchangeManifestWithRegistration(
 		"exchange.example", "https://exchange.example",
-		testutil.Registration{DataSchemaJSON: spacedSchema}))
+		testutil.Registration{DataSchemaJSON: spacedSchema},
+	))
 	origin := testutil.NewOrigin(served)
 	defer origin.Close()
 
@@ -63,7 +64,8 @@ func TestRegistrationSchemaBytes_PreservesTheServedMember(t *testing.T) {
 	t.Parallel()
 	served := indented(t, testutil.ExchangeManifestWithRegistration(
 		"exchange.example", "https://exchange.example",
-		testutil.Registration{DataSchemaJSON: spacedSchema}))
+		testutil.Registration{DataSchemaJSON: spacedSchema},
+	))
 	doc, err := forawellknown.ParseDocument(served, forawellknown.RoleExchange)
 	if err != nil {
 		t.Fatalf("ParseDocument: %v", err)
@@ -147,16 +149,28 @@ func withEmptyRegistrationBlock(t *testing.T) []byte {
 }
 
 // TestRegistrationSchemaBytes_UnreadableBodyIsReported pins that a body which
-// is not JSON is an error rather than silence. Silence would read as "this
+// cannot be read is an error rather than silence. Silence would read as "this
 // Exchange publishes no schema", which turns a broken document into a decision
 // to skip validation.
+//
+// It also pins WHICH error, because the two rows below are different facts: a
+// body that never parsed says nothing about the document, while one that parsed
+// into an array or carries a non-object block is a document that arrived and is
+// the wrong shape. The same unmarshal produces both, so the split is the only
+// thing keeping them apart.
 func TestRegistrationSchemaBytes_UnreadableBodyIsReported(t *testing.T) {
 	t.Parallel()
-	for _, raw := range []string{`not json`, `[1,2,3]`, `{"account_registration": 7}`} {
+	for raw, want := range map[string]error{
+		// Never parsed, so nothing is known about the document.
+		`not json`: forawellknown.ErrNotJSON,
+		// Parsed, and is the wrong shape -- a fact about a document that arrived.
+		`[1,2,3]`:                     forawellknown.ErrSchemaInvalid,
+		`{"account_registration": 7}`: forawellknown.ErrSchemaInvalid,
+	} {
 		doc := &forawellknown.Document{Raw: []byte(raw)}
 		_, ok, err := doc.RegistrationSchemaBytes()
-		if !errors.Is(err, forawellknown.ErrSchemaInvalid) {
-			t.Fatalf("%s: want ErrSchemaInvalid, got %v", raw, err)
+		if !errors.Is(err, want) {
+			t.Fatalf("%s: want %v, got %v", raw, want, err)
 		}
 		if ok {
 			t.Fatalf("%s: reported present despite failing", raw)

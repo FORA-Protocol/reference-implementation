@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/tracelog"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/logging"
 )
 
 // Config captures pool-level tunables. Zero values fall back to sensible defaults.
@@ -73,17 +75,26 @@ func (s slogAdapter) Log(ctx context.Context, level tracelog.LogLevel, msg strin
 	for k, v := range data {
 		attrs = append(attrs, k, v)
 	}
+	// A statement that failed because its own context ended is its caller
+	// going away, not a database fault, so logging.LevelFor records it at
+	// DEBUG. An error the database itself returns keeps pgx's level: ERROR,
+	// which is what database alerting counts. pgx passes the failure under
+	// "err".
+	err, _ := data["err"].(error)
+	s.logger.Log(ctx, logging.LevelFor(ctx, err, slogLevel(level)), msg, attrs...)
+}
+
+// slogLevel maps a pgx trace level onto slog's.
+func slogLevel(level tracelog.LogLevel) slog.Level {
 	switch level {
 	case tracelog.LogLevelTrace, tracelog.LogLevelDebug:
-		s.logger.DebugContext(ctx, msg, attrs...)
-	case tracelog.LogLevelInfo:
-		s.logger.InfoContext(ctx, msg, attrs...)
+		return slog.LevelDebug
 	case tracelog.LogLevelWarn:
-		s.logger.WarnContext(ctx, msg, attrs...)
+		return slog.LevelWarn
 	case tracelog.LogLevelError:
-		s.logger.ErrorContext(ctx, msg, attrs...)
+		return slog.LevelError
 	default:
-		s.logger.InfoContext(ctx, msg, attrs...)
+		return slog.LevelInfo
 	}
 }
 

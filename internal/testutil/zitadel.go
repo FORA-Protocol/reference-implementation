@@ -4,19 +4,21 @@ package testutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"net/netip"
+	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/moby/moby/api/types/container"
-	mobynet "github.com/moby/moby/api/types/network"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/tcstart"
 )
 
 // dumpZitadelLogs best-effort streams a failed container's logs to stderr.
@@ -43,14 +45,17 @@ const (
 	zitadelImage     = "ghcr.io/zitadel/zitadel:v3.4.9"
 	zitadelPGImage   = "postgres:17-alpine"
 	zitadelMasterkey = "MasterkeyNeedsToHave32Characters"
-	// zitadelHostPort is a FIXED host port. Zitadel derives its issuer, JWKS URL,
-	// and authorize/token endpoints from ExternalDomain:ExternalPort baked at init,
-	// not from the request Host — so go-oidc discovery only succeeds if the client
-	// reaches Zitadel at exactly that address. A testcontainers ephemeral port would
-	// break discovery, verification, and every endpoint URL in the doc. The cost is
-	// that this container cannot overlap anything else on the port; StartSharedZitadel
-	// surfaces a bind failure as a startup error the caller can skip on.
-	zitadelHostPort = "8080"
+	// zitadelFrontImage is the TCP forwarder the test process reaches Zitadel
+	// through; see startZitadelFront for why Zitadel's own published port is not
+	// used.
+	zitadelFrontImage = "alpine/socat:1.8.0.3"
+	// zitadelPort is the port Zitadel and its forwarder listen on inside the
+	// private network. Never a host port: the host side is whatever free port
+	// Docker maps the forwarder to.
+	zitadelPort = "8080"
+	// zitadelNetworkAlias is Zitadel's name on the private network, which the
+	// forwarder dials.
+	zitadelNetworkAlias = "zitadel"
 	// zitadelPATPath is under /app (where the binary lives), NOT /tmp: the minimal
 	// Zitadel image has no /tmp, so init-writing the PAT there fails with "no such
 	// file or directory". /app exists, is root-writable, and — unlike a tmpfs mount
@@ -106,7 +111,8 @@ type SharedZitadel struct {
 // waits for first-instance init to write the admin PAT, then bootstraps the
 // `fora-mcp` OIDC client and the `alice@acme.local` login user. Returns a handle
 // plus a cleanup func for the caller (TestMain) to defer. Sibling of
-// StartSharedVault, but heavier: expect ~30-45s startup.
+// StartSharedVault, but heavier: expect ~30-45s startup. Nothing it starts binds
+// a fixed host port, so any number of these run side by side on one daemon.
 func StartSharedZitadel(ctx context.Context, logger *slog.Logger) (*SharedZitadel, func(), error) {
 	net, err := network.New(ctx)
 	if err != nil {
@@ -131,32 +137,31 @@ func StartSharedZitadel(ctx context.Context, logger *slog.Logger) (*SharedZitade
 	}
 	cleanups = append(cleanups, terminateFn(logger, "zitadel postgres", pgC))
 
-	// The host the TEST PROCESS reaches published ports at — "localhost" against a
-	// local daemon, but "docker" under GitLab dind, where the daemon runs in the
-	// `docker:dind` service and the job container reaches it by that hostname.
-	// Zitadel bakes ExternalDomain into its issuer/JWKS/endpoint URLs at init, and
-	// the oidcup client + headless login must reach it at exactly that host — so we
-	// resolve it from the daemon (via the already-started container's provider) and
-	// thread it through ExternalDomain, the issuer, and the bootstrap Host header.
-	host, err := pgC.Host(ctx)
+	frontC, host, port, err := startZitadelFront(ctx, net.Name)
 	if err != nil {
 		cleanup()
-		return nil, nil, fmt.Errorf("resolve docker daemon host: %w", err)
+		return nil, nil, err
 	}
+	cleanups = append(cleanups, terminateFn(logger, "zitadel front", frontC))
 
-	ziC, err := startZitadelContainer(ctx, net.Name, host)
+	ziC, err := startZitadelContainer(ctx, net.Name, host, port)
 	if err != nil {
 		cleanup()
 		return nil, nil, err
 	}
 	cleanups = append(cleanups, terminateFn(logger, "zitadel", ziC))
 
+	issuer := "http://" + host + ":" + port
+	if err := waitZitadelReady(ctx, issuer); err != nil {
+		dumpZitadelLogs(ctx, ziC)
+		cleanup()
+		return nil, nil, err
+	}
 	pat, err := waitForPAT(ctx, ziC)
 	if err != nil {
 		cleanup()
 		return nil, nil, err
 	}
-	issuer := "http://" + host + ":" + zitadelHostPort
 	creds, err := bootstrapZitadel(ctx, issuer, host, pat)
 	if err != nil {
 		cleanup()
@@ -166,20 +171,22 @@ func StartSharedZitadel(ctx context.Context, logger *slog.Logger) (*SharedZitade
 }
 
 func startZitadelPostgres(ctx context.Context, netName string) (testcontainers.Container, error) {
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image: zitadelPGImage,
-			Env: map[string]string{
-				"POSTGRES_USER":     "zitadel",
-				"POSTGRES_PASSWORD": "zitadel",
-				"POSTGRES_DB":       "zitadel",
+	c, err := tcstart.Run(ctx, func(ctx context.Context) (testcontainers.Container, error) {
+		return testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+			ContainerRequest: testcontainers.ContainerRequest{
+				Image: zitadelPGImage,
+				Env: map[string]string{
+					"POSTGRES_USER":     "zitadel",
+					"POSTGRES_PASSWORD": "zitadel",
+					"POSTGRES_DB":       "zitadel",
+				},
+				ExposedPorts:   []string{"5432/tcp"},
+				Networks:       []string{netName},
+				NetworkAliases: map[string][]string{netName: {"zitadel-db"}},
+				WaitingFor:     wait.ForListeningPort("5432/tcp").WithStartupTimeout(60 * time.Second),
 			},
-			ExposedPorts:   []string{"5432/tcp"},
-			Networks:       []string{netName},
-			NetworkAliases: map[string][]string{netName: {"zitadel-db"}},
-			WaitingFor:     wait.ForListeningPort("5432/tcp").WithStartupTimeout(60 * time.Second),
-		},
-		Started: true,
+			Started: true,
+		})
 	})
 	if err != nil {
 		return nil, fmt.Errorf("start zitadel postgres: %w", err)
@@ -187,7 +194,58 @@ func startZitadelPostgres(ctx context.Context, netName string) (testcontainers.C
 	return c, nil
 }
 
-func startZitadelContainer(ctx context.Context, netName, host string) (testcontainers.Container, error) {
+// startZitadelFront starts the forwarder that publishes Zitadel to the test
+// process, and returns it with the host and port the test process reaches it at.
+//
+// Zitadel derives its issuer, JWKS URL and authorize/token endpoints from
+// ExternalDomain:ExternalPort, baked at init, not from the request Host, so
+// go-oidc discovery only succeeds when the client reaches Zitadel at exactly that
+// address. The address must therefore be known before Zitadel starts, and
+// Docker names an ephemeral host port only once the container publishing it has
+// started. The forwarder breaks the cycle: it starts first, on an ephemeral host
+// port, and Zitadel starts after it, with that host and port as its external
+// address. testcontainers also publishes the port the Zitadel image declares, on
+// a second ephemeral host port, but nothing uses that one: the test process
+// reaches Zitadel only through the forwarder. Neither container holds a fixed
+// host port, so two runs on one daemon never contend for one.
+//
+// The host is the one the TEST PROCESS reaches published ports at — "localhost"
+// against a local daemon, but "docker" under GitLab dind, where the daemon runs
+// in the `docker:dind` service and the job container reaches it by that
+// hostname. It becomes ExternalDomain, the issuer host and the bootstrap Host
+// header. The binding is on every interface, not loopback only, because under
+// dind the job container reaches it from outside the daemon's host.
+func startZitadelFront(ctx context.Context, netName string) (c testcontainers.Container, host, port string, err error) {
+	c, err = tcstart.Run(ctx, func(ctx context.Context) (testcontainers.Container, error) {
+		return testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+			ContainerRequest: testcontainers.ContainerRequest{
+				Image: zitadelFrontImage,
+				Cmd: []string{
+					"TCP-LISTEN:" + zitadelPort + ",fork,reuseaddr",
+					"TCP:" + zitadelNetworkAlias + ":" + zitadelPort,
+				},
+				ExposedPorts: []string{zitadelPort + "/tcp"},
+				Networks:     []string{netName},
+				WaitingFor:   wait.ForListeningPort(zitadelPort + "/tcp").WithStartupTimeout(60 * time.Second),
+			},
+			Started: true,
+		})
+	})
+	if err != nil {
+		return c, "", "", fmt.Errorf("start zitadel front: %w", err)
+	}
+	host, err = c.Host(ctx)
+	if err != nil {
+		return c, "", "", fmt.Errorf("resolve docker daemon host: %w", err)
+	}
+	mapped, err := c.MappedPort(ctx, zitadelPort+"/tcp")
+	if err != nil {
+		return c, "", "", fmt.Errorf("zitadel front port: %w", err)
+	}
+	return c, host, mapped.Port(), nil
+}
+
+func startZitadelContainer(ctx context.Context, netName, host, port string) (testcontainers.Container, error) {
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image: zitadelImage,
@@ -195,50 +253,76 @@ func startZitadelContainer(ctx context.Context, netName, host string) (testconta
 				"start-from-init", "--masterkey", zitadelMasterkey,
 				"--tlsMode", "disabled", "--steps", "/etc/zitadel/init-steps.yaml",
 			},
-			Env:          zitadelEnv(host),
-			ExposedPorts: []string{zitadelHostPort + "/tcp"},
-			Networks:     []string{netName},
+			Env:            zitadelEnv(host, port),
+			Networks:       []string{netName},
+			NetworkAliases: map[string][]string{netName: {zitadelNetworkAlias}},
 			Files: []testcontainers.ContainerFile{{
 				Reader:            strings.NewReader(zitadelInitSteps),
 				ContainerFilePath: "/etc/zitadel/init-steps.yaml",
 				FileMode:          0o644,
 			}},
 			ConfigModifier: func(c *container.Config) { c.User = "0" },
-			HostConfigModifier: func(hc *container.HostConfig) {
-				// Bind 0.0.0.0, not 127.0.0.1: under dind the job container reaches
-				// this published port at the daemon host (`docker:8080`), which a
-				// loopback-only binding refuses. A fixed host port (not ephemeral)
-				// is still required because ExternalPort=8080 is baked at init.
-				hc.PortBindings = mobynet.PortMap{
-					mobynet.MustParsePort(zitadelHostPort + "/tcp"): []mobynet.PortBinding{
-						{HostIP: netip.MustParseAddr("0.0.0.0"), HostPort: zitadelHostPort},
-					},
-				}
-			},
-			WaitingFor: wait.ForListeningPort(zitadelHostPort + "/tcp").
-				WithStartupTimeout(180 * time.Second),
+			// No wait strategy: the test process reaches Zitadel only through
+			// the forwarder, so readiness is polled there (waitZitadelReady).
+			// The port testcontainers publishes for the image goes unused.
 		},
 		Started: true,
 	})
 	if err != nil {
-		// c may be non-nil on a wait failure — dump its logs before wrapping.
 		dumpZitadelLogs(ctx, c)
 		return nil, fmt.Errorf("start zitadel: %w", err)
 	}
 	return c, nil
 }
 
+// zitadelReadyTimeout bounds Zitadel's start-from-init, which runs its
+// migrations and first-instance setup before it serves; under GitLab dind that
+// has taken well over a minute.
+const zitadelReadyTimeout = 180 * time.Second
+
+// waitZitadelReady polls Zitadel's readiness endpoint through the forwarder
+// until it answers 200. A refused or reset connection is the forwarder finding
+// nothing listening yet, so it is retried like any other not-ready answer.
+func waitZitadelReady(ctx context.Context, base string) error {
+	ctx, cancel := context.WithTimeout(ctx, zitadelReadyTimeout)
+	defer cancel()
+	client := &http.Client{Timeout: 5 * time.Second}
+	var last error
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/debug/ready", http.NoBody)
+		if err != nil {
+			return fmt.Errorf("zitadel readiness request: %w", err)
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+			err = fmt.Errorf("status %d", resp.StatusCode)
+		}
+		last = err
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("zitadel never became ready at %s: %w", base, errors.Join(last, ctx.Err()))
+		case <-time.After(time.Second):
+		}
+	}
+}
+
 // zitadelEnv mirrors the retired docker-compose.e2e.yml zitadel service: a
-// non-TLS instance on <host>:8080 backed by the `zitadel-db` Postgres reached
-// over the private network. host is the daemon host the test process resolves to
-// (localhost locally, docker under dind); it becomes ExternalDomain, so Zitadel's
-// issuer and endpoint URLs are the ones the client can actually reach.
-func zitadelEnv(host string) map[string]string {
+// non-TLS instance listening on 8080 inside the private network, backed by the
+// `zitadel-db` Postgres reached over the same network. host and port are where
+// the test process reaches it through the forwarder (localhost locally, docker
+// under dind, on an ephemeral port); they become ExternalDomain and
+// ExternalPort, so Zitadel's issuer and endpoint URLs are the ones the client
+// can actually reach.
+func zitadelEnv(host, port string) map[string]string {
 	return map[string]string{
 		"ZITADEL_EXTERNALDOMAIN":                   host,
-		"ZITADEL_EXTERNALPORT":                     zitadelHostPort,
+		"ZITADEL_EXTERNALPORT":                     port,
 		"ZITADEL_EXTERNALSECURE":                   "false",
-		"ZITADEL_PORT":                             zitadelHostPort,
+		"ZITADEL_PORT":                             zitadelPort,
 		"ZITADEL_TLS_ENABLED":                      "false",
 		"ZITADEL_DATABASE_POSTGRES_HOST":           "zitadel-db",
 		"ZITADEL_DATABASE_POSTGRES_PORT":           "5432",
@@ -256,15 +340,17 @@ func zitadelEnv(host string) map[string]string {
 // port listening a beat before FirstInstance finishes writing the PAT, so this
 // retries the copy until the file is non-empty rather than reading once.
 func waitForPAT(ctx context.Context, c testcontainers.Container) (string, error) {
-	deadline := time.Now().Add(120 * time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
 	for {
 		if pat := tryReadPAT(ctx, c); pat != "" {
 			return pat, nil
 		}
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("zitadel: admin PAT %s not written within timeout", zitadelPATPath)
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("zitadel: admin PAT %s not written: %w", zitadelPATPath, ctx.Err())
+		case <-time.After(time.Second):
 		}
-		time.Sleep(time.Second)
 	}
 }
 

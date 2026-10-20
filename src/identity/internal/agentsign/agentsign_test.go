@@ -37,7 +37,7 @@ func (nonEd25519Custody) Signer(_ context.Context, _ keystore.Ref) (crypto.Signe
 // panicking inside the RFC 9421 signer or, worse, going out unsigned.
 func TestKeyFor_RejectsAKeyItCannotRead(t *testing.T) {
 	t.Parallel()
-	resolver, err := agentsign.New(agentsign.Config{Keys: nonEd25519Custody{}})
+	resolver, err := agentsign.New(agentsign.Config{Keys: nonEd25519Custody{}, BaseDomain: "foramcp.org"})
 	if err != nil {
 		t.Fatalf("new resolver: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestKeyFor_RejectsAKeyItCannotRead(t *testing.T) {
 // signature, never a default one.
 func TestSource_RefusesAContextWithoutAnIdentity(t *testing.T) {
 	t.Parallel()
-	resolver, err := agentsign.New(agentsign.Config{Keys: nonEd25519Custody{}})
+	resolver, err := agentsign.New(agentsign.Config{Keys: nonEd25519Custody{}, BaseDomain: "foramcp.org"})
 	if err != nil {
 		t.Fatalf("new resolver: %v", err)
 	}
@@ -72,6 +72,33 @@ func TestNew_RequiresCustody(t *testing.T) {
 	t.Parallel()
 	if _, err := agentsign.New(agentsign.Config{}); err == nil {
 		t.Fatal("a Resolver was built with no custody backend")
+	}
+}
+
+// TestNew_RefusesAZoneWhoseAgentOriginsAreNotHTTPSOrigins pins the boot
+// refusal: every agent signs as https://<slug>.<zone>, so a zone that cannot
+// form an https origin would put a Signature-Agent every verifier refuses on
+// every request the service signs.
+func TestNew_RefusesAZoneWhoseAgentOriginsAreNotHTTPSOrigins(t *testing.T) {
+	t.Parallel()
+	for _, zone := range []string{"", "FORAMCP.ORG", "foramcp.org/agents", "foramcp.org:0"} {
+		if _, err := agentsign.New(agentsign.Config{Keys: nonEd25519Custody{}, BaseDomain: zone}); err == nil {
+			t.Errorf("zone %q: a Resolver was built", zone)
+		}
+	}
+}
+
+// TestDirectoryOrigin_IsTheAgentsHTTPSOrigin pins the Signature-Agent member an
+// agent signs with: https://<subdomain>, whatever scheme the deployment serves
+// other documents over.
+func TestDirectoryOrigin_IsTheAgentsHTTPSOrigin(t *testing.T) {
+	t.Parallel()
+	resolver, err := agentsign.New(agentsign.Config{Keys: nonEd25519Custody{}, BaseDomain: "foramcp.org"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resolver.DirectoryOrigin("alice.foramcp.org"); got != "https://alice.foramcp.org" {
+		t.Fatalf("DirectoryOrigin = %q, want https://alice.foramcp.org", got)
 	}
 }
 

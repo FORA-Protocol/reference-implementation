@@ -8,6 +8,8 @@
 import process from 'node:process';
 import { Miniflare } from 'miniflare';
 
+import { WORKERS_COMPAT } from './workers-compat.mjs';
+
 const port = Number.parseInt(process.env.PORT ?? '8787', 10);
 
 function requireEnv(name) {
@@ -24,8 +26,7 @@ const mf = new Miniflare({
   scriptPath: process.env.WORKER_SCRIPT ?? 'dist/worker.mjs',
   host: '0.0.0.0',
   port,
-  compatibilityDate: '2026-07-01',
-  compatibilityFlags: ['nodejs_compat'],
+  ...WORKERS_COMPAT,
   bindings: {
     EXCHANGE_URL: requireEnv('EXCHANGE_URL'),
     // EXCHANGE_WBA_URL points at the Exchange's Web Bot Auth directory
@@ -49,6 +50,11 @@ const mf = new Miniflare({
     ...(process.env.WBA_KEYS_JSON ? { WBA_KEYS_JSON: process.env.WBA_KEYS_JSON } : {}),
     ...(process.env.WBA_REVOCATION_URL
       ? { WBA_REVOCATION_URL: process.env.WBA_REVOCATION_URL }
+      : {}),
+    // Optional pre-signed directory response, served verbatim in place of the
+    // unsigned directory. Passed only when set.
+    ...(process.env.WBA_SIGNED_DIRECTORY_JSON
+      ? { WBA_SIGNED_DIRECTORY_JSON: process.env.WBA_SIGNED_DIRECTORY_JSON }
       : {}),
   },
 });

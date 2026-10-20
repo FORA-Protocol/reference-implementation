@@ -1,0 +1,96 @@
+# Public resources for an agent acting as its own principal: the agent signs
+# every request with its own key and carries no delegation from anyone above it.
+# Registry entries (ADR-028 D1); the tests that prove them say so on themselves.
+#
+# A "negative:" case is a refusal with a typed error response (ADR-028 D1). What
+# an answer that refuses nothing must leave out is a "must not" in "positive:".
+
+- id: PUBLIC-001
+  title: A public resource is offered at price zero, and accepting it yields a signed URL
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: no charge; rate must be 0 (state FREE explicitly — absent Pricing is not free)
+  positive: >-
+    An agent signing with its own key and presenting no delegation discovers a free
+    offer for a public URI, accepts it, and receives a retrieval_endpoint.
+  negative: []
+
+- id: PUBLIC-002
+  title: The agent fetches the signed URL through the edge and the content is delivered
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Signed retrieval URL for this item. Bound to the requesting agent's identity via the parent TransactionResponse.agent_identity_hash
+  positive: >-
+    A fetch of that retrieval_endpoint with the agent's proof of possession answers 200
+    with the public article.
+  negative: []
+
+- id: PUBLIC-003
+  title: The transaction is recorded under the signing agent, with no separate principal
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Optional delegation — present when the requester acts on behalf of another
+      entity (user, organization, upstream agent).
+  positive: >-
+    The agent that bought the free resource reports its usage and the report is
+    accepted, because the transaction is recorded under that agent. The same report
+    signed first by a different agent must not be accepted; the refusal it gets, the
+    one an unknown transaction gets, is PUBLIC-005.
+  negative: []
+
+- id: PUBLIC-004
+  title: A resource the agent's scopes do not cover is answered with no offers and no reason
+  level: DECISION
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      EXISTENCE HIDING. A requester never learns about a resource outside its
+      scopes.
+  positive: >-
+    A public resource discovered in the same batch gets its offer, and the same agent
+    stating the scope is offered the gated resource, both at the Exchange and through
+    Broker Resolve. The protocol author's decision: when a requester's scopes leave
+    no presentable offer for a resource, the Exchange answers exactly as for any
+    resource with nothing to offer, with no offers and no absence reason, so the
+    requester never learns the resource exists. SCOPE_INSUFFICIENT is never sent.
+    An offer the Exchange presented is honoured until it expires, so a scope
+    refusal at purchase cannot arise either. Without the scope, the gated
+    resource's group carries no offer and no absence reason, at the Exchange and
+    through the Broker, so the resource is not served.
+  negative: []
+
+- id: PUBLIC-005
+  title: A usage report for another agent's transaction is answered exactly as for an unknown transaction
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A report for a transaction the Exchange recorded under a different agent's account
+      is answered exactly as a report for an unknown transaction:
+      USAGE_REPORT_REJECTION_REASON_TRANSACTION_NOT_FOUND and the Connect code not_found,
+      so the answer does not reveal that the transaction exists.
+  positive: The agent's report for its own transaction is accepted.
+  negative:
+    - code: not_found
+      reason: >-
+        USAGE_REPORT_REJECTION_REASON_TRANSACTION_NOT_FOUND, the same code and reason the
+        same agent gets for a transaction id no one holds
+      side_effect: >-
+        the report is not recorded against the other agent's transaction: the buying
+        agent's own report for it is accepted afterwards, not refused DUPLICATE
+  # A report for a transaction id no one holds is MONEY-024.

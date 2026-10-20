@@ -10,7 +10,10 @@ import (
 	protobuf "google.golang.org/protobuf/proto"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/metadatacodec"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/metadatacodec/metadatacodectest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo/repotest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/service/servicetest"
 )
 
@@ -30,18 +33,27 @@ func TestCatalogMetadataPersists(t *testing.T) {
 	// surface sibling Exchange tests use), not a raw SQL string.
 	if _, err := sqlc.New(pool).InsertTenant(ctx, sqlc.InsertTenantParams{
 		TenantID: "t1", Domain: "publisher.example", Ed25519KeyRef: "k",
-		ReportingPolicy: []byte(`{}`), SigningScheme: sqlc.ForaSigningSchemeED25519,
+		ReportingPolicy: []byte(`{}`),
 	}); err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
 
+	// entryFromProto is the write projection only; the push path fills the payee
+	// in afterwards from the site's manifest, and the domain from the registered
+	// site it matched. catalog.resource_owner_id references fora.publishers and
+	// catalog.domain refuses an empty value, so this test supplies both: a
+	// registered payee, and the payee and domain on each entry.
+	const ownerID = "pub-metadata"
+	repotest.SeedPublisher(t, ctx, pool, ownerID, "Stoa Press")
+
 	realRepo := repo.NewCatalogRepo(sqlc.New(pool))
 
 	// Metadata-bearing entry goes through the production write projection.
-	withMeta, err := entryFromProto("t1", metadataEntry(t))
+	withMeta, err := entryFromProto("t1", metadatacodectest.FullEntry(t))
 	if err != nil {
 		t.Fatalf("entryFromProto (with metadata): %v", err)
 	}
+	withMeta.ResourceOwnerID, withMeta.Domain = ownerID, metadatacodectest.FullEntry(t).GetDomain()
 	if _, err := realRepo.Upsert(ctx, withMeta); err != nil {
 		t.Fatalf("upsert with metadata: %v", err)
 	}
@@ -50,11 +62,12 @@ func TestCatalogMetadataPersists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("entryFromProto (no metadata): %v", err)
 	}
+	noMeta.ResourceOwnerID, noMeta.Domain = ownerID, "publisher.example"
 	if _, err := realRepo.Upsert(ctx, noMeta); err != nil {
 		t.Fatalf("upsert without metadata: %v", err)
 	}
 
-	assertMetadataRoundTrip(t, ctx, realRepo, withMeta.ResourceID, metadataEntry(t))
+	assertMetadataRoundTrip(t, ctx, realRepo, withMeta.ResourceID, metadatacodectest.FullEntry(t))
 	assertNoMetadata(t, ctx, realRepo, noMeta.ResourceID)
 }
 
@@ -69,15 +82,15 @@ func assertMetadataRoundTrip(t *testing.T, ctx context.Context, r repo.CatalogRe
 	if got.MetadataJSON == nil {
 		t.Fatal("metadata column is NULL for a metadata-bearing entry")
 	}
-	decoded, err := unmarshalResourceMetadata(got.MetadataJSON)
+	decoded, err := metadatacodec.Unmarshal(got.MetadataJSON)
 	if err != nil {
 		t.Fatalf("decode stored metadata: %v", err)
 	}
-	want, err := marshalResourceMetadata(src)
+	want, err := metadatacodec.Marshal(src)
 	if err != nil {
 		t.Fatalf("marshal source metadata: %v", err)
 	}
-	wantEntry, err := unmarshalResourceMetadata(want)
+	wantEntry, err := metadatacodec.Unmarshal(want)
 	if err != nil {
 		t.Fatalf("decode source metadata: %v", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/catalogfeed"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/ingest"
 )
 
@@ -20,14 +21,14 @@ func metadataCorpusPath(t *testing.T, name string) string {
 }
 
 // parseCorpusFile parses one corpus fixture through the production ParseJSONL.
-func parseCorpusFile(t *testing.T, name string) []ingest.Record {
+func parseCorpusFile(t *testing.T, name string) []catalogfeed.Record {
 	t.Helper()
 	f, err := os.Open(metadataCorpusPath(t, name))
 	if err != nil {
 		t.Fatalf("open %s: %v", name, err)
 	}
 	defer func() { _ = f.Close() }()
-	records, err := ingest.ParseJSONL(f)
+	records, err := catalogfeed.ParseJSONL(f)
 	if err != nil {
 		t.Fatalf("parse %s: %v", name, err)
 	}
@@ -46,15 +47,14 @@ func parseCorpusFile(t *testing.T, name string) []ingest.Record {
 // PushResources (accepted), discharging the ingest-side obligation of .7/.8.
 func TestIngestMetadata_ExtensionLineAccepted(t *testing.T) {
 	h := newPushHarness(t)
-	const publisherDomain = "publisher.example"
-	kid, priv := registerContributor(t, h, publisherDomain)
-	publisherTenant := seedTenantForDomain(t, h, publisherDomain)
+	kid, priv := registerContributor(t, h)
+	publisherTenant := seedSiteForDomain(t, h, ingestDomain)
 
 	records := parseCorpusFile(t, "valid_full.jsonl")
 	if len(records) != 1 {
 		t.Fatalf("valid_full.jsonl: expected 1 record, got %d", len(records))
 	}
-	entries, err := ingest.MapRecords(records)
+	entries, err := catalogfeed.MapRecords(records)
 	if err != nil {
 		t.Fatalf("map extension line: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestIngestMetadata_UnknownKeyRejectedAtParse(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 
-	_, err = ingest.ParseJSONL(f)
+	_, err = catalogfeed.ParseJSONL(f)
 	if err == nil {
 		t.Fatal("expected ParseJSONL to reject the corpus parse-reject fixture, got nil")
 	}
@@ -102,7 +102,7 @@ func TestIngestMetadata_MutabilityMapperRejected(t *testing.T) {
 	// rejected in isolation — proving BOTH the UNSPECIFIED sentinel and the unknown
 	// name fail at the mapper, then that a batch containing either is voided whole.
 	for i := range records {
-		_, err := ingest.MapRecords(records[i : i+1])
+		_, err := catalogfeed.MapRecords(records[i : i+1])
 		if err == nil {
 			t.Errorf("record %d (%s%s): expected MapRecords to reject mutability, got nil",
 				i, records[i].Domain, records[i].Path)
@@ -113,7 +113,7 @@ func TestIngestMetadata_MutabilityMapperRejected(t *testing.T) {
 				i, records[i].Domain, records[i].Path, err)
 		}
 	}
-	_, err := ingest.MapRecords(records)
+	_, err := catalogfeed.MapRecords(records)
 	if err == nil {
 		t.Fatal("expected MapRecords to reject the batch, got nil (nothing should reach push)")
 	}

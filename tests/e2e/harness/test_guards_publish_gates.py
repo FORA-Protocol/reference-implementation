@@ -38,8 +38,9 @@ covered for ``docs/`` is the other side of the array instead: an allowlisted doc
 travels and the doc beside it does not.
 
 The forbidden-path gate is reachable without touching an allowlist at all, but
-only for the two entries that live *under* an allowlisted directory: the local
-dev-keys folder and the e2e key fixtures. Those are the cases below.
+only for the entries that live *under* an allowlisted directory: the local
+dev-keys folder and the e2e key fixtures, which are the cases below, and every
+path DENY_PATHS holds back, whose cases live in ``test_guards_publish_held_back.py``.
 """
 
 from __future__ import annotations

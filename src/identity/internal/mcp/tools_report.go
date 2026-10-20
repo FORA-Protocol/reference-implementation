@@ -79,11 +79,11 @@ func (t *toolset) handleReport(
 	}
 	// The exchange rides on the report itself rather than beside it: the field is
 	// the one the offer signed, and the leg below reads the destination from it.
-	resp, err := t.reports.ReportUsage(t.callCtx(ctx, who), in.usageReport())
+	resp, err := t.reports.ReportUsage(ctx, in.usageReport())
 	if err != nil {
 		return nil, reportOutput{}, t.failed(ctx, who, tool, err)
 	}
-	t.logger(ctx, who).InfoContext(ctx, "identity.mcp.report",
+	t.logger(ctx).InfoContext(ctx, "identity.mcp.report",
 		"subdomain", who.subdomain, "exchange", in.Exchange,
 		"transaction_id", in.TransactionID, "report_id", resp.GetReportId())
 	return nil, reportOutput{ReportID: resp.GetReportId(), RequestID: who.requestID}, nil

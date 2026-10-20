@@ -80,10 +80,16 @@ variable "broker_subdomain" {
 }
 
 variable "identity_subdomain" {
-  description = "Label for the Identity Service hostname — the MCP endpoint agents connect to and the OAuth issuer developers sign up against. Agent Web Bot Auth directories are published one label below it, at <agent-slug>.<identity_subdomain>.<domain>, which is why the stack also creates a wildcard record for it."
+  description = "Label for the Identity Service hostname — the OAuth issuer developers sign up against, and the MCP endpoint agents connect to unless mcp_subdomain gives that endpoint its own label. Agent Web Bot Auth directories are published one label below it, at <agent-slug>.<identity_subdomain>.<domain>, which is why the stack also creates a wildcard record for it."
   type        = string
   default     = "mcp"
   nullable    = false
+}
+
+variable "mcp_subdomain" {
+  description = "Optional label for the MCP endpoint when it should answer under a name of its own. Set, the token audience follows <mcp_subdomain>.<domain> while the issuer and the agent-directory wildcard stay on identity_subdomain. Null keeps the MCP endpoint on the Identity hostname. Changing it on a running stack replaces the VM (the compose file is in its user data) and invalidates every issued bearer."
+  type        = string
+  default     = null
 }
 
 variable "zitadel_subdomain" {
@@ -105,12 +111,6 @@ variable "publisher_subdomain" {
   type        = string
   default     = "demo"
   nullable    = false
-}
-
-variable "default_tenant_domain" {
-  description = "Domain of the tenant agent Register reads its activation policy from. Defaults to this stack's own demo publisher hostname. Set it only in the deploy_edge = false mode, to the client publisher's hostname. seed-staging.sh reads the resolved value back from the default_tenant_domain output and creates the tenant under it, so the Exchange and the seeded tenant can never disagree."
-  type        = string
-  default     = null
 }
 
 # ── Container images ─────────────────────────────────────────────────────────
@@ -163,9 +163,9 @@ variable "billing_adapter" {
 }
 
 variable "default_agent_credit" {
-  description = "One-time welcome credit granted to each newly registered agent, in WHOLE units of the ledger currency — \"100\" on the default EUR ledger grants EUR 100.00 per agent, not 100 cents. The default \"0\" disables the grant; a freshly deployed stack then starts with an empty ledger and agents are funded by the operator scripts instead. Format and full semantics: the compose-stack module's variable of the same name."
+  description = "One-time welcome credit granted to each newly registered agent, PER CURRENCY, as comma-separated CODE=AMOUNT pairs — \"EUR=100\" on the default EUR ledger grants EUR 100.00 per agent, not 100 cents. Empty (the default) disables the grant; a freshly deployed stack then starts with an empty ledger and agents are funded by the operator scripts instead. Format and full semantics: the compose-stack module's variable of the same name."
   type        = string
-  default     = "0"
+  default     = ""
   nullable    = false
 }
 
@@ -190,7 +190,7 @@ variable "exa_api_key" {
 }
 
 variable "smoke_agent_subdomain" {
-  description = "Label for the smoke agent's Web Bot Auth directory hostname. The full hostname <label>.<domain> IS the smoke agent's identity: gen-staging-keys.sh mints the agent key with that kid, seed-staging.sh registers it, and Caddy serves the public key directory at it so the services can verify the smoke signatures. The default matches the label scripts/lib/staging-env.sh derives ids with; seeding and smoke verify the two agree before running."
+  description = "Label for the smoke agent's Web Bot Auth directory hostname. The full hostname <label>.<domain> IS the smoke agent's identity: gen-keys.sh mints the agent key with that kid, seed-staging.sh registers it, and Caddy serves the public key directory at it so the services can verify the smoke signatures. The default matches the label scripts/lib/staging-env.sh derives ids with; seeding and smoke verify the two agree before running."
   type        = string
   default     = "smoke-agent"
   nullable    = false
@@ -217,7 +217,7 @@ variable "worker_bundle_path" {
 }
 
 variable "deploy_edge" {
-  description = "Deploy staging's own Cloudflare edge worker fronting demo.<domain>. Off = the backend and the demo origin still run in full; use off for the client-simulation mode where a separately applied stacks/edge fronts a client hostname against this backend (see docs/deploy-edge-standalone.md)."
+  description = "Deploy staging's own Cloudflare edge worker fronting demo.<domain>. Off = the backend and the demo origin still run in full; use off for the publisher hand-off rehearsal, where a separately applied stacks/edge fronts another publisher's hostname against this backend (see docs/deploy-edge-standalone.md)."
   type        = bool
   default     = true
   nullable    = false

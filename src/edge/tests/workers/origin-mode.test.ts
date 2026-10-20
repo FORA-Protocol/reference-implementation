@@ -20,6 +20,7 @@ import {
   futureExp,
   generateKeypair,
   keyThumbprint,
+  rawPublicKey,
   signUrl,
   tamperSignature,
 } from '../helpers/ed25519.js';
@@ -118,7 +119,7 @@ describe('same-zone origin mode with real verification', () => {
     const kid = await keyThumbprint(keypair);
     const seen: string[] = [];
     const app = createApp(
-      realVerifyDeps(seen, async (k) => (k === kid ? keypair.publicKey : undefined)),
+      realVerifyDeps(seen, async (k) => (k === kid ? rawPublicKey(keypair) : undefined)),
     );
     const url = await signUrl('https://pub.example.com', keypair.privateKey, {
       path: '/artikel',
@@ -137,7 +138,7 @@ describe('same-zone origin mode with real verification', () => {
     const kid = await keyThumbprint(keypair);
     const seen: string[] = [];
     const app = createApp(
-      realVerifyDeps(seen, async (k) => (k === kid ? keypair.publicKey : undefined)),
+      realVerifyDeps(seen, async (k) => (k === kid ? rawPublicKey(keypair) : undefined)),
     );
     const url = await signUrl('https://pub.example.com', keypair.privateKey, {
       path: '/artikel',

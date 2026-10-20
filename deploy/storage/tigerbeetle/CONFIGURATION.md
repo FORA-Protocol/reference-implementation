@@ -147,7 +147,7 @@ the ledger-related ones are listed here.
 | Name | Required? | What it is | Default |
 |---|---|---|---|
 | `FORA_BILLING_ADAPTER` | **Set it to `tigerbeetle`** | Chooses which billing backend the Exchange uses. Leave it out and the Exchange bills nothing — the default `free` backend approves everything and records nothing. | `free` |
-| `EXCHANGE_BILLING_LEDGER` | **Required** | The ISO 4217 **numeric** currency code. It is both the TigerBeetle ledger id and the currency the whole deployment operates in. Only `978` (EUR) and `840` (USD) are accepted — see §4. | *(none)* |
+| `EXCHANGE_BILLING_LEDGER` | **Required** | The ISO 4217 **numeric** currency codes the deployment bills in, comma-separated — one ledger each. Only `978` (EUR) and `840` (USD) are accepted, and the **order decides the advertised `base_currency`** — see §4. | *(none)* |
 | `EXCHANGE_BILLING_TB_ADDRESS` | **Required** | The ledger's address as **`IP:port`**. **Hostnames are rejected by the client** — `tigerbeetle:3000` does not work, `10.0.1.7:3000` does. | *(none)* |
 | `EXCHANGE_BILLING_TB_CLUSTER_ID` | Optional | The cluster id. Must match the `--cluster` the data file was formatted with. | `0` |
 | `EXCHANGE_BILLING_HOLD_GRACE` | Optional | How much longer a reservation stays alive than the signed download URL, so a settlement can still land right at the end of the URL's validity. | `1m` |
@@ -166,7 +166,9 @@ The exact messages, each of which stops boot:
 ```
 billing: EXCHANGE_BILLING_LEDGER is required for FORA_BILLING_ADAPTER=tigerbeetle
 billing: EXCHANGE_BILLING_TB_ADDRESS is required for FORA_BILLING_ADAPTER=tigerbeetle
-billing: unsupported EXCHANGE_BILLING_LEDGER 826 (supported: 978=EUR, 840=USD)
+billing: unsupported EXCHANGE_BILLING_LEDGER entry 826 (supported: 840=USD, 978=EUR)
+billing: EXCHANGE_BILLING_LEDGER lists 978 (EUR) more than once
+billing: invalid EXCHANGE_BILLING_LEDGER entry "EUR": ...
 billing: invalid EXCHANGE_BILLING_TB_CLUSTER_ID: ...
 billing: invalid EXCHANGE_BILLING_HOLD_GRACE: ...
 billing: invalid EXCHANGE_BILLING_TB_OP_TIMEOUT: ...
@@ -181,25 +183,182 @@ you a running Exchange that bills nothing. Check the boot line
 
 ---
 
-## 4. Currency is deployment-wide, not per-tenant
+## 4. Currencies are deployment-wide, not per-tenant
 
-**One deployment operates in exactly one currency.** `EXCHANGE_BILLING_LEDGER` is
-both the ledger id and the source of that currency, and it is read once at boot.
+**A deployment bills in one or more currencies, and every tenant on it shares
+that set.** `EXCHANGE_BILLING_LEDGER` names them by ISO 4217 numeric code and is
+read once at boot.
 
-| Value | Currency |
+| Value | Bills in |
 |---|---|
 | `978` | EUR |
 | `840` | USD |
+| `978,840` | EUR and USD |
 | anything else | **the Exchange stops at start-up with an error** |
 
-This also affects your catalog: **every catalog term must be priced in the
-ledger's currency.** A charge in a different currency is refused with the reason
-`currency mismatch`, and the agent does not get the content. A EUR
-deployment cannot sell a USD-priced resource.
+### One ledger per currency, and nothing crosses between them
 
-**Multiple currencies are not implemented yet.** There is no per-tenant currency
-and no cross-currency settlement. Supporting them requires one ledger per
-currency and a change to how account ids are derived, neither of which is built.
+Each currency gets its own TigerBeetle ledger, numbered with that currency's
+code. An agent therefore holds **one balance per currency**, not one balance:
+
+- A EUR-priced article is paid out of the agent's EUR balance. A USD-priced
+  article is paid out of its USD balance.
+- **Nothing is converted.** An agent with 10 EUR and no USD cannot buy a
+  USD-priced article, however much EUR it holds. The charge is denied for
+  insufficient balance.
+- Balances are never added together. An operator report shows one row per
+  (agent, currency) and no total, because a total across currencies would be a
+  number that means nothing.
+- Commission and owner revenue follow the same rule: commission collected in
+  EUR sits in the EUR platform account, commission collected in USD in the USD
+  one.
+
+**A catalog term priced in a currency the deployment does not bill in is
+refused** with the reason `currency mismatch`, and the agent does not get the
+content. That is the same rule as before, applied to a set instead of a single
+currency: a EUR-and-USD deployment sells EUR- and USD-priced resources and
+refuses a GBP-priced one.
+
+### The ORDER of the list sets `base_currency`
+
+The Exchange's well-known document advertises a single `base_currency`, because
+the protocol field holds one value. **That value is the FIRST code in
+`EXCHANGE_BILLING_LEDGER`**: `978,840` advertises `EUR`, and `840,978`
+advertises `USD`.
+
+Two rules follow, and they matter because nothing in the running system reads
+`base_currency` back — a wrong value is invisible from the inside:
+
+- **Add a new currency at the END of the list.** Appending leaves the advertised
+  value untouched.
+- **Reordering the list is a deliberate decision**, never tidying. Agents
+  comparing offers across exchanges read our prices through `base_currency`.
+
+The boot line prints both, so the running value can be checked without reading
+the environment:
+
+```
+billing adapter: tigerbeetle currencies=EUR,USD base_currency=EUR address=10.0.1.7:3000 hold_timeout=6m0s
+```
+
+### Adding a currency to a running deployment
+
+This is a repeatable, **non-destructive** procedure: it adds a currency and
+changes nothing about the currencies already in use. The currency list is
+`EXCHANGE_BILLING_LEDGER` (the `billing_ledger` input of
+`deploy/terraform/modules/compose-stack`), and the welcome credit is
+`EXCHANGE_DEFAULT_AGENT_CREDIT` (its `default_agent_credit` input).
+
+#### First: is it config-only, or does it need a release?
+
+| Currency | What it takes |
+|---|---|
+| EUR (`978`) or USD (`840`) | **Config only.** Both are already in every table listed below. Change the currency list, apply it, restart the Exchange. |
+| Any other ISO 4217 currency | **Four source edits and a release**, then the config-only procedure. The list is below; none of it is optional. |
+
+The reason for the split: the Exchange validates `EXCHANGE_BILLING_LEDGER`
+against a table compiled into the binary, and refuses to start on a code it does
+not find there. That is deliberate — a ledger the Exchange cannot name is a
+ledger it cannot derive account ids for.
+
+#### A currency the Exchange has never run: the four edits
+
+The supported set is enumerated in four places. Three of them cannot read the
+first, because Terraform and shell cannot import Go, so all four are edited
+together:
+
+| # | Where | What it is | What happens if you skip it |
+|---|---|---|---|
+| 1 | `src/exchange/internal/billing/tigerbeetle/currency.go` | `ledgerCurrencies`, the numeric-to-alpha table the whole binary reads | The Exchange refuses to start on the new code |
+| 2 | `deploy/terraform/modules/compose-stack/variables.tf` | The `contains([...])` validation on `billing_ledger` | `terraform plan` refuses the new code, so the config change never applies |
+| 3 | `deploy/terraform/scripts/fund-staging-agent.sh` | The `CURRENCY)` case that maps the alpha code to its ledger | Funding refuses the currency, so no agent can be given a balance in it |
+| 4 | `deploy/terraform/scripts/agent-balances.sh` | The case that maps the ledger number back to an alpha code | The balance report stops on "unsupported ledger" and reports nothing at all |
+
+Each failure surfaces a long way from its cause, which is why a guard test
+(`deploy/terraform/scripts/tests/currency-table-consistency-test.py`, run by
+`make test-terraform`) fails when the four stop agreeing and names the ones that
+were missed. Run it after the edits and before the release.
+
+Editing only the Go table looks like it works — the binary starts, the boot line
+reads correctly — and then `terraform plan` refuses the variable change that
+would actually put the currency into service.
+
+With the four edits in, build and deploy an Exchange that carries them, as any
+other release. After that release is running, the config-only procedure below
+applies unchanged.
+
+#### Config-only procedure
+
+1. **Append the new code to the currency list.** Append, do not prepend: the
+   FIRST entry is what the Exchange advertises as its `base_currency`, and
+   moving another code to the front changes what every other party is told our
+   prices are denominated in. Through compose-stack, `terraform plan` refuses an
+   unsupported code, a duplicate and an empty list; set directly, each stops the
+   Exchange's boot.
+2. **Decide the welcome credit for the new currency.** Either add a
+   `CODE=AMOUNT` pair to the welcome credit, or leave it out — an agent then
+   gets no automatic grant in the new currency and is funded by the operator
+   script instead. A currency in the welcome credit that is NOT in the currency
+   list stops the Exchange from starting, which is why the two are changed
+   together.
+3. **Apply and restart the Exchange.** The currency set is read once at boot.
+4. **Check the boot line.** It prints the resolved list and the advertised
+   currency:
+
+   ```
+   billing adapter: tigerbeetle currencies=EUR,USD base_currency=EUR ...
+   ```
+
+   If `base_currency` is not what it was before this change, the list was
+   reordered rather than appended — revert to the previous order before going
+   further.
+5. **Verify the existing currencies still work.** Run one paid transaction in
+   each currency that already worked, end to end, and confirm the charge landed
+   on that currency's balance. This is the check that matters most: the new
+   currency having no traffic yet is harmless, an existing currency breaking is
+   not.
+6. **Verify the new currency.** Publish or pick one catalog term priced in it,
+   fund one agent in that currency with the operator funding script
+   (`CURRENCY=<code>`), and run one paid transaction. Confirm the charge debited
+   the new currency's balance and left the others unchanged.
+7. **Fund the agents that need it.** A currency added after an agent registered
+   leaves that agent with a zero balance in it: the welcome credit is granted at
+   registration and is not re-granted later. Existing agents are funded through
+   the operator funding sweep, once per currency — there is no backfill, by
+   design, because a backfill would hand money to every account that ever
+   registered.
+
+#### What this procedure does NOT do
+
+- **It does not convert anything.** An agent's existing balance stays in its own
+  currency. Adding USD does not give a EUR-funded agent any USD.
+- **It does not re-grant welcome credits.** See step 7.
+- **It does not change existing account ids.** The currency is part of each
+  account id, so adding a currency creates NEW accounts and leaves every
+  existing one exactly as it was. This is what makes the procedure
+  non-destructive.
+
+#### Rollback, and its limits
+
+Removing a currency from the currency list and restarting stops the Exchange
+billing in it: terms priced in that currency are refused with `currency
+mismatch`, and balance reports no longer include it. That much is clean and
+reversible.
+
+What rollback does **not** undo:
+
+- **Money already in that currency stays on its ledger.** The accounts and
+  transfers are not deleted; they become unreachable through the Exchange until
+  the currency is configured again. Nothing is lost, and nothing is spendable.
+- **Welcome credits already granted are not reclaimed.** They were posted
+  transfers.
+- **Charges already settled in that currency are not reversed.** A refund needs
+  the currency configured, so reverse anything that needs reversing BEFORE
+  removing the currency.
+
+So the safe order for removing a currency is: stop selling in it (remove the
+priced terms from the catalog), settle or reverse what is outstanding, and only
+then remove it from the currency list.
 
 ---
 
@@ -209,8 +368,8 @@ currency and a change to how account ids are derived, neither of which is built.
 |---|---|
 | **The reservation timeout is derived, not set** | A reservation lives for the signed-URL lifetime (5 minutes) **plus** `EXCHANGE_BILLING_HOLD_GRACE` — 6 minutes by default. There is no separate setting for it. If a settlement never arrives, the reservation expires by itself at that point and the money returns to the agent. |
 | **The amount scale is fixed at 8 decimal places** | The ledger stores integers only, at 10⁻⁸ of the currency unit. `€1.00` is stored as `100000000`. **Divide by 100,000,000 when reading balances** — not by 100. A price with more than 8 decimal places is rejected as an invalid request. The scale cannot be changed once the ledger is formatted. |
-| **Account ids are unsalted in production** | An account id is `sha256(prefix + business id)`, truncated to its low 16 bytes and read little-endian. In production nothing extra is added to that input (that is what "unsalted" means), so the id can be calculated from the business id alone. For an **owner** or the **platform fee** that means anyone holding the public id can calculate the account id and look the account up. An **agent** is different: its business id is the agent's `billing_ref`, not the agent's name, so the id cannot be calculated from anything public — you must read the `billing_ref` out of PostgreSQL first ([`RUNBOOK.md`](RUNBOOK.md) §4.1). The calculator is in [`RUNBOOK.md`](RUNBOOK.md) §3.2. |
-| **Account ids are unique per cluster, not per ledger** | Two ledgers in one cluster share the id space. This is why a second currency needs the currency added into how the ids are calculated. |
+| **Account ids are unsalted in production** | An account id is `sha256(prefix + currency + ":" + business id)`, truncated to its low 16 bytes and read little-endian. In production nothing extra is added to that input (that is what "unsalted" means), so the id can be calculated from the business id alone. For an **owner** or the **platform fee** that means anyone holding the public id can calculate the account id and look the account up. An **agent** is different: its business id is the agent's `billing_ref`, not the agent's name, so the id cannot be calculated from anything public — you must read the `billing_ref` out of PostgreSQL first ([`RUNBOOK.md`](RUNBOOK.md) §4.1). The calculator is in [`RUNBOOK.md`](RUNBOOK.md) §3.2. |
+| **Account ids are unique per cluster, not per ledger** | Two ledgers in one cluster share the id space. That is why the currency is part of every account id: without it, one agent's EUR and USD accounts would calculate to the same id and the second ledger could never create its account. The same applies to transfer ids, which is why the welcome-credit slot carries the currency too. |
 | **A single replica has no spare copy** | `--replica-count=1` means the ledger is one process and one file. There is nothing to fail over to. TigerBeetle supports clusters with several replicas; this deployment does not use one. |
 
 ### The three account classes
@@ -304,17 +463,19 @@ The Exchange's environment:
 
 ```
 FORA_BILLING_ADAPTER=tigerbeetle
-EXCHANGE_BILLING_LEDGER=978
+EXCHANGE_BILLING_LEDGER=978,840
 EXCHANGE_BILLING_TB_ADDRESS=<fill in — the ledger's IP>:3000
 EXCHANGE_BILLING_TB_CLUSTER_ID=1
 EXCHANGE_BILLING_HOLD_GRACE=1m
 EXCHANGE_BILLING_TB_OP_TIMEOUT=5s
 ```
 
-`978` makes this a **EUR** deployment: every catalog term must be priced in EUR
-or the transaction is denied (§4). `EXCHANGE_BILLING_TB_CLUSTER_ID` matches the
-`--cluster` the data file was formatted with — a mismatch fails the Exchange's
-boot health check.
+`978,840` makes this a **EUR and USD** deployment: catalog terms may be priced in
+either, a term in any other currency is denied, and the two balances never mix
+(§4). `978` comes first, so this Exchange advertises `EUR` as its
+`base_currency`. `EXCHANGE_BILLING_TB_CLUSTER_ID` matches the `--cluster` the
+data file was formatted with — a mismatch fails the Exchange's boot health
+check.
 
 Both containers — ledger **and** Exchange — carry `seccomp=unconfined` and
 `IPC_LOCK` (§1.1), and the data volume is a real block device with a filesystem

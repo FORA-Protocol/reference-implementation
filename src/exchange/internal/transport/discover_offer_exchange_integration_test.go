@@ -17,7 +17,7 @@ import (
 // signing, so the field falls inside the signed offer payload
 // (helpers.canonicalOfferPayload covers the whole Offer minus
 // signature/signature_algorithm). The broker derives the execute-routing target
-// from this signed field, retiring the X-FORA-Exchange-Endpoint header.
+// from this signed field, so no caller-supplied header names the Exchange.
 //
 // Round-trip: the offer is produced and read through the public
 // CatalogService.PushResources → ExchangeService.DiscoverResources surface; the

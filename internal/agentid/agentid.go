@@ -1,122 +1,37 @@
-// Package agentid turns the covered Signature-Agent header into an agent's stable
-// identity. That is two steps, and both live here so the wire form and the
-// identity derived from it cannot drift apart: DirectoryFromHeader reads the
-// header's structured-field forms into a plain directory URI, and FromDirectory
-// reduces that URI to the identity everything keys on.
+// Package agentid turns a verified signer's Signature-Agent directory origin into
+// that signer's stable identity (FromDirectory). The origin itself is read off
+// the request by the protocol SDK's verifier, which accepts it only as an https
+// origin and carries it on the VerifiedRequest; this package reduces it to the
+// identity everything keys on.
 //
 // After the WBA split the RFC 9421 keyid is only a key thumbprint — proof of
 // possession, not identity — so the identity is the directory the signature
-// commits to. That value arrives as a URL, and using it verbatim makes
-// "http://agent.example" and "https://agent.example" two different agents with
-// two registrations, two key pins, and two billing refs, even though only one
-// party can serve either.
+// commits to. That value arrives as a URL, and using it verbatim would make one
+// party several agents with several registrations, key pins and billing refs.
+// The identity is therefore the host — with its port, which a deployment may
+// distinguish by — reduced to one canonical spelling.
 //
-// The scheme is a property of the DEPLOYMENT, not of the agent: the directory
-// fetch uses the configured FORA_WELLKNOWN_SCHEME,
-// which is http on a compose stack and https in production. So the identity is
-// the host — with its port, which a compose stack does distinguish by — and the
-// fetch URL is rebuilt from it by forawellknown.WBAURL.
-//
-// Dropping the scheme also closes a small hole IN agentreg specifically, and the
-// scope matters. agentreg rebuilds its fetch URL from whatever it is handed, so a
-// caller presenting "http://victim.example" used to force that directory fetch
-// down to cleartext; it now derives the host before building either the fetch URL
-// or the stored identity, so the configured scheme always decides.
-//
-// This is NOT a general cleartext-downgrade defence, and that is the ONLY thing
-// it leaves to another layer. The transport key resolver (agentkeys) canonicalizes
-// through this package too — so one host is one cache entry and one fetch budget
-// there as well — but the SDK still honours a caller-supplied scheme when it
-// dials. What refuses a cleartext dial on that path is the guarded HTTP client's
-// ALLOW_INSECURE gate, which the e2e compose stacks deliberately set to "true".
+// Dropping the scheme never makes a plaintext directory acceptable. A
+// Signature-Agent member that is not an https origin is refused by the SDK
+// verifier before any identity is derived, and every key directory this
+// repository reads is read over https from the host's own authority (the SDK's
+// fetcher, through forawellknown.NewDirectoryFetcher and internal/agentkeys),
+// whatever scheme a caller wrote.
 package agentid
 
 import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/dunglas/httpsfv"
 	"golang.org/x/net/idna"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 )
-
-// DirectoryFromHeader reads a raw Signature-Agent header value and returns the
-// bare directory URI it carries. It mirrors the protocol SDK's own reader, and the
-// two must agree: this repo verifies signatures through both stacks (the SDK
-// connectserver gate for the Connect services, internal/httpsig for the identity
-// delivery path), and a header the two read differently is one that authorizes
-// differently depending on which door the request came through.
-//
-// Two forms are accepted, and both yield the same URI:
-//
-//	"https://a.example"   an RFC 8941 String, which is what Web Bot Auth defines
-//	                      the value to be. Quoting is not optional in structured
-//	                      fields — a String has exactly one serialization — so this
-//	                      is what a conformant signer sends, and reading it verbatim
-//	                      carried the quotes into the directory URI and failed the
-//	                      request.
-//	https://a.example     the bare form FORA itself emits. Despite appearances this
-//	                      is not "an unquoted string": it parses as a Token, since
-//	                      RFC 8941 tokens admit ":" and "/".
-//
-// A value neither parser accepts is returned trimmed but otherwise unchanged, so
-// hosts no structured-field parser admits keep working. Nothing is lost by being
-// lenient here: FromDirectory still has to find a host in the result before it can
-// become an identity or a fetch target.
-//
-// The spec's sf-dictionary form and its data: URI are NOT read; see FromDirectory
-// for why FORA declines an inline key directory.
-//
-// Prefer DirectoryFromRequest when reading from an http.Header. This entry point
-// takes an already-extracted string and so cannot see a REPEATED header, which is
-// the one case where the two readings of one header can diverge.
-func DirectoryFromHeader(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	item, err := httpsfv.UnmarshalItem([]string{raw})
-	if err != nil {
-		return raw
-	}
-	switch v := item.Value.(type) {
-	case string:
-		return v // String: the parser has already stripped the quotes
-	case httpsfv.Token:
-		return string(v)
-	default:
-		return raw
-	}
-}
-
-// SignatureAgentHeader is the Web Bot Auth header carrying the signer's key
-// directory. It is declared here because DirectoryFromRequest must read the same
-// field name the signature base covered.
-const SignatureAgentHeader = "Signature-Agent"
-
-// DirectoryFromRequest reads the Signature-Agent directory out of a request's
-// headers. This — not DirectoryFromHeader — is what a verifier should call.
-//
-// The difference is Values, not Get. A field that appears twice contributes BOTH
-// values to the RFC 9421 signature base, joined by ", ", so a signature can commit
-// to two directories at once. Get returns only the first field line: the identity
-// would then be derived from one value while the signature covered both, and the
-// two readings of one header must not diverge. Joining the way the base joins
-// them yields a value no structured-field parser accepts as a single Item, so a
-// repeated header falls through to FromDirectory and is refused — which is the
-// answer the SDK's own reader gives, and the answer these two stacks have to
-// agree on. A request that authorizes differently depending on which door it came
-// through is the bug this parity exists to prevent.
-func DirectoryFromRequest(h http.Header) string {
-	return DirectoryFromHeader(strings.Join(h.Values(SignatureAgentHeader), ", "))
-}
 
 // FromDirectory returns the agent identity for a Signature-Agent directory
 // origin: its host including any port, with the scheme removed. It accepts the

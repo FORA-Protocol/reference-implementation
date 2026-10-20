@@ -48,9 +48,18 @@ Nothing then has to be stored between calls: no cache, no handle table, no expir
 
 The cost is that an agent pays the fetch latency for every licensed item, including ones it may not read.
 
+**Amended 2026-09-27: the fetch is the default, not unconditional.** `fora_execute` takes an optional boolean `embed_content`, default `true`. With `true` or no value, everything above holds. With `false`, the service skips the fetch: the purchase still happens and the result carries each item's `retrieval_endpoint` and transaction id, but no content and no `delivery_failures`. The edge is not contacted, so no delivery is recorded for that purchase until someone fetches the URL.
+
+The option exists for clients that cannot accept large embedded resources in a tool result. It has two limits, and the tool's parameter description states both to the agent:
+
+- **The URL is a bearer credential until it expires**, about five minutes after the purchase, and with `false` it is the only thing the agent receives, so it stays in the chat and in client logs for that time.
+- **The URL alone works only where the edge does not enforce the binding.** Where the edge enforces it (D1), the agent cannot produce the proof of possession and every fetch is refused, which is the deadlock this ADR exists to remove. On such a deployment the agent should keep the default.
+
+The value is checked by the MCP SDK's schema validation before the handler runs. A value that is not a JSON boolean (`null`, `"false"`, `0`) is refused before anything is bought.
+
 ### D3 — Both the bytes and the URL are returned; nothing is persisted
 
-`fora_execute` returns the content as MCP embedded resources alongside the unchanged `retrieval_endpoint` per item.
+`fora_execute` returns the content as MCP embedded resources alongside the unchanged `retrieval_endpoint` per item, unless the caller set `embed_content` to `false` (D2).
 
 The URL is kept because it remains the item's delivery identity — it is what `transaction_log` records, what reconciliation joins on, and what an agent can retry with if the service's own fetch failed. The bytes ride as a **blob** whatever the media type: the SDK's text field is a Go string, and `encoding/json` silently replaces invalid UTF-8 rather than erroring, which would corrupt paid-for content with no signal. The media type travels beside the blob so a client decodes with its own charset handling.
 

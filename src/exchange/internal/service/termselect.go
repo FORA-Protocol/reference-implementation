@@ -14,9 +14,9 @@ import (
 // is the one piece of term logic the Exchange keeps, because it is Exchange
 // behaviour rather than a protocol rule.
 //
-// A term is kept iff the requester's Biscuit authority (Requester.scopes)
-// covers ALL of the term's scopes (AND-coverage). An empty term scopes[] is
-// public. Coverage is hierarchical: a requester scope "a:*" covers "a:US" and a
+// A term is kept only when the scopes the requester states (Requester.scopes)
+// cover ALL of the term's scopes (AND-coverage). An empty term scopes[] is
+// public. Coverage is segment-wise: a requester scope "a:*" covers "a:US" and a
 // bare "*" covers everything. Scope coverage is the ONLY eligibility filter.
 //
 // Restriction axes (USER_TYPE, GEOGRAPHY, FUNCTION) are NOT used to exclude
@@ -30,21 +30,21 @@ import (
 //
 // A nil requester selects nothing (no requester, no entitlement). selectTerms
 // never mutates its inputs, and the terms it returns are the same pointers it
-// was given, in stored order — headlineIndex recovers the publisher's term
+// was given, in stored order — storedIndex recovers the publisher's term
 // index by pointer identity.
 //
-// TRUST CAVEAT (deferred verification): requester.scopes is a self-declared wire
-// field — the Exchange currently TRUSTS it without attestation. Scope coverage
-// is therefore an honest projection of intent, NOT yet an authorization
-// boundary: an agent could claim any scope. Scope verification (entitlement
-// biscuit attenuation + WBA-bound identity) is deliberately deferred; when it
-// lands, scopes will be verified upstream and this function is
-// unchanged. Until then, do not treat scope coverage as an access-control gate.
+// Requester.scopes is the requester's own statement, as the pinned protocol
+// defines it: signed and attributable, and not verified by the Exchange. Scope
+// coverage decides which terms the Exchange presents; it is not access control,
+// and a false statement is settled through reconciliation and the account
+// relationship. An Exchange MAY require a verified delegation before it presents
+// a scoped term (see LicenseTerm.scopes); this one reads no delegation, so it
+// presents every term the stated scopes cover.
 func selectTerms(terms []*forav1.LicenseTerm, requester *forav1.Requester) []*forav1.LicenseTerm {
 	if requester == nil {
 		return nil
 	}
-	scopes := requester.GetScopes() // self-declared, trusted-for-now (see TRUST CAVEAT)
+	scopes := requester.GetScopes() // the requester's own statement; see above
 	out := make([]*forav1.LicenseTerm, 0, len(terms))
 	for _, term := range terms {
 		if term == nil {

@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	connect "connectrpc.com/connect"
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
@@ -34,8 +33,8 @@ import (
 // collide with a sibling's on the append-only ledger (there is no per-test reset).
 
 const (
-	e2eTBLedger   uint32 = 840 // ISO 4217 USD — matches the harness's USD-priced offers
-	e2eTBCurrency        = "USD"
+	e2eTBLedger   uint32 = 840 // ISO 4217 numeric for the harness currency
+	e2eTBCurrency        = harnessCurrency
 	// e2eOwnerID is the resource_owner_id the harness manifest attests (see
 	// newAllowAllManifestCache). The agent leg is keyed on the harness's
 	// billing_ref, read via h.billingRef, not a fixed agent id.
@@ -48,14 +47,16 @@ const (
 // newTBAdapter builds a salt-namespaced TigerBeetleAdapter over the shared
 // package cluster. IDNamespace isolates this test's accounts/transfers from
 // siblings on the reset-less ledger.
-func newTBAdapter(salt string) *billing.TigerBeetleAdapter {
-	return billing.NewTigerBeetleAdapter(billing.TigerBeetleOptions{
-		Client:      tbClient,
-		Ledger:      e2eTBLedger,
-		Currency:    e2eTBCurrency,
-		HoldTimeout: time.Minute,
-		IDNamespace: salt,
-	})
+func newTBAdapter(t *testing.T, salt string) *billing.TigerBeetleAdapter {
+	t.Helper()
+	return newTBAdapterFor(t, salt, e2eTBCurrency)
+}
+
+// newTBAdapterFor is newTBAdapter with an explicit currency set, for the cases
+// that need a deployment billing in more than one currency.
+func newTBAdapterFor(t *testing.T, salt string, currencies ...string) *billing.TigerBeetleAdapter {
+	t.Helper()
+	return tbtest.Adapter(t, tbClient, salt, currencies...)
 }
 
 // newTBHarness wires a transport harness whose billing adapter is a real
@@ -65,8 +66,26 @@ func newTBAdapter(salt string) *billing.TigerBeetleAdapter {
 // so the refund case can drive the no-public-RPC surface directly).
 func newTBHarness(t *testing.T, salt string, feeBps int, opts harnessOptions) (*testHarness, *billing.TigerBeetleAdapter) {
 	t.Helper()
-	adapter := newTBAdapter(salt)
+	return newTBHarnessWith(t, salt, feeBps, opts, e2eTBCurrency)
+}
+
+// newTBHarnessFor is newTBHarness for a deployment billing in a given currency
+// set, at the module's default fee rate. The Exchange config and the adapter are
+// configured from the same list, so they cannot disagree.
+func newTBHarnessFor(
+	t *testing.T, salt string, currencies []string,
+) (*testHarness, *billing.TigerBeetleAdapter) {
+	t.Helper()
+	return newTBHarnessWith(t, salt, 0, harnessOptions{}, currencies...)
+}
+
+func newTBHarnessWith(
+	t *testing.T, salt string, feeBps int, opts harnessOptions, currencies ...string,
+) (*testHarness, *billing.TigerBeetleAdapter) {
+	t.Helper()
+	adapter := newTBAdapterFor(t, salt, currencies...)
 	opts.server = adapter
+	opts.ledgerCurrencies = currencies
 	h := newTestHarnessWith(t, opts)
 	if feeBps > 0 {
 		if _, err := h.queries.SetTenantFeeRateBps(h.ctx, sqlc.SetTenantFeeRateBpsParams{
@@ -100,7 +119,8 @@ func fundTBAgent(t *testing.T, salt, agentID, dollars string) {
 // RevenueReport surface; no protocol read surface is added here). Missing reads 0.
 func tbPosted(t *testing.T, prefix tigerbeetle.Prefix, salt, businessID string) int64 {
 	t.Helper()
-	return tbLedger().PostedBalance(t, tbtest.MustAccountID(t, prefix, salt+businessID))
+	led := tbLedger()
+	return led.PostedBalance(t, tbtest.MustAccountID(t, prefix, led.Currency(t), salt+businessID))
 }
 
 // assertSplitBalances asserts the agent / owner:revenue / platform:fee settled
@@ -174,7 +194,8 @@ func TestTigerBeetleE2E_HoldRelease(t *testing.T) {
 	// (they exclude debits_pending), so assert the hold is actually gone: an
 	// unreleased hold would pin the 1.00 gross in the agent's debits_pending until
 	// the ~6-min timeout, invisible to the settled-balance check.
-	if p := tbLedger().PendingBalance(t, tbtest.MustAccountID(t, tigerbeetle.PrefixAgent, salt+h.billingRef)); p != 0 {
+	led := tbLedger()
+	if p := led.PendingBalance(t, tbtest.MustAccountID(t, tigerbeetle.PrefixAgent, led.Currency(t), salt+h.billingRef)); p != 0 {
 		t.Errorf("agent debits_pending = %d, want 0 (hold not voided on persist failure)", p)
 	}
 }
@@ -208,7 +229,7 @@ func TestTigerBeetleE2E_PerOwnerFeeOverride(t *testing.T) {
 // A service that re-resolved the rate at Record would post 0.50 / 0.50 and fail here.
 func TestTigerBeetleE2E_RateFrozenAtAuthorize(t *testing.T) {
 	salt := sharedTB.Salt(t)
-	rec := newRecordingAdapter(newTBAdapter(salt))
+	rec := newRecordingAdapter(newTBAdapter(t, salt))
 	h := newTestHarnessWith(t, harnessOptions{server: rec})
 	if _, err := h.queries.SetTenantFeeRateBps(h.ctx, sqlc.SetTenantFeeRateBpsParams{
 		TenantID: h.tenantID, FeeRateBps: e2eFeeBps, // tenant default 10%
@@ -312,7 +333,7 @@ func TestTigerBeetleE2E_InsufficientBalance(t *testing.T) {
 // ErrRefundBeforeRecord and no split postings land.
 func TestTigerBeetleE2E_RefundBeforeRecord(t *testing.T) {
 	salt := sharedTB.Salt(t)
-	adapter := newTBAdapter(salt)
+	adapter := newTBAdapter(t, salt)
 	// Adapter-direct test (no harness, no Register): the funded account and the
 	// Authorize account key just have to agree, so both use the same ref.
 	const ref = defaultCallerBillingRef

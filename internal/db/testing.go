@@ -14,6 +14,8 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/tcstart"
 )
 
 // postgresRunOptions is the single source of truth for the testcontainers
@@ -54,7 +56,9 @@ func postgresRunOptions() []testcontainers.ContainerCustomizer {
 // Shared by StartPostgres and StartSharedPostgres so the run + connection-string
 // boilerplate exists in one place.
 func runPostgres(ctx context.Context) (*tcpostgres.PostgresContainer, string, error) {
-	container, err := tcpostgres.Run(ctx, "postgres:16-alpine", postgresRunOptions()...)
+	container, err := tcstart.Run(ctx, func(ctx context.Context) (*tcpostgres.PostgresContainer, error) {
+		return tcpostgres.Run(ctx, "postgres:16-alpine", postgresRunOptions()...)
+	})
 	if err != nil {
 		return nil, "", fmt.Errorf("start postgres: %w", err)
 	}

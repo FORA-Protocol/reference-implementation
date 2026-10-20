@@ -16,15 +16,26 @@ import (
 // agent-balance denial.
 var errCreditLiquidityCap = errors.New("billing: credit exceeds platform liquidity cap")
 
-// Credit grants a one-time credit to the agent's account as a single posted
-// transfer from the platform liquidity account. The transfer id is derived
-// from the caller's idempotency key alone — TransferID(idNS + key) — which is
-// the same derivation the operator funding scripts use for their reserved
-// service-welcome label (WelcomeCreditKey), so a service grant and an operator
-// prefund that share the key occupy one ledger slot and can never both apply. Idempotency is check-then-act:
-// an existing transfer under the id (whatever its amount — the first credit
-// wins) is a no-op success, and the create maps a duplicate-id race to
-// success the same way.
+// Credit grants a one-time credit to the agent's account in the amount's currency,
+// as a single posted transfer from that currency's platform liquidity account. The
+// currency must be one the deployment bills in; anything else is rejected by the
+// shared argument gate.
+//
+// The transfer id is derived from the caller's idempotency key alone —
+// TransferID(idNS + key) — which is the same derivation the operator funding
+// scripts use for their reserved service-welcome label (WelcomeCreditKey), so a
+// service grant and an operator prefund that share the key occupy one ledger slot
+// and can never both apply. Idempotency is check-then-act: an existing transfer
+// under the id (whatever its amount — the first credit wins) is a no-op success,
+// and the create maps a duplicate-id race to success the same way.
+//
+// Because a TigerBeetle transfer id is unique per CLUSTER and not per ledger, the
+// key alone names ONE slot across every currency. A caller that grants the same
+// agent in more than one currency must therefore put the currency in its key, or
+// the second currency's grant reads the first one's transfer and silently does
+// nothing. WelcomeCreditKey does exactly that; the adapter deliberately does not
+// add the currency itself, because the operator scripts derive the id from the
+// same key text and both sides must agree on it.
 //
 // The liquidity account is created on first use with the platform flag policy
 // (History, no DebitsMustNotExceedCredits), so it may go arbitrarily negative:
@@ -35,9 +46,11 @@ func (a *TigerBeetleAdapter) Credit(
 	ctx context.Context, billingRef string, amount Amount, idempotencyKey string,
 ) (err error) {
 	defer func() { err = classifyUnavailable(err) }()
-	if err := validateCreditArgs(billingRef, amount, idempotencyKey, a.currency); err != nil {
+	if err := validateCreditArgs(billingRef, amount, idempotencyKey, a.currencies); err != nil {
 		return err
 	}
+	currency := amount.Currency
+	ledger := a.ledgers[currency]
 	minor, err := a.toMinor(amount)
 	if err != nil {
 		return err
@@ -46,18 +59,20 @@ func (a *TigerBeetleAdapter) Credit(
 	if err != nil {
 		return fmt.Errorf("billing: derive credit id: %w", err)
 	}
-	agentAcct, err := a.accountID(tigerbeetle.PrefixAgent, billingRef)
+	agentAcct, err := a.accountID(tigerbeetle.PrefixAgent, currency, billingRef)
 	if err != nil {
 		return err
 	}
-	liquidity, err := a.accountID(tigerbeetle.PrefixPlatform, tigerbeetle.PlatformLiquidityID)
+	liquidity, err := a.accountID(tigerbeetle.PrefixPlatform, currency, tigerbeetle.PlatformLiquidityID)
 	if err != nil {
 		return err
 	}
-	if err := a.ensureAccount(ctx, agentAcct, tigerbeetle.CodeAgent, "agent"); err != nil {
+	if err := a.ensureAccount(ctx, agentAcct, ledger, tigerbeetle.CodeAgent, "agent"); err != nil {
 		return err
 	}
-	if err := a.ensureAccount(ctx, liquidity, tigerbeetle.CodePlatform, "platform liquidity"); err != nil {
+	if err := a.ensureAccount(
+		ctx, liquidity, ledger, tigerbeetle.CodePlatform, "platform liquidity",
+	); err != nil {
 		return err
 	}
 	_, exists, err := a.tb.LookupTransfer(ctx, transferID)
@@ -72,7 +87,7 @@ func (a *TigerBeetleAdapter) Credit(
 		Debit:  liquidity,
 		Credit: agentAcct,
 		Amount: minor,
-		Ledger: a.ledger,
+		Ledger: ledger,
 		Code:   tigerbeetle.CodeSettlement,
 	}})
 	if err == nil && out == tigerbeetle.LinkedExistsMismatch {

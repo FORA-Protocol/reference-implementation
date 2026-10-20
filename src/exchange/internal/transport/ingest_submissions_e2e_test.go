@@ -122,12 +122,11 @@ func assertSubmission(t *testing.T, got ingest.SubmissionResult, first, last int
 // second; one that drifted high would fail the first.
 func TestIngest_FeedOverTheWireBoundIsPushedInSubmissions(t *testing.T) {
 	h := newPushHarness(t)
-	const publisherDomain = "publisher.example"
-	kid, priv := registerContributor(t, h, publisherDomain)
-	publisherTenant := seedTenantForDomain(t, h, publisherDomain)
+	kid, priv := registerContributor(t, h)
+	publisherTenant := seedSiteForDomain(t, h, ingestDomain)
 	bound := entriesPerSubmission(t)
 
-	entries := bulkEntries(publisherDomain, "/bulk/", bound+1)
+	entries := bulkEntries(ingestDomain, "/bulk/", bound+1)
 	report, err := ingest.PushEntries(h.ctx,
 		mustCatalogClient(t, h.server.URL, kid, priv), pushTarget(publisherTenant, kid), entries)
 	if err != nil {
@@ -141,7 +140,7 @@ func TestIngest_FeedOverTheWireBoundIsPushedInSubmissions(t *testing.T) {
 	assertSubmission(t, report.Submissions[1], bound, bound, true)
 	assertEntriesOfferCount(t, h, entries, 1)
 
-	over := bulkEntries(publisherDomain, "/bulk-raw/", bound+1)
+	over := bulkEntries(ingestDomain, "/bulk-raw/", bound+1)
 	_, err = h.signedCat(kid, priv).PushResources(h.ctx, connect.NewRequest(newPushRequest(publisherTenant, kid, over)))
 	assertConnectCode(t, err, connect.CodeInvalidArgument)
 	assertWireViolation(t, err, "entries", "repeated.max_items")
@@ -159,12 +158,11 @@ func TestIngest_FeedOverTheWireBoundIsPushedInSubmissions(t *testing.T) {
 // submission, the range that was stored and the range that was not sent.
 func TestIngest_RefusedSubmissionStopsTheRun(t *testing.T) {
 	h := newPushHarness(t)
-	const publisherDomain = "publisher.example"
-	kid, priv := registerContributor(t, h, publisherDomain)
-	publisherTenant := seedTenantForDomain(t, h, publisherDomain)
+	kid, priv := registerContributor(t, h)
+	publisherTenant := seedSiteForDomain(t, h, ingestDomain)
 	bound := entriesPerSubmission(t)
 
-	entries := bulkEntries(publisherDomain, "/stop/", 2*bound+1)
+	entries := bulkEntries(ingestDomain, "/stop/", 2*bound+1)
 	entries[bound].Terms = []*forav1.LicenseTerm{unregisteredUnitTerm()}
 
 	report, err := ingest.PushEntries(h.ctx,

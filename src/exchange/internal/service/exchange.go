@@ -2,9 +2,8 @@ package service
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/base64"
 	"errors"
+	"math/big"
 	"time"
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
@@ -27,8 +26,8 @@ import (
 // ExchangeConfig bundles wiring knobs for the service.
 type ExchangeConfig struct {
 	Exchange     string        // canonical exchange domain (echoed in ResourceResponse)
-	OfferTTL     time.Duration // default 5m
-	URLTTL       time.Duration // default 5m
+	OfferTTL     time.Duration // default DefaultOfferTTL
+	URLTTL       time.Duration // default DefaultURLTTL
 	ReportWindow time.Duration // default 24h
 	// SupportedProfiles is the Exchange's advertised extension-profile set (the
 	// same list published in WellKnownManifest.supported_profiles). It gates
@@ -42,14 +41,30 @@ type ExchangeConfig struct {
 	// (falling back to EXCHANGE_DOMAIN); handling per-publisher activation defaults
 	// is deferred past v1.
 	DefaultTenantDomain string
-	// LedgerCurrency is the deployment ledger currency (ISO 4217 alpha) the
-	// welcome-credit grant is denominated in. There is deliberately NO default:
-	// cmd/server threads the selected billing backend's currency here, and the
-	// billing gate rejects a Credit whose currency does not match the adapter's,
-	// so wiring that leaves this empty fails the first Register loudly. A
-	// default would substitute a plausible currency for missing wiring and
-	// misbook money instead.
-	LedgerCurrency string
+	// LedgerCurrencies are the currencies this deployment bills in (ISO 4217
+	// alpha), in configuration order. There is deliberately NO default:
+	// cmd/server threads the selected billing backend's currencies here, and the
+	// billing gate rejects a Credit in a currency the adapter does not keep, so
+	// wiring that leaves this empty fails the first Register loudly. A default
+	// would substitute a plausible currency for missing wiring and misbook money
+	// instead.
+	//
+	// The order matters outside this struct: the well-known document advertises
+	// the first entry as base_currency. Nothing in the service reads the order.
+	LedgerCurrencies []string
+	// DefaultAgentCredits is the one-time welcome credit a freshly registered
+	// agent receives at its first Register, keyed by ISO 4217 alpha code. It is
+	// parsed once at boot from EXCHANGE_DEFAULT_AGENT_CREDIT, which validates
+	// every entry (a currency this deployment bills in, a non-negative amount
+	// exact at ledger asset scale 8), and is held here for the life of the
+	// process. A currency absent from the map, and an entry of zero, both mean
+	// no grant in that currency; nil or empty disables the grant entirely.
+	//
+	// It is configuration, not seat state, so it applies from the first
+	// Register whenever the default seat was created: a seat inserted after the
+	// process started grants it exactly like one that existed at boot.
+	// Server-side commercial term, never on the wire.
+	DefaultAgentCredits map[string]*big.Rat
 	// TermsDigest is the digest of the licensing terms this Exchange currently
 	// publishes — the SAME value the manifest serves as
 	// WellKnownManifest.terms_digest, threaded from the one place the operator's
@@ -60,17 +75,28 @@ type ExchangeConfig struct {
 	// recorded — the behaviour every deployment had before terms versioning
 	// existed.
 	TermsDigest string
+	// BrokerHost is the canonical directory host of the Broker this Exchange
+	// accepts relayed transactions from — derived at boot from
+	// EXCHANGE_BROKER_WELLKNOWN_URL, the same document the transport's
+	// revocation resolver is bound to, so the Broker the transport trusts and the
+	// Broker the service recognises are one party. A verified caller signing under
+	// this host is a relay, and the agent is then read from Requester.domain
+	// rather than from the header (see resolveAgent). Empty means no Broker is
+	// configured: every caller is then direct, and a relay cannot be recognised at
+	// all. Production refuses to boot without the URL, so empty is the harness and
+	// single-tenant-direct case.
+	BrokerHost string
 }
 
 func (c ExchangeConfig) withDefaults() ExchangeConfig {
 	if c.OfferTTL == 0 {
-		c.OfferTTL = 5 * time.Minute
+		c.OfferTTL = DefaultOfferTTL
 	}
 	if c.URLTTL == 0 {
-		c.URLTTL = 5 * time.Minute
+		c.URLTTL = DefaultURLTTL
 	}
 	if c.ReportWindow == 0 {
-		c.ReportWindow = 24 * time.Hour
+		c.ReportWindow = DefaultReportWindow
 	}
 	return c
 }
@@ -79,20 +105,29 @@ func (c ExchangeConfig) withDefaults() ExchangeConfig {
 // ReportUsage. It depends on narrow repos, a billing adapter, a URL-signer
 // dispatcher, and an offer signer.
 type ExchangeService struct {
-	tx           db.TxRunner
-	catalog      *CatalogService
-	tenants      repo.TenantReadRepo
+	tx      db.TxRunner
+	catalog *CatalogService
+	tenants repo.TenantReadRepo
+	// sites resolves the registered publisher site a delivery URL is minted for.
+	// The scheme the site's edge verifies, and its CloudFront key-pair id, are
+	// read from there; the private key the URL is signed with comes from the seat
+	// (per ADR-026 D5).
+	sites        repo.PublisherDomainReadRepo
 	agents       repo.AgentRepo
 	agentReg     agentreg.Registry
 	transactions repo.TransactionRepo
 	obligations  repo.ObligationRepo
 	evidence     repo.EvidenceRepo
+	events       repo.TransactionEventRepo
 	feeOverrides repo.FeeOverrideRepo
 	billing      billing.Adapter
 	offerSigner  *signing.Ed25519Signer
 	keyStore     signing.KeyStore
 	clk          clock.Clock
 	cfg          ExchangeConfig
+	// lifetimes shortens the offer and delivery-URL lifetimes of one tenant; nil
+	// in production. See Lifetimes.
+	lifetimes Lifetimes
 	// sor is the System of Record the Register flow creates and reads agent
 	// accounts through (ADR-021), and the paid charge path reads the account's
 	// active flag from before reserving money (checkAccountActive). billingRefGen
@@ -118,7 +153,12 @@ type ExchangeDeps struct {
 	TxRunner db.TxRunner
 	Catalog  *CatalogService
 	Tenants  repo.TenantReadRepo
-	Agents   repo.AgentRepo
+	// Sites resolves the registered publisher site a delivery URL is minted for,
+	// which carries the signing scheme and the CloudFront key-pair id. Required:
+	// every successful ExecuteTransaction mints a URL, so a nil value would panic
+	// the hot path.
+	Sites  repo.PublisherDomainReadRepo
+	Agents repo.AgentRepo
 	// AgentReg drives ADR-009 D2 lazy registration: when resolveCaller meets
 	// a keyID with no fora.agents row, the service pulls the caller's own Web
 	// Bot Auth key directory, pins the currently-valid key published there,
@@ -133,6 +173,10 @@ type ExchangeDeps struct {
 	// Required: every successful ExecuteTransaction writes one; a nil value would
 	// panic the hot path.
 	Evidence repo.EvidenceRepo
+	// Events is the transaction event journal the attributed denials are
+	// recorded in (ADR-027). Required: every attributed denial of a request that
+	// proved possession writes one row; a nil value would panic the denial path.
+	Events repo.TransactionEventRepo
 	// FeeOverrides resolves the per-(tenant, resource_owner) commission override
 	// at Authorize. Required: every ExecuteTransaction resolves the effective fee
 	// rate so it can be frozen on the hold; a nil value would panic the hot path.
@@ -168,6 +212,10 @@ type ExchangeDeps struct {
 	// integration tests pass a DeterministicClock so the gates are driven
 	// without sleeping. See ADR-008 D1.
 	Clk clock.Clock
+	// Lifetimes shortens the offer and delivery-URL lifetimes of a tenant. nil
+	// in production, where every tenant gets Config.OfferTTL and Config.URLTTL;
+	// the e2e build wires its control service here (ADR-028 D6).
+	Lifetimes Lifetimes
 	// Every ExecuteTransaction / ReportUsage outcome (success or rejection)
 	// emits one log line through the REQUEST-SCOPED logger that
 	// RequestIDMiddleware binds onto the context (reqctx.IntoContext), so the
@@ -192,17 +240,20 @@ func NewExchangeService(d ExchangeDeps) *ExchangeService {
 		tx:            d.TxRunner,
 		catalog:       d.Catalog,
 		tenants:       d.Tenants,
+		sites:         d.Sites,
 		agents:        d.Agents,
 		agentReg:      d.AgentReg,
 		transactions:  d.Transactions,
 		obligations:   d.Obligations,
 		evidence:      d.Evidence,
+		events:        d.Events,
 		feeOverrides:  d.FeeOverrides,
 		billing:       d.Billing,
 		offerSigner:   d.OfferSigner,
 		keyStore:      d.KeyStore,
 		clk:           clk,
 		cfg:           d.Config.withDefaults(),
+		lifetimes:     d.Lifetimes,
 		sor:           d.SoR,
 		billingRefGen: gen,
 		regSchema:     d.RegSchema,
@@ -393,84 +444,4 @@ func (s *ExchangeService) resolveOfferForTx(req *forav1.TransactionRequest) (res
 		return resolvedOffer{}, exchange.Wrap(exchange.KindInvalidRequest, err, "parse signed offer pricing")
 	}
 	return resolvedOffer{entry: entry, pricing: pricing, offerCanonicalBytes: canonical}, nil
-}
-
-// agentKey is the ONE registered-agent key snapshot that every signature in one
-// ExecuteTransaction is verified against: the complete request proof, each
-// per-item check the broker-relay gate runs, and each item authorization at
-// execution time. It is resolved once, from the agent row the request already
-// had to load, and passed down; no verification site below reloads it.
-//
-// Threading the key rather than the agent id is what makes that structural. A
-// verifier that never receives an id cannot read the registry a second time, so
-// a key rotation landing mid-request cannot verify the proof and the early items
-// against the old key and the later items against the new one. That matters
-// because the response is finalized onto the request claim write-once: a
-// response assembled under two key snapshots would be stored permanently, and
-// every later retry under that idempotency key would replay its stale
-// SIGNATURE_INVALID denials.
-//
-// It carries the public key and the directory that key was pinned from, not a
-// whole agentBinding: a binding's acceptanceBytes describe ONE item's payload,
-// so a shared binding would carry the wrong payload for every item after the
-// first.
-type agentKey struct {
-	pub          ed25519.PublicKey
-	discoveryURL string
-}
-
-// verifier returns the Ed25519 key a signature is checked against. A snapshot
-// with no usable key means no registered agent row was resolved for this
-// request — the Exchange has no agents repo wired, or the stored key is not an
-// Ed25519 key. Neither is the caller's fault, so it surfaces as an internal
-// error rather than a signature denial.
-func (k agentKey) verifier() (ed25519.PublicKey, error) {
-	if len(k.pub) != ed25519.PublicKeySize {
-		return nil, exchange.Newf(exchange.KindInternal,
-			"no ed25519 agent key resolved for this request (%d bytes)", len(k.pub))
-	}
-	return k.pub, nil
-}
-
-// agentBinding carries the requesting agent's delivery-URL identity binding:
-// the RFC 7638 thumbprint of the proven caller key in both the base64url-no-pad
-// wire form (URL agent_id param + TransactionResponse.agent_identity_hash) and
-// the raw 32-byte digest persisted to transaction_log (ADR-013 D4/17.6/17.8).
-// pub is the raw key the thumbprint was derived from, retained so the success
-// path can persist it to transaction_evidence.agent_public_key for offline
-// acceptance re-verification (the digest is one-way and cannot recover it), and
-// discoveryURL is the anchored directory that key was pinned from, persisted
-// alongside it as the provenance the registry itself does not keep.
-// acceptanceBytes is the canonical payload the acceptance signature was verified
-// over, carried from the verify site for the same reason resolvedOffer carries
-// the offer's: the evidence row must store the bytes that were checked, not a
-// later re-derivation from a separately assembled argument list.
-type agentBinding struct {
-	thumbprint      string
-	digest          []byte
-	pub             ed25519.PublicKey
-	discoveryURL    string
-	acceptanceBytes []byte
-}
-
-// agentBindingForKey computes the RFC 7638 thumbprint binding from the request's
-// agent key snapshot and the canonical acceptance payload that key was just
-// verified against. R4 binds the delivery URL to the agent key proven by the
-// BODY offer-acceptance signature (never the transport caller / broker key), so
-// the binding source is a bare key, not a Caller. acceptanceBytes is taken as a
-// parameter rather than filled in afterwards so a binding is never half-built:
-// every field describes the same verification, or the value does not exist.
-func agentBindingForKey(key agentKey, acceptanceBytes []byte) (agentBinding, error) {
-	sum, err := helpers.ThumbprintBytes(key.pub)
-	if err != nil {
-		return agentBinding{}, exchange.Wrap(exchange.KindInternal, err, "compute agent thumbprint")
-	}
-	digest := sum[:]
-	return agentBinding{
-		thumbprint:      base64.RawURLEncoding.EncodeToString(digest),
-		digest:          digest,
-		pub:             key.pub,
-		discoveryURL:    key.discoveryURL,
-		acceptanceBytes: acceptanceBytes,
-	}, nil
 }

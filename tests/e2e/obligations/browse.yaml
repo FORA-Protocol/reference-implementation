@@ -1,0 +1,76 @@
+# Browse offers without committing: an agent asks what access would cost and
+# commits later, if at all. A browse charges nothing and records nothing.
+# Registry entries (ADR-028 D1); the tests that prove them say so on themselves.
+#
+# A "negative:" case is a refusal with a typed error response (ADR-028 D1). What
+# an answer that refuses nothing must leave out is a "must not" in "positive:".
+
+- id: BROWSE-001
+  title: Discovery for one URI returns its applicable offers with prices and terms
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      ResourceResponse — Exchange returns candidate resource offers.
+  positive: >-
+    DiscoverResources for one priced URI returns at least one offer, each with a
+    numeric rate, an ISO 4217 currency and the Exchange's offer signature.
+  negative: []
+
+- id: BROWSE-002
+  title: A discovery creates no transaction, no billing authorization and no reporting obligation
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Discovery has no side effects. It creates no transaction, no billing
+      authorization and no reporting obligation; an agent commits to an offer only on
+      the execute path (ExecuteTransaction).
+  positive: >-
+    The buyer's available balances, from which a billing authorization's hold is
+    subtracted, are the same after a successful DiscoverResources as before it, while
+    buying the offer it returned moves them by the item's cost. Repeated discoveries
+    of a resource whose every sale owes a usage report, under a reporting window that
+    has passed by the time the agent buys, leave the agent with no overdue
+    obligation: its purchase is not denied DENIAL_REASON_REPORTING_OVERDUE, though the
+    same purchase left unreported is, once its own window passes.
+  negative: []
+
+- id: BROWSE-003
+  title: A URI the platform does not recognise gets an empty offer list and a reason
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: Resource URI is not in this Exchange's catalog. OFFER_ABSENCE_REASON_NOT_IN_CATALOG = 1;
+  positive: A URI in the catalog gets its offers.
+  negative:
+    - code: ok
+      reason: OFFER_ABSENCE_REASON_NOT_IN_CATALOG
+      side_effect: no offer is returned for the unrecognised URI
+
+- id: BROWSE-004
+  title: The same discovery repeated returns the same answer and has no side effect
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Discovery is therefore safe to retry. A transport failure, such as an
+      unreachable Exchange or a timeout, is the client's concern: the protocol defines
+      no transient-failure code for it.
+  positive: >-
+    The same DiscoverResources sent three times returns, each time, offers for the
+    same resource at the same Exchange with the same pricing, delivery method,
+    reporting obligation and term, and the buyer's balances do not move across the
+    three; buying the offer the last one returned moves them by the item's cost. A
+    discovery retried after the Exchange gave no answer returns, once the Exchange
+    answers again, the same offer and moves no money. The failed attempt is the
+    client's transport concern, for which the protocol defines no code.
+  negative: []

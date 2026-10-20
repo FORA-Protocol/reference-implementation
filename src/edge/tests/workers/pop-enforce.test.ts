@@ -10,12 +10,15 @@
 // it.
 import { beforeAll, describe, expect, it } from 'vitest';
 
+import { POP_ACCEPT_SIGNATURE } from '@fora-protocol/sdk/pop';
+
 import { createApp } from '../../src/app.js';
 import { type AppDeps, buildPublisherManifest } from '../../src/types.js';
 import {
   type TestKeypair,
   generateKeypair,
   keyThumbprint,
+  rawPublicKey,
   signGetHeaders,
   signUrl,
 } from '../helpers/ed25519.js';
@@ -36,7 +39,7 @@ beforeAll(async () => {
     exchangeUrl: 'https://exchange.test',
     // Hand-wired verify key — no WBA directory fetch, so the app runs fully
     // in-memory with no worker env involved.
-    resolveKey: async (kid) => (kid === exchangeKid ? exchangeKeypair.publicKey : undefined),
+    resolveKey: async (kid) => (kid === exchangeKid ? rawPublicKey(exchangeKeypair) : undefined),
     enforceBinding: true,
   };
   app = createApp(deps);
@@ -77,7 +80,48 @@ describe('proof-of-possession enforcement (deps-injected ON)', () => {
     const { url } = await boundUrl(agentKp);
     const res = await app.request(url);
     expect(res.status).toBe(403);
+    // No presented key is not a form the agent fixes by signing differently, so
+    // the refusal names no Accept-Signature.
+    expect(res.headers.get('accept-signature')).toBeNull();
     expect(((await res.json()) as { reason: string }).reason).toBe('missing_agent_key');
+  });
+
+  // A refusal the agent can fix by signing again is answered 401 with the
+  // Accept-Signature value the SDK's verdict carries (RFC 9421 §5.1, WG-00 §5.3):
+  // the components and parameters a delivery proof must carry.
+  it('401 with Accept-Signature when the key is presented with no signature', async () => {
+    const agentKp = await generateKeypair('agent');
+    const { url, agentId } = await boundUrl(agentKp);
+    const presented = (await popHeaders(url, agentKp, agentId))['X-FORA-Agent-Key'] as string;
+    const res = await app.request(url, { headers: { 'X-FORA-Agent-Key': presented } });
+    expect(res.status).toBe(401);
+    expect(res.headers.get('accept-signature')).toBe(POP_ACCEPT_SIGNATURE);
+    expect(((await res.json()) as { reason: string }).reason).toBe('missing_sig');
+  });
+
+  it('401 with Accept-Signature for a proof that carries no Web Bot Auth tag', async () => {
+    const agentKp = await generateKeypair('agent');
+    const { url, agentId } = await boundUrl(agentKp);
+    const headers = await popHeaders(url, agentKp, agentId);
+    headers['Signature-Input'] = (headers['Signature-Input'] as string).replace(/;tag="[^"]*"/, '');
+    const res = await app.request(url, { headers });
+    expect(res.status).toBe(401);
+    expect(res.headers.get('accept-signature')).toBe(POP_ACCEPT_SIGNATURE);
+    expect(((await res.json()) as { reason: string }).reason).toBe('bad_tag');
+  });
+
+  it('401 with Accept-Signature for the v1.0.8 proof form, which names no directory', async () => {
+    const agentKp = await generateKeypair('agent');
+    const { url, agentId } = await boundUrl(agentKp);
+    const headers = await popHeaders(url, agentKp, agentId);
+    headers['Signature-Input'] = (headers['Signature-Input'] as string).replace(
+      '("@method" "@target-uri" "signature-agent";key="sig1")',
+      '("@method" "@target-uri")',
+    );
+    const res = await app.request(url, { headers });
+    expect(res.status).toBe(401);
+    expect(res.headers.get('accept-signature')).toBe(POP_ACCEPT_SIGNATURE);
+    expect(((await res.json()) as { reason: string }).reason).toBe('bad_covered_components');
   });
 
   it('403 thumbprint_mismatch when a different key is presented', async () => {

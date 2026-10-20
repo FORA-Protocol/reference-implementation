@@ -46,15 +46,7 @@ func literalBaseCurrency(kv *ast.KeyValueExpr, consts map[string]string) (string
 	if !ok || key.Name != baseCurrencyField {
 		return "", false
 	}
-	if v, isLit := stringValue(kv.Value); isLit {
-		return v, true
-	}
-	if ident, isIdent := kv.Value.(*ast.Ident); isIdent {
-		if v, declared := consts[ident.Name]; declared {
-			return v, true
-		}
-	}
-	return "", false
+	return resolvedString(kv.Value, consts)
 }
 
 // TestBaseCurrencyIsNeverHardcoded fails when app code stamps a well-known

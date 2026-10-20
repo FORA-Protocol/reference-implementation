@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/oidcup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/oauth"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/token"
 )
@@ -56,7 +57,7 @@ func invalidGrant(desc string) error { return &grantError{desc: desc} }
 // issue mints a fresh one-time authorization code bound to cg, stores its hash, and
 // returns the opaque code to hand back to the client.
 func (g *grant) issue(ctx context.Context, cg codeGrant) (string, error) {
-	code, err := randomToken(32)
+	code, err := oidcup.RandomToken(32)
 	if err != nil {
 		return "", err
 	}

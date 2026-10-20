@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fora-protocol.org/schemas/music/v1/music-v1.schema.json",
+  "title": "fora-music-v1 — the music.<field> keys of Offer.ext",
+  "description": "Recording-discovery metadata for one music asset, carried as flat music.<field> keys in Offer.ext (and in the ext object of a catalog feed record). Every field is optional: an absent field means unknown, and an empty array means known to be empty. Other keys, including unknown music.* keys, are allowed, and consumers ignore them.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "music.artist": {
+      "description": "Display credit. Case is preserved. It does not identify the publisher, the rights owner or a structured contributor. Descriptive only: not a matching input.",
+      "type": "string",
+      "minLength": 1
+    },
+    "music.isrc": {
+      "description": "ISRC of the source recording, in the 12-character form without hyphens. For an excerpt or an edit it still names the source recording. Matched only by the music.isrc search filter, as an exact identifier.",
+      "type": "string",
+      "pattern": "^[A-Z]{2}[A-Z0-9]{3}[0-9]{7}$"
+    },
+    "music.genre": {
+      "description": "One primary genre.",
+      "$ref": "#/$defs/Label"
+    },
+    "music.mood": {
+      "$ref": "#/$defs/Labels"
+    },
+    "music.instruments": {
+      "description": "Instruments heard in the asset. Category labels such as brass or strings are valid.",
+      "$ref": "#/$defs/Labels"
+    },
+    "music.suitable_for": {
+      "description": "Editorial suitability, for example vlog, documentary or trailer. It does not give permission to use the asset; permission comes only from the license terms.",
+      "$ref": "#/$defs/Labels"
+    },
+    "music.energy": {
+      "description": "Editorial energy level, independent of bpm.",
+      "enum": ["low", "medium", "high"]
+    },
+    "music.vocals": {
+      "description": "True when the delivered asset contains any audible human voice: sung lyrics, wordless singing, choir or spoken word. False only when it contains no human voice.",
+      "type": "boolean"
+    },
+    "music.bpm": {
+      "description": "Tempo in beats per minute. A positive integer; fractional BPM is not supported.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "music.duration_seconds": {
+      "description": "Duration of the delivered asset in seconds, which for an excerpt is the excerpt's duration.",
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  },
+  "$defs": {
+    "Label": {
+      "description": "A canonical label: non-empty, with no leading or trailing whitespace (Unicode White_Space) and no upper-case or title-case letter (Unicode Lu, Lt). Consumers do no stemming and no singular/plural matching.",
+      "type": "string",
+      "pattern": "^[^\t-\r\u0085\\p{Z}\\p{Lu}\\p{Lt}](?:[^\\p{Lu}\\p{Lt}]*[^\t-\r\u0085\\p{Z}\\p{Lu}\\p{Lt}])?$"
+    },
+    "Labels": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Label"
+      }
+    }
+  }
+}

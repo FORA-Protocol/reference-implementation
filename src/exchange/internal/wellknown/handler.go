@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/server"
@@ -51,6 +53,7 @@ var RebuildInterval = server.RebuildIntervalFor(OfferKeyLifetime)
 type Config struct {
 	Domain              string
 	Endpoint            string // ExchangeService endpoint
+	HealthEndpoint      string // health check endpoint (WellKnownManifest.health_endpoint)
 	CatalogEndpoint     string // CatalogService endpoint
 	BaseCurrency        string
 	SupportedProfiles   []string
@@ -80,6 +83,9 @@ type Config struct {
 	OfferKey    ed25519.PublicKey
 	Clock       clock.Clock
 	KeyLifetime time.Duration
+	// OfferSigner holds OfferKey's private half. The key directory lists
+	// OfferKey, so its response is signed by this signer.
+	OfferSigner helpers.Signer
 }
 
 // offerKeySource publishes the offer-signing key with a window anchored to
@@ -117,6 +123,7 @@ func New(cfg Config) (server.Handlers, error) {
 			Role:                forawellknown.RoleExchange,
 			Domain:              cfg.Domain,
 			Endpoint:            cfg.Endpoint,
+			HealthEndpoint:      cfg.HealthEndpoint,
 			CatalogEndpoint:     cfg.CatalogEndpoint,
 			BaseCurrency:        cfg.BaseCurrency,
 			SupportedProfiles:   cfg.SupportedProfiles,
@@ -126,6 +133,8 @@ func New(cfg Config) (server.Handlers, error) {
 			// Document() is nil on a nil schema, which leaves the block absent.
 			RegistrationDataSchema: cfg.RegistrationDataSchema.Document(),
 		},
-		Keys: offerKeySource{key: cfg.OfferKey, clk: cfg.Clock, lifetime: cfg.KeyLifetime},
+		Keys:    offerKeySource{key: cfg.OfferKey, clk: cfg.Clock, lifetime: cfg.KeyLifetime},
+		Signers: []helpers.Signer{cfg.OfferSigner},
+		Now:     cfg.Clock.Now,
 	})
 }

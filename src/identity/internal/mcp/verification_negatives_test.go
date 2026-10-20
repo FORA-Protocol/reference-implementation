@@ -94,6 +94,20 @@ func TestDiscover_UnverifiableOfferIsRejectedNotReturned(t *testing.T) {
 	if got := group.Rejected[0].Reason; got != "signature_invalid" {
 		t.Errorf("rejected reason = %q, want signature_invalid", got)
 	}
+
+	// And the operator sees it at WARN, not among the routine per-call lines: a
+	// whole exchange's offers failing verification is a problem on that exchange
+	// that no single agent's view reveals.
+	assertDiscoverLogged(t, f, "WARN", 1)
+}
+
+// assertDiscoverLogged fails unless the one identity.mcp.discover record the
+// call left was logged at level and counts rejected refused offers.
+func assertDiscoverLogged(t *testing.T, f *fixture, level string, rejected int) {
+	t.Helper()
+	if rec := f.logs.AssertLoggedOnce(t, "identity.mcp.discover", level); rec["rejected"] != float64(rejected) {
+		t.Errorf("discover record = %v, want rejected=%d", rec, rejected)
+	}
 }
 
 // TestDiscover_RejectionNamesTheCause drives the three refusal causes the token
@@ -315,11 +329,11 @@ func TestDiscover_CustodyFailureIsNamedNotSignable(t *testing.T) {
 // custody outage through the PURCHASE leg, which is a different code path and
 // the one that matters most.
 //
-// The purchase does not go through the SDK — it is a raw POST to the Broker's
-// relay route — so it classified the same failure as unreachable with no typed
-// detail, and the agent got prose with no token. An operator alert keyed on the
-// class was therefore silent on the one leg where money moves, while firing on
-// the other three.
+// The purchase once went out as a raw POST outside the SDK, and classified the
+// same failure as unreachable with no typed detail, so the agent got prose with
+// no token. An operator alert keyed on the class was therefore silent on the one
+// leg where money moves, while firing on the other three. It goes through the
+// SDK now, and this pins that the class still arrives.
 //
 // The second assertion is that the agent gets a FIXED sentence rather than the
 // cause. Every branch of the key store's classifier preserves the error

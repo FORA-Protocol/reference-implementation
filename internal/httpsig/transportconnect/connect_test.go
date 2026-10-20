@@ -11,12 +11,10 @@ import (
 	connect "connectrpc.com/connect"
 	"github.com/FORA-Protocol/protocol/sdk/go/connectserver"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
-
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/httpsig"
 )
 
 func TestRejectCode(t *testing.T) {
-	hop := fmt.Errorf("%w: got 3 max 2", httpsig.ErrTooManyHops)
+	hop := fmt.Errorf("%w: got 3 max 2", helpers.ErrTooManyHops)
 	if got := RejectCode(hop); got != connect.CodeResourceExhausted {
 		t.Errorf("RejectCode(hop) = %v, want ResourceExhausted", got)
 	}
@@ -26,7 +24,7 @@ func TestRejectCode(t *testing.T) {
 	if got := RejectCode(tooLarge); got != connect.CodeResourceExhausted {
 		t.Errorf("RejectCode(over-cap body) = %v, want ResourceExhausted", got)
 	}
-	for _, err := range []error{httpsig.ErrReplayed, httpsig.ErrBrokenSignatureChain, errors.New("bad sig")} {
+	for _, err := range []error{connectserver.ErrReplayed, helpers.ErrBrokenSignatureChain, errors.New("bad sig")} {
 		if got := RejectCode(err); got != connect.CodeUnauthenticated {
 			t.Errorf("RejectCode(%v) = %v, want Unauthenticated", err, got)
 		}
@@ -35,13 +33,11 @@ func TestRejectCode(t *testing.T) {
 
 // TestRejectAuditOutcome pins the token the reject loggers emit.
 //
-// The errors are the SDK's own sentinels, not this package's: the loggers are
-// registered as connectserver.WithOnReject, so what reaches them comes from the
-// SDK's verify seam. The httpsig.* sentinels are a different family, produced
-// by the app-owned reference verifier that no production path runs, and the two
-// are distinct objects — errors.Is against the wrong family is false, so a
-// classifier keyed on it answers the default for every rejection it sees. That
-// is what this test's cases are chosen to catch.
+// The errors are the SDK's own sentinels: the loggers are registered as
+// connectserver.WithOnReject, so what reaches them comes from the SDK's verify
+// seam, and a classifier keyed on any other family of sentinels would answer
+// the default for every rejection it sees. That is what this test's cases are
+// chosen to catch.
 //
 // The four authentication outcomes are asserted so a rename in the SDK's
 // classifier surfaces here rather than as a silently changed audit value. The
@@ -72,7 +68,7 @@ func TestRejectAuditOutcome(t *testing.T) {
 
 func TestWriteError_HopBudget(t *testing.T) {
 	rec := httptest.NewRecorder()
-	WriteError(rec, fmt.Errorf("%w: got 3 max 2", httpsig.ErrTooManyHops))
+	WriteError(rec, fmt.Errorf("%w: got 3 max 2", helpers.ErrTooManyHops))
 
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429", rec.Code)

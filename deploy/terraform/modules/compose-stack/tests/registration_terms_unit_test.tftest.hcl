@@ -15,7 +15,7 @@ variables {
   identity_hostname = "mcp.staging.example"
   zitadel_hostname  = "login.staging.example"
 
-  default_tenant_domain = "demo.staging.example"
+  default_tenant_domain = "exchange.staging.example"
 
   exchange_image = "registry.example.com/group/proj/exchange:test"
   broker_image   = "registry.example.com/group/proj/broker:test"
@@ -27,6 +27,27 @@ variables {
   ed25519_private_pem     = "-----BEGIN PRIVATE KEY-----\ndGVzdA==\n-----END PRIVATE KEY-----\n"
   broker_relay_key_json   = "{\"kid\":\"broker.test.v1\"}"
   broker_identity_key_pem = "-----BEGIN ED25519 PRIVATE KEY-----\nZmFrZSBicm9rZXIgaWRlbnRpdHkgZml4dHVyZTogZXhhY3RseSBzaXh0eS1mb3VyIGJ5dGVzIGZvciB0ZnRlcw==\n-----END ED25519 PRIVATE KEY-----\n"
+}
+
+run "legal_path_serves_terms_and_privacy" {
+  command = apply
+  variables {
+    exchange_legal_path = "/legal"
+    exchange_terms_documents = {
+      "terms-revision-1.txt" = "Terms\n"
+      "privacy.txt"          = "Privacy\n"
+    }
+  }
+  assert {
+    condition = (
+      strcontains(output.caddyfile, "handle_path /legal/*") &&
+      !strcontains(output.caddyfile, "handle_path /terms/*") &&
+      strcontains(output.user_data, "/opt/fora/exchange-terms/privacy.txt") &&
+      strcontains(output.user_data, "/opt/fora/exchange-terms/terms-revision-1.txt") &&
+      strcontains(output.compose_yaml, "/opt/fora/exchange-terms:/srv/exchange-terms:ro")
+    )
+    error_message = "Legal routing must serve both TXT files from the mounted directory without the legacy public prefix."
+  }
 }
 
 # ---------------------------------------------------------------------------

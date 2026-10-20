@@ -1,197 +1,40 @@
-"""Shared discover -> accept flow for the obligation happy-path tests.
+"""The control purchase the obligation tests share.
 
-De-duplicates the ExecuteTransaction request body and the "first offer / assert
-signature" extraction that the standard USD/``sign_post`` happy-path obligation
-tests repeat near-verbatim. The DiscoverResources body itself is built by
-``harness.discovery.discover_body``, which every caller in the suite shares.
-
-Scope note (premise correction): the requester's self-declared facets
-(``domain`` / ``userType`` / ``geography``) are KEPT on the DiscoverResources
-path. Per ADR-014 the Exchange does scope-only *projection* (it does not filter
-terms by these facets), but the facets are still legitimately carried on the
-wire to the Exchange — only the Broker-resolve canonical ``DiscoveryRequest`` dropped
-them. So this flow passes them through to the shared builder.
-
-Bespoke flows that do NOT use this helper, by design: the obligation-04 public-
-resource tests (EUR agent, their own ``_post_signed_json`` + per-response
-delegation-credential assertions + per-request-offer filtering) and the
-obligation-05 signature negatives.
+A test that claims "no sale was recorded" reads the buyer's balance before and
+after the action it drives. That claim needs a control: the same reading does
+move when a paid sale IS recorded. :func:`buy_verified_and_observe_charge` is
+that control, on the SDK's own client: the offer comes from the SDK's discovery,
+the purchase is the SDK's ExecuteTransaction signed and accepted as the agent,
+and both balance readings are its GetAccountStatus.
 """
 
 from __future__ import annotations
 
-import copy
-import uuid
-from collections.abc import Callable
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, cast
+from fora_sdk import to_wire
+from fora_sdk.core import VerifiedOffer
+from wire.models import TransactionResultItem
 
-import httpx
-
-from fora_sdk.core import sign_offer_acceptance_jcs
-from fora_sdk import ProtocolVersion
-from ..discovery import DISCOVER_PATH, discover_body
-from ..exchanges import recipient_of
-from ..httpsig_signer import load_keypair
-from ..signing import AGENT_E2E_KEY_PATH, sign_post
-
-_EXECUTE_PATH = "/fora.v1.ExchangeService/ExecuteTransaction"
+from ..fresh_agent import FreshAgent
+from ..ledger import assert_charged
 
 
-def discover_first_offer(
-    exchange_url: str,
-    *,
-    uri: str,
-    agent_id: str,
-    domain: str,
-    key_path: Path | None = None,
-    user_type: str = "individual",
-    geography: str = "US",
-) -> dict[str, Any]:
-    """DiscoverResources for ``uri`` as ``agent_id``; return the first offer.
+def buy_verified_and_observe_charge(
+    agent: FreshAgent, exchange: str, offer: VerifiedOffer, what: str
+) -> TransactionResultItem:
+    """Buy ``offer`` at ``exchange`` as ``agent``; assert its balance dropped by the item's cost.
 
-    Asserts HTTP 200 and a non-empty ``offers`` list (DiscoverResources must
-    precede ExecuteTransaction). ``key_path`` selects the signing identity
-    (default: the generic test signer); pass the agent's key to sign AS the
-    requester. The requester facets are carried as-is (Exchange-path facets).
+    The purchase is the SDK's ExecuteTransaction, signed and accepted as the agent,
+    and both balance readings are its GetAccountStatus: the balance drops by
+    exactly the item's cost in that cost's currency, and by nothing elsewhere.
+    Returns the bought item.
     """
-    resp = sign_post(
-        f"{exchange_url}{DISCOVER_PATH}",
-        body=discover_body(
-            uris=[uri],
-            agent_id=agent_id,
-            exchange=recipient_of(exchange_url),
-            domain=domain,
-            user_type=user_type,
-            geography=geography,
-        ),
-        key_path=key_path,
-    )
-    assert resp.status_code == httpx.codes.OK, (
-        f"DiscoverResources must return 200 (precedes ExecuteTransaction); "
-        f"got {resp.status_code}: {resp.text[:512]}"
-    )
-    offers = cast(list[dict[str, Any]], resp.json().get("offers") or [])
-    assert offers, f"DiscoverResources returned no offers for {uri!r}"
-    return offers[0]
-
-
-@dataclass(frozen=True)
-class AcceptResult:
-    """Outcome of :func:`accept_offer` — the response, its parsed body, and the
-    client-generated transaction request id the caller can assert echoed back."""
-
-    response: httpx.Response
-    payload: dict[str, Any]
-    transaction_id: str
-
-
-def execute_offer(
-    exchange_url: str,
-    offer: dict[str, Any],
-    *,
-    agent_id: str,
-    domain: str,
-    key_path: Path | None = None,
-    mutate: Callable[[dict[str, Any]], None] | None = None,
-) -> tuple[httpx.Response, str]:
-    """POST ExecuteTransaction REFLECTING the discovered ``offer`` verbatim.
-
-    The tightened proto removed ``offer_signature`` and now
-    requires the full signed Offer on ``TransactionRequest.offer`` (XOR
-    ``items``); the Exchange verifies ``offer.signature`` over the exact
-    presented bytes. So the request re-presents the WHOLE discovered offer dict
-    (camelCase wire shape) reflected exactly as received from discovery — the
-    only contract that still verifies. ``idempotencyKey`` and
-    ``requester.type`` are set (the proto now requires them).
-
-    ``mutate`` (negative-path hook) receives a DEEP COPY of the offer and may
-    edit any field in place BEFORE signing+sending; the genuine Exchange
-    ``signature`` (over the ORIGINAL bytes) then no longer covers the presented
-    bytes, so the Exchange rejects with SIGNATURE_INVALID. The deep copy keeps
-    the caller's offer object pristine for reuse.
-
-    Agent acceptance: ``agent_acceptance`` is REQUIRED at execute even on this
-    agent-direct path. The acceptance is detached-signed over the PRESENTED
-    offer's ``signature`` (which the price/expiry ``mutate`` hooks leave intact)
-    + requester + idempotency_key, so the acceptance presence/verify gate passes
-    and the Exchange proceeds to the offer-signature verify — the rejection the
-    tampered-offer negatives assert remains SIGNATURE_INVALID, not a missing-
-    acceptance refusal.
-
-    The signing ``key_path`` MUST match ``agent_id`` (the Exchange's caller
-    authz requires keyID == requester.id on ExecuteTransaction, and the agent
-    acceptance binds to that same key).
-
-    Returns ``(response, tx_request_id)`` WITHOUT asserting status — callers
-    (positive vs negative) own the verdict.
-    """
-    presented = copy.deepcopy(offer)
-    if mutate is not None:
-        mutate(presented)
-    offer_signature = presented.get("signature")
-    assert offer_signature, f"discovered offer carries no signature: {offer!r}"
-    tx_request_id = f"tx-{uuid.uuid4().hex}"
-    _, priv = load_keypair(key_path or AGENT_E2E_KEY_PATH)
-    acceptance_sig, acceptance_alg = sign_offer_acceptance_jcs(
-        seed=priv.private_bytes_raw(),
-        offer_sig=str(offer_signature),
-        requester_id=agent_id,
-        requester_domain=domain,
-        idempotency_key=tx_request_id,
-    )
-    # A single offer rides the items[] envelope (NO top-level
-    # offer/agentAcceptance) — the same 1-element-batch wire shape the agent-direct
-    # path now shares with the broker relay. The per-item acceptance still signs
-    # over the PRESENTED offer.signature + requester + shared idempotency_key.
-    resp = sign_post(
-        f"{exchange_url}{_EXECUTE_PATH}",
-        body={
-            "ver": ProtocolVersion,
-            "idempotency_key": tx_request_id,
-            "requester": {
-                "id": agent_id,
-                "domain": domain,
-                "type": "REQUESTER_TYPE_AGENT",
-            },
-            "items": [
-                {
-                    "offer": presented,
-                    "agent_acceptance": {
-                        "signature": acceptance_sig,
-                        "signature_algorithm": acceptance_alg,
-                    },
-                }
-            ],
-        },
-        key_path=key_path,
-    )
-    return resp, tx_request_id
-
-
-def accept_offer(
-    exchange_url: str,
-    offer: dict[str, Any],
-    *,
-    agent_id: str,
-    domain: str,
-    key_path: Path | None = None,
-) -> AcceptResult:
-    """ExecuteTransaction accepting ``offer`` as ``agent_id``; assert 200.
-
-    Reflects the FULL discovered offer on ``TransactionRequest.offer``;
-    the ``offer`` must carry a non-empty Exchange ``signature``. The signing
-    ``key_path`` MUST match ``agent_id`` (the Exchange's caller authz requires
-    keyID == requester.id on ExecuteTransaction).
-    """
-    resp, tx_request_id = execute_offer(
-        exchange_url, offer, agent_id=agent_id, domain=domain, key_path=key_path
-    )
-    offer_id = cast(str, offer.get("offer_id"))
-    assert resp.status_code == httpx.codes.OK, (
-        f"ExecuteTransaction should succeed for offer {offer_id!r}; "
-        f"got {resp.status_code}: {resp.text[:512]}"
-    )
-    payload = cast(dict[str, Any], resp.json())
-    return AcceptResult(response=resp, payload=payload, transaction_id=tx_request_id)
+    before = agent.balances(exchange)[exchange]
+    response = agent.exchange(exchange).execute(offer)
+    after = agent.balances(exchange)[exchange]
+    items = response.items or []
+    assert len(items) == 1, f"{what}: one offer bought, {len(items)} items answered: {response}"
+    item = items[0]
+    assert item.denial_reason is None, f"{what}: the purchase was denied: {item}"
+    assert item.transaction_id, f"{what}: the purchase names no transaction: {item}"
+    assert_charged(before, after, to_wire(item.cost) if item.cost else None, what)
+    return item

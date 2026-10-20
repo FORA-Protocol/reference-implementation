@@ -3,28 +3,27 @@
 package transport_test
 
 import (
+	"cmp"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	connect "connectrpc.com/connect"
 	foraconnect "github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/FORA-Protocol/protocol/sdk/go/connectserver"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	sharedb "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/db"
-	audiencetest "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/foraaudience/testutil"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/replay"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/runhttp"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/agentreg"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
@@ -34,14 +33,48 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/signing"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/sor"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/transport"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/wellknown"
 )
+
+// ledgerCurrenciesOrDefault is the configured currency set, or the
+// single-currency default the whole suite runs on.
+func (d exchangeServerDeps) ledgerCurrenciesOrDefault() []string {
+	if len(d.ledgerCurrencies) > 0 {
+		return d.ledgerCurrencies
+	}
+	return []string{harnessCurrency}
+}
+
+// journalQueries is what the denial journal writes through: the harness's own
+// queries, or journalPool's when a test names one.
+func (d exchangeServerDeps) journalQueries() sqlc.Querier {
+	if d.journalPool == nil {
+		return d.queries
+	}
+	return sqlc.New(d.journalPool)
+}
+
+// harnessCurrency is the one currency MOST harnesses in this suite bill in. The
+// in-memory tier keeps billing.DemoCurrency, and the TigerBeetle e2e harness
+// runs on ledger 840, which is that same currency — so one constant covers the
+// adapter wiring, the offers the harnesses price, and every balance read.
+const harnessCurrency = billing.DemoCurrency
 
 // This file holds the Exchange HTTP server fixture: the httptest server wired
 // with the CatalogService and ExchangeService mounts, and the Connect-JSON
 // twins built over the same signed transport. The test harness that stands a
 // database and a tenant up around it is in integration_helper_test.go, which
 // this file was split out of when the two together crossed the test-file cap.
+
+// harnessBrokerHost is the Broker directory host every harness configures as
+// ExchangeConfig.BrokerHost unless it names its own. A single-signature request
+// whose Signature-Agent is this host is a relayed ExecuteTransaction: the agent is
+// then read from Requester.domain, not from the header.
+//
+// It is a constant rather than a per-test literal for the same reason
+// harnessExchangeDomain is: the service compares the caller's directory against
+// this exact value, so a test that spells it differently is exercising the direct
+// path while believing it exercises the relay.
+const harnessBrokerHost = "broker.fora.test"
 
 // exchangeServerFixture bundles an httptest server wired with the Exchange
 // Connect-Go handlers for CatalogService + ExchangeService, along with the
@@ -92,9 +125,14 @@ type exchangeServerDeps struct {
 	// still uses deps.keystore.
 	keystoreOverride signing.KeyStore
 	// maxSignatures bounds the inbound signature (hop) chain depth, mirroring
-	// the production ceiling (cmd/server/main.go: max_intermediary_hops + 1).
+	// the production ceiling (cmd/server/keyresolver.go: max_intermediary_hops).
 	// 0 → unbounded — the default for tests that do not exercise the hop bound.
 	maxSignatures int
+	// brokerHost is the Broker directory host the service recognises relays from
+	// (ExchangeConfig.BrokerHost, derived in production from
+	// EXCHANGE_BROKER_WELLKNOWN_URL). Empty → harnessBrokerHost, so every harness
+	// has one configured Broker and a relay test needs no extra wiring.
+	brokerHost string
 	// sor is the account System of Record the Register flow depends on. nil → a
 	// fresh in-memory SoR so every harness constructs a valid service even when it
 	// never calls Register (production wiring is ST-5's job; the harness needs the
@@ -104,6 +142,17 @@ type exchangeServerDeps struct {
 	// activate_new_agents_by_default policy from (ADR-021 §5 decision 1). Empty for
 	// harnesses that do not exercise Register.
 	defaultTenantDomain string
+	// ledgerCurrencies are the currencies this Exchange bills in, the value
+	// cmd/server threads from the selected billing backend. nil → the
+	// single-currency default every harness in this package runs on. A
+	// multi-currency test sets it together with a billing adapter configured for
+	// the same set: the two disagreeing would make every grant fail the billing
+	// gate, which is a wiring mistake, not a case worth covering.
+	ledgerCurrencies []string
+	// defaultAgentCredits is the welcome credit Register grants, by currency —
+	// the map cmd/server parses from EXCHANGE_DEFAULT_AGENT_CREDIT and hands the
+	// service as configuration. nil → no grant.
+	defaultAgentCredits map[string]*big.Rat
 	// billingRefGen overrides the billing_ref generator; nil → uuid.NewString
 	// inside NewExchangeService. Register tests inject a deterministic counter.
 	billingRefGen service.BillingRefGen
@@ -125,16 +174,22 @@ type exchangeServerDeps struct {
 	// the only injection point that tells one transaction apart from two
 	// sequential ones.
 	auditWrap func(repo.AuditRepo) repo.AuditRepo
+	// journalPool, when set, is the pool the denial journal writes through
+	// instead of the harness pool. Only the connection changes: the journal
+	// still writes through the real repository, so a closed pool makes every
+	// journal write fail in the driver.
+	journalPool *pgxpool.Pool
+	// lifetimes shortens a tenant's offer and delivery-URL lifetimes; nil is
+	// production's none.
+	lifetimes service.Lifetimes
 }
 
-// startExchangeServer wires the Exchange's public HTTP surface — Connect-Go
-// CatalogService + ExchangeService, the three /.well-known/ routes, and the
-// public agents/register handler — onto a fresh mux behind
-// RequestIDMiddleware + the connectserver verify middleware + CatalogSignatureMiddleware,
-// serves it via httptest, and returns the fixture. Mirror of
-// cmd/server/main.go::buildWrapped so the integration tests exercise the
-// SAME middleware chain as production (per ADR-008 D1). Admin-plane
-// routes are deliberately absent; the admin_removed_e2e_test asserts that.
+// startExchangeServer serves the Exchange's public trading surface, as
+// exchangetest.MountTrading composes it, behind the production public-surface
+// wrapper, and returns the fixture. It mirrors cmd/server/main.go::buildWrapped
+// so the integration tests exercise the same middleware chain as production
+// (per ADR-008 D1). Admin-plane routes are deliberately absent; the
+// admin_removed_e2e_test asserts that.
 //
 // Callers still own DB bring-up, tenant seeding, and any post-wiring
 // bootstrap (e.g. catalog.Bootstrap). Callers MUST also register every
@@ -142,152 +197,22 @@ type exchangeServerDeps struct {
 // unknown keyids with helpers.ErrUnknownKey.
 func startExchangeServer(t *testing.T, deps exchangeServerDeps) *exchangeServerFixture {
 	t.Helper()
-	catalogSvc := service.NewCatalogService(
-		repo.NewCatalogRepo(deps.queries), repo.NewTenantReadRepo(deps.queries),
-		deps.registry, deps.manifests, sharedb.PoolRunner{Pool: deps.pool},
-		harnessExchangeDomain,
-	)
-	// Mirror production (cmd/server exchangeSupportedProfiles): the CatalogService
-	// must know the advertised profiles so rebuild() pre-renders CoMP — set
-	// before any Bootstrap/push, else the comp cache is empty and the
-	// CoMP integration suite goes red.
-	catalogSvc.SetSupportedProfiles([]string{"fora-news-v1", "fora-comp-v1"})
-	// NOTE: the SetOfferRepo / FREE-offer materialisation bridge was
-	// removed by the proto-rename wave W3 along with src/exchange/internal/repo/offers.go.
-	// Obligation 04's anonymous public-resource flow is now served by
-	// DiscoverResources directly; no parallel offer-row seed runs here.
-	txRunner := sharedb.TxRunner(sharedb.PoolRunner{Pool: deps.pool})
-	if deps.txRunner != nil {
-		txRunner = deps.txRunner
-	}
-	var svcKeyStore signing.KeyStore = deps.keystore
-	if deps.keystoreOverride != nil {
-		svcKeyStore = deps.keystoreOverride
-	}
-	auditRepo := repo.NewAuditRepo(deps.queries)
-	if deps.auditWrap != nil {
-		auditRepo = deps.auditWrap(auditRepo)
-	}
-	sorAdapter := deps.sor
-	if sorAdapter == nil {
-		sorAdapter = sor.NewInMemoryAdapter()
-	}
-	exchangeSvc := service.NewExchangeService(service.ExchangeDeps{
-		TxRunner:      txRunner,
-		Catalog:       catalogSvc,
-		Tenants:       repo.NewTenantReadRepo(deps.queries),
-		Agents:        repo.NewAgentRepo(deps.queries),
-		AgentReg:      deps.registry,
-		Transactions:  repo.NewTransactionRepo(deps.queries),
-		Obligations:   repo.NewObligationRepo(deps.queries),
-		Evidence:      repo.NewEvidenceRepo(deps.queries),
-		FeeOverrides:  repo.NewFeeOverrideRepo(deps.queries),
-		Billing:       deps.bill,
-		OfferSigner:   deps.signer,
-		KeyStore:      svcKeyStore,
-		SoR:           sorAdapter,
-		Audit:         auditRepo,
-		RegSchema:     deps.regSchema,
-		BillingRefGen: deps.billingRefGen,
-		// SupportedProfiles mirrors production (cmd/server/main.go
-		// exchangeSupportedProfiles): the Exchange advertises + projects
-		// fora-comp-v1, so profile-aware discovery renders the CoMP ext.
-		Config: service.ExchangeConfig{
-			Exchange:            harnessExchangeDomain,
-			SupportedProfiles:   []string{"fora-news-v1", "fora-comp-v1"},
-			DefaultTenantDomain: deps.defaultTenantDomain,
-			// Set explicitly, as cmd/server does: ExchangeConfig has no
-			// currency default, so wiring that leaves this empty makes the
-			// welcome-credit grant fail the billing gate. The harness runs on
-			// the in-memory adapter, whose currency is billing.DemoCurrency.
-			LedgerCurrency: billing.DemoCurrency,
-			TermsDigest:    deps.termsDigest,
-		},
-		Clk: deps.clk,
-	})
-
-	// The ExchangeService Connect handler is built via
-	// connectserver.NewExchangeServiceHandler, which wraps request-id (outermost)
-	// → RFC 9421 verify middleware → connect interceptors (protovalidate
-	// bidirectional). The resolver and replay store are constructed inline from
-	// httpsigKeys + maxSignatures, mirroring cmd/server buildHTTPSigDeps.
-	// CatalogService uses its own per-contributor signature check and is
-	// registered with plain foraconnect.NewCatalogServiceHandler (no global
-	// verify gate).
-	resolver := helpers.NewStaticKeyResolver(deps.httpsigKeys)
-	replayAdapter := replay.NewCoreAdapter(replay.NewMemoryStore(time.Now))
-	// The recipient check, built from this harness's own Exchange domain — the
-	// same value the served manifest and the issued offers carry. Production
-	// mounts it on BOTH surfaces, so the harness does too: a request naming a
-	// different Exchange has to be refused here exactly as it is in production.
-	audience := audiencetest.MustInterceptor(t, harnessExchangeDomain)
-	// Built by the function production builds it with, for the reason the catalog
-	// mount below already gives. Written out here instead, the list drifted:
-	// omitting protovalidate or the emit-unpopulated codec makes the harness
-	// silently accept production-invalid requests or fork the response wire
-	// shape, and a test that reads what the mount SERVES then reads this copy
-	// rather than the one that ships.
-	svrOpts, err := transport.ExchangeMountOptions(
-		resolver, replayAdapter, deps.maxSignatures, audience,
-	)
-	if err != nil {
-		t.Fatalf("exchange mount options: %v", err)
-	}
-	mux := http.NewServeMux()
-	exchangePath, exchangeHandler := connectserver.NewExchangeServiceHandler(
-		transport.NewExchangeHandler(exchangeSvc), svrOpts...,
-	)
-	mux.Handle(exchangePath, exchangeHandler)
-	// Built by the function production builds it with, not by a list assembled
-	// here. Hand-assembling it is how the two came apart: this harness installed
-	// a bare protovalidate interceptor where production installs the SDK's, which
-	// validates responses as well and shares one ruleset with the ExchangeService
-	// mount. The codec, that interceptor, the recipient check and the message
-	// read cap all arrive through this one call, so a change to the mount reaches
-	// the tests. The cap used to be a separate append here and in cmd/server, so
-	// a copy dropped on one side went unnoticed by the other.
-	catalogOpts, err := transport.CatalogMountOptions(audience)
-	if err != nil {
-		t.Fatalf("catalog mount options: %v", err)
-	}
-	catalogPath, catalogHandler := foraconnect.NewCatalogServiceHandler(
-		transport.NewCatalogHandler(catalogSvc, deps.registry), catalogOpts...,
-	)
-	mux.Handle(catalogPath, catalogHandler)
-
 	rsaPriv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("rsa: %v", err)
 	}
-	const rsaKid = "cf-test"
-	// The keystore entry under rsaKid lets tests whose tenant uses
-	// AWS_CLOUDFRONT_RSA resolve the RSA key when minting CloudFront URLs.
+	// The keystore entry under this ref lets tests whose site uses
+	// AWS_CLOUDFRONT_RSA resolve the RSA key when minting CloudFront URLs. It is
+	// the ref the seat row carries, which is why both name the same constant.
 	// FORA v1 no longer publishes it at a well-known route (CloudFront verifies
 	// natively against a trusted key group); tests read fixture.rsaPub instead.
-	deps.keystore.PutRSA(rsaKid, rsaPriv)
-	wk, err := wellknown.New(wellknown.Config{
-		Domain:            harnessExchangeDomain,
-		Endpoint:          "/fora.v1.ExchangeService",
-		CatalogEndpoint:   "/fora.v1.CatalogService",
-		BaseCurrency:      "USD",
-		SupportedProfiles: []string{"fora-news-v1"},
-		OfferKey:          deps.signer.PublicKey(),
-		Clock:             clock.NewDeterministic(time.Unix(1700000000, 0).UTC()),
-		KeyLifetime:       10 * 365 * 24 * time.Hour,
-	})
-	if err != nil {
-		t.Fatalf("wellknown: %v", err)
-	}
-	wk.RegisterRoutes(mux)
+	deps.keystore.PutRSA(cloudFrontTestKeyRef, rsaPriv)
 
-	transport.NewAgentsRegisterHandler(deps.registry, transport.AgentsRegisterOptions{}).
-		RegisterRoutes(mux)
+	mux := http.NewServeMux()
+	trading := exchangetest.MountTrading(t, mux, deps.trading())
 
-	// ExchangeService verification is handled by
-	// connectserver.NewExchangeServiceHandler registered above;
-	// CatalogSignatureMiddleware handles the Catalog path. trustProxyHeaders
-	// wires the same forwarded-header rewrite production wires under
-	// FORA_TRUST_PROXY_HEADERS.
+	// trustProxyHeaders wires the same forwarded-header rewrite production
+	// wires under FORA_TRUST_PROXY_HEADERS.
 	server := httptest.NewServer(transport.WrapPublicSurface(deps.logger, mux,
 		runhttp.PublicSurfaceOptions{TrustProxyHeaders: deps.trustProxyHeaders}))
 	t.Cleanup(server.Close)
@@ -299,11 +224,46 @@ func startExchangeServer(t *testing.T, deps exchangeServerDeps) *exchangeServerF
 	return &exchangeServerFixture{
 		server:        server,
 		baseTransport: base,
-		exchange:      exchangeSvc,
-		catalogSvc:    catalogSvc,
-		resolver:      resolver,
+		exchange:      trading.Exchange,
+		catalogSvc:    trading.Catalog,
+		resolver:      trading.Resolver,
 		rsaPub:        &rsaPriv.PublicKey,
-		rsaKid:        rsaKid,
+		rsaKid:        cloudFrontTestKeyRef,
+	}
+}
+
+// trading is these deps as exchangetest composes the surface from them: the
+// harness's own Exchange domain and default Broker, and the service keystore
+// the override replaces when a test sets one.
+func (d exchangeServerDeps) trading() exchangetest.TradingDeps {
+	var keys signing.KeyStore = d.keystore
+	if d.keystoreOverride != nil {
+		keys = d.keystoreOverride
+	}
+	return exchangetest.TradingDeps{
+		Pool:                d.pool,
+		Queries:             d.queries,
+		Registry:            d.registry,
+		Manifests:           d.manifests,
+		Billing:             d.bill,
+		Signer:              d.signer,
+		KeyStore:            keys,
+		JournalQueries:      d.journalQueries(),
+		ExchangeDomain:      harnessExchangeDomain,
+		CallerKeys:          d.httpsigKeys,
+		Clock:               d.clk,
+		TxRunner:            d.txRunner,
+		Audit:               d.auditWrap,
+		MaxSignatures:       d.maxSignatures,
+		BrokerHost:          cmp.Or(d.brokerHost, harnessBrokerHost),
+		SoR:                 d.sor,
+		DefaultTenantDomain: d.defaultTenantDomain,
+		LedgerCurrencies:    d.ledgerCurrenciesOrDefault(),
+		DefaultAgentCredits: d.defaultAgentCredits,
+		BillingRefGen:       d.billingRefGen,
+		Lifetimes:           d.lifetimes,
+		RegSchema:           d.regSchema,
+		TermsDigest:         d.termsDigest,
 	}
 }
 

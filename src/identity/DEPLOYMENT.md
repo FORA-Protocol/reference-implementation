@@ -32,6 +32,17 @@ from the publisher's delivery edge — proving to that edge that it holds the ag
 key — and returns the content inside the tool result. The key never leaves this
 service, so the agent could not make that proof itself.
 
+The agent can turn this fetch off by calling `fora_execute` with `embed_content`
+set to `false`. The purchase still happens, but the result carries only each
+item's delivery link and transaction id. Two warnings apply, and the parameter
+description gives both to the agent:
+
+- The link is a bearer credential. It stays visible in the chat and in logs until
+  it expires, about five minutes after the purchase.
+- The link alone works only when the delivery edge does not enforce the key
+  binding, as on the demo deployment. Where the edge enforces it, only this
+  service can fetch the content, so the agent must keep the default.
+
 ```
 Agent ──► Identity (/mcp) ──► Broker ──► Exchange ──► (signed link) ──► CDN ──► Origin
               │                                                          │
@@ -61,6 +72,7 @@ is down will not come back up. Plan restarts accordingly.
 | A Vault instance with a KV v2 engine and a scoped token | `VAULT_ADDR`, `VAULT_TOKEN`, `IDENTITY_KV_MOUNT` | `vault status` → `Sealed  false` |
 | An OIDC provider, and a confidential client registered on it | `IDENTITY_OIDC_*` | `curl -s https://login.example.com/.well-known/openid-configuration` returns JSON |
 | A public hostname for this service, with TLS | `IDENTITY_AUTH_ISSUER` | `curl -sI https://id.example.com` returns anything but a DNS error |
+| Optional: a separate public hostname for the MCP endpoint, say `mcp.example.com` beside `id.example.com` | `IDENTITY_TOKEN_AUDIENCE`, set to that origin; a proxy route from it to this same service | `curl -s https://mcp.example.com/.well-known/oauth-protected-resource` names `https://mcp.example.com` as `resource` (Check E) |
 | A wildcard DNS record for the identity zone | `IDENTITY_BASE_DOMAIN` | `dig +short anything.agents.example.com` returns your address |
 | A wildcard TLS certificate matching that zone | your proxy or load balancer | `openssl s_client -connect anything.agents.example.com:443` shows a `*.agents.example.com` certificate |
 | The address of your Broker | `IDENTITY_MCP_BROKER_URL` | It does not have to be answering yet. No Exchange address is configured — an agent names the Exchange per call. |
@@ -88,7 +100,7 @@ this is the only place this document names one, and every command below reuses
 it:
 
 ```bash
-VERSION=1.0.0-rc.4
+VERSION=1.0.0-rc.5
 docker pull ghcr.io/fora-protocol/identity:$VERSION
 ```
 
@@ -312,6 +324,8 @@ services:
     environment:
       IDENTITY_DSN: "postgres://fora:${DB_PASSWORD}@db.internal:5432/identity?sslmode=require"
       IDENTITY_ADDR: ":8083"
+      # Optional; unset means INFO. The start-up check below reads INFO lines.
+      IDENTITY_LOG_LEVEL: "INFO"
       IDENTITY_BASE_DOMAIN: "agents.example"
       IDENTITY_AUTH_ISSUER: "https://id.example"
       IDENTITY_OIDC_ISSUER: "https://login.example"
@@ -345,6 +359,7 @@ If it exited instead, the `identity.exit` line names the cause:
 
 | `err` begins with | Cause |
 |---|---|
+| `IDENTITY_LOG_LEVEL:` | The value is not `DEBUG`, `INFO`, `WARN` or `ERROR` (any case). |
 | `IDENTITY_DSN is required` | The variable is unset. |
 | `db setup:` | The database is unreachable, or a migration failed. |
 | `sign-up config: developer sign-up requires` | One of the four OIDC values is missing. |
@@ -413,6 +428,8 @@ curl -s https://id.example/.well-known/oauth-authorization-server
 # "registration_endpoint" all begin with your IDENTITY_AUTH_ISSUER, e.g.
 # {"authorization_endpoint":"https://id.example/authorize",...,
 #  "issuer":"https://id.example",...}
+# It also carries "authorization_response_iss_parameter_supported":true, so agent
+# software requires every sign-in redirect to name this same issuer.
 ```
 
 If those addresses show a different hostname, `IDENTITY_AUTH_ISSUER` is wrong and
@@ -431,6 +448,23 @@ curl -s -i -X POST https://id.example/mcp \
 # token. Anything other than 401 means the endpoint is unprotected — stop and
 # investigate.
 ```
+
+Then read the document that header points to, and compare its `resource` with the
+origin agents connect to:
+
+```bash
+curl -s https://id.example/.well-known/oauth-protected-resource
+# Expect: {"resource":"https://id.example", ...}
+```
+
+`resource` is `IDENTITY_TOKEN_AUDIENCE`, which defaults to `IDENTITY_AUTH_ISSUER`.
+It must be the origin agent software connects to for `/mcp`: agent software
+compares the two and refuses to start sign-in when they differ. When `/mcp` is
+served under a hostname of its own (`https://mcp.example`, say, beside this
+service's `https://id.example`), the document must name that origin, so set
+`IDENTITY_TOKEN_AUDIENCE=https://mcp.example` and run the check against that
+hostname too — the `resource_metadata` URL in the 401 still names this service's
+issuer, and both documents must agree.
 
 **Check F — the identity zone answers, and does not leak.**
 

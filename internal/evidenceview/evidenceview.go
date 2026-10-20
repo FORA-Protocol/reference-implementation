@@ -176,6 +176,13 @@ type Evidence struct {
 // of an evidence row is itself the statement that the transaction succeeded.
 type TransactionState struct {
 	IdempotencyKey string `json:"idempotency_key"`
+	// AgentID is the canonical agent host the Exchange attributed the
+	// transaction to: the verified Signature-Agent host for a direct request,
+	// Requester.domain for one a Broker re-packaged. It is the identity to
+	// correlate on; Requester.id and Requester.domain on the evidence row are
+	// what the agent signed, and neither names the agent on every path. Empty
+	// when the serving Exchange predates the field.
+	AgentID string `json:"agent_id,omitempty"`
 	// SignedURLHash is the SHA-256 over the verbatim signed URL. Empty when the
 	// transaction delivered without minting one.
 	SignedURLHash []byte `json:"signed_url_hash,omitempty"`

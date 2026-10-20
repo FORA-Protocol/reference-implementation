@@ -1,15 +1,10 @@
 -- ListUnblockedExchanges returns every exchange the operator has not BLOCKED,
 -- INCLUDING the ones whose last probe did not leave them routable, and carries
 -- probe_state on each row so a caller decides for itself what to do with them.
--- That is the whole registry read surface on purpose: a query that pre-filtered
--- routable rows could not tell "the operator never registered this" apart from
--- "it is registered and not routable right now", and those need different
--- answers. The health refresher must see DOWN and REFUSED rows or it could
--- never probe one back to life; the relay allowlist must see them to refuse a
--- down exchange with a retryable error and a refused one with a final error,
--- instead of claiming either was never registered.
--- BLOCKED rows stay excluded for every caller. The operator withdrew trust from
--- them, so the broker sends them no traffic at all, a health probe included.
+-- The health refresher's read. It must see DOWN and REFUSED rows or it could
+-- never probe one back to life, so it does not pre-filter routable rows.
+-- BLOCKED rows stay excluded: the operator withdrew trust from them, so the
+-- broker sends them no traffic at all, a health probe included.
 -- exchange_id closes the ordering. Priority and trust_level do not break every
 -- tie, so two rows equal on both came back in whichever order the planner chose,
 -- and a caller reading position-dependent answers off this list got a different

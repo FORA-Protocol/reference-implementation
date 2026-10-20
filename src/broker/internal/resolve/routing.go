@@ -117,8 +117,8 @@ func (h *Service) exchangeForURL(
 
 // registeredHealthy resolves a manifest-named exchange domain to a queryable
 // exchange record, returning it only when the domain is registered (TRUST
-// allowlist), routable per repo.Exchange.Admission (the same rule the relay's
-// SSRF admission reads), AND advertises an endpoint in its OWN
+// allowlist), routable per repo.Exchange.Admission (the same rule purchase
+// admission reads), AND advertises an endpoint in its OWN
 // /.well-known/fora.json. The registry row is consulted for trust + health ONLY;
 // the Endpoint is OVERWRITTEN with the well-known-resolved origin (the same
 // resolver the execute path uses) so no backfilled registry endpoint is ever
@@ -264,11 +264,11 @@ func (p *routePlan) routeURLTo(uri string, ex repo.Exchange) {
 //
 // So every requested URL surfaces as exactly one group, never silently dropped —
 // the negative-leg guarantee.
-func (p *routePlan) assemble(byURL map[string]OfferGroup) []OfferGroup {
+func (p *routePlan) assemble(ctx context.Context, byURL map[string]OfferGroup) []OfferGroup {
 	out := make([]OfferGroup, 0, len(p.urlOrder))
 	for _, uri := range p.urlOrder {
 		if g, ok := byURL[uri]; ok {
-			out = append(out, g.finalize())
+			out = append(out, g.finalize(ctx))
 			continue
 		}
 		out = append(out, OfferGroup{

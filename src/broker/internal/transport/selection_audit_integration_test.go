@@ -24,6 +24,7 @@ package transport_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -46,6 +47,8 @@ import (
 // signature nor is stripped. We therefore set a deterministic X-Request-ID on the
 // request and query the audit by that exact id — no reliance on the
 // server-minted UUID.
+//
+// Needs an e2e test: the selection audit of a real-Exchange resolve; it first needs a public read surface.
 func TestResolve_RecordsSelectionAudit(t *testing.T) {
 	ctx := context.Background()
 	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
@@ -57,7 +60,7 @@ func TestResolve_RecordsSelectionAudit(t *testing.T) {
 	// deterministic X-Request-ID on the outbound request so the audit's
 	// request_id is known up front).
 	pub, priv := newBrokerKeyPair(t)
-	srv := startBrokerConnectServer(t, fx, "agent-1", pub)
+	srv := startBrokerConnectServer(t, fx, pub)
 	client := signingBrokerClient(srv.base, srv.server.URL, "agent-1", priv)
 	req := connect.NewRequest(buildDiscoveryRequest("agent-1", reqOpts{
 		query:       "FORA intro",
@@ -119,24 +122,15 @@ func TestResolve_RecordsSelectionAudit(t *testing.T) {
 	// candidate_offers into typed []repo.CandidateInfo (the implement step adds
 	// repo.CandidateInfo so the read stays inside the repo layer — repo must not
 	// import the transport package).
-	candidates, ok := got.CandidateOffers.([]repo.CandidateInfo)
-	if !ok {
-		t.Fatalf("CandidateOffers type = %T, want []repo.CandidateInfo", got.CandidateOffers)
-	}
+	candidates := candidateOffers(t, got.CandidateOffers)
 	if len(candidates) == 0 {
 		t.Fatal("CandidateOffers is empty — the ranked candidate set was not recorded")
 	}
-	var sawWinner bool
-	for _, c := range candidates {
-		if c.OfferID == "offer-1" {
-			sawWinner = true
-			if c.ExchangeID != "mp.acme.example" {
-				t.Errorf("candidate offer-1 ExchangeID = %q, want %q", c.ExchangeID, "mp.acme.example")
-			}
-		}
-	}
-	if !sawWinner {
+	i := slices.IndexFunc(candidates, func(c repo.CandidateInfo) bool { return c.OfferID == "offer-1" })
+	if i < 0 {
 		t.Errorf("ranked CandidateOffers does not contain the winning offer-1: %+v", candidates)
+	} else if candidates[i].ExchangeID != "mp.acme.example" {
+		t.Errorf("candidate offer-1 ExchangeID = %q, want %q", candidates[i].ExchangeID, "mp.acme.example")
 	}
 
 	// Negative path (Testing Doctrine pt10): an unknown request_id yields an
@@ -169,6 +163,8 @@ func TestResolve_RecordsSelectionAudit(t *testing.T) {
 // resolve core → auditSelection → SelectionLogRepo.RecordSelection → Postgres).
 // READ leg is a PERSISTENCE round-trip — the production repo.SelectionLogRepo over
 // fx.pool (tier-2 documented fallback; no public read RPC exists), never raw SQL.
+//
+// Needs an e2e test: the selection audit of a real-Exchange resolve; it first needs a public read surface.
 func TestResolve_SelectionAudit_CrossGroupGlobalWinner(t *testing.T) {
 	ctx := context.Background()
 	fx := newFixture(t, ctx, fixtureOpts{
@@ -185,7 +181,7 @@ func TestResolve_SelectionAudit_CrossGroupGlobalWinner(t *testing.T) {
 	const knownReqID = "req-selection-audit-crossgroup-0001"
 
 	pub, priv := newBrokerKeyPair(t)
-	srv := startBrokerConnectServer(t, fx, "agent-1", pub)
+	srv := startBrokerConnectServer(t, fx, pub)
 	client := signingBrokerClient(srv.base, srv.server.URL, "agent-1", priv)
 	req := connect.NewRequest(buildDiscoveryRequest("agent-1", reqOpts{
 		uris: []string{
@@ -263,6 +259,8 @@ func TestResolve_SelectionAudit_CrossGroupGlobalWinner(t *testing.T) {
 // Querier, the documented tier-2 fallback, because the Broker still has no
 // public read surface for its selection audit. It is not a protocol round-trip
 // and is not claimed as one.
+//
+// Needs an e2e test: the selection audit of a real-Exchange resolve; it first needs a public read surface.
 func TestSelectionLog_LatestOfferingOffer(t *testing.T) {
 	ctx := context.Background()
 	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
@@ -274,7 +272,7 @@ func TestSelectionLog_LatestOfferingOffer(t *testing.T) {
 	)
 
 	pub, priv := newBrokerKeyPair(t)
-	srv := startBrokerConnectServer(t, fx, agentID, pub)
+	srv := startBrokerConnectServer(t, fx, pub)
 	client := signingBrokerClient(srv.base, srv.server.URL, agentID, priv)
 	req := connect.NewRequest(buildDiscoveryRequest(agentID, reqOpts{
 		query:       "FORA intro",
@@ -318,17 +316,8 @@ func TestSelectionLog_LatestOfferingOffer(t *testing.T) {
 		}
 		// The decoded candidate set must still carry the offer, since that is
 		// what the renderer's assertion re-checks after the query matched.
-		candidates, ok := got.CandidateOffers.([]repo.CandidateInfo)
-		if !ok {
-			t.Fatalf("CandidateOffers type = %T, want []repo.CandidateInfo", got.CandidateOffers)
-		}
-		found := false
-		for _, c := range candidates {
-			if c.OfferID == offeredID {
-				found = true
-			}
-		}
-		if !found {
+		candidates := candidateOffers(t, got.CandidateOffers)
+		if !slices.ContainsFunc(candidates, func(c repo.CandidateInfo) bool { return c.OfferID == offeredID }) {
 			t.Errorf("the matched row does not list %q: %+v", offeredID, candidates)
 		}
 	})
@@ -374,4 +363,15 @@ func TestSelectionLog_LatestOfferingOffer(t *testing.T) {
 			}
 		})
 	}
+}
+
+// candidateOffers asserts a selection-log row's candidate set decoded to the
+// typed []repo.CandidateInfo the repo reconstructs, and returns it.
+func candidateOffers(t *testing.T, v any) []repo.CandidateInfo {
+	t.Helper()
+	candidates, ok := v.([]repo.CandidateInfo)
+	if !ok {
+		t.Fatalf("CandidateOffers type = %T, want []repo.CandidateInfo", v)
+	}
+	return candidates
 }

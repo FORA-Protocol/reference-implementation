@@ -5,6 +5,7 @@ package transport_test
 import (
 	"crypto/ed25519"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
 )
 
@@ -49,23 +51,37 @@ import (
 // URI so the caller can discover it.
 func seedResourceWithRate(t *testing.T, h *testHarness, path, rate string) string {
 	t.Helper()
+	return seedResourceWithRates(t, h, path, rate)
+}
+
+// seedResourceWithRates is seedResourceWithRate for a resource the publisher
+// licenses several ways: one unrestricted PER_UNIT term per rate, in the order
+// given. Discovery answers such a resource with one offer per term, so the
+// number of rates is the number of offers a requester gets back.
+func seedResourceWithRates(t *testing.T, h *testHarness, path string, rates ...string) string {
+	t.Helper()
 	unit := "accesses"
-	if _, err := h.catalogClient.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, "agent-test", []*forav1.ResourceEntry{{
-		Domain: h.tenantDomain,
-		Path:   path,
-		Terms: []*forav1.LicenseTerm{{
+	terms := make([]*forav1.LicenseTerm, 0, len(rates))
+	for _, rate := range rates {
+		terms = append(terms, &forav1.LicenseTerm{
 			Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
 			Pricing: &forav1.Pricing{
-				Model:    forav1.PricingModel_PRICING_MODEL_PER_UNIT,
-				Rate:     rate,
-				Currency: "USD",
-				Unit:     &unit,
+				Model:             forav1.PricingModel_PRICING_MODEL_PER_UNIT,
+				Rate:              rate,
+				Currency:          "USD",
+				Unit:              &unit,
+				EstimatedQuantity: proto.Int32(1),
 			},
-		}},
-	}}))); err != nil {
-		t.Fatalf("push %s @ %s: %v", path, rate, err)
+		})
 	}
-	return "https://" + h.tenantDomain + path
+	if _, err := h.catalogClient.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, "agent-test", []*forav1.ResourceEntry{{
+		Domain: h.siteDomain,
+		Path:   path,
+		Terms:  terms,
+	}}))); err != nil {
+		t.Fatalf("push %s @ %v: %v", path, rates, err)
+	}
+	return "https://" + h.siteDomain + path
 }
 
 // executeSingleItem drives ExecuteTransaction with a single items[] entry: the
@@ -89,50 +105,81 @@ func executeSingleItemWithRequestID(
 	t *testing.T, h *testHarness, txID string, presented *forav1.Offer, requestID string,
 ) (*connect.Response[forav1.TransactionResponse], error) {
 	t.Helper()
-	requester := newRequester("agent-test", "agent.example")
-	txReq := &forav1.TransactionRequest{
-		Ver:            helpers.ProtocolVersion,
-		IdempotencyKey: txID,
-		Requester:      requester,
-		Items: []*forav1.TransactionItem{
-			{Offer: presented, AgentAcceptance: signAcceptanceFor(t, h.callerPriv, presented, requester, txID)},
-		},
-	}
-	txReq.AgentRequestAcceptance = signRequestAcceptanceFor(t, h.callerPriv, txReq)
-	req := connect.NewRequest(txReq)
+	req := connect.NewRequest(claimedItemRequest(t, h.defaultCaller(), txID, presented))
 	if requestID != "" {
 		req.Header().Set(helpers.RequestIDHeader, requestID)
 	}
 	return h.exchangeClient.ExecuteTransaction(h.ctx, req)
 }
 
+// executeClaimedAs is executeSingleItem for any caller: the request carries the
+// request-level proof, so it takes the claimed path, as an SDK client's does.
+func executeClaimedAs(
+	t *testing.T, h *testHarness, c executeCaller, txID string, presented *forav1.Offer,
+) (*connect.Response[forav1.TransactionResponse], error) {
+	t.Helper()
+	return c.client.ExecuteTransaction(h.ctx, connect.NewRequest(claimedItemRequest(t, c, txID, presented)))
+}
+
+// claimedItemRequest builds a one-item request the way an SDK client sends it:
+// the item's acceptance and the request-level proof are both signed with the
+// caller's key over the presented offer and txID.
+func claimedItemRequest(
+	t *testing.T, c executeCaller, txID string, presented *forav1.Offer,
+) *forav1.TransactionRequest {
+	t.Helper()
+	return claimedRequest(t, c, txID, signedItem(t, c, txID, presented))
+}
+
+// requestFor is the envelope c sends for items under the shared key txID, with
+// no request-level proof: all a client that predates that proof sends. Such a
+// request takes no claim, and only an item's own acceptance can prove that the
+// caller holds its key.
+func requestFor(c executeCaller, txID string, items ...*forav1.TransactionItem) *forav1.TransactionRequest {
+	return &forav1.TransactionRequest{
+		Ver:            helpers.ProtocolVersion,
+		IdempotencyKey: txID,
+		Requester:      c.requester,
+		Items:          items,
+	}
+}
+
+// claimedRequest is requestFor with c's request-level proof, the shape an SDK
+// client sends. The proof covers the whole request, so it is signed last, and it
+// takes the request down the claimed path.
+func claimedRequest(
+	t *testing.T, c executeCaller, txID string, items ...*forav1.TransactionItem,
+) *forav1.TransactionRequest {
+	t.Helper()
+	req := requestFor(c, txID, items...)
+	req.AgentRequestAcceptance = signRequestAcceptanceFor(t, c.priv, req)
+	return req
+}
+
+// signedItem is one item carrying offer and c's own acceptance of it under txID.
+func signedItem(t *testing.T, c executeCaller, txID string, offer *forav1.Offer) *forav1.TransactionItem {
+	t.Helper()
+	return &forav1.TransactionItem{Offer: offer, AgentAcceptance: signAcceptanceFor(t, c.priv, offer, c.requester, txID)}
+}
+
 // executeItems drives ExecuteTransaction for pre-built items under one shared
 // request key, for tests that must control an item's acceptance (omit it, sign it
 // with the wrong key, sign over a tampered offer) — the one axis executeSingleItem
-// fixes by always minting a valid acceptance for the caller.
+// fixes by always minting a valid acceptance for the caller. The request carries
+// the harness agent's request-level proof, so it takes the claimed path.
 func executeItems(
 	t *testing.T, h *testHarness, reqKey string, items ...*forav1.TransactionItem,
 ) (*connect.Response[forav1.TransactionResponse], error) {
 	t.Helper()
-	req := &forav1.TransactionRequest{
-		Ver:            helpers.ProtocolVersion,
-		IdempotencyKey: reqKey,
-		Requester:      agentRequester("agent-test"),
-		Items:          items,
-	}
-	req.AgentRequestAcceptance = signRequestAcceptanceFor(t, h.callerPriv, req)
-	return h.exchangeClient.ExecuteTransaction(h.ctx, connect.NewRequest(req))
+	c := h.defaultCaller()
+	return c.client.ExecuteTransaction(h.ctx, connect.NewRequest(claimedRequest(t, c, reqKey, items...)))
 }
 
 func signRequestAcceptanceFor(
 	t *testing.T, priv ed25519.PrivateKey, req *forav1.TransactionRequest,
 ) *forav1.AgentRequestAcceptance {
 	t.Helper()
-	acceptance, err := helpers.SignRequestAcceptance(priv, req)
-	if err != nil {
-		t.Fatalf("SignRequestAcceptance: %v", err)
-	}
-	return acceptance
+	return exchangetest.RequestAcceptance(t, priv, req)
 }
 
 // derivedTxKey is the per-item persistence/billing key the batch path writes
@@ -203,7 +250,7 @@ func assertNoTransaction(t *testing.T, h *testHarness, idempotencyKey string) {
 // seed, proving a rejected Execute reserved/charged nothing.
 func assertBalanceUnchanged(t *testing.T, h *testHarness) {
 	t.Helper()
-	bal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	bal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}
@@ -306,9 +353,9 @@ func TestExecuteTransaction_ExpiredOfferRejected(t *testing.T) {
 // presented offer, NOT a recompute from the live catalog. An offer is discovered
 // at price X; the catalog term is then re-pushed at a DIFFERENT price Y; the
 // ORIGINAL signed offer (price X) is executed and must be billed X. Today
-// billing derives pricing from the current catalog snapshot (selectedPricing on
-// the live entry), so after the drift the agent is charged Y — this fails RED
-// until billing reads offer.GetPricing() from the presented offer.
+// billing derives pricing from the current catalog snapshot (the live entry's
+// terms), so after the drift the agent is charged Y — this fails RED until
+// billing reads offer.GetPricing() from the presented offer.
 //
 // Observed through both public surfaces: the wire Cost on the response AND the
 // billing balance debit. X = 0.05, Y = 0.50; est qty defaults to 1, so the
@@ -345,7 +392,7 @@ func TestExecuteTransaction_SignedPriceHonoredOnCatalogDrift(t *testing.T) {
 	}
 
 	// Billing surface: balance debited by X (0.05) → 9.95, not by Y (0.50) → 9.50.
-	bal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	bal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}
@@ -366,5 +413,64 @@ func TestExecuteTransaction_SignedPriceHonoredOnCatalogDrift(t *testing.T) {
 	gotPersisted := mustBillingAmount(t, rec.UnitCostDecimal, rec.Currency)
 	if gotPersisted.Value.Cmp(mustBillingAmount(t, "0.05", "USD").Value) != 0 {
 		t.Errorf("persisted unit_cost = %q, want signed X 0.05", rec.UnitCostDecimal)
+	}
+}
+
+// TestExecuteTransaction_EachTermOfferChargesItsOwnPrice is the execute leg of
+// the one-offer-per-term model. A resource licensed two ways is discovered as
+// two signed offers with different prices, and BOTH are redeemable: each
+// execute charges the price its own offer carries, because billing reads the
+// price off the verified presented offer. Before the split, the cheaper term
+// rode on an offer priced from the first term and could never be bought at its
+// own price.
+//
+// Round-trip: PushResources -> DiscoverResources -> ExecuteTransaction twice,
+// all through the public Connect-Go RPCs. The charge is observed on the wire
+// (TransactionResultItem.Cost) and on the billing balance.
+func TestExecuteTransaction_EachTermOfferChargesItsOwnPrice(t *testing.T) {
+	h := newTestHarness(t)
+	uri := seedResourceWithRates(t, h, "/articles/two-terms", "0.05", "0.02")
+
+	offers := discoverURI(t, h, uri)
+	if len(offers) != 2 {
+		t.Fatalf("discovered %d offers, want 2 (one per term)", len(offers))
+	}
+	for i, o := range offers {
+		if got := len(o.GetTerms()); got != 1 {
+			t.Fatalf("offer %d carries %d terms, want exactly 1", i, got)
+		}
+	}
+	if offers[0].GetOfferId() == offers[1].GetOfferId() {
+		t.Fatalf("both offers carry offer_id %q, want distinct ids", offers[0].GetOfferId())
+	}
+
+	wantRates := []string{"0.05", "0.02"}
+	for i, o := range offers {
+		if got := o.GetPricing().GetRate(); got != wantRates[i] {
+			t.Fatalf("offer %d rate = %q, want %q (the term it sells)", i, got, wantRates[i])
+		}
+		txID := "tx-two-terms-" + strconv.Itoa(i)
+		resp, err := executeSingleItem(t, h, txID, o)
+		if err != nil {
+			t.Fatalf("execute offer %d: %v", i, err)
+		}
+		item := singleResultItem(t, resp)
+		if got := item.GetCost().GetUnitCost(); got != wantRates[i] {
+			t.Errorf("offer %d: Cost.unit_cost = %q, want %q (its own signed price)", i, got, wantRates[i])
+		}
+		if got := item.GetCost().GetAmount(); got != wantRates[i] {
+			t.Errorf("offer %d: Cost.amount = %q, want %q (qty 1)", i, got, wantRates[i])
+		}
+	}
+
+	// Billing surface: both charges landed — 10.00 - 0.05 - 0.02 = 9.93.
+	bal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
+	if err != nil {
+		t.Fatalf("GetBalance: %v", err)
+	}
+	want := mustBillingAmount(t, "9.93", "USD")
+	if bal.Value.Cmp(want.Value) != 0 {
+		t.Errorf("balance after executing both offers = %s, want 9.93 (0.05 + 0.02 charged)",
+			bal.Value.FloatString(4))
 	}
 }

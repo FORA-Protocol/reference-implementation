@@ -51,25 +51,69 @@ func renderRows(b *strings.Builder, rows []Row) {
 // tunnel see the same output as an operator holding a forged row.
 func renderAssertions(b *strings.Builder, assertions []Assertion) {
 	b.WriteString("ASSERTIONS\n")
-	held, failed, skipped := 0, 0, 0
+	marks := map[string]string{stateHeld: "v", stateFailed: "x", stateUnchecked: "?"}
 	for _, a := range assertions {
-		var mark string
-		switch {
-		case a.Unchecked:
-			mark, skipped = "?", skipped+1
-		case a.OK:
-			mark, held = "v", held+1
+		line(b, "  [%s] %s\n        %s\n", marks[a.State()], a.Name, a.Detail)
+	}
+	line(b, "\n%s\n", Summarize(assertions))
+}
+
+// The three states an assertion can be in. They are strings rather than an
+// enum because both renderers key on them: the text one for its mark, the
+// HTML one for its badge label and class.
+const (
+	stateHeld      = "held"
+	stateFailed    = "failed"
+	stateUnchecked = "unchecked"
+)
+
+// State names the verdict. Unchecked wins over OK because an unchecked
+// assertion carries no verdict at all — its OK is simply the zero value.
+func (a Assertion) State() string {
+	switch {
+	case a.Unchecked:
+		return stateUnchecked
+	case a.OK:
+		return stateHeld
+	default:
+		return stateFailed
+	}
+}
+
+// Tally counts the assertions by state.
+type Tally struct {
+	Held, Failed, Skipped int
+}
+
+// TallyOf counts every assertion once, by its state.
+func TallyOf(assertions []Assertion) Tally {
+	var t Tally
+	for _, a := range assertions {
+		switch a.State() {
+		case stateHeld:
+			t.Held++
+		case stateFailed:
+			t.Failed++
 		default:
-			mark, failed = "x", failed+1
+			t.Skipped++
 		}
-		line(b, "  [%s] %s\n        %s\n", mark, a.Name, a.Detail)
 	}
-	line(b, "\n%d of %d checked assertions hold", held, held+failed)
-	if failed > 0 {
-		line(b, "; %d FAILED", failed)
+	return t
+}
+
+// Summarize writes the one-line verdict both renderers end with. The wording
+// is shared so an operator comparing a terminal run with a saved report reads
+// the same sentence in both.
+func Summarize(assertions []Assertion) string {
+	t := TallyOf(assertions)
+	var b strings.Builder
+	line(&b, "%d of %d checked assertions hold", t.Held, t.Held+t.Failed)
+	if t.Failed > 0 {
+		line(&b, "; %d FAILED", t.Failed)
 	}
-	if skipped > 0 {
-		line(b, "; %d could not be checked because a source was not read", skipped)
+	if t.Skipped > 0 {
+		line(&b, "; %d could not be checked because a source was not read", t.Skipped)
 	}
-	b.WriteString(".\n")
+	b.WriteString(".")
+	return b.String()
 }

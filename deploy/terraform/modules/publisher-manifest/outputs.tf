@@ -15,7 +15,7 @@ output "exchanges_json" {
   value = jsonencode([{
     domain             = var.exchange_fqdn
     endpoint           = "https://${var.exchange_fqdn}"
-    supported_profiles = ["fora-news-v1"]
+    supported_profiles = ["fora-news-v1", "fora-comp-v1", "fora-music-v1"]
     ext                = { resource_owner_id = var.resource_owner_id }
   }])
 }

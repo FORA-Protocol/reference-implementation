@@ -89,11 +89,11 @@ func TestPushResources_MetadataRoundTrip(t *testing.T) {
 	h := newPushHarness(t)
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 
 	const metaPath = "/articles/with-metadata"
 	const basePath = "/articles/no-metadata"
@@ -338,11 +338,11 @@ func TestPushResources_TitleRoundTrip(t *testing.T) {
 	h := newPushHarness(t)
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 	client := h.signedCat(callerID, priv)
 
 	const titledPath = "/articles/titled"
@@ -410,11 +410,11 @@ func TestPushResources_TitleRoundTrip(t *testing.T) {
 func assertTitleIsSigned(t *testing.T, h *pushHarness) {
 	t.Helper()
 	callerID := "caller.example"
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 	const signedPath = "/articles/signed-title"
 	pushEntries(t, h, h.signedCat(callerID, priv), callerID, &forav1.ResourceEntry{
 		ContentId: proto.String("res-" + uuid.NewString()),
@@ -480,11 +480,11 @@ func TestExecuteTransaction_ResourceTitleEchoesSignedOffer(t *testing.T) {
 	h := newPushHarness(t)
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 	client := h.signedCat(callerID, priv)
 
 	const titledPath = "/articles/tx-titled"

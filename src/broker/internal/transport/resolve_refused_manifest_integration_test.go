@@ -20,6 +20,10 @@ package transport_test
 // fixture already substitutes for every test in the suite (fakeEndpointResolver).
 // The same verdict over a REAL well-known fetch is covered by the relay suite,
 // which wires the production resolver.
+//
+// No Exchange is emulated. The Exchange address answers every discovery request
+// 503 with no body (newRoutingFixture), so "routed to the Exchange" is read as
+// one more request arriving there.
 
 import (
 	"net/http"
@@ -27,12 +31,14 @@ import (
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"github.com/FORA-Protocol/protocol/sdk/go/resolvers"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/repo"
 )
 
 // TestResolve_RefusedExchangeManifestIsSettledAndRecovers walks the whole life
-// of a refusal through the public RPC: the Exchange serves, its manifest starts
-// being refused, a probe pass records that, the URL answers with the SETTLED
-// reason, the Exchange republishes, and routing resumes.
+// of a refusal through the public RPC: the Exchange is routed to, its manifest
+// starts being refused, a probe pass records that, the URL answers with the
+// SETTLED reason, the Exchange republishes, and routing resumes.
 //
 // Leg 3 is the regression. NOT_IN_CATALOG and TEMPORARILY_UNAVAILABLE are both
 // refusals and both carry no offers, so a test that only checked "no offers"
@@ -45,46 +51,39 @@ import (
 // version this build accepts routes again with no operator intervention.
 func TestResolve_RefusedExchangeManifestIsSettledAndRecovers(t *testing.T) {
 	ctx := t.Context()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example", captureLogs: true})
+	fx := newRoutingFixture(t, true)
 	refresher := newRefresher(fx)
 
 	// Leg 1: baseline. Everything after this is about the manifest verdict, not
-	// about a fixture that could never serve the URL.
-	assertServed(t, resolveCataloged(t, fx), "baseline, before the manifest was refused")
-	servedBefore := fx.exchange.discoverCalls
+	// about a fixture that could never route the URL.
+	assertRoutedToExchange(t, fx, "baseline, before the manifest was refused")
 
 	// Leg 2: the Exchange's manifest starts carrying a document version this
 	// build does not accept. One refresher pass reads it and records the verdict
 	// on the row, which is the sequence production runs on its ticker.
 	fx.endpoints.refuseDomain(mockExchangeDomain, resolvers.ErrManifestVersionRefused)
 	refreshOnce(t, refresher, ctx)
+	assertTransitionLogged(t, fx.logs, mockExchangeDomain, repo.ProbeRefused, "WARN")
 
 	// Leg 3: the URL answers with the SETTLED refusal, the Exchange is not
 	// dialled, and the operator can read which exchange dropped out and why.
-	assertUnroutable(t, resolveCataloged(t, fx),
+	assertNotRoutedToExchange(t, fx,
 		forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_NOT_IN_CATALOG,
 		"while the exchange's manifest is refused")
-	if fx.exchange.discoverCalls != servedBefore {
-		t.Errorf("discover calls = %d, want %d — an exchange whose manifest was refused "+
-			"must not be dialled", fx.exchange.discoverCalls, servedBefore)
-	}
 	// Its own reason token, not the outage one: waiting fixes an outage, and only
 	// the exchange republishing fixes this, so an operator reading the two the
 	// same way would wait for something that is not going to happen.
-	assertSkipLogged(t, fx, mockExchangeDomain, "refused")
+	assertSkipLogged(t, fx, "refused")
 
 	// Leg 4: the Exchange republishes a manifest this build accepts. The next
 	// pass must still reach it — a REFUSED row stays on the list the refresher
 	// reads, or the state is a one-way ratchet.
 	fx.endpoints.stopRefusing(mockExchangeDomain)
 	refreshOnce(t, refresher, ctx)
+	assertTransitionLogged(t, fx.logs, mockExchangeDomain, repo.ProbeLive, "INFO")
 
 	// Leg 5: routing resumes on its own.
-	assertServed(t, resolveCataloged(t, fx), "after the exchange republished its manifest")
-	if fx.exchange.discoverCalls <= servedBefore {
-		t.Errorf("discover calls = %d, want more than %d — the recovered exchange was never dialled",
-			fx.exchange.discoverCalls, servedBefore)
-	}
+	assertRoutedToExchange(t, fx, "after the exchange republished its manifest")
 }
 
 // TestResolve_RefusedManifestOutranksAnUnreachableSibling covers the mixed
@@ -98,23 +97,23 @@ func TestResolve_RefusedExchangeManifestIsSettledAndRecovers(t *testing.T) {
 // decided the answer for every URL in it.
 func TestResolve_RefusedManifestOutranksAnUnreachableSibling(t *testing.T) {
 	ctx := t.Context()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example", captureLogs: true})
+	fx := newRoutingFixture(t, true)
 	refresher := newRefresher(fx)
 
-	assertServed(t, resolveCataloged(t, fx), "baseline, before either fault")
+	assertRoutedToExchange(t, fx, "baseline, before either fault")
 
 	// Both faults at once, each through its own production lever: the manifest
 	// verdict at the resolver, the outage at /healthz.
 	fx.endpoints.refuseDomain(mockExchangeDomain, resolvers.ErrManifestVersionRefused)
-	fx.exchange.setHealthz(http.StatusServiceUnavailable)
+	fx.wire.setHealthz(http.StatusServiceUnavailable)
 	refreshOnce(t, refresher, ctx)
 
 	// Trust is read before the probe state and the manifest verdict before the
 	// outage, so the row lands REFUSED and the answer is settled. A pass that
 	// recorded either fault as plain unhealthiness would answer
 	// TEMPORARILY_UNAVAILABLE here.
-	assertUnroutable(t, resolveCataloged(t, fx),
+	assertNotRoutedToExchange(t, fx,
 		forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_NOT_IN_CATALOG,
 		"while the exchange is both refused and unreachable")
-	assertSkipLogged(t, fx, mockExchangeDomain, "refused")
+	assertSkipLogged(t, fx, "refused")
 }

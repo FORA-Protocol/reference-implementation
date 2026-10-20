@@ -31,7 +31,7 @@ func TestExecuteTransaction_TwoOffersForSameURLInOneBatch(t *testing.T) {
 	}
 
 	const reqKey = "tx-two-offers-one-url"
-	requester := agentRequester("agent-test")
+	requester := agentRequester()
 	itemFor := func(o *forav1.Offer) *forav1.TransactionItem {
 		return &forav1.TransactionItem{
 			Offer:           o,
@@ -88,7 +88,7 @@ func TestExecuteTransaction_TwoOffersForSameURLInOneBatch(t *testing.T) {
 	}
 
 	// Both purchases really billed: two 0.05 charges against the 10.00 seed.
-	bal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	bal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}

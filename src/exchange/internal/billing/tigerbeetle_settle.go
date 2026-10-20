@@ -8,10 +8,13 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing/tigerbeetle"
 )
 
-// refundReq carries the inputs Refund resolves before the reversal: the settled hold,
-// the deterministic leg ids for this (billing, key) pair, and the refund amount.
+// refundReq carries the inputs Refund resolves before the reversal: the settled hold
+// and the transfer record read back from it, the deterministic leg ids for this
+// (billing, key) pair, and the refund amount. info carries the hold's ledger, which
+// is what makes the reversal land in the currency the charge was taken in.
 type refundReq struct {
 	pendingID tigerbeetle.ID
+	info      tigerbeetle.TransferInfo
 	netID     tigerbeetle.ID
 	feeID     tigerbeetle.ID
 	rMinor    *big.Int
@@ -26,6 +29,8 @@ type refundLegs struct {
 	feeID     tigerbeetle.ID
 	agent     tigerbeetle.ID
 	owner     tigerbeetle.ID
+	ledger    uint32
+	currency  string
 	netRev    *big.Int
 	feeRev    *big.Int
 	reason    string
@@ -53,11 +58,22 @@ func (a *TigerBeetleAdapter) settleSplit(ctx context.Context, pendingID, postID 
 		}
 		return resolveErr(out)
 	}
-	platformID, err := a.platformFeeAccount()
+	// The fee leg is a plain transfer, so it must name its ledger. It takes the
+	// ledger the hold itself reserved on rather than anything from configuration:
+	// the hold is the record of which currency this charge is in, and reading it
+	// back keeps the fee in that same currency even if the configured set changed
+	// after the hold was created.
+	currency, ok := a.currencyFor(info.Ledger)
+	if !ok {
+		return fmt.Errorf("billing: settle: hold is on ledger %d, which is not configured", info.Ledger)
+	}
+	platformID, err := a.platformFeeAccount(currency)
 	if err != nil {
 		return err
 	}
-	if eErr := a.ensureAccount(ctx, platformID, tigerbeetle.CodePlatform, "platform fee"); eErr != nil {
+	if eErr := a.ensureAccount(
+		ctx, platformID, info.Ledger, tigerbeetle.CodePlatform, "platform fee",
+	); eErr != nil {
 		return eErr
 	}
 	feeID, err := a.feeLegID(pendingID)
@@ -67,7 +83,10 @@ func (a *TigerBeetleAdapter) settleSplit(ctx context.Context, pendingID, postID 
 	net := new(big.Int).Sub(gross, fee)
 	out, err := a.tb.CreateLinked(ctx, []tigerbeetle.Leg{
 		{ID: postID, PendingID: pendingID, Amount: net},
-		{ID: feeID, Debit: info.Debit, Credit: platformID, Amount: fee, Ledger: a.ledger, Code: tigerbeetle.CodeSettlement},
+		{
+			ID: feeID, Debit: info.Debit, Credit: platformID, Amount: fee,
+			Ledger: info.Ledger, Code: tigerbeetle.CodeSettlement,
+		},
 	})
 	return linkedErr(out, err, ErrInsufficientBalance)
 }
@@ -99,12 +118,10 @@ func (a *TigerBeetleAdapter) classifyForRefund(ctx context.Context, pendingID ti
 // reverseRefund resolves the reversal split — recover the posted fee, enforce the
 // cumulative cap against the original gross, then apply the proportional reversal.
 func (a *TigerBeetleAdapter) reverseRefund(ctx context.Context, r refundReq) error {
-	info, ok, err := a.tb.LookupTransfer(ctx, r.pendingID)
-	if err != nil {
-		return fmt.Errorf("billing: refund lookup pending: %w", err)
-	}
+	info := r.info
+	currency, ok := a.currencyFor(info.Ledger)
 	if !ok {
-		return ErrUnknownBillingID
+		return fmt.Errorf("billing: refund: charge is on ledger %d, which is not configured", info.Ledger)
 	}
 	gross := info.Amount
 	prior, err := a.tb.SumAccountRefunds(ctx, info.Debit, r.pendingID, tigerbeetle.CodeRefund)
@@ -119,8 +136,8 @@ func (a *TigerBeetleAdapter) reverseRefund(ctx context.Context, r refundReq) err
 	netRev := new(big.Int).Sub(r.rMinor, feeRev)
 	return a.refundReverse(ctx, refundLegs{
 		pendingID: r.pendingID, netID: r.netID, feeID: r.feeID,
-		agent: info.Debit, owner: info.Credit, netRev: netRev, feeRev: feeRev,
-		reason: r.reason,
+		agent: info.Debit, owner: info.Credit, ledger: info.Ledger, currency: currency,
+		netRev: netRev, feeRev: feeRev, reason: r.reason,
 	})
 }
 
@@ -130,27 +147,31 @@ func (a *TigerBeetleAdapter) reverseRefund(ctx context.Context, r refundReq) err
 func (a *TigerBeetleAdapter) refundReverse(ctx context.Context, r refundLegs) error {
 	legs := []tigerbeetle.Leg{{
 		ID: r.netID, Debit: r.owner, Credit: r.agent, Amount: r.netRev,
-		Ledger: a.ledger, Code: tigerbeetle.CodeRefund, UserData128: r.pendingID,
+		Ledger: r.ledger, Code: tigerbeetle.CodeRefund, UserData128: r.pendingID,
 		UserData64: tigerbeetle.ReasonToken(r.reason),
 	}}
 	if r.feeRev.Sign() > 0 {
-		platformID, err := a.platformFeeAccount()
+		platformID, err := a.platformFeeAccount(r.currency)
 		if err != nil {
 			return err
 		}
 		legs = append(legs, tigerbeetle.Leg{
 			ID: r.feeID, Debit: platformID, Credit: r.agent, Amount: r.feeRev,
-			Ledger: a.ledger, Code: tigerbeetle.CodeRefund, UserData128: r.pendingID,
+			Ledger: r.ledger, Code: tigerbeetle.CodeRefund, UserData128: r.pendingID,
 		})
 	}
 	out, err := a.tb.CreateLinked(ctx, legs)
 	return linkedErr(out, err, ErrInsufficientBalance)
 }
 
-// refundMinor validates the refund amount (positive, matching currency) and converts it
-// to minor units. Any failure maps to ErrInvalidAmount.
-func (a *TigerBeetleAdapter) refundMinor(amount Amount) (*big.Int, error) {
-	if amount.Currency != a.currency {
+// refundMinor validates the refund amount and converts it to minor units. The
+// amount must be positive and denominated in the currency the original charge was
+// taken in — chargeLedger is the ledger the settled hold recorded, so a refund
+// cannot reverse a EUR charge with a USD amount. Any failure maps to
+// ErrInvalidAmount.
+func (a *TigerBeetleAdapter) refundMinor(amount Amount, chargeLedger uint32) (*big.Int, error) {
+	ledger, ok := a.ledgerFor(amount.Currency)
+	if !ok || ledger != chargeLedger {
 		return nil, ErrInvalidAmount
 	}
 	minor, err := a.toMinor(amount)

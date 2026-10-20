@@ -1,0 +1,559 @@
+# Purchases and discovery through the Broker, the budget it applies at Resolve,
+# and the relay policy of the providers an Exchange sells for. Registry entries
+# (ADR-028 D1); the tests that prove them say so on themselves.
+#
+# Sources: fora.proto and the website docs of the pinned protocol module
+# github.com/FORA-Protocol/protocol (the version in the root go.mod).
+#
+# A requester.domain naming another agent's directory (RELAY-005) is distinct
+# from an empty requester, which is REQUESTER-002 and REQUESTER-003.
+#
+# A "# harness:" comment above an entry says why the e2e harness cannot drive it
+# through a public surface yet, and what it would need.
+#
+# A "negative:" case is a refusal with a typed error response (ADR-028 D1). What
+# an answer that refuses nothing must leave out is a "must not" in "positive:".
+
+- id: RELAY-001
+  title: The Broker buys each item at the Exchange its signed offer names, and each Exchange charges only its own items
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      It verifies the agent's request, groups the items by each signed offer's
+      `exchange`, and sends one ExchangeService.ExecuteTransaction per Exchange.
+  positive: >-
+    One BrokerService.ExecuteTransaction over offers from three Exchanges buys every
+    item, and each Exchange's balance for the buyer drops by exactly its own items'
+    cost, in their currency.
+  negative: []
+
+- id: RELAY-002
+  title: The Broker answers one item per request item, in request order, and one outcome per Exchange
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      One per Exchange the Broker contacted, in the order each Exchange first appears
+      among the request items.
+  positive: >-
+    BrokerTransactionResponse.items has one entry per request item in request order;
+    exchanges has one ExchangeOutcome per Exchange in first-appearance order, listing
+    its items' offer_ids in order, with that Exchange's agent_identity_hash.
+  negative: []
+
+- id: RELAY-003
+  title: The Broker's totals hold one exact sum per currency over the charged items only
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Amounts are never summed across currencies and never converted: currency conversion
+      is out of scope for this version. unit_cost is unset. Empty when no item was
+      charged.
+  positive: >-
+    A purchase charging EUR and USD items has totals of one EUR entry and one USD
+    entry, in first-charged order, each the exact decimal sum of its currency's
+    charged items, with no unit_cost. A denied item adds nothing to totals; when
+    every item is denied, totals is empty, not a zero entry.
+  negative: []
+
+- id: RELAY-004
+  title: The Broker refuses a purchase whose agent signature does not verify, and buys nothing
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      The agent's request signature does not verify: UNAUTHENTICATED with
+      `request_auth_failure`, exactly as at an Exchange.
+  positive: The same purchase, unaltered, is bought.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no sub-request is sent: no balance moves at any Exchange the items name
+
+- id: RELAY-005
+  title: The Broker refuses a purchase whose requester.domain is not the agent's signing directory
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      `requester.domain` is not the agent's verified signing directory — the host of the
+      origin the agent's covered `Signature-Agent` member names, the directory the
+      request-signing key resolved from: UNAUTHENTICATED with `request_auth_failure`
+      SIGNATURE_INVALID.
+  positive: The same purchase naming the agent's own directory host is bought.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no sub-request is sent and no balance moves, when requester.domain names
+        another agent's published directory
+
+- id: RELAY-006
+  title: The Broker refuses a malformed purchase as invalid_argument and buys nothing
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A malformed request — no items, an item with no offer or no AgentAcceptance, no
+      AgentRequestAcceptance, or an AgentRequestAcceptance whose payload does not list
+      the request's items in order (each offer.signature and offer.exchange) or names
+      another requester or idempotency key: INVALID_ARGUMENT.
+  positive: The same purchase, well formed, is bought.
+  negative:
+    - code: invalid_argument
+      reason: none
+      side_effect: >-
+        no balance moves at any Exchange, for an item without its AgentAcceptance, no
+        AgentRequestAcceptance, and a request acceptance listing the items in another
+        order
+
+- id: RELAY-007
+  title: The Broker refuses the whole purchase when any item's Exchange is one it cannot route to or does not approve
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      The Broker checks every item before it sends anything, so one unroutable Exchange
+      refuses the whole call rather than buying the rest.
+  positive: The same purchase without the unroutable item is bought.
+  negative:
+    - code: failed_precondition
+      reason: >-
+        none; ErrorDetail.metadata["exchange"] names the unroutable host
+      side_effect: >-
+        no item is bought at any Exchange, including the routable ones
+
+- id: RELAY-008
+  title: An Exchange's refusal of its whole sub-request rides on its items, and the other Exchanges' results stand
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Upstream answers are ALWAYS IN THE BODY. Once the Broker has sent its sub-requests
+      the call returns OK.
+  positive: >-
+    The call returns OK. Each refused item carries refusal with party equal to its
+    signed offer.exchange and the Exchange's Connect code and ErrorDetail unchanged,
+    and only offer_id among the result fields; the other Exchanges' items are bought
+    and charged.
+  negative:
+    - code: ok
+      reason: refusal on the refused Exchange's items
+      side_effect: >-
+        no balance moves at the refusing Exchange, and the refused items carry no
+        denial_reason, transaction_id, billing_id, cost or retrieval_endpoint
+
+- id: RELAY-009
+  title: An Exchange that does not answer is reported as a refusal with the transport code, and a retry with the same key is safe
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A refusal with either of those codes is an ambiguous outcome: a purchase may have
+      completed. On a Broker purchase, retrying the agent's request with the same
+      idempotency_key, on any route, is answered from each Exchange's stored result, so it
+      settles the outcome without buying twice.
+  positive: >-
+    The retry after the Exchange is back answers the purchase, charged once, with the
+    same transaction_id whether or not the first attempt completed upstream.
+  negative:
+    - code: ok
+      reason: refusal code unavailable or deadline_exceeded, with no detail
+      side_effect: >-
+        the other Exchanges' items are bought; the unanswered items carry no
+        denial_reason
+
+- id: RELAY-010
+  title: The Broker never stamps a denial on an item its Exchange did not deny
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      DENIAL_REASON_CONTENT_UNAVAILABLE is not a catch-all for upstream failures; the
+      Broker never stamps it, or any denial_reason, onto an item an Exchange did not
+      deny.
+  positive: >-
+    An item an Exchange denied carries that Exchange's denial_reason unchanged.
+  negative:
+    - code: ok
+      reason: refusal, never denial_reason
+      side_effect: >-
+        an item whose Exchange refused or did not answer carries no denial_reason
+
+- id: RELAY-011
+  title: An Exchange's per-item denial reaches the agent unchanged through the Broker
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      An Exchange's per-item denial is that Exchange's result item, unchanged; a one-item
+      sub-request an Exchange denies is such a result item, because an Exchange answers
+      every per-item denial in the body.
+  positive: >-
+    In a sub-request the Exchange otherwise accepts, the denied item carries the
+    Exchange's denial_reason and no refusal, and the other items are bought.
+  negative:
+    - code: ok
+      reason: the Exchange's DENIAL_REASON_ACCOUNT_NOT_REGISTERED, unchanged
+      side_effect: the denied item adds nothing to totals and moves no balance
+
+- id: RELAY-012
+  title: An Exchange answer the Broker cannot attribute is reported as an internal refusal on every item sent there
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      If an Exchange answers OK without exactly one result item per item sent, the Broker
+      cannot attribute the answer, and reports every item of that sub-request with a
+      refusal whose code is "internal" and no detail.
+  positive: An Exchange answering one item per item sent has its items reported as answered.
+  negative:
+    - code: ok
+      reason: refusal code internal, no detail
+      side_effect: >-
+        no item of that sub-request is reported bought, and the other Exchanges' items
+        are unaffected
+
+- id: RELAY-013
+  title: A purchase retried through the Broker with the same key is answered from each Exchange's stored result
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A retry is safe: the Broker forwards the agent's idempotency_key unchanged, so each
+      Exchange answers a repeated sub-request from its stored result
+  positive: >-
+    The same Broker purchase across two Exchanges, sent twice with one key, answers
+    the same transaction_ids and retrieval_endpoints both times, and each Exchange's
+    balance drops once.
+  negative: []
+
+- id: RELAY-014
+  title: Two agents behind one Broker that choose the same key each buy as themselves
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      On a request the agent signed itself, the request signature authenticates it; on a
+      purchase relayed through BrokerService.ExecuteTransaction, the agent's acceptances
+      authenticate the directory Requester.domain names. The route does not change the
+      scope: the same key from the same agent names the same purchase whether it arrives
+      directly or through any Broker the Exchange admits.
+  positive: >-
+    Agents A and B buy the same offer through the Broker under one idempotency_key;
+    each gets its own transaction_id and a retrieval_endpoint of its own, and each
+    one's balance drops by the cost. B's answer never carries A's transaction_id or
+    retrieval_endpoint.
+  negative: []
+
+- id: RELAY-015
+  title: On a relayed purchase an item whose AgentAcceptance does not verify under requester.domain's keys is denied SIGNATURE_INVALID, in the body
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      On a purchase a Broker relayed, an item whose AgentAcceptance does not verify
+      under the keys the directory requester.domain names publishes is denied with
+      this reason, in the body, exactly as for the AgentRequestAcceptance: the item
+      is denied and the whole request is not refused.
+  positive: >-
+    A Broker purchase of two items at one Exchange whose acceptances verify under the
+    agent's published key buys both.
+  negative:
+    - code: ok
+      reason: >-
+        DENIAL_REASON_SIGNATURE_INVALID on the item, in the body: its AgentAcceptance is
+        a valid signature over the same payload made by another agent's published key,
+        which the directory requester.domain names does not publish
+      side_effect: >-
+        that item carries no delivery URL, transaction or charge, while the other item
+        of the same sub-request is bought; the Exchange's balance moves by the other
+        item's cost alone, and the whole request is not refused
+
+- id: RELAY-016
+  title: A sub-request that is not the projection the agent signed has every item denied SIGNATURE_INVALID, in the body
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A subrequest whose items are not exactly that projection — an item dropped, an
+      item added, or the items reordered — is refused PER ITEM, IN THE BODY: the Exchange
+      answers OK and denies every item of the subrequest with
+      DENIAL_REASON_SIGNATURE_INVALID, because the agent's signature does not cover what
+      arrived.
+  positive: >-
+    A direct two-item purchase whose items are the set the agent's request acceptance
+    signs is bought.
+  negative:
+    - code: ok
+      reason: DENIAL_REASON_SIGNATURE_INVALID on every item
+      side_effect: >-
+        nothing is bought and no balance moves, when an item is dropped from the signed
+        set or the items are reordered
+
+- id: RELAY-017
+  title: A request whose signed set fails the projection check is never served from stored idempotency state
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/transaction-flow.mdx
+    quote: >-
+      request-level idempotency state is never created or served for a request whose set
+      claim has not been proven, otherwise a mutated request could consume the key and a
+      later honest retry would replay its result
+  positive: >-
+    After a mutated request under key K is denied, a retry of the honest request under
+    K replays the honest purchase.
+  negative:
+    - code: ok
+      reason: DENIAL_REASON_SIGNATURE_INVALID on every item
+      side_effect: >-
+        a mutated request under a key the honest request already used is not answered
+        from the stored result, and moves no balance
+
+- id: RELAY-018
+  title: The Broker forwards the agent's request acceptance unchanged on every sub-request
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A Broker MUST forward it unchanged on every projected subrequest.
+  positive: >-
+    The captured sub-request to each Exchange carries the agent's
+    agent_request_acceptance byte-identical to the agent's request, and each Exchange
+    buys its items.
+  negative: []
+
+- id: RELAY-019
+  title: The delivery URL of a relayed purchase is bound to the agent's acceptance key, not the Broker's
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      On a sub-request a Broker re-packaged, the request signer is the Broker, and this is
+      the thumbprint of the agent key the AgentAcceptances verify under instead.
+  positive: >-
+    Each ExchangeOutcome.agent_identity_hash equals the RFC 7638 thumbprint of the
+    agent's key.
+  negative: []
+
+# harness: needs delegation minting, as MONEY-020.
+- id: RELAY-020
+  title: A relayed purchase under a delegation binds the holder to the acceptance key
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A relayed purchase that carries a delegation therefore needs an AgentAcceptance on
+      every item; an item without one fails the binding (DENIAL_REASON_DELEGATION_INVALID).
+  positive: >-
+    A Broker purchase under a delegation whose cnf.jkt is the agent's key, with an
+    acceptance on every item, is bought.
+  negative:
+    - code: ok
+      reason: DENIAL_REASON_DELEGATION_INVALID
+      side_effect: no balance moves for the item whose holder binding fails
+
+- id: RELAY-021
+  title: A provider that does not accept relayed purchases has its items denied in the body, and the agent can buy them directly
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Decided PER ITEM, by each offer's own provider, and answered in the body on that
+      item's denial_reason: other items in the same sub-request, sold by providers that
+      accept relayed purchases, may succeed.
+  positive: >-
+    The same offer bought directly at its Exchange is bought and charged, and another
+    Exchange's item in the same Broker purchase is bought.
+  negative:
+    - code: ok
+      reason: DENIAL_REASON_RELAY_NOT_ACCEPTED on the refusing provider's item, never a refusal
+      side_effect: >-
+        no balance moves for that item at its Exchange
+
+- id: RELAY-022
+  title: Resolve never charges
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Resolve never charges: returning an offer reserves nothing.
+  positive: >-
+    The buyer's balances at the Exchange that sells an offer are the same after Resolves
+    that returned the offer, with and without a budget, as before them.
+  negative: []
+
+- id: RELAY-023
+  title: Resolve forwards each Exchange's signed offer unchanged, and the Broker adds no fee to its price
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Each contained Offer is the full signed Offer the Exchange issued (including
+      Offer.exchange, the execute-routing target), forwarded by the Broker unchanged so
+      the agent can verify the signature end to end.
+  positive: >-
+    Every offer Resolve returns verifies against its issuing Exchange's published key,
+    and buying it through the Broker charges exactly its signed price.
+  negative: []
+
+- id: RELAY-024
+  title: Resolve answers a URI whose every offer the budget filters out with no offers and BUDGET_EXCEEDED
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A budget is never reported as OFFER_ABSENCE_REASON_NOT_AUTHORIZED and never as a
+      non-OK error such as RESOURCE_EXHAUSTED.
+  positive: The same Resolve under a budget that covers the offer returns it.
+  negative:
+    - code: ok
+      reason: OFFER_ABSENCE_REASON_BUDGET_EXCEEDED
+      side_effect: no offer is returned
+
+- id: RELAY-026
+  title: The Broker prefers a subscription offer when one is available
+  level: SHOULD
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: The Broker SHOULD prefer subscription offers when available.
+  positive: >-
+    For a resource offered both per request and under the agent's subscription,
+    Resolve's chosen offer is the subscription offer.
+  negative: []
+
+# harness: needs a DYNAMIC resource with data_as_of in the e2e catalog.
+- id: RELAY-027
+  title: The Broker leaves out dynamic offers older than the agent's max_data_age
+  level: SHOULD
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      The Broker SHOULD exclude offers where (now - Offer.data_as_of) exceeds this
+      duration.
+  positive: >-
+    A DYNAMIC offer fresher than max_data_age is returned, and a stale one is not.
+  negative: []
+
+# harness: needs a publisher whose fora.json can drop an Exchange for one test and
+# put it back. The demo publishers' manifests are fixed for the session, and the
+# console-onboarded publisher sells through one Exchange only.
+- id: RELAY-028
+  title: The Broker checks that the publisher authorizes the Exchange before it buys there
+  level: SHOULD
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/broker/selection-engine.mdx
+    quote: >-
+      Before executing a transaction, the Broker SHOULD verify that the Exchange is
+      authorized by the provider whose content is being licensed.
+  positive: >-
+    An offer from an Exchange the publisher's fora.json lists is bought through the
+    Broker.
+  negative:
+    - code: failed_precondition
+      reason: none; metadata["exchange"] names the host
+      side_effect: >-
+        an offer from an Exchange the publisher's manifest no longer lists is not
+        bought, and no balance moves
+
+# harness: needs an intermediary that returns a hostile TransactionDenial.exchange.
+# The stack's Broker and Exchanges are honest, so this needs a fault mode in the
+# Broker's e2e control service. The identity service may also never act on the
+# hint, which makes the rule hold vacuously; the test should state which.
+- id: RELAY-029
+  title: A custodial agent acts on a denial's exchange hint only when it matches a domain it already trusts
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      a caller MUST check the value against a domain it already trusts for this
+      transaction: the signed `offer.exchange` of the items in the refused request, or its
+      own RequestConstraints.exchanges set.
+  positive: >-
+    An ACCOUNT_NOT_REGISTERED denial naming the item's own offer.exchange leads the
+    agent to register at that Exchange.
+  negative:
+    - code: tool error
+      reason: the hint names a host the agent does not trust
+      side_effect: the identity service sends no Register or other request to that host
+
+- id: RELAY-030
+  title: The Broker denies every item of a purchase whose ext_critical names a key it does not understand, and contacts no Exchange
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      When the Broker itself does not understand a key the agent's request lists in
+      ext_critical, every item is the Broker's denial,
+      DENIAL_REASON_UNKNOWN_CRITICAL_EXTENSION, and no Exchange was contacted.
+  positive: >-
+    A purchase through the Broker whose ext carries an unknown key that its
+    ext_critical does not list is bought.
+  negative:
+    - code: ok
+      reason: >-
+        every item is denied UNKNOWN_CRITICAL_EXTENSION, with no exchanges and no
+        totals: the purchase carries ext {"acme.must": true} and ext_critical
+        ["acme.must"]
+      side_effect: no sub-request reaches any Exchange, and no balance moves

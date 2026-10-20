@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -41,7 +42,7 @@ type evidenceReply struct {
 
 // callEvidence issues one request against the route over real HTTP. rawQuery is
 // appended verbatim so a malformed or missing selector can be driven too.
-func callEvidence(t *testing.T, h *testHarness, method, baseURL, rawQuery string) evidenceReply {
+func callEvidence(t testing.TB, h *testHarness, method, baseURL, rawQuery string) evidenceReply {
 	t.Helper()
 	target := baseURL + transport.TransactionEvidencePath + rawQuery
 	req, err := http.NewRequestWithContext(h.ctx, method, target, http.NoBody)
@@ -62,7 +63,7 @@ func callEvidence(t *testing.T, h *testHarness, method, baseURL, rawQuery string
 
 // readEvidence issues the read for one transaction id, requires 200 with the two
 // headers the route owes, and decodes and validates the payload.
-func readEvidence(t *testing.T, h *testHarness, baseURL, txID string) evidenceview.Response {
+func readEvidence(t testing.TB, h *testHarness, baseURL, txID string) evidenceview.Response {
 	t.Helper()
 	reply := callEvidence(t, h, http.MethodGet, baseURL, "?tx="+url.QueryEscape(txID))
 	if reply.status != http.StatusOK {
@@ -172,9 +173,13 @@ func TestTransactionEvidence_RoundTripFromExecute(t *testing.T) {
 	if state.SignedURLExpiry == nil {
 		t.Error("transaction_state signed_url_expiry is absent; a paid delivery URL always expires")
 	}
-	if strings.Contains(string(mustMarshal(t, view)), item.GetRetrievalEndpoint()) {
-		t.Error("the response carries the full signed URL, which is a live bearer capability")
+	// The URL is a live bearer capability, so the response must not carry it.
+	var raw any
+	reply := callEvidence(t, h, http.MethodGet, baseURL, "?tx="+url.QueryEscape(item.GetTransactionId()))
+	if err := json.Unmarshal(reply.body, &raw); err != nil {
+		t.Fatalf("decode body: %v", err)
 	}
+	assertNoSignedURL(t, raw, item.GetRetrievalEndpoint())
 
 	assertUnreportedObligation(t, view.ObligationState)
 }
@@ -344,15 +349,41 @@ func TestTransactionEvidence_Refusals(t *testing.T) {
 // (404).
 const neverExecutedTxID = "00000000-0000-4000-8000-000000000000"
 
-// mustMarshal re-encodes a decoded response so a test can assert on what the
-// payload does NOT contain.
-func mustMarshal(t *testing.T, view evidenceview.Response) []byte {
+// assertNoSignedURL fails when any string in a decoded JSON body carries the
+// signed URL, or its signature, which is the part that makes it a live bearer
+// capability. It walks the decoded values rather than searching encoded
+// bytes: an encoder escapes the "&" every signed URL holds, so a search of the
+// bytes for the URL could never match. And it walks the whole body as the
+// server sent it, not a struct decoded from it, so a field no struct declares
+// is searched too.
+func assertNoSignedURL(t *testing.T, body any, signedURL string) {
 	t.Helper()
-	b, err := json.Marshal(view)
+	parsed, err := url.Parse(signedURL)
 	if err != nil {
-		t.Fatalf("marshal: %v", err)
+		t.Fatalf("signed URL does not parse: %v", err)
 	}
-	return b
+	sig := parsed.Query().Get("sig")
+	if sig == "" {
+		t.Fatalf("signed URL %s carries no sig", signedURL)
+	}
+	var walk func(path string, v any)
+	walk = func(path string, v any) {
+		switch v := v.(type) {
+		case string:
+			if strings.Contains(v, signedURL) || strings.Contains(v, sig) {
+				t.Errorf("%s carries the signed URL or its signature", path)
+			}
+		case map[string]any:
+			for k, e := range v {
+				walk(path+"."+k, e)
+			}
+		case []any:
+			for i, e := range v {
+				walk(fmt.Sprintf("%s[%d]", path, i), e)
+			}
+		}
+	}
+	walk("body", body)
 }
 
 // assertOfferSignatureVerifies re-runs the Exchange's offer signature the way an

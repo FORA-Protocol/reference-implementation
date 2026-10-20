@@ -152,7 +152,7 @@ func TestExecuteTransaction_UnregisteredKeyAcceptanceLeavesNoEvidence(t *testing
 	offer := discoverOffer(t, h, uri)
 
 	const reqKey = "tx-ev-wrong-key"
-	requester := agentRequester("agent-test")
+	requester := agentRequester()
 	resp, err := executeItems(t, h, reqKey, &forav1.TransactionItem{
 		Offer:           offer,
 		AgentAcceptance: mintWrongKeyAcceptanceFor(t, offer, requester, reqKey),

@@ -18,10 +18,10 @@ import (
 const defaultQuantityTolerance = 0.20
 
 // timestampSkewFuture caps how far in the future a UsageReport.timestamp may
-// drift before we treat it as broken-clock / clock-shift abuse. Matches
-// httpsig.ReplayTTL — the same window the inbound signature gate already
-// enforces, so honest clock skew that passed signature verification will not
-// be rejected by the report-timestamp check.
+// drift before we treat it as broken-clock / clock-shift abuse. Matches the
+// five minutes the inbound signature gate already tolerates for a signature's
+// created time, so honest clock skew that passed signature verification will
+// not be rejected by the report-timestamp check.
 const timestampSkewFuture = 5 * time.Minute
 
 // timestampSkewPast caps how far before the originating transaction the

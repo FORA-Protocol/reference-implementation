@@ -55,11 +55,11 @@ func proxiedPush(t *testing.T, h *pushHarness, path string) error {
 	t.Helper()
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen caller key: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 
 	client := proxiedCatalogClient(t, h, callerID, priv)
 	_, err = client.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, callerID, []*forav1.ResourceEntry{{
@@ -110,11 +110,11 @@ func TestExchangeRPC_ProxiedTLSTermination_VerifiesForwardedScheme(t *testing.T)
 	// no-op, schemes agree at http), so the assertion isolates the proxied leg.
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen caller key: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 	if _, err := h.signedCat(callerID, priv).PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, callerID, []*forav1.ResourceEntry{{
 		Domain: h.publisherDom, Path: "/articles/seeded",
 		Terms: []*forav1.LicenseTerm{seedPricedTerm()},

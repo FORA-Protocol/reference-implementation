@@ -1,21 +1,19 @@
 package main
 
-// Wiring-level test: the offer Verifier built by newOfferVerifier makes its
-// expiry decisions from the INJECTED clock, not an inline time.Now. The round
-// trip is real: the verifier resolves the exchange's offer-signing key from a
-// genuine WBA directory served over HTTP (the exchange is the external system —
+// Wiring-level test: the offer Verifier the wiring builds makes its expiry
+// decisions from the INJECTED clock, not an inline time.Now. The round trip is
+// real: the verifier resolves the exchange's offer-signing key from a genuine,
+// signed WBA directory served over https (the exchange is the external system —
 // the adapter boundary), verifies a genuinely signed offer, and the verdict
 // flips from verified to rejected purely by pinning the injected clock past the
-// offer's expiry.
+// offer's expiry. The directory is fetched through the TLS server's own client,
+// because a key directory is only ever fetched over https.
 
 import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"testing"
 	"time"
 
@@ -27,8 +25,6 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	rwtestutil "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/testutil"
-
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
 )
 
 func TestNewOfferVerifier_ExpiryDrivenByInjectedClock(t *testing.T) {
@@ -37,38 +33,21 @@ func TestNewOfferVerifier_ExpiryDrivenByInjectedClock(t *testing.T) {
 		t.Fatalf("keygen: %v", err)
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/.well-known/http-message-signatures-directory" {
-			http.NotFound(w, r)
-			return
-		}
-		// Built through the shared key builder, which stamps the RFC 8037 JWK
-		// header quartet in exactly one place. A literal here is a second copy of
-		// that quartet, unchecked against the schema.
-		_, _ = w.Write(rwtestutil.MarshalWBA(rwtestutil.WBAFile(forawellknown.NewKey(
-			pub,
-			time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC),
-			time.Date(2100, time.January, 1, 0, 0, 0, 0, time.UTC),
-		))))
-	}))
+	// Built through the shared key builder, which stamps the RFC 8037 JWK header
+	// quartet in exactly one place, and served signed by the key it lists.
+	srv := rwtestutil.NewTLSOrigin(nil)
 	defer srv.Close()
-
-	// The wiring builds its SDK-guarded fetch client and scheme from the
-	// environment, so the loopback opt-outs go in before it is built.
-	testutil.AllowLoopbackFetch(t)
-	// The scheme is this test's own knob, not part of that pair: it points the
-	// wiring at the local WBA server, the same value the e2e stack sets.
-	t.Setenv("FORA_WELLKNOWN_SCHEME", "http")
-
-	u, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("parse server url: %v", err)
-	}
+	srv.SetWBA(rwtestutil.MarshalWBA(rwtestutil.WBAFile(forawellknown.NewKey(
+		pub,
+		time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2100, time.January, 1, 0, 0, 0, 0, time.UTC),
+	))))
+	srv.SetWBASigners(priv)
 
 	t0 := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 	offer := &forav1.Offer{
 		OfferId:   "wiring-clock-offer",
-		Exchange:  u.Host,
+		Exchange:  srv.Host(),
 		ExpiresAt: timestamppb.New(t0.Add(time.Hour)),
 	}
 	sig, err := helpers.SignOffer(priv, offer)
@@ -78,7 +57,7 @@ func TestNewOfferVerifier_ExpiryDrivenByInjectedClock(t *testing.T) {
 	offer.Signature = sig
 
 	// Clock pinned BEFORE expiry: the genuinely signed offer verifies.
-	freshVerifier := newOfferVerifier(clock.NewDeterministic(t0))
+	freshVerifier := offerVerifierOver(clock.NewDeterministic(t0), srv.HTTPClient())
 	fresh := freshVerifier.Sort(context.Background(), []*forav1.Offer{offer})
 	if len(fresh.Verified) != 1 || len(fresh.Rejected) != 0 {
 		t.Fatalf("clock before expiry: verified=%d rejected=%d (want 1/0); rejected=%+v",
@@ -88,7 +67,7 @@ func TestNewOfferVerifier_ExpiryDrivenByInjectedClock(t *testing.T) {
 	// Same offer, same key, clock pinned PAST expiry: rejected as expired. The
 	// only variable is the injected clock — proving the expiry decision is
 	// driven by it, not by the wall clock.
-	staleVerifier := newOfferVerifier(clock.NewDeterministic(t0.Add(2 * time.Hour)))
+	staleVerifier := offerVerifierOver(clock.NewDeterministic(t0.Add(2*time.Hour)), srv.HTTPClient())
 	stale := staleVerifier.Sort(context.Background(), []*forav1.Offer{offer})
 	if len(stale.Verified) != 0 || len(stale.Rejected) != 1 {
 		t.Fatalf("clock past expiry: verified=%d rejected=%d (want 0/1)",

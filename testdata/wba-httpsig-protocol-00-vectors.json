@@ -1,0 +1,82 @@
+{
+  "source": {
+    "document": "draft-ietf-webbotauth-httpsig-protocol-00",
+    "title": "HTTP Message Signatures for automated traffic",
+    "date": "2026-09-01",
+    "url": "https://www.ietf.org/archive/id/draft-ietf-webbotauth-httpsig-protocol-00.txt",
+    "sections": "Appendix E.2.1, E.2.2 and E.2.3 (EdDSA Using Curve edwards25519)",
+    "key_source": "RFC 9421 Appendix B.1.4 (test-key-ed25519), the key Appendix E.2 names",
+    "transcription": "Values are copied from the draft text. Lines the draft wraps per RFC 8792 ('\\' line wrapping) are joined back into one line. The request URL is not given by the draft beyond its @authority; https://example.com/ is the smallest request with that authority. E.2.3 shows only the Content-Digest, Signature-Input and Signature fields of the directory response; its Content-Type is the media type Section 5.5.1 requires of a directory served at the well-known URI."
+  },
+  "key": {
+    "private_jwk": {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "d": "n4Ni-HpISpVObnQMW0wOhCKROaIKqKtW_2ZYb2p9KcU",
+      "x": "JrQLj5P_89iXES9-vFgrIy29clF9CC_oPPsw3c5D0bs"
+    },
+    "public_jwk": {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "x": "JrQLj5P_89iXES9-vFgrIy29clF9CC_oPPsw3c5D0bs"
+    },
+    "thumbprint": "poqkLGiymh_W0uP6PZFw-dvez3QJT5SolqXBCW38r0U"
+  },
+  "requests": [
+    {
+      "name": "E.2.1 dictionary Signature-Agent",
+      "form": "dictionary",
+      "method": "GET",
+      "url": "https://example.com/",
+      "label": "sig2",
+      "agent_key": "agent2",
+      "agent_origin": "https://signature-agent.test",
+      "created": 1735689600,
+      "expires": 4889289600,
+      "nonce": "n9p433xm+NJ3ph3upfBIGmsuwHw387YV7Q/F+6BSpGCVjYCqQw6rznNA8PVVLySrAWsv0hQtFioQb6E1YsauiA==",
+      "signature_base": "\"@authority\": example.com\n\"signature-agent\";key=\"agent2\": \"https://signature-agent.test\"\n\"@signature-params\": (\"@authority\" \"signature-agent\";key=\"agent2\");created=1735689600;keyid=\"poqkLGiymh_W0uP6PZFw-dvez3QJT5SolqXBCW38r0U\";alg=\"ed25519\";expires=4889289600;nonce=\"n9p433xm+NJ3ph3upfBIGmsuwHw387YV7Q/F+6BSpGCVjYCqQw6rznNA8PVVLySrAWsv0hQtFioQb6E1YsauiA==\";tag=\"web-bot-auth\"",
+      "headers": {
+        "Signature-Agent": "agent2=\"https://signature-agent.test\"",
+        "Signature-Input": "sig2=(\"@authority\" \"signature-agent\";key=\"agent2\");created=1735689600;keyid=\"poqkLGiymh_W0uP6PZFw-dvez3QJT5SolqXBCW38r0U\";alg=\"ed25519\";expires=4889289600;nonce=\"n9p433xm+NJ3ph3upfBIGmsuwHw387YV7Q/F+6BSpGCVjYCqQw6rznNA8PVVLySrAWsv0hQtFioQb6E1YsauiA==\";tag=\"web-bot-auth\"",
+        "Signature": "sig2=:RdNFx5Bj6au3YgAMQL/RzmUlZE8QZLIaXGRpw985hWnwPfMxT228NMk6ehRS1PSl4e8PhbNZACSanGdhEwYCCg==:"
+      }
+    },
+    {
+      "name": "E.2.2 legacy sf-string Signature-Agent",
+      "form": "legacy",
+      "method": "GET",
+      "url": "https://example.com/",
+      "label": "sig2",
+      "agent_key": null,
+      "agent_origin": "https://signature-agent.test",
+      "created": 1735689600,
+      "expires": 1735693200,
+      "nonce": "e8N7S2MFd/qrd6T2R3tdfAuuANngKI7LFtKYI/vowzk4lAZYadIX6wW25MwG7DCT9RUKAJ0qVkU0mEeLElW1qg==",
+      "signature_base": "\"@authority\": example.com\n\"signature-agent\": \"https://signature-agent.test\"\n\"@signature-params\": (\"@authority\" \"signature-agent\");created=1735689600;keyid=\"poqkLGiymh_W0uP6PZFw-dvez3QJT5SolqXBCW38r0U\";alg=\"ed25519\";expires=1735693200;nonce=\"e8N7S2MFd/qrd6T2R3tdfAuuANngKI7LFtKYI/vowzk4lAZYadIX6wW25MwG7DCT9RUKAJ0qVkU0mEeLElW1qg==\";tag=\"web-bot-auth\"",
+      "headers": {
+        "Signature-Agent": "\"https://signature-agent.test\"",
+        "Signature-Input": "sig2=(\"@authority\" \"signature-agent\");created=1735689600;keyid=\"poqkLGiymh_W0uP6PZFw-dvez3QJT5SolqXBCW38r0U\";alg=\"ed25519\";expires=1735693200;nonce=\"e8N7S2MFd/qrd6T2R3tdfAuuANngKI7LFtKYI/vowzk4lAZYadIX6wW25MwG7DCT9RUKAJ0qVkU0mEeLElW1qg==\";tag=\"web-bot-auth\"",
+        "Signature": "sig2=:jdq0SqOwHdyHr9+r5jw3iYZH6aNGKijYp/EstF4RQTQdi5N5YYKrD+mCT1HA1nZDsi6nJKuHxUi/5Syp3rLWBA==:"
+      }
+    }
+  ],
+  "directory": {
+    "name": "E.2.3 signed directory response",
+    "request_url": "https://signature-agent.test/.well-known/http-message-signatures-directory",
+    "request_headers": {
+      "Accept": "application/http-message-signatures-directory+json"
+    },
+    "status": 200,
+    "body": "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"kid\":\"poqkLGiymh_W0uP6PZFw-dvez3QJT5SolqXBCW38r0U\",\"x\":\"JrQLj5P_89iXES9-vFgrIy29clF9CC_oPPsw3c5D0bs\",\"use\":\"sig\"}]}",
+    "label": "binding",
+    "created": 1735689600,
+    "expires": 4889289600,
+    "signature_base": "\"@authority\";req: signature-agent.test\n\"content-digest\": sha-256=:CADMT2aBdV/rqQr/NIru64ERQkCobVvllA4V0fLFDu0=:\n\"@signature-params\": (\"@authority\";req \"content-digest\");created=1735689600;expires=4889289600;keyid=\"poqkLGiymh_W0uP6PZFw-dvez3QJT5SolqXBCW38r0U\";tag=\"http-message-signatures-directory\"",
+    "response_headers": {
+      "Content-Type": "application/http-message-signatures-directory+json",
+      "Content-Digest": "sha-256=:CADMT2aBdV/rqQr/NIru64ERQkCobVvllA4V0fLFDu0=:",
+      "Signature-Input": "binding=(\"@authority\";req \"content-digest\");created=1735689600;expires=4889289600;keyid=\"poqkLGiymh_W0uP6PZFw-dvez3QJT5SolqXBCW38r0U\";tag=\"http-message-signatures-directory\"",
+      "Signature": "binding=:l6P8R67tm3kujAxbHWio7ll01qrEZ0dKD/WWlGhNYEmTnFZM8Wt0VQ9zqGfvo7T/UMkBxsigzChM1Gpz7gOVBg==:"
+    }
+  }
+}

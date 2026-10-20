@@ -44,6 +44,9 @@ locals {
   # 4*ceil(n/3) characters, so 16384 bytes is 21848 characters. Written once
   # here and read by the precondition below and by the module's tests.
   ec2_user_data_max_base64 = 21848
+
+  # One data volume when sized, none otherwise; the attachment follows it.
+  data_volume_count = var.data_volume_gb == null ? 0 : 1
 }
 
 # Zones that are actually usable in the target region/account, so the subnet
@@ -73,7 +76,10 @@ data "cloudinit_config" "this" {
   }
 }
 
-# Canonical's official Ubuntu 24.04 LTS amd64 image, newest build.
+# Canonical's official Ubuntu 24.04 LTS amd64 image, newest build. The
+# instance reads this only while var.ami_id is null. With ami_id set the lookup
+# still runs on every plan, but its result is not referenced, so a newer
+# Canonical build changes nothing in the plan.
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"] # Canonical's AWS account — guards against lookalike AMIs
@@ -107,7 +113,7 @@ resource "aws_internet_gateway" "this" {
 
 resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.this.id
-  cidr_block              = var.vpc_cidr
+  cidr_block              = coalesce(var.public_subnet_cidr, var.vpc_cidr)
   availability_zone       = data.aws_availability_zones.available.names[0]
   map_public_ip_on_launch = true
 
@@ -186,10 +192,16 @@ resource "aws_security_group" "this" {
 # this instance accepts arrives through the cloud-init document below, carrying
 # its own from= restriction.
 resource "aws_instance" "this" {
-  ami                    = data.aws_ami.ubuntu.id
+  # ami is a replace-on-change attribute. Left on the most_recent lookup, an
+  # apply that meant to change something else replaces the VM the day Canonical
+  # publishes a new build. A production stack pins ami_id so a release apply can
+  # never replace the instance for that reason; the disposable stacks leave it
+  # null and keep following the newest build.
+  ami                    = coalesce(var.ami_id, data.aws_ami.ubuntu.id)
   instance_type          = var.instance_type
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.this.id]
+  iam_instance_profile   = var.iam_instance_profile
 
   # cloud-init transparently un-gzips; gzip keeps the rendered config (compose
   # file, Caddyfile, key material) under EC2's 16 KB raw user-data limit.
@@ -236,6 +248,38 @@ resource "aws_instance" "this" {
   }
 
   tags = { Name = "${var.name_prefix}-vm" }
+}
+
+# Optional data volume, separate from the root volume on purpose: the root
+# volume is destroyed with the instance (user_data_replace_on_change, a new
+# AMI, an ssh_operators edit), and prevent_destroy here is what keeps the
+# service state out of that blast radius — Terraform refuses any plan that
+# would destroy this volume. The attachment is a separate resource so the
+# instance can be replaced while the volume stays; stopping the instance before
+# detaching keeps the filesystem consistent. Mounting the device is the host's
+# job (cloud-init), not this module's.
+resource "aws_ebs_volume" "data" {
+  count = local.data_volume_count
+
+  availability_zone = aws_subnet.public.availability_zone
+  size              = var.data_volume_gb
+  type              = "gp3"
+  encrypted         = true
+
+  lifecycle {
+    prevent_destroy = true
+  }
+
+  tags = { Name = "${var.name_prefix}-data" }
+}
+
+resource "aws_volume_attachment" "data" {
+  count = local.data_volume_count
+
+  device_name                    = "/dev/sdf"
+  volume_id                      = aws_ebs_volume.data[0].id
+  instance_id                    = aws_instance.this.id
+  stop_instance_before_detaching = true
 }
 
 # Stable address for the Cloudflare A records: survives instance recreation

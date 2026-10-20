@@ -54,6 +54,7 @@ module "edge" {
   wba_revocation_url        = var.wba_revocation_url
   bot_ua_allow_json         = var.bot_ua_allow_json
   bot_ua_deny_json          = var.bot_ua_deny_json
+  licensed_paths_json       = var.licensed_paths_json
 
   create_waf_skip_rule = var.create_waf_skip_rule
   waf_skip_expression  = var.waf_skip_expression

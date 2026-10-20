@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"math/big"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -11,7 +10,6 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/db"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/exchange"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/money"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
 )
 
@@ -52,18 +50,13 @@ func NewAdminServiceFromPool(pool *pgxpool.Pool, queries *sqlc.Queries) *AdminSe
 }
 
 // AdminCaller carries the coarse attribution the audit row records: the caller's
-// source address (from the Connect peer), the correlation id, and an optional
-// actor.
-//
-// Actor is nil on the RPC path, because v1 has no authenticated operator
-// identity to record. It is NOT always nil: a boot-time write has no network
-// peer and no request, so the process names itself instead (bootAdminCaller in
-// the composition root). Registration, on the agent plane, always has one — the
-// request signature identifies the agent that registered.
+// source address (from the Connect peer) and the correlation id. It names no
+// actor, because v1 has no authenticated operator identity to record: the audit
+// row's actor stays NULL on the admin plane. Registration, on the agent plane,
+// does record one — the request signature identifies the agent that registered.
 type AdminCaller struct {
 	SourceAddr string
 	RequestID  string
-	Actor      *string
 }
 
 // FeeRateValues is the fee-rate payload shared by the write and its RPC read-back:
@@ -139,39 +132,6 @@ func (s *AdminService) SetReportingPolicy(
 	return in, nil
 }
 
-// defaultAgentCreditAudit is the audit-detail payload for a default-agent-credit
-// replace. Credit is the decimal rendering of the applied amount at the ledger
-// asset scale, so the JSONB stays readable without a rational-number decoder.
-type defaultAgentCreditAudit struct {
-	TenantID string `json:"tenant_id"`
-	Credit   string `json:"default_agent_credit"`
-}
-
-// SetDefaultAgentCredit replaces the tenant's default agent credit and records
-// the change. There is no admin RPC for this setter — the only caller is the
-// boot-time EXCHANGE_DEFAULT_AGENT_CREDIT seeding, which routes through here so
-// the write and its audit row commit in one transaction like every other write
-// on the tenant admin plane.
-func (s *AdminService) SetDefaultAgentCredit(
-	ctx context.Context, caller AdminCaller, tenantID string, credit *big.Rat,
-) error {
-	detail, err := marshalAuditDetail(defaultAgentCreditAudit{
-		TenantID: tenantID,
-		Credit:   money.DecimalString(credit),
-	})
-	if err != nil {
-		return err
-	}
-	return s.runSetter(ctx, caller, tenantID, "SetDefaultAgentCredit", detail, func(tx pgx.Tx) (int64, error) {
-		n, werr := s.tenants.SetDefaultAgentCredit(ctx, tx, tenantID, credit)
-		if werr != nil {
-			return 0, mapSetterError(werr, repo.ErrDefaultCreditInvalid,
-				"default agent credit invalid", "set tenant default agent credit")
-		}
-		return n, nil
-	})
-}
-
 // runSetter executes a setter mutation and its audit row in one transaction.
 // write returns rows-affected; a 0 becomes KindNotFound and rolls back, so no
 // audit row is written for a missing tenant. This is the shared skeleton both
@@ -192,7 +152,6 @@ func (s *AdminService) runSetter(
 			return exchange.Newf(exchange.KindNotFound, "tenant %q not found", tenantID)
 		}
 		return appendAudit(ctx, tx, s.audit, repo.AuditEntry{
-			Actor:      caller.Actor,
 			SourceAddr: caller.SourceAddr,
 			Action:     action,
 			Detail:     detail,

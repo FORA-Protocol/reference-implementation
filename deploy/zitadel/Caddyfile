@@ -1,0 +1,32 @@
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	@developer_css {
+		host localhost
+		path /ui/login/resources/themes/zitadel/css/zitadel.css
+		not query fora-original=1
+	}
+	handle @developer_css {
+		root * /srv/branding
+		rewrite * /developer-login.css
+		header Cache-Control "no-cache"
+		file_server
+	}
+	@publisher_css {
+		host 127.0.0.1
+		path /ui/login/resources/themes/zitadel/css/zitadel.css
+		not query fora-original=1
+	}
+	handle @publisher_css {
+		root * /srv/branding
+		rewrite * /publisher-login.css
+		header Cache-Control "no-cache"
+		file_server
+	}
+	handle {
+		reverse_proxy h2c://zitadel:8080
+	}
+}

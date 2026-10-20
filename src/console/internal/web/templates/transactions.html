@@ -1,0 +1,77 @@
+{{define "content"}}
+{{with .Transactions}}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+  <div>
+    <h1 class="h3 mb-0">Transactions</h1>
+    <p class="text-body-secondary small mb-0">{{.Period.Label}}</p>
+  </div>
+  <form class="period d-flex flex-wrap align-items-end gap-2" method="get">
+    {{template "period-fields" .}}
+    {{template "domain-filter" .}}
+    <div>
+      <label class="form-label small mb-0" for="filter-status">Report status</label>
+      <select class="form-select form-select-sm" id="filter-status" name="status">
+        <option value="">All statuses</option>
+        {{$chosen := .Status}}
+        {{range .Statuses}}
+        <option value="{{.Value}}"{{if eq .Value $chosen}} selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select>
+    </div>
+    <div>
+      <label class="form-label small mb-0" for="filter-resource">Resource id</label>
+      <input class="form-control form-control-sm" type="text" id="filter-resource" name="resource" value="{{.ResourceID}}" placeholder="all resources">
+    </div>
+    <button class="btn btn-sm btn-outline-primary" type="submit">Apply</button>
+  </form>
+</div>
+{{if .ResourceID}}
+<p class="small">Showing one resource only. <a href="{{.Unfiltered}}">Show every resource</a></p>
+{{end}}
+
+{{if .Rows}}
+{{/* The pager is repeated above the table, beside the row numbers, so a long
+   page can be left without scrolling to its end. */}}
+<div class="d-flex flex-wrap align-items-center gap-3 mb-2">
+  {{template "pager" .Page}}
+  <p class="text-body-secondary small mb-0 page-position">
+    Transactions {{.Page.First}}–{{.Page.Last}}{{if ge .Page.Of 0}} of {{.Page.Of}}{{end}}, newest first
+  </p>
+</div>
+<div class="table-responsive-stack">
+<table class="table align-middle rows">
+  <thead>
+    <tr>
+      <th scope="col">When (UTC)</th>
+      <th scope="col">Resource</th>
+      <th scope="col">Agent</th>
+      <th scope="col">Unit price</th>
+      <th scope="col">Report</th>
+    </tr>
+  </thead>
+  <tbody>
+  {{range .Rows}}
+    <tr class="row-link">
+      <td data-label="When (UTC)">{{.When}}<a class="stretched-link" href="{{.Link}}"><span class="visually-hidden">Open this transaction</span></a></td>
+      {{/* The page's headline, cut with an ellipsis so one long title cannot crowd
+         out the other columns. A resource listed without a title falls back to
+         its address. Plain text, so the only thing a row click does is open the
+         transaction. */}}
+      <td data-label="Resource" class="cell-clip" title="{{.ResourceURI}}">{{if .Title}}{{.Title}}{{else}}{{.ResourceURI}}{{end}}</td>
+      <td data-label="Agent" class="text-break">{{.Agent}}</td>
+      <td data-label="Unit price">{{.UnitPrice}}</td>
+      <td data-label="Report"><span class="badge text-bg-{{.Status.Tone}}" data-status="{{.Status.Value}}">{{.Status.Label}}</span></td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{template "pager" .Page}}
+{{else}}
+<div class="empty-state" role="status">
+  <p class="h5 mb-1">No transactions in this period{{if .Status}} with this report status{{end}}.</p>
+  <p class="text-body-secondary mb-0">Choose another period{{if .ResourceID}}, or show every resource{{end}}.</p>
+</div>
+{{end}}
+{{end}}
+{{end}}

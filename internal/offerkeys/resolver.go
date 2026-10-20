@@ -18,11 +18,12 @@
 // the inbound-request identity face).
 //
 // The per-domain TTL cache -> active-key selection -> not_after clamp is the
-// SDK's resolvers.CachedOfferKeyResolver: this package is a thin composition
-// root that injects each caller's collaborators (the SSRF-guarded WBA fetch, the
-// injected clock, the revocation-screen predicate) behind one New/Config contract
-// for the Verifier wiring. The clamp and the off-by-one-prone
-// min(now+ttl, not_after) live once in the SDK.
+// SDK's resolvers.CachedOfferKeyResolver, and the directory read beneath it is
+// the SDK's directory fetcher (forawellknown.NewDirectoryFetcher): this package
+// is a thin composition root that injects each caller's collaborators (the
+// SSRF-guarded client, the injected clock, the revocation-screen predicate)
+// behind one New/Config contract for the Verifier wiring. The clamp and the
+// off-by-one-prone min(now+ttl, not_after) live once in the SDK.
 //
 // The domain is checked to be a plain host before anything is fetched, and that
 // is a separate control from the SSRF guard rather than a duplicate of it. The
@@ -47,6 +48,7 @@ package offerkeys
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
@@ -64,33 +66,29 @@ type Config struct {
 	// Client is a fail-loud forawellknown.ErrNoClient — this package never
 	// fabricates a fail-open default (matching agentkeys and forawellknown).
 	//
-	// Typed forawellknown.HTTPDoer (an interface) rather than agentkeys' concrete
-	// *http.Client on purpose: this Client feeds forawellknown.FetchWBA, whose
-	// option IS an HTTPDoer, and the Broker's discover integration test injects a
-	// request-rewriting HTTPDoer double (rewritingHTTPClient) here to route WBA
-	// fetches at a local httptest server. agentkeys stays concrete because its
-	// Client feeds the SDK's resolvers.WBAKeyResolver, whose HTTP option is a
-	// concrete *http.Client — the two types differ because their sinks differ.
-	Client forawellknown.HTTPDoer
-	// Scheme/Port shape the directory URL for bare-host domains on
-	// local/compose stacks (mirror FORA_WELLKNOWN_SCHEME); empty means https
-	// + default port.
-	Scheme string
-	Port   string
+	// It is an *http.Client because the directory is read through the SDK's
+	// fetcher (forawellknown.NewDirectoryFetcher), which takes one, as agentkeys'
+	// resolvers.WBAKeyResolver does. That fetcher reads over https from the
+	// exchange domain's own authority, follows no redirect whatever this client's
+	// own redirect policy, and keeps only the keys that signed the response: no
+	// deployment setting moves a key directory off https.
+	Client *http.Client
 	// TTL bounds the per-domain cache; <=0 uses the SDK default.
 	TTL time.Duration
 	// Clk is the cache-freshness + key-validity time source; nil uses clock.System.
 	Clk clock.Clock
 	// Revoked screens a candidate exchange offer-signing key by its RFC 7638
-	// thumbprint, so a window-active-but-revoked key still listed in a CDN-cached
-	// directory is never served on this verification path. nil installs an explicit
-	// nothing-revoked predicate, and both callers take that waiver on the same
-	// grounds: each only RELAYS offers — neither terminates a transaction — and
-	// neither holds an exchange revocation channel, so the terminal checkpoint that
-	// consults revocation is the Exchange. That is the same relay-only revocation
-	// stance the agent-sig resolver documents. The explicit waiver keeps it a
-	// visible decision rather than a silent nil.
-	Revoked func(thumbprint string) bool
+	// thumbprint and the exchange domain whose directory listed it, so a
+	// window-active-but-revoked key still listed in a CDN-cached directory is never
+	// served on this verification path. It answers from that exchange's own
+	// revocation list only: no party's list revokes another party's key. nil
+	// installs an explicit nothing-revoked predicate, and both callers take that
+	// waiver on the same grounds: each only RELAYS offers — neither terminates a
+	// transaction — and neither holds an exchange revocation channel, so the
+	// terminal checkpoint that consults revocation is the Exchange. That is the
+	// same relay-only revocation stance the agent-sig resolver documents. The
+	// explicit waiver keeps it a visible decision rather than a silent nil.
+	Revoked func(thumbprint, exchange string) bool
 }
 
 // Resolver is the offer-key resolver type: the SDK CachedOfferKeyResolver keyed
@@ -112,17 +110,14 @@ func New(cfg Config) *Resolver {
 	}
 	revoked := cfg.Revoked
 	if revoked == nil {
-		revoked = func(string) bool { return false }
+		revoked = func(string, string) bool { return false }
 	}
+	readDirectory := forawellknown.NewDirectoryFetcher(cfg.Client, clk, 0)
 	fetch := func(ctx context.Context, domain string) (*forawellknown.WBAFile, error) {
 		if err := vetDomain(domain); err != nil {
 			return nil, err
 		}
-		dir, err := forawellknown.FetchWBA(ctx, domain, forawellknown.FetchOptions{
-			Client: cfg.Client,
-			Scheme: cfg.Scheme,
-			Port:   cfg.Port,
-		})
+		dir, err := readDirectory(ctx, domain)
 		if err != nil {
 			// A failed fetch answers errors.Is the same way an empty directory
 			// does. Both mean one thing to a caller: no key could be resolved for

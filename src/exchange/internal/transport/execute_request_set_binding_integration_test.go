@@ -26,7 +26,7 @@ func TestExecuteRelay_ValidSubsetCannotClaimWholeRequestKey(t *testing.T) {
 		seedResourceWithRate(t, h, "/articles/request-set-b", "0.05"))
 
 	const idem = "tx-request-set-binding"
-	requester := newRequester("agent-test", "agent.example")
+	requester := h.relayRequester()
 	item := func(offer *forav1.Offer) *forav1.TransactionItem {
 		return &forav1.TransactionItem{
 			Offer:           offer,
@@ -44,7 +44,7 @@ func TestExecuteRelay_ValidSubsetCannotClaimWholeRequestKey(t *testing.T) {
 
 	// A broker submits only A while forwarding the proof over A+B. Projection
 	// verification detects the removal and leaves no claim behind.
-	brokerClient := h.brokerOnlyClient(t, "broker.request-set.v1")
+	brokerClient := h.brokerOnlyClient(t)
 	if _, err := brokerClient.ExecuteTransaction(h.ctx, connect.NewRequest(&forav1.TransactionRequest{
 		Ver:                    helpers.ProtocolVersion,
 		IdempotencyKey:         idem,
@@ -89,7 +89,7 @@ func refusePoisonAttempt(t *testing.T, h *testHarness, slug, idem string) poison
 		seedResourceWithRate(t, h, "/articles/"+slug+"-a", "0.05"))
 	offerB := discoverOffer(t, h,
 		seedResourceWithRate(t, h, "/articles/"+slug+"-b", "0.05"))
-	requester := newRequester("agent-test", "agent.example")
+	requester := h.relayRequester()
 
 	attack := &forav1.TransactionRequest{
 		Ver:            helpers.ProtocolVersion,
@@ -206,7 +206,7 @@ func TestExecuteRelay_InvalidItemAcceptanceLeavesIntendedRequestExecutable(t *te
 		}
 	}
 	// Charged once per item: 10.00 seed less two items at 0.05.
-	bal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	bal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}

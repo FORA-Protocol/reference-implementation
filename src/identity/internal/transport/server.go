@@ -16,7 +16,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
+	wkserver "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/server"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/directory"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/publisher"
@@ -25,7 +28,7 @@ import (
 // DocumentService is the publisher surface the handler depends on: fetch a built
 // document by subdomain. *publisher.Service satisfies it.
 type DocumentService interface {
-	Directory(ctx context.Context, subdomain string) ([]byte, error)
+	SignedDirectory(ctx context.Context, subdomain, authority string) ([]byte, helpers.DirectoryResponseSignature, error)
 	Card(ctx context.Context, subdomain string) ([]byte, error)
 	Revocation(ctx context.Context, subdomain string) ([]byte, error)
 	Manifest(ctx context.Context, subdomain string) ([]byte, error)
@@ -128,31 +131,46 @@ func healthHandler(health func(context.Context) error) http.HandlerFunc {
 	}
 }
 
+// serveWBA answers an agent's key directory under the Web Bot Auth directory
+// rules: 200 from this host itself, the directory media type, and one response
+// signature per listed key covering the authority the request named — so a proxy
+// in front must preserve the Host the client used.
 func (h *Handler) serveWBA(w http.ResponseWriter, r *http.Request) {
-	h.serve(w, r, directory.WBAMediaType, h.svc.Directory)
+	authority, err := wkserver.RequestAuthority(r)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	var sig helpers.DirectoryResponseSignature
+	h.serve(w, r, directory.WBAMediaType, func(ctx context.Context, subdomain string) ([]byte, error) {
+		body, signature, err := h.svc.SignedDirectory(ctx, subdomain, authority)
+		sig = signature
+		return body, err
+	}, func(hdr http.Header) { sig.Apply(hdr) })
 }
 
 func (h *Handler) serveCard(w http.ResponseWriter, r *http.Request) {
-	h.serve(w, r, directory.CardMediaType, h.svc.Card)
+	h.serve(w, r, directory.CardMediaType, h.svc.Card, nil)
 }
 
 func (h *Handler) serveRevocation(w http.ResponseWriter, r *http.Request) {
-	h.serve(w, r, directory.RevocationMediaType, h.svc.Revocation)
+	h.serve(w, r, directory.RevocationMediaType, h.svc.Revocation, nil)
 }
 
 // serveManifest answers the FORA commercial overlay. The media type is the plain
 // application/json every FORA participant serves this document as; the shared
 // forawellknown/server handler that Exchanges and Brokers mount uses the same value.
 func (h *Handler) serveManifest(w http.ResponseWriter, r *http.Request) {
-	h.serve(w, r, "application/json", h.svc.Manifest)
+	h.serve(w, r, "application/json", h.svc.Manifest, nil)
 }
 
 // serve resolves the subdomain from the Host, fetches the selected document, and
 // writes it — mapping an absent document to 404, a backend outage to 503, and any
 // other fault to 500. The fault detail is logged, never written to the caller.
+// decorate, when set, adds the document's own headers after a successful fetch.
 func (h *Handler) serve(
 	w http.ResponseWriter, r *http.Request, mediaType string,
-	fetch func(context.Context, string) ([]byte, error),
+	fetch func(context.Context, string) ([]byte, error), decorate func(http.Header),
 ) {
 	subdomain, ok := parseHost(r.Host, h.base)
 	if !ok {
@@ -162,6 +180,9 @@ func (h *Handler) serve(
 	body, err := fetch(r.Context(), subdomain)
 	switch {
 	case err == nil:
+		if decorate != nil {
+			decorate(w.Header())
+		}
 		w.Header().Set("Content-Type", mediaType)
 		w.Header().Set("Cache-Control", h.cacheControl)
 		w.Header().Set("X-Content-Type-Options", "nosniff")

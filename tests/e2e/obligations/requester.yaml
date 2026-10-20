@@ -1,0 +1,75 @@
+# The requester a purchase names: every acceptance names a non-empty requester id
+# and domain, and on a direct request the domain is the host of the directory the
+# request is signed from.
+# Registry entries (ADR-028 D1); the tests that prove them say so on themselves.
+#
+# A "negative:" case is a refusal with a typed error response (ADR-028 D1). What
+# an answer that refuses nothing must leave out is a "must not" in "positive:".
+
+- id: REQUESTER-001
+  title: An Exchange refuses a direct purchase whose acceptances name an empty requester
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A signer refuses to sign bytes that name an empty requester, and a verifier
+      refuses an acceptance whose canonical bytes name one, even when the signature
+      over those bytes verifies.
+  positive: >-
+    The same direct purchase, naming the agent's own id and directory host, is
+    bought and charged.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        none: a request that fails the Requester field rules is a generic
+        validation failure and carries no typed reason
+      side_effect: >-
+        no balance moves, with requester.id empty and with requester.domain empty,
+        each acceptance validly signed over the bytes that name the empty field
+
+- id: REQUESTER-002
+  title: A Broker refuses a purchase whose acceptances name an empty requester
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      on a purchase relayed through BrokerService.ExecuteTransaction this acceptance
+      is the only agent signature the Exchange sees
+  positive: >-
+    The same purchase through BrokerService.ExecuteTransaction, naming the agent's
+    own id and directory host, is bought and charged.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        none: a request that fails the Requester field rules is a generic
+        validation failure and carries no typed reason
+      side_effect: >-
+        no balance moves at the Exchange the offer names, with requester.id empty
+        and with requester.domain empty
+
+- id: REQUESTER-003
+  title: >-
+    An Exchange refuses a direct request whose requester.domain is not the host of
+    its Signature-Agent
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      An Exchange applies it on every request whose signer it does not admit as a Broker;
+      a mismatch from a signer it does admit is a relayed request, one of the two cases
+      below.
+  positive: >-
+    The same direct purchase, naming the host of the directory the request is
+    signed from, is bought and charged.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no balance moves when requester.domain names another agent's published
+        directory and every acceptance is validly signed over that name

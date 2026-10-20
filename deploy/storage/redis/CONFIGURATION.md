@@ -18,7 +18,7 @@ Exchange and the Broker.** That is the whole requirement.
 | Consumer | What it stores in Redis |
 |---|---|
 | Exchange | A record of which signed requests it has already accepted, so the same one cannot be sent twice (the "replay" protection required by RFC 9421). |
-| Broker | The same, for three kinds of request, plus a spend counter per agent. |
+| Broker | The same, for its two agent-facing requests, plus a spend counter per agent. |
 
 "RFC 9421" is the HTTP Message Signatures standard: callers sign their requests,
 and the receiving service must remember each signature so the same one cannot be
@@ -68,37 +68,33 @@ the URL gives it.
 
 ---
 
-## 3. The five key namespaces
+## 3. The three key namespaces
 
-Everything the platform writes lands under one of five prefixes. They **never
+Everything the platform writes lands under one of three prefixes. They **never
 overlap**: no two parts of the platform can ever produce the same key, which is
 what makes a single instance and a single database safe for both services.
 
 | Prefix | Written by | Holds | Lifetime |
 |---|---|---|---|
 | `httpsig:exchange:replay:` | Exchange | Signature nonces for every Exchange RPC | 5 minutes |
-| `httpsig:broker:replay:` | Broker | Signature nonces for the agent-facing `BrokerService` RPC | 5 minutes |
-| `httpsig:broker:relay:execute:` | Broker | Signature nonces for the execute relay route | 5 minutes |
-| `httpsig:broker:relay:discover:` | Broker | Signature nonces for the discover relay route | 5 minutes |
+| `httpsig:broker:replay:` | Broker | Signature nonces for the agent-facing `BrokerService` RPCs (`Resolve`, `ExecuteTransaction`) | 5 minutes |
 | `budget:<agent-id>:<YYYY-MM>` | Broker | Per-agent monthly spend counter | 35 days |
 
-The four replay keys are a fixed-length hash of the caller's key id and
-signature, with the value `1` — a few hundred bytes each, at most. The three
-Broker prefixes are deliberately distinct so a signature used on one route
-cannot be spent against another.
+The two replay keys are a fixed-length hash of the caller's key id and
+signature, with the value `1` — a few hundred bytes each, at most.
 
 `budget:` keys are **never written today** — see [`RUNBOOK.md`](RUNBOOK.md) §6.
 
 ### Nothing here is tunable
 
-All five lifetimes are compiled into the binaries. There is no environment
+All three lifetimes are compiled into the binaries. There is no environment
 variable, no config file and no runtime setting for any of them:
 
 | Value | Where it comes from |
 |---|---|
 | 5-minute replay window | `internal/replay/store.go`, constant `ReplayTTL` |
 | 35-day budget-counter lifetime | `src/broker/internal/budget/budget.go`, the `NewRedis` default |
-| The five prefixes | Fixed strings at each service's wiring point |
+| The three prefixes | Fixed strings at each service's wiring point |
 
 If you need a different replay window, that is a code change, not a
 configuration change.

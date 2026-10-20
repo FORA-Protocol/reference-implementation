@@ -1,0 +1,50 @@
+{{define "content"}}
+{{if not .Registrations.Sites}}
+<div class="text-center py-5">
+  <h1 class="h3">Add your first domain</h1>
+  <p class="text-body-secondary mb-4">
+    Tell us your domain, publish one file and install a package on your CDN.
+    From then on AI agents pay for your pages and your readers are unaffected.
+  </p>
+  <a class="btn btn-primary btn-lg" href="/domains/new">Add domain</a>
+</div>
+{{else}}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+  <div>
+    <h1 class="h3 mb-0">My domains</h1>
+    <p class="text-body-secondary small mb-0">{{.Registrations.DisplayName}} · Payee id {{.Registrations.PublisherID}}</p>
+  </div>
+  <a class="btn btn-primary" href="/domains/new">Add domain</a>
+</div>
+<div class="list-group">
+{{range .Registrations.Sites}}
+  <div class="list-group-item d-flex justify-content-between align-items-center gap-2">
+    <a class="text-reset text-decoration-none" href="/domains/{{.Domain}}">
+      <span class="fw-semibold">{{.Domain}}</span>
+      <span class="d-block text-body-secondary small">{{.CDN}}</span>
+    </a>
+    <span class="d-flex align-items-center gap-2">
+      {{if .Active}}<span class="badge text-bg-success">Verified</span>
+      {{- else}}<span class="badge text-bg-warning">Not verified</span>
+      <a class="btn btn-primary btn-sm" href="/domains/{{.Domain}}/setup">Finish setup</a>{{end}}
+    </span>
+  </div>
+{{end}}
+</div>
+{{end}}
+{{with .ExchangeTerms}}
+<section class="card p-3 mt-4" aria-labelledby="terms-heading">
+  <h2 class="h6 mb-3" id="terms-heading">Your terms with the exchange</h2>
+  <dl class="terms mb-0">
+    <dt>Exchange fee</dt>
+    <dd>{{.Fee}} of each sale <span class="text-body-secondary small">({{.FeeSource}})</span></dd>
+    <dt>Usage reports</dt>
+    <dd>due within {{.ReportWithin}} of each sale</dd>
+    <dt>Reported quantity</dt>
+    <dd>may differ from the estimate by up to {{.Tolerance}}</dd>
+    {{if .RequiredFields}}<dt>Report must include</dt><dd>{{.RequiredFields}}</dd>{{end}}
+  </dl>
+  <p class="text-body-secondary small mt-3 mb-0">The operator sets these. They apply to every domain you sell.</p>
+</section>
+{{end}}
+{{end}}

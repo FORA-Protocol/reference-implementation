@@ -31,10 +31,11 @@ agent registered in it — buy content, spend money, and file usage reports in t
 agent's name. Treat the Vault backups with the same care as the live system
 ([`deploy/storage/vault/RUNBOOK.md`](../../deploy/storage/vault/RUNBOOK.md) §5).
 
-**It is on the delivery path for its agents.** When an agent buys content, the
-service does not stop at forwarding the purchase: it follows the delivery link the
+**It is on the delivery path for its agents.** When an agent buys content, by
+default the service does not stop at forwarding the purchase: it follows the delivery link the
 Exchange answered with, fetches the licensed content from the publisher's edge —
 proving it holds the agent's key — and returns the content inside the tool result.
+An agent that sets `embed_content` to `false` gets only the delivery link instead.
 If it is down, agents cannot discover, buy, or receive content. The publisher's site
 is unaffected either way.
 
@@ -81,6 +82,12 @@ on the same schedule as `/healthz`.
 JSON, one object per line, on stdout — `docker compose logs identity`. **There is no
 `/metrics` endpoint and no Prometheus support**, so alerting is on log events.
 
+Everything in this section assumes the default `IDENTITY_LOG_LEVEL` of `INFO`. Raised to
+`WARN`, the service stops writing the `INFO` lines below, and several checks and
+procedures in this runbook read those; lowered to `DEBUG`, it adds routine detail,
+such as an `http request` line for every request. [`CONFIGURATION.md`](CONFIGURATION.md)
+§2 says what each level hides.
+
 Every line carries `request_id`, and it is the same value across the Identity Service,
 the Broker and the Exchange — grep it in all three to trace one agent's call end to
 end. It arrives or is created as the `X-Request-ID` header and is passed outbound.
@@ -97,7 +104,8 @@ end. It arrives or is created as the `X-Request-ID` header and is passed outboun
 | `identity.signup.ephemeral_token_key` | WARN | `IDENTITY_TOKEN_SIGNING_KEY` is unset. **Every agent is signed out on every restart.** |
 | `identity.mcp.delivery_failed` | WARN | The agent's purchase went through, but this service could not fetch one of the bought items from the publisher's edge. **The Exchange has already charged for it.** The line names the `subdomain`, the `offer_id` and the reason; the agent was handed the same failure with the delivery link intact, so it can try again. |
 | `identity.oauthserver.*` (outage) | WARN | A backend was unavailable during sign-up; the caller got `503`. |
-| `identity.mcp.register` / `.status` / `.discover` / `.execute` / `.report` | INFO | One agent tool call. One line per call, naming the agent. |
+| `identity.mcp.register` / `.status` / `.execute` / `.report` | INFO | One agent tool call. One line per call, naming the agent. |
+| `identity.mcp.discover` | INFO, WARN when `rejected` is above 0 | One `fora_discover` call, naming the agent. `rejected` counts the offers whose signature did not verify; such a call is logged at WARN, because a whole Exchange's offers failing verification is a key-rotation or manifest problem on that Exchange, which no single agent's view reveals. |
 | `identity.oauthserver.register.ok` / `.signin.ok` / `.consent.approved` | INFO | One sign-up step completed. Together these are the audit record of who signed up and which agent software registered itself. |
 | `identity.rotation.rotated` / `.pruned` | INFO | A key was replaced, or a retired one erased. Routine. |
 | `identity.revoke` | INFO | A key was revoked. Carries `subdomain`, `thumbprint` and `as_of` — **this is the audit record of the revocation**. |
@@ -134,6 +142,7 @@ into whatever monitoring you already run.
 | An agent's documents return `404` | No such agent — or the `Host` header was rewritten in front of the service, or the name has more than one label | Confirm with §3.2. If every agent 404s, suspect the proxy: [`CONFIGURATION.md`](CONFIGURATION.md) §5. |
 | Will not start after an outage | The OIDC provider is contacted at boot and the service exits if it cannot reach it | Bring the provider back, then start this service. A running service does not need it; a starting one does. |
 | Sign-in fails at the provider, nothing in these logs | The redirect address on file does not match `IDENTITY_AUTH_ISSUER` + `/callback` exactly | [`deploy/zitadel/RUNBOOK.md`](../../deploy/zitadel/RUNBOOK.md) §3. The failure happens before the request ever reaches here, which is why the logs are silent. |
+| Agent software refuses to connect before sign-in, reporting that the protected resource does not match the server URL | The MCP endpoint advertises `IDENTITY_TOKEN_AUDIENCE` as its protected resource, which defaults to `IDENTITY_AUTH_ISSUER`, and the agent connected through a different hostname | Set `IDENTITY_TOKEN_AUDIENCE` to the origin agents connect to ([`CONFIGURATION.md`](CONFIGURATION.md) §2) and recreate the container — a restart does not apply a changed environment. Existing access tokens are invalid afterwards, so agents sign in again. |
 | Sign-ups fail halfway through, only sometimes | `IDENTITY_SESSION_KEY` unset and the service restarted mid-flow | Set the key ([`DEPLOYMENT.md`](DEPLOYMENT.md) §7). |
 | **A revoked key still verifies** | Two delays add up: this service republishes the revocation within `IDENTITY_DIRECTORY_TTL` (default 5 minutes), and the Broker and the Exchange each notice on their own revocation refresh (about every 5 minutes; their library's default, not set here) | Wait roughly ten minutes end to end. This is expected, not a fault — §4.2. |
 | Agent calls fail with a signature error at the Broker | The agent's directory does not serve the key it signed with, or clocks disagree | Read the agent's directory (§3.2) and check the signing key is in it; check time sync on both hosts. The Broker keeps no key list of its own — it fetches this directory on demand, and re-fetches when it meets a key fingerprint it does not know, so a rotation normally corrects itself. |
@@ -249,6 +258,9 @@ psql "$IDENTITY_DSN" -c "SELECT version, dirty FROM public.schema_migrations_ide
   parties cached and in the signatures they make.
 - **Changing `IDENTITY_AUTH_ISSUER` breaks sign-in** until the OIDC client's redirect
   address is updated to match.
+- **Changing `IDENTITY_TOKEN_AUDIENCE` invalidates every access token issued before
+  the change.** Tokens carry the old value, and the endpoint only accepts the current
+  one. Agents sign in again; nothing else is lost.
 - **A proxy that rewrites `Host` makes every agent 404.** The agent is selected from
   that header and nothing else.
 - **Agent subdomains take exactly one label.** That is what a wildcard certificate

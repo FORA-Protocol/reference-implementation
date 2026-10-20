@@ -45,7 +45,7 @@ func TestNewRefresherRequiresHTTPClient(t *testing.T) {
 			t.Fatal("NewRefresher with a nil HTTP client must panic, but it returned normally")
 		}
 	}()
-	_ = registry.NewRefresher(stubHealthRepo{}, stubResolver{}, nil, testutil.DiscardLogger(), 0)
+	_ = registry.NewRefresher(stubHealthRepo{}, stubResolver{}, registry.ProbeTransport{}, testutil.DiscardLogger(), 0)
 }
 
 func TestNewRefresherRequiresEndpointResolver(t *testing.T) {
@@ -54,5 +54,6 @@ func TestNewRefresherRequiresEndpointResolver(t *testing.T) {
 			t.Fatal("NewRefresher with a nil endpoint resolver must panic, but it returned normally")
 		}
 	}()
-	_ = registry.NewRefresher(stubHealthRepo{}, nil, http.DefaultClient, testutil.DiscardLogger(), 0)
+	_ = registry.NewRefresher(stubHealthRepo{}, nil, registry.ProbeTransport{HTTP: http.DefaultClient},
+		testutil.DiscardLogger(), 0)
 }

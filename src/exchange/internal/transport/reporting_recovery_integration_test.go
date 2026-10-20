@@ -72,12 +72,12 @@ func TestReportUsage_RejectedRetrySameKey_Revalidates(t *testing.T) {
 
 	const key = "r-same-key"
 
-	// First attempt: outside the ±20% tolerance, so rejected.
+	// First attempt: the wrong billing_id, so rejected.
 	_, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(newUsageReport(
-		key, item.GetTransactionId(), item.GetBillingId(), &forav1.Usage{ConsumedQuantity: 500},
+		key, item.GetTransactionId(), "wrong-billing-id", &forav1.Usage{ConsumedQuantity: 100},
 	)))
-	assertConnectError(t, err, connect.CodeInvalidArgument, "outside")
-	assertObligationState(t, h, item.GetTransactionId(), "PENDING", "REJECTED_TOLERANCE")
+	assertConnectError(t, err, connect.CodeInvalidArgument, "billing_id")
+	assertObligationState(t, h, item.GetTransactionId(), "PENDING", "REJECTED_BILLING_ID")
 
 	// Retry under the SAME key with corrected data. A replay short-circuit here
 	// would return 200 with an empty report_id and leave the obligation PENDING.
@@ -95,9 +95,9 @@ func TestReportUsage_RejectedRetrySameKey_Revalidates(t *testing.T) {
 // TestReportUsage_AcceptedReplay_SkipsValidation pins the other half of the
 // probe: an ACCEPTED key still short-circuits, and still without re-validating.
 //
-// The replayed report carries a consumed quantity far outside tolerance. If the
-// probe had been narrowed into uselessness, that payload would be validated and
-// rejected; instead the original report_id comes back unchanged. This is the
+// The replayed report carries a different consumed quantity. If the probe had
+// been narrowed into uselessness, that payload would be validated and recorded
+// anew; instead the original report_id comes back unchanged. This is the
 // test that fails if the issued_report_id predicate is over-applied.
 func TestReportUsage_AcceptedReplay_SkipsValidation(t *testing.T) {
 	h, _, _, _ := newReportingHarness(t)
@@ -147,10 +147,10 @@ func TestReportUsage_RejectedAfterAccepted_LeavesTheAcceptedRowIntact(t *testing
 	const acceptedKey = "r-accepted-first"
 	reportID := reportFor(t, h, acceptedKey, item, 100)
 
-	// A second report under a DIFFERENT key, far outside tolerance. It is
-	// refused for being against an obligation that is already reported, not for
-	// the tolerance breach: the state is checked when the rejection is written,
-	// so the settled row is never touched.
+	// A second report under a DIFFERENT key, with a different quantity. It is
+	// refused for being against an obligation that is already reported: the
+	// state is checked when the rejection is written, so the accepted row is
+	// never touched.
 	_, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(newUsageReport(
 		"r-second-key", item.GetTransactionId(), item.GetBillingId(),
 		&forav1.Usage{ConsumedQuantity: 9_999},

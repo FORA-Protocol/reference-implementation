@@ -1,7 +1,8 @@
 """Obligation-driven E2E tests.
 
-Each module under this package traces to a single happy-path or failure-mode
-bullet of one behavioural obligation. The scenario text (verbatim) is the test
-docstring; the xfail reason mirrors that bullet when production does not yet
-exhibit the asserted behavior.
+Each test here proves one or more entries of the obligation registry under
+``tests/e2e/obligations/`` and says which with ``@obligation(Obligation.<ID>)``.
+That marker is the only record of the link; the docstring names the same IDs for
+a reader. When production does not yet exhibit an obligation, the test is a
+strict xfail whose reason names the defect.
 """

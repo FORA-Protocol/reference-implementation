@@ -65,11 +65,11 @@ func TestComp_ProfileGatedPricingProjection(t *testing.T) {
 	h := newPushHarness(t)
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 
 	const compPath = "/articles/comp-priced"
 	resourceID := "res-" + uuid.NewString()
@@ -94,7 +94,7 @@ func TestComp_ProfileGatedPricingProjection(t *testing.T) {
 
 	// POSITIVE: profile-aware discover renders the comp ext.
 	compOffer := discoverCompOffer(t, h, uri)
-	assertCompPricingProjection(t, compOffer, term, compPackageID(h, resourceID, 0))
+	assertCompPricingProjection(t, compOffer, term, compPackageID(h, compContentKey(h, resourceID), 0))
 
 	// NEGATIVE: profile-free discover renders NO comp ext, base path intact.
 	baseOffer := singleOffer(t, h, uri)
@@ -118,25 +118,47 @@ func TestComp_ProfileGatedPricingProjection(t *testing.T) {
 // reuse one definition (Go would reject a redeclaration).
 func discoverCompOffer(t *testing.T, h *pushHarness, uri string, scopes ...string) *forav1.Offer {
 	t.Helper()
-	spec := requesterWithScopes("agent-discover", scopes...)
-	spec.profiles = []string{"fora-comp-v1"}
-	offers := discoverOffersAs(t, h, uri, spec)
+	offers := discoverCompOffers(t, h, uri, scopes...)
 	if len(offers) != 1 {
 		t.Fatalf("discover (comp profile) %s: got %d offers, want 1", uri, len(offers))
 	}
 	return offers[0]
 }
 
+// discoverCompOffers returns every offer the profile-aware discovery projects
+// for uri, in stored term order. A resource with several eligible terms answers
+// with one offer per term, each carrying its own comp package.
+func discoverCompOffers(t *testing.T, h *pushHarness, uri string, scopes ...string) []*forav1.Offer {
+	t.Helper()
+	spec := requesterWithScopes("agent-discover", scopes...)
+	spec.profiles = []string{"fora-comp-v1"}
+	return discoverOffersAs(t, h, uri, spec)
+}
+
 // compPackageID derives the expected CoMP Package.id for a pushed entry: the
-// tenant-scoped resource id (tenant_id + ":" + the pushed content_id, or the
-// entry URI when no content_id was pushed) plus the selected term's ORIGINAL
-// stored index. The package id is resource-intrinsic — precomputed once at
-// snapshot rebuild — and independent of the per-offer random offer_id.
+// seat-scoped resource id (tenant_id + ":" + key) plus the selected term's
+// ORIGINAL stored index. The package id is resource-intrinsic — precomputed once
+// at snapshot rebuild — and independent of the per-offer random offer_id.
+//
+// key is the entry URI when no content_id was pushed, and compContentKey below
+// when one was.
 //
 // SHARED helper: used by the comp_*_integration_test.go siblings; it stays in
 // this base file so they reuse one definition.
 func compPackageID(h *pushHarness, key string, index int) string {
 	return h.tenantID + ":" + key + "#" + strconv.Itoa(index)
+}
+
+// compContentKey is the scoping key half of a resource_id for an entry pushed
+// WITH a content_id, for callers that build a package id through compPackageID.
+//
+// The site is part of it because a content_id is the publisher's own identifier
+// and is only unique inside their own site, so the seat alone would not separate
+// two publishers that both call an article "story-1". An entry pushed WITHOUT a
+// content_id is keyed by its URI instead, which already contains the domain, and
+// those callers pass the URI to compPackageID directly.
+func compContentKey(h *pushHarness, contentID string) string {
+	return h.publisherDom + ":" + contentID
 }
 
 // assertCompPricingProjection verifies the comp ext the profile-aware discover

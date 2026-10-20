@@ -105,20 +105,16 @@ func faultEnvelope(err error, domain string) error {
 // key "fora.v1.ExchangeService". Naming both "domain" is how an RPC service
 // name ends up where a caller expects an address.
 //
-// NO CLIENT RECEIVES THAT TODAY, and the denial branch below is unreachable from
-// the RPC. ExecuteTransaction has one pipeline: every request, including a
-// single-offer one, is handled as a batch, and the batch loop folds each denial
-// kind into an in-body TransactionResultItem instead of returning it. Only a
-// NON-denial error reaches this function, so txDenialReason answers ok=false and
-// the generic path runs. The denial branch and its Exchange assignment are kept
-// wired and unit-tested against the day the batch shape can carry the value.
-//
-// What would make it reachable is a per-item exchange field on
-// TransactionResultItem, which the protocol does not define — that is a change
-// to github.com/FORA-Protocol/protocol, not something to work around here by
-// inventing a second carrier. It matters most for a broker request fanned out
-// across several Exchanges, where the results arrive together and nothing in the
-// body says which Exchange refused which offer.
+// ExecuteTransaction has one pipeline: every request, including a single-offer
+// one, is handled as a batch, and the batch loop folds each denial kind into an
+// in-body TransactionResultItem instead of returning it. The one denial that
+// reaches this function is raised BEFORE the loop: the relay gate at admission
+// refuses a Broker-relayed request whose tenant does not accept relayed
+// purchases, as KindRelayNotAccepted, so the whole request is PERMISSION_DENIED
+// with a transaction_denial carrying DENIAL_REASON_RELAY_NOT_ACCEPTED and this
+// Exchange's host. The Broker carries that detail to the agent inside the
+// UpstreamRefusal on each refused item. Every other error is a non-denial and
+// takes the generic path.
 func executeTxError(err error, exchangeHost string) error {
 	reason, ok := txDenialReason(err)
 	if !ok {

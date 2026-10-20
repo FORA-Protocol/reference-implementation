@@ -1,151 +1,41 @@
-// Package forahttpsig provides the single canonical outbound RFC 9421
-// Ed25519 signing http.RoundTripper used by every FORA client that talks
-// to a signature-verifying server.
+// Package forahttpsig is the outbound signing http.RoundTripper the publisher
+// console signs its calls to the Exchange with, and the key types every custodial
+// signer in this repository shares.
 //
-// The wire contract is owned by the SDK (helpers.SignRequest / helpers.AppendSignature) (the same
-// function the Exchange's verifier mirrors): for every /fora.* request the
-// transport buffers the body, re-seats Body/GetBody/ContentLength/Host so the
-// signed bytes match the transmitted bytes, and emits the FORA covered
-// component set (@method, @target-uri, content-digest, authorization, plus
-// x-fora-entitlement-biscuit when present). Bodyless /fora.* requests pass
-// through unsigned.
+// The Transport signs through the SDK (core.NewSigningTransport): the Web Bot
+// Auth profile, the FORA covered components (@method, @target-uri,
+// content-digest, authorization and the signer's own Signature-Agent member),
+// tag="web-bot-auth", and a fresh 64-byte nonce on every signature, which is
+// what keeps two identical requests apart in a verifier's replay store. The
+// signature window is the caller's core.Window; production passes the SDK's
+// core.ClockWindow. This package adds only what the SDK leaves to its caller:
+// which key signs, and which requests are FORA traffic (/fora.* procedures plus
+// any WithFORATargets admits). A request no rule claims, and a bodiless
+// request, pass through unsigned. Its one production caller is the console,
+// which signs with a key bound at construction and admits its console-API
+// routes through WithFORATargets.
 //
-// A non-/fora.* request is forwarded untouched by default. WithWBASigning instead
-// signs it under the Web Bot Auth profile (internal/httpsig.SignRequestWBA):
-// @authority + signature-agent, tag="web-bot-auth", a per-request nonce. That is
-// the profile an arbitrary WBA-aware origin verifies, and unlike the FORA branch
-// it covers bodyless GETs, which is what such traffic mostly is.
-//
-// Which key signs is a separate axis. By default it is the one bound at
-// construction. WithKeySource resolves it per request, so a service holding
-// custody of many agents' keys signs each request as the agent it is acting for.
-//
-// Callers differ only in how the signature's (created, expires) instants are
-// sourced — the production ingester stamps a wall-clock instant plus a TTL; a
-// monotonic source keeps back-to-back signatures in the same wall-clock second
-// unique so they do not trip the server's replay store. That axis of variation
-// is captured by the Window func; the signing bytes are otherwise identical
-// across callers.
-//
-// The SDK ships a Window pair under the same two names, and this package's
-// exists for one difference: the monotonic one here CAPS its drift, so a
-// signature can never outlive twice its TTL however fast requests arrive. The
-// SDK's does not, and above one request per second the uncapped bump compounds
-// until the cutoff runs permanently ahead of the clock — which turns the
-// short-lifetime control off without failing anything. The cap is written once,
-// in MonotonicWindow below, with the arithmetic that explains it.
-//
-// Which signers take which is worth stating, because the split is real and not
-// everyone is on this side of it. The identity service's two outbound legs take
-// the pair from here — the SDK-backed client and the hand-written one. The
-// Broker's exchange client and the Exchange's catalog push call the SDK's, so
-// they sign without the bound — knowingly, since moving them changes two
-// services' signing behaviour and belongs with the work that verifies it rather
-// than with the caller that noticed. Capping the SDK's is the resolution that
-// would retire the difference altogether; until then the two are not
-// interchangeable, and which pair a signer takes is a property of that signer
-// rather than a rule this package can state for everyone.
-//
-// Two signing branches share that Window, and they source created differently:
-//
-//   - A plain outbound /fora.* request is signed with
-//     the SDK's helpers.SignRequest, which stamps
-//     created=now() ITSELF — the caller-supplied created is unused on this path.
-//   - A request that already carries an incoming Signature header — the relay
-//     path — CHAINS a co-signature on top via the SDK
-//     helpers.AppendSignature so the ordered set of signatures forms the
-//     forwarding chain. The SDK helpers are L1 and read no clock: their
-//     SignOptions.Created/Expires are caller-injected and Created=0 is omitted
-//     from the wire. The multisig verifier requires created on EVERY signature,
-//     so the caller MUST inject created here from the same clock as expires.
+// AgentKey, KeySource, CompleteKey and ErrNoSigningKey are also what the
+// identity service's outbound legs build their signer from. Identity resolves
+// the agent's key per call (agentsign.Resolver.Source) and builds one SDK client
+// per call around it, rather than signing through this Transport.
 package forahttpsig
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"fmt"
-	"io"
 	"net/http"
-	"sync/atomic"
-	"time"
 
+	"github.com/FORA-Protocol/protocol/sdk/go/core"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/foraauth"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/httpsig"
 )
 
-// Window returns the RFC 9421 (created, expires) cutoffs (unix seconds) to stamp
-// on the next outbound signature. It is invoked once per signed request. Both
-// axes matter: the internal/httpsig (yaronf) non-relay path stamps created=now()
-// itself and ignores the returned created, but the SDK helpers relay path reads
-// no clock and MUST receive created from the caller — the multisig verifier
-// rejects any signature missing created. An implementation may return
-// monotonically increasing values to keep each on-the-wire signature unique (the
-// integration replay-uniqueness need) or a wall-clock instant plus a fixed TTL
-// (production); created and expires should derive from the same source so a
-// deterministic-clock test stays inside the verifier's freshness window.
-type Window func() (created, expires int64)
-
-// ClockWindow returns the production Window: it stamps each outbound signature
-// with wall-clock-derived created=now() and expires=now()+ttl (now read through
-// clk). This is the shared constructor for every production caller that signs
-// against a real clock; integration tests that need strictly-increasing values
-// to dodge the server's replay store supply their own monotonic Window instead.
-// Both axes come from the single clk.Now() reading so created ≤ expires and both
-// land in the verifier's window.
-func ClockWindow(clk clock.Clock, ttl time.Duration) Window {
-	return func() (int64, int64) {
-		now := clk.Now()
-		return now.Unix(), now.Add(ttl).Unix()
-	}
-}
-
-// MonotonicWindow returns a Window whose expires cutoff increases across calls
-// within the same wall-clock second, so a burst of identical relay requests does
-// not collide on (keyid, signature) in the server's replay store. created tracks
-// now(); the pair stays clock-consistent. Safe for concurrent RoundTrips: the
-// running maximum is held in an atomic updated by compare-and-swap.
-//
-// The drift is CAPPED at one further ttl, so a signature can never live longer
-// than 2*ttl no matter the request rate. Without a cap the +1s bump compounds:
-// above one request per second the cutoff runs permanently ahead of the clock
-// and a signature's real lifetime becomes a function of traffic rate rather than
-// ttl — at 10 rps the window grows by 9 seconds every second. That silently
-// disables the short-lifetime control, and the replay store only remembers a
-// signature for ReplayTTL, so past that point a captured request is replayable
-// again.
-//
-// Above the saturation rate (ttl bumps per second) two signatures in one second
-// can share a cutoff, which is exactly what a plain clock window does. Losing
-// collision-avoidance under sustained load is the deliberate trade: a bounded
-// lifetime matters more than sparing the replay store a duplicate.
-func MonotonicWindow(clk clock.Clock, ttl time.Duration) Window {
-	var lastExpires atomic.Int64
-	return func() (int64, int64) {
-		now := clk.Now()
-		floor := now.Unix() + int64(ttl.Seconds())
-		ceiling := floor + int64(ttl.Seconds())
-		for {
-			prev := lastExpires.Load()
-			next := floor
-			if prev >= next {
-				next = prev + 1
-			}
-			if next > ceiling {
-				next = ceiling
-			}
-			if lastExpires.CompareAndSwap(prev, next) {
-				return now.Unix(), next
-			}
-		}
-	}
-}
-
 // AgentKey is the identity ONE outbound request is signed as: the signer's own
-// directory origin, its RFC 9421 keyid, and the Ed25519 private half. KeyID may be
+// directory origin (an https origin, the Signature-Agent member the signature
+// covers), its RFC 9421 keyid, and the Ed25519 private half. KeyID may be
 // left empty, in which case it is derived as the RFC 7638 thumbprint of Private's
 // public key — the only value a WBA verifier will accept.
 type AgentKey struct {
@@ -164,115 +54,108 @@ type AgentKey struct {
 // the wire will happily sign as whoever was asked for.
 type KeySource func(ctx context.Context) (AgentKey, error)
 
-// Transport is an http.RoundTripper that signs outbound requests with the
-// canonical FORA RFC 9421 message. After the WBA split the RFC 9421 keyid is the
-// RFC 7638 thumbprint of the signing key's public half (proof of key possession);
-// the signer's identity is its directory origin, carried in the covered
-// Signature-Agent header. Construct it with New.
-//
-// By default only bodied /fora.* requests are signed and everything else is
-// forwarded to base untouched. WithWBASigning additionally signs non-/fora.*
-// requests with the Web Bot Auth profile, which is how the registry identifies an
-// agent to an arbitrary WBA-aware origin.
+// Transport is an http.RoundTripper that signs outbound FORA requests under the
+// Web Bot Auth profile through the SDK. The RFC 9421 keyid is the RFC 7638
+// thumbprint of the signing key's public half (proof of key possession); the
+// signer's identity is its directory origin, carried in the covered
+// Signature-Agent member. Construct it with New.
 type Transport struct {
-	base   http.RoundTripper
-	keys   KeySource
-	window Window
-	// appendOnly selects the always-append signing branch (WithAppendSigner):
-	// every /fora.* request is signed with helpers.AppendSignature regardless
-	// of whether an incoming Signature is present. See signFORA for the two branches.
-	appendOnly bool
-	// wba enables the Web Bot Auth branch for non-/fora.* targets (WithWBASigning).
-	wba bool
-	// foraTarget, when non-nil, marks additional non-/fora.* requests as FORA
-	// traffic (WithFORATargets). It exists for the Broker's execute relay route,
-	// which is not a /fora.* path yet is verified under the FORA covered set.
+	keys       KeySource
 	foraTarget func(*http.Request) bool
+	signing    http.RoundTripper
 }
 
 // Option customizes a Transport at construction time.
 type Option func(*Transport)
 
-// WithAppendSigner routes EVERY signed /fora.* request through the yaronf
-// helpers.AppendSignature instead of the default split (fresh sig1
-// via SignRequestFORA, chained sig2 via the SDK helpers). This is the relay
-// caller's mode: AppendSignatureFORA degrades to a plain sig1 when no incoming
-// signature is present and appends a forwarding-chain-linked sigN+1 when one is,
-// so a single always-append branch serves both the broker-originated and the
-// relayed call. Pair it with MonotonicWindow so identical back-to-back relay
-// requests do not collide in the server's replay store.
-func WithAppendSigner() Option {
-	return func(t *Transport) { t.appendOnly = true }
-}
-
-// WithWBASigning signs requests whose target is NOT /fora.* with the Web Bot Auth
-// profile (@authority + signature-agent, tag="web-bot-auth", nonce) instead of
-// forwarding them unsigned. It is opt-in because every existing caller relies on
-// non-FORA traffic leaving this transport untouched, and because a WBA signature
-// is only meaningful when the signer publishes a directory the origin can fetch.
-//
-// Unlike the FORA branch it also signs BODYLESS requests: the ordinary Web Bot
-// Auth request is a plain GET, and refusing to sign it would leave exactly the
-// traffic the profile exists for unauthenticated.
-func WithWBASigning() Option {
-	return func(t *Transport) { t.wba = true }
-}
-
 // WithKeySource resolves the signing key per request instead of using the one
-// bound at construction. This is what a key-custody service wires in: the key that
-// signs is the authenticated agent's own, looked up on every call.
+// bound at construction, so one Transport could sign as many agents. No
+// production caller uses it: the identity service, which holds custody of its
+// agents' keys, builds one SDK client per call instead (see the package doc).
 func WithKeySource(src KeySource) Option {
 	return func(t *Transport) { t.keys = src }
 }
 
 // WithFORATargets extends which requests get the FORA signature. pred is called
-// for each outgoing request and reports whether it should be signed under the
-// FORA profile. By default only requests whose path is /fora.* are signed as
-// FORA; with this option, any request for which pred returns true is also
-// signed as FORA. pred can only add targets — a /fora.* path is signed as FORA
-// regardless of what pred returns.
+// for each outgoing request and reports whether it should be signed. By default
+// only requests whose path is /fora.* are signed; with this option, any request
+// for which pred returns true is also signed. pred can only add targets — a
+// /fora.* path is signed regardless of what pred returns.
 //
-// This exists for the agent posting to the Broker's execute relay
-// (/broker/v1/exchange/execute). That route is not a /fora.* path, but the
-// Broker verifies it exactly like a /fora.* request: it expects the FORA
-// signature, which covers the method, target URI, body digest, and
-// authorization header. Without this option the transport would treat the
-// request as ordinary non-FORA traffic — forwarding it unsigned, or signing it
-// with the Web Bot Auth profile, which covers different components — and the
-// Broker would reject it.
+// This exists for a route that is not a /fora.* path but is verified exactly
+// like one — the Exchange's console API, which the publisher console signs. Its
+// verifier expects the FORA signature, which covers the method, target URI,
+// body digest, and authorization header; without this option the transport
+// would forward the request unsigned and the verifier would refuse it.
 func WithFORATargets(pred func(*http.Request) bool) Option {
 	return func(t *Transport) { t.foraTarget = pred }
 }
 
 // New builds a signing Transport over base. directory is the signer's own
-// directory origin (published in the covered Signature-Agent header so the
-// verifier resolves the thumbprint keyid against that directory's WBA file);
-// priv is its Ed25519 private key; window supplies the per-request (created,
-// expires) cutoffs (unix seconds). The keyid is derived once as the RFC 7638
-// thumbprint of priv's public key. base defaults to http.DefaultTransport when
-// nil. opts customize the signing branch (see WithAppendSigner, WithWBASigning).
+// directory origin, an https origin (helpers.CheckHTTPSOrigin) published as the
+// covered Signature-Agent member so the verifier resolves the thumbprint keyid
+// in that directory; priv is its Ed25519 private key; window supplies the
+// per-request (created, expires) cutoffs (unix seconds), and production passes
+// the SDK's core.ClockWindow. base defaults to http.DefaultTransport when nil.
 //
 // A caller that supplies WithKeySource signs with a key resolved per request; the
-// directory and priv arguments are then unused and may be zero.
+// directory and priv arguments are then unused and may be zero, and each
+// resolved key's directory is held to the same origin rule by the SDK when it
+// signs.
 func New(
-	base http.RoundTripper, directory string, priv ed25519.PrivateKey, window Window, opts ...Option,
+	base http.RoundTripper, directory string, priv ed25519.PrivateKey, window core.Window, opts ...Option,
 ) (*Transport, error) {
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	t := &Transport{base: base, window: window}
+	t := &Transport{}
 	for _, opt := range opts {
 		opt(t)
 	}
-	if t.keys != nil {
-		return t, nil
+	if t.keys == nil {
+		if err := helpers.CheckHTTPSOrigin(directory); err != nil {
+			return nil, fmt.Errorf("%w: signing directory: %w", ErrUnusableKey, err)
+		}
+		static, err := CompleteKey(AgentKey{Directory: directory, Private: priv})
+		if err != nil {
+			return nil, err
+		}
+		t.keys = func(context.Context) (AgentKey, error) { return static, nil }
 	}
-	static, err := CompleteKey(AgentKey{Directory: directory, Private: priv})
-	if err != nil {
-		return nil, err
-	}
-	t.keys = func(context.Context) (AgentKey, error) { return static, nil }
+	t.signing = core.NewSigningTransport(nil, base,
+		core.WithSignerSource(t.signerFor),
+		core.WithWindow(window),
+		core.WithSignPredicate(t.isFORA),
+	)
 	return t, nil
+}
+
+// RoundTrip signs req when it is FORA traffic carrying a body and forwards it to
+// the base transport; anything else passes through unchanged. A request that
+// cannot be signed — no usable key, a directory that is not an https origin —
+// is never sent.
+func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.signing.RoundTrip(req)
+}
+
+// isFORA reports whether req is signed: a /fora.* procedure, or a target
+// WithFORATargets admits.
+func (t *Transport) isFORA(req *http.Request) bool {
+	if req.URL == nil {
+		return false
+	}
+	return foraauth.IsFORAProcedure(req) || (t.foraTarget != nil && t.foraTarget(req))
+}
+
+// signerFor is the SDK signer source: the key this request is signed as, and its
+// directory origin.
+func (t *Transport) signerFor(ctx context.Context, _ *http.Request) (helpers.Signer, string, error) {
+	key, err := t.resolveKey(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	signer, err := helpers.NewEd25519Signer(key.KeyID, key.Private)
+	if err != nil {
+		return nil, "", fmt.Errorf("%w: %w", ErrNoSigningKey, err)
+	}
+	return signer, key.Directory, nil
 }
 
 // CompleteKey validates key material and derives the keyid as the RFC 7638
@@ -316,73 +199,6 @@ func CompleteKey(key AgentKey) (AgentKey, error) {
 	return key, nil
 }
 
-// signMode is which profile, if any, an outbound request is signed under.
-type signMode int
-
-const (
-	signNone signMode = iota
-	signFORA
-	signWBA
-)
-
-// modeFor picks the profile by target. A /fora.* request is a FORA RPC and gets
-// the FORA covered set — but only when it carries a body, preserving the contract
-// every existing caller was built against. Anything else is Web Bot Auth traffic
-// when that branch is enabled (bodied or not), and untouched otherwise.
-func (t *Transport) modeFor(req *http.Request) signMode {
-	if req.URL == nil {
-		return signNone
-	}
-	if foraauth.IsFORAProcedure(req) || t.isFORATarget(req) {
-		if req.Body == nil {
-			return signNone
-		}
-		return signFORA
-	}
-	if t.wba {
-		return signWBA
-	}
-	return signNone
-}
-
-// isFORATarget reports whether a non-/fora.* request opted into FORA signing via
-// WithFORATargets (the execute relay route).
-func (t *Transport) isFORATarget(req *http.Request) bool {
-	return t.foraTarget != nil && t.foraTarget(req)
-}
-
-// RoundTrip signs req under the profile its target selects and forwards it to the
-// base transport; a request no profile claims passes through unchanged.
-func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	mode := t.modeFor(req)
-	if mode == signNone {
-		return t.base.RoundTrip(req)
-	}
-	// Buffering comes first because it is the only place the caller's body is
-	// closed, and RoundTrip must close it on every path including the error ones.
-	// Key resolution fails routinely — custody down, no active key, an
-	// unauthenticated caller — so resolving before buffering would leak the body
-	// of every request that hits one of those.
-	body, err := t.buffer(req)
-	if err != nil {
-		return nil, err
-	}
-	key, err := t.resolveKey(req.Context())
-	if err != nil {
-		return nil, err
-	}
-	created, expires := t.window()
-	if mode == signWBA {
-		err = t.signWBA(req, body, key, expires)
-	} else {
-		err = t.signFORA(req, body, key, created, expires)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return t.base.RoundTrip(req)
-}
-
 // resolveKey consults the KeySource for the key this request is signed as. A
 // source that cannot answer — custody down, no active key, an unauthenticated
 // caller — aborts the request: sending it unsigned would present the agent to the
@@ -403,90 +219,4 @@ func (t *Transport) resolveKey(ctx context.Context) (AgentKey, error) {
 		return AgentKey{}, fmt.Errorf("%w: %w", ErrNoSigningKey, err)
 	}
 	return key, nil
-}
-
-// buffer drains req.Body into memory and re-seats Body, GetBody, ContentLength,
-// and Host so the signed bytes match the transmitted bytes AND so net/http can
-// replay the body on a retried request (a signer that leaves GetBody nil silently
-// loses the body on the second attempt). A bodyless request — the ordinary Web Bot
-// Auth GET — yields a nil body and only the Host is seated, which is what the
-// @authority component canonicalizes.
-func (t *Transport) buffer(req *http.Request) ([]byte, error) {
-	if req.Host == "" {
-		req.Host = req.URL.Host
-	}
-	if req.Body == nil {
-		return nil, nil
-	}
-	// Close the caller's reader exactly once, on the read-failure path too: a
-	// half-drained body that is never closed leaks the underlying reader for
-	// anything but an in-memory one.
-	orig := req.Body
-	body, err := io.ReadAll(orig)
-	_ = orig.Close()
-	if err != nil {
-		return nil, err
-	}
-	req.Body = io.NopCloser(bytes.NewReader(body))
-	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
-	req.ContentLength = int64(len(body))
-	return body, nil
-}
-
-// signFORA stamps the outbound FORA RFC 9421 signature(s) on the buffered req. It
-// first stamps the covered Signature-Agent header with the signer's own directory
-// when — and only when — the request does not already carry one: on the relay path
-// the originating agent already set Signature-Agent to ITS directory and its sig1
-// covers that value, so overwriting it would break sig1 at the verifier. The
-// relay's own key is resolved by its thumbprint keyid, not via Signature-Agent.
-//
-// Two signing branches follow, selected at construction:
-//
-//   - appendOnly (WithAppendSigner, the relay caller): every request is signed
-//     with helpers.AppendSignature, which degrades to a plain sig1
-//     when no incoming signature is present and appends a chain-linked sigN+1 when
-//     one is. The yaronf signer stamps created=now() itself, so created is unused
-//     on this branch.
-//   - default: a fresh /fora.* request is signed with helpers.SignRequest
-//     (yaronf, created=now()); a request already carrying an incoming Signature —
-//     the relay path — CHAINS a co-signature via the SDK helpers, which
-//     read no clock (L1) and so REQUIRE created injected from the Window or the
-//     multisig verifier rejects sig2 for the missing created param.
-//
-// signFORA signs a FORA leg through the SDK. The covered set, the canonical
-// signature base and the chain linkage are the SDK's — this function only
-// decides WHICH of its two entry points applies and supplies the per-request
-// key, which is the whole reason this transport exists (one identity service
-// signs for every agent, so the keyid is not fixed for the life of a transport
-// the way core.NewSigningTransport assumes).
-//
-// AppendSignature covers both the always-append relay mode and the chained case:
-// the SDK documents that appending to a request with no existing signature
-// produces a sig1 byte-for-byte identical to SignRequest, so single-sig is just
-// the N=1 case and needs no separate branch.
-func (t *Transport) signFORA(req *http.Request, body []byte, key AgentKey, created, expires int64) error {
-	if key.Directory != "" && req.Header.Get(helpers.SignatureAgentHeader) == "" {
-		req.Header.Set(helpers.SignatureAgentHeader, key.Directory)
-	}
-	signer, err := helpers.NewEd25519Signer(key.KeyID, key.Private)
-	if err != nil {
-		return err
-	}
-	opts := helpers.SignOptions{Created: created, Expires: expires}
-	if t.appendOnly || req.Header.Get("Signature") != "" {
-		return helpers.AppendSignature(req.Context(), req, body, signer, opts)
-	}
-	return helpers.SignRequest(req.Context(), req, body, signer, opts)
-}
-
-// signWBA stamps a Web Bot Auth signature on a request bound for an arbitrary
-// WBA-aware origin: the profile's own covered set and parameters, with the keyid
-// resolved against the directory named in the (covered, quoted) Signature-Agent
-// header. The FORA covered set does not apply — the receiver is not a FORA peer.
-func (t *Transport) signWBA(req *http.Request, body []byte, key AgentKey, expires int64) error {
-	return httpsig.SignRequestWBA(req, body, key.Private, httpsig.WBAOptions{
-		Directory: key.Directory,
-		KeyID:     key.KeyID,
-		Expires:   expires,
-	})
 }

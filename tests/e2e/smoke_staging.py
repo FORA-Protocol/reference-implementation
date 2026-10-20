@@ -15,13 +15,13 @@ script run against a live, already-seeded staging deployment
 What it proves, end to end, over the real public surface (HTTPS, Cloudflare
 DNS, the deployed edge worker):
 
-1. Licensed discovery: Broker Resolve for a demo resource (socrates) returns
-   a non-empty offer group — ingest + discovery work. Resolve is
-   DISCOVERY-ONLY: it carries ranked signed Offers, never a signed URL.
-2. Two-phase delivery for the canary: the winning Offer is relay-EXECUTED
-   through the Broker (agent acceptance + broker relay signatures) and the
-   Exchange mints the agent-bound signed retrievalEndpoint on the
-   TransactionResponse item. A bare fetch of that URL (no proof of
+1. Licensed discovery: Broker Resolve for a demo resource (socrates), through
+   the SDK's own BrokerClient, returns verified offers — ingest + discovery
+   work. Resolve is DISCOVERY-ONLY: it carries ranked signed Offers, never a
+   signed URL.
+2. Two-phase delivery for the canary: the winning Offer is bought through the
+   Broker (BrokerService.ExecuteTransaction, through the SDK) and the Exchange
+   mints the agent-bound signed retrievalEndpoint on the result item. A bare fetch of that URL (no proof of
    possession) is expected to DELIVER the origin body by default, matching an
    edge deployed with fora_enforce_binding = "false"; set
    FORA_STAGING_ENFORCE_BINDING=true for an edge that enforces binding, where
@@ -41,9 +41,11 @@ DNS, the deployed edge worker):
      endpoints on this response; the current worker does not, so nothing MCP
      is asserted here.)
    - the site root serves the human-facing landing page to a browser
-     User-Agent (200 HTML naming the demo catalog) and still refuses an
-     AI-bot User-Agent (403) — a stakeholder demo starts in a browser, so
-     the first impression must be the catalog index, not an error page;
+     User-Agent (200 HTML naming the demo catalog) — a stakeholder demo
+     starts in a browser, so the first impression must be the catalog index,
+     not an error page. An AI-bot User-Agent is refused there (403) when the
+     edge licenses the whole site, and reads the page (200) when the edge's
+     licensed paths (FORA_STAGING_LICENSED_PATHS_JSON) leave the root out;
    - /.well-known/fora.json answers any User-Agent with no signature (200,
      domain matching this publisher) — the guard against a bot being locked
      out of the very document that tells it how to negotiate.
@@ -59,6 +61,7 @@ the licensing/delivery path only.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -68,15 +71,14 @@ import httpx
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tests" / "e2e"))
 
-from harness.broker_client import execute_first_offer, resolve  # noqa: E402
+from fora_sdk.client import CallError  # noqa: E402
+from fora_sdk.hosts import host_of  # noqa: E402
+
+from harness.broker_purchase import AI_INPUT, only_verified_offer, resolve_request  # noqa: E402
 from harness.constants import AI_BOT_UA, BROWSER_UA  # noqa: E402
-from harness.stack_urls import StackURLs  # noqa: E402
 from harness.edge_fetch import fetch_signed  # noqa: E402
-from harness.resolve_carriers import (  # noqa: E402
-    first_item_of,
-    offer_exchanges_by_uri,
-    retrieval_endpoint_of,
-)
+from harness.sdk_client import offer_verifier, sdk_broker_client  # noqa: E402
+from harness.stack_urls import StackURLs  # noqa: E402
 
 CANARY_MARKER = "FORA-DEMO-CANARY-8FK3J2-0418"
 
@@ -181,13 +183,15 @@ def _bot_negotiation_leg(article: str, publisher: str, exchange_url: str) -> Non
     print("  bot fetch refused (403) with fora.json pointer + exchange header")
 
 
-def _landing_page_leg(publisher: str) -> None:
+def _landing_page_leg(publisher: str, licensed_paths: list[str]) -> None:
     """The site root serves the catalog landing page to a browser (200 HTML).
 
     A stakeholder demo starts by opening the demo hostname in a browser, so
     the root must be an index page, not an error. The bot side of the same
-    URL is asserted too: the landing page must not open a hole in the bot
-    gate at the root.
+    URL is asserted too, and it follows the edge's licensed scope. With no
+    scope the whole site is licensed, so the landing page must not open a
+    hole in the bot gate at the root. With a scope that leaves the root out,
+    the page is public and a bot reads it like a browser does.
     """
     url = f"https://{publisher}/"
     resp = httpx.get(url, follow_redirects=True, timeout=30.0, headers={"User-Agent": BROWSER_UA})
@@ -201,6 +205,14 @@ def _landing_page_leg(publisher: str) -> None:
         msg = "landing page does not name the demo catalog"
         raise SystemExit(msg)
     bot = httpx.get(url, timeout=30.0, headers={"User-Agent": AI_BOT_UA})
+    root_licensed = not licensed_paths or any(p.lower() == "/" for p in licensed_paths)
+    if not root_licensed:
+        if bot.status_code != httpx.codes.OK:
+            print(f"  bot at root: status={bot.status_code} body={bot.text[:200]}")
+            msg = "site root is outside the licensed paths but refused an AI-bot User-Agent"
+            raise SystemExit(msg)
+        print("  landing page served to a browser and, outside the licensed paths, to a bot")
+        return
     if bot.status_code != httpx.codes.FORBIDDEN:
         print(f"  bot at root: status={bot.status_code} body={bot.text[:200]}")
         msg = "site root did not refuse an AI-bot User-Agent"
@@ -242,6 +254,12 @@ def main() -> None:
     # "true" enables the enforcement expectation.
     enforce_binding = os.environ.get("FORA_STAGING_ENFORCE_BINDING", "false") == "true"
 
+    # The path prefixes the edge licenses (its LICENSED_PATHS_JSON). Empty or
+    # unset means the whole site, the edge's own default.
+    licensed_paths: list[str] = json.loads(
+        os.environ.get("FORA_STAGING_LICENSED_PATHS_JSON") or "[]"
+    )
+
     # Only the exchange and broker URLs are consumed by the harness helpers
     # used here (fetch_signed follows the signed URL's own hostname over real
     # DNS, so no edge field is read). The empty strings satisfy the tuple
@@ -251,6 +269,7 @@ def main() -> None:
         exchange=exchange_url,
         exchange_b="",
         exchange_c="",
+        exchange_d="",
         broker=broker_url,
         edge="",
         aws_edge="",
@@ -261,47 +280,60 @@ def main() -> None:
         zitadel="",
     )
 
+    # The SDK verifies every offer against its issuing Exchange's published key,
+    # read over https from the Exchange's own host, the one every offer names.
+    verifier = offer_verifier([host_of(exchange_url)], scheme="https")
+    buyer = sdk_broker_client(stack, verifier, agent_id=agent_id, key_path=agent_key)
+
     print("== item 1: licensed discovery for socrates ==")
     socrates = f"https://{publisher}/articles/philosophers/socrates.txt"
-    resp = resolve(
-        stack,
-        {"agent_id": agent_id, "uri": socrates, "intended_use": "ai-input"},
-        key_path=agent_key,
+    try:
+        result = buyer.resolve(resolve_request([socrates], intended_use=AI_INPUT))
+    except CallError as err:
+        buyer.close()
+        msg = f"socrates resolve was refused: {err}"
+        raise SystemExit(msg) from err
+    # Resolve is discovery-only: a licensed discovery is a NON-EMPTY group of
+    # verified offers for the requested uri (never a retrievalEndpoint — that is
+    # minted at purchase time).
+    issuers = sorted(
+        {
+            str(o.offer.get("exchange"))
+            for g in result.groups
+            if g.uri == socrates
+            for o in g.result.verified
+        }
     )
-    payload = _payload_of(resp, "socrates resolve")
-    # Resolve is discovery-only: a licensed discovery is a NON-EMPTY offer
-    # group for the requested uri (never a retrievalEndpoint — that is minted
-    # at execute time).
-    offers_by_uri = offer_exchanges_by_uri(payload)
-    if not offers_by_uri.get(socrates):
-        print(f"  body={resp.text}")
-        msg = "socrates discovery returned no offers (empty offer group)"
+    if not issuers:
+        buyer.close()
+        print(f"  result={result}")
+        msg = "socrates discovery returned no verified offers"
         raise SystemExit(msg)
-    print(f"  offers from exchange(s): {sorted(offers_by_uri[socrates])}")
+    print(f"  offers from exchange(s): {issuers}")
 
-    print("== item 2: execute canary offer -> signed URL -> edge fetch ==")
+    print("== item 2: buy canary offer -> signed URL -> edge fetch ==")
     canary = f"https://{publisher}/articles/philosophers/thales-of-miletus.txt"
-    # Two-phase mint: Broker Resolve (discovery) then relay-execute the
-    # winning Offer; the Exchange mints the agent-bound signed URL on the
-    # TransactionResponse items[0].
-    resp = execute_first_offer(
-        stack,
-        {"agent_id": agent_id, "uri": canary, "intended_use": "ai-input"},
-        agent_id=agent_id,
-        domain=publisher,
-        key_path=agent_key,
-    )
-    payload = _payload_of(resp, "canary execute")
-    item = first_item_of(payload)
-    if item is None:
-        print(f"  body={resp.text}")
-        msg = "canary execute response carried no items[0]"
-        raise SystemExit(msg)
-    signed = retrieval_endpoint_of(item)
+    # Two phases: Broker Resolve (discovery), then a purchase of the winning
+    # offer through the Broker; the Exchange mints the agent-bound signed URL on
+    # the purchase's result item.
+    try:
+        found = buyer.resolve(resolve_request([canary], intended_use=AI_INPUT))
+        groups = [g for g in found.groups if g.uri == canary]
+        if len(groups) != 1:
+            msg = f"canary resolve answered {len(groups)} groups for {canary}"
+            raise SystemExit(msg)
+        purchase = buyer.execute([only_verified_offer(groups[0], "canary resolve")])
+    except (CallError, AssertionError) as err:
+        msg = f"canary purchase failed: {err}"
+        raise SystemExit(msg) from err
+    finally:
+        buyer.close()
+    items = purchase.items or []
+    signed = items[0].retrieval_endpoint if len(items) == 1 else None
     print(f"  retrievalEndpoint={signed}")
     if not signed:
-        print(f"  body={resp.text}")
-        msg = "canary execute returned no retrievalEndpoint"
+        print(f"  response={purchase}")
+        msg = "canary purchase returned no retrievalEndpoint"
         raise SystemExit(msg)
 
     # Binding leg first: fetch the agent-bound URL WITHOUT proof of possession.
@@ -310,11 +342,12 @@ def main() -> None:
     _bare_fetch_binding_leg(signed, enforce=enforce_binding)
 
     # Happy path: real DNS, real TLS — the signed URL's hostname IS the
-    # deployed edge worker's route. fetch_signed merges the PoP headers
-    # (X-FORA-Agent-Key + RFC 9421 GET signature) and asserts 200 + marker.
+    # deployed edge worker's route. fetch_signed fetches through the SDK, which
+    # presents the PoP headers (X-FORA-Agent-Key + RFC 9421 GET signature); the
+    # marker is asserted.
     try:
         content = fetch_signed(signed, stack, expect_marker=CANARY_MARKER, key_path=agent_key)
-    except AssertionError as err:
+    except (AssertionError, CallError) as err:
         # Deliberate: fetch_signed asserts internally (it is harness code);
         # converting to SystemExit turns a traceback into a readable smoke
         # failure. The explicit re-check below keeps the proof valid even
@@ -323,8 +356,9 @@ def main() -> None:
         raise SystemExit(msg) from err
     # Re-checked explicitly: fetch_signed's internal asserts vanish under
     # `python -O`, and this is the proof the smoke exists for.
-    if content.status_code != httpx.codes.OK or CANARY_MARKER not in content.text:
-        print(f"  edge fetch: status={content.status_code} body={content.text[:200]}")
+    delivered = content.body.decode("utf-8", errors="replace")
+    if CANARY_MARKER not in delivered:
+        print(f"  edge fetch: body={delivered[:200]}")
         msg = "edge delivery did not return the canary body"
         raise SystemExit(msg)
     print(f"  CANARY FOUND: {CANARY_MARKER}")
@@ -335,7 +369,7 @@ def main() -> None:
     # through the edge. The last two legs run on the site root and fora.json.
     _browser_leg(canary)
     _bot_negotiation_leg(canary, publisher, exchange_url)
-    _landing_page_leg(publisher)
+    _landing_page_leg(publisher, licensed_paths)
     _well_known_leg(publisher)
 
     print("\nSTAGING SMOKE PASSED")

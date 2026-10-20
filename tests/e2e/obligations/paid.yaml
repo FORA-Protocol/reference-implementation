@@ -1,0 +1,127 @@
+# Access a paid resource: an agent finds a resource whose owner charges per
+# request, accepts the price, fetches the content and reports its usage.
+# Registry entries (ADR-028 D1); the tests that prove them say so on themselves.
+#
+# A "negative:" case is a refusal with a typed error response (ADR-028 D1). What
+# an answer that refuses nothing must leave out is a "must not" in "positive:".
+
+- id: PAID-001
+  title: Discovery returns the ways to pay for a resource, with prices and currencies
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Price in the provider's model, as an exact decimal string — e.g. "0.05" = $0.05 per article.
+  positive: >-
+    DiscoverResources for a priced URI returns its per-request offer, and the offer's
+    pricing carries the rate as a plain decimal number, not a formatted amount, and
+    an ISO 4217 currency.
+  negative: []
+
+- id: PAID-002
+  title: Accepting a per-request offer confirms the purchase and returns a URL to fetch
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Commit to an offer and receive delivery information.
+  positive: >-
+    Buying the per-request offer returns an item with an Exchange-assigned
+    transaction_id and a non-empty retrieval_endpoint, and no denial reason.
+  negative: []
+
+- id: PAID-003
+  title: Fetching the delivered URL returns the resource owner's content
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/signed-url-verification.mdx
+    quote: >-
+      The Edge Function verifies signed URLs to gate access to protected content.
+  positive: >-
+    A fetch of the purchased retrieval_endpoint through the publisher's edge answers
+    200 with the publisher's article as the body.
+  negative: []
+
+- id: PAID-004
+  title: The agent reports usage after delivery, and the paid access is recorded
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Filed by the agent itself after the resource is used, with the Exchange that issued
+      the offer (UsageReport.exchange), for a purchase a Broker relayed as for a direct
+      one: a Broker files no report for an agent (see "Accounts" in the file header).
+      Failure to report may result in the Exchange blocking subsequent access.
+  positive: >-
+    After a paid purchase and fetch, ReportUsage for the transaction is accepted with
+    a report_id; the buyer's balance dropped by the item's cost in the offer's
+    currency, and the recorded access carries the resource URI and a timestamp.
+  negative: []
+
+- id: PAID-005
+  title: A URI unknown to the platform gets no offer and a reason saying so
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: Why no offers are available for this URI. Set only when `offers` is empty
+  positive: A URI in the catalog gets its offers.
+  negative:
+    - code: ok
+      reason: OFFER_ABSENCE_REASON_NOT_IN_CATALOG
+      side_effect: no offer is returned for the unknown URI
+
+- id: PAID-006
+  title: A buyer with nothing to pay with cannot accept an offer, and is told why
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: "DENIAL_REASON_INSUFFICIENT_BALANCE = 2; // Requester's balance too low"
+  positive: A funded buyer accepts the same offer and is charged the item's cost.
+  negative:
+    - code: ok
+      reason: DENIAL_REASON_INSUFFICIENT_BALANCE
+      side_effect: >-
+        the denied item carries no retrieval_endpoint, transaction or billing record,
+        and the buyer's balances do not move
+
+- id: PAID-007
+  title: A buyer with overdue usage reports may be refused new purchases
+  level: MAY
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      DENIAL_REASON_REPORTING_OVERDUE = 6; // Requester has >20% overdue reports (MAY threshold)
+  positive: A buyer with no overdue report is not refused for reporting.
+  negative:
+    - code: ok
+      reason: DENIAL_REASON_REPORTING_OVERDUE
+      side_effect: the denied item carries no retrieval_endpoint and nothing is charged
+
+- id: PAID-008
+  title: A delivery URL tampered with by the caller is refused, and no content is served
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/signed-url-verification.mdx
+    quote: >-
+      `signature_mismatch` | The signature does not verify, or `kid` resolved to no key.
+  positive: The untampered URL, fetched with the buyer's proof of possession, is served.
+  negative:
+    - code: "403"
+      reason: signature_mismatch
+      side_effect: the publisher's content is not in the response

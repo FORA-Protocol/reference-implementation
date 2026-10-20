@@ -48,7 +48,9 @@ func mustCompileSchema(name string, source []byte) *jsonschema.Schema {
 
 // ValidateManifest applies the document version gate, then checks raw against
 // the WellKnownManifest JSON Schema. A refused version returns ErrVersionRefused;
-// any shape failure returns ErrSchemaInvalid (wrapping the detailed violation).
+// a document that parsed and broke a rule returns ErrSchemaInvalid, wrapping the
+// detailed violation; a body that is not JSON at all returns ErrNotJSON. This
+// function performs no fetch and says nothing about one.
 //
 // The version runs first, and on the raw bytes rather than the decoded message:
 // the manifest's rule is that a consumer reads `ver` before it acts on any other
@@ -111,9 +113,28 @@ func ValidateRevocation(raw []byte) error {
 }
 
 func validateAgainst(sch *jsonschema.Schema, raw []byte) error {
+	// A body that is not JSON at all is ErrNotJSON, not ErrSchemaInvalid, and the
+	// difference is whether a retry can clear it. Nothing was validated here:
+	// there is no document to hold to a rule, so this says nothing about what the
+	// origin publishes. The shape it actually describes is a proxy or a CDN
+	// answering 200 with an error page, or a body truncated in transit, and the
+	// next fetch may well return the real document.
+	//
+	// It is NOT ErrFetch either, and that is the point of the separate sentinel.
+	// This function is pure — it is handed bytes and never learns where they came
+	// from — so it cannot honestly report a transport event. The functions that
+	// do fetch wrap this in ErrFetch on the way out; a caller that read a
+	// local file gets the plain answer.
+	//
+	// ErrSchemaInvalid is the opposite fact — bytes that decoded, and then broke a
+	// rule this participant enforces. That one returns the same answer forever, so
+	// a caller classifying retryability reads it as final. Folding the two would
+	// make every such caller either retry a permanent refusal or give up on a
+	// transient one, and the sentinel's own doc records that consumers already
+	// disagree about which.
 	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
 	if err != nil {
-		return fmt.Errorf("%w: not JSON: %w", ErrSchemaInvalid, err)
+		return fmt.Errorf("%w: %w", ErrNotJSON, err)
 	}
 	if err := sch.Validate(inst); err != nil {
 		return fmt.Errorf("%w: %w", ErrSchemaInvalid, err)
@@ -122,10 +143,18 @@ func validateAgainst(sch *jsonschema.Schema, raw []byte) error {
 }
 
 // decodeValidated runs validate over raw, then protojson-decodes it into msg
-// (ignoring unknown fields). A schema or decode failure is wrapped as
-// ErrSchemaInvalid. The caller passes the schema validator so the manifest and
-// revocation-list decode paths share one validate-then-unmarshal sequence
-// without sharing a schema.
+// (ignoring unknown fields). The caller passes the schema validator so the
+// manifest and revocation-list decode paths share one validate-then-unmarshal
+// sequence without sharing a schema.
+//
+// Everything refused from here down is ErrSchemaInvalid, and every one of them
+// is a fact about a document that ARRIVED. validate has already established the
+// bytes are JSON — a body that is not gets ErrNotJSON there, because nothing was
+// read and the next attempt may return the real document. So a protojson refusal
+// is not "it would not decode": the bytes parsed as JSON and satisfied the wire
+// schema, and proto-JSON's own mapping is the rule they broke. Same for the
+// field constraints below. The next fetch returns the same bytes and the same
+// answer, which is what makes these final rather than worth retrying.
 func decodeValidated[T proto.Message](raw []byte, msg T, validate func([]byte) error) error {
 	if err := validate(raw); err != nil {
 		return err

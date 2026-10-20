@@ -18,7 +18,7 @@ import (
 const profileCoMPV1 = "fora-comp-v1"
 
 // compRenderInput names everything the CoMP renderer projects for one offer: the
-// selected headline term, the resource id + that term's ORIGINAL stored index
+// term that offer sells, the resource id + that term's ORIGINAL stored index
 // (together the CoMP package_id), and the resource-intrinsic
 // metadata. Grouping them keeps applyCompProfile within the argument-count cap.
 type compRenderInput struct {
@@ -37,7 +37,7 @@ type compRenderInput struct {
 // It must run AFTER applyMetadata and BEFORE SignOffer so the comp ext is
 // signature-covered (canonicalOfferPayload marshals the whole Offer). It CLONES
 // offer.Ext before writing: applyMetadata aliases the snapshot's rebuild-time
-// metadata struct (metadata_codec.go: offer.Ext = md.Ext), so mutating it in
+// metadata struct (offer_metadata.go: offer.Ext = md.Ext), so mutating it in
 // place would corrupt that shared cache across requests.
 func applyCompProfile(offer *forav1.Offer, cached *structpb.Struct, profiles []string) {
 	if cached == nil || !slices.Contains(profiles, profileCoMPV1) {

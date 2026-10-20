@@ -34,6 +34,7 @@ import (
 	"io"
 	"os"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/catalogfeed"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/ingest"
 )
@@ -152,11 +153,11 @@ func openFeed(positional []string) (feed io.Reader, closeFeed func() error, err 
 // into a non-nil error, so main exits non-zero on it. The findings are written
 // to report before the verdict, so a refused feed lists every reason.
 func runCheck(feed io.Reader, report io.Writer) error {
-	result, err := ingest.Check(feed)
+	result, err := catalogfeed.Check(feed)
 	if err != nil {
 		return err
 	}
-	ingest.WriteCheckReport(report, result)
+	catalogfeed.WriteCheckReport(report, result)
 	if !result.OK() {
 		return fmt.Errorf("check: %d violation(s) across %d record(s); the Exchange would refuse the push",
 			result.Violations(), result.Records)

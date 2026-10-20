@@ -2,10 +2,16 @@ import { generateKeyPairSync } from 'node:crypto';
 
 import { describe, expect, it } from 'vitest';
 
-import { WellKnownManifestVersion } from '@fora-protocol/sdk-l1/wire';
+import { WBA_DIRECTORY_MEDIA_TYPE } from '@fora-protocol/sdk/resolvers/edge';
+import { WellKnownManifestVersion } from '@fora-protocol/sdk/wire';
 import { buildDeps, parseEnv } from '../../src/config.js';
 import { MAX_WBA_KEYS } from '../../src/keys.js';
-import { type WbaKey, buildPublisherManifest, buildPublisherWba } from '../../src/types.js';
+import {
+  WBA_DIRECTORY_CONTENT_TYPE,
+  type WbaKey,
+  buildPublisherManifest,
+  buildPublisherWba,
+} from '../../src/types.js';
 import { assertValidManifest, assertValidWba } from '../helpers/wellknown-schema.js';
 
 describe('edge publisher overlay manifest conforms to the canonical FORA schema', () => {
@@ -44,6 +50,16 @@ describe('edge publisher overlay manifest conforms to the canonical FORA schema'
     // constant rather than importing it. This is the check that keeps the mirror
     // honest: a bump in the SDK that the literal did not follow fails here.
     expect(minimalManifest().ver).toBe(WellKnownManifestVersion);
+  });
+
+  it('the WBA directory media type literal is the SDK media type', () => {
+    // The same mirror, for the media type the edge serves its directory under and
+    // requires of the Exchange's. The SDK names it in its edge resolvers entry,
+    // the one an edge runtime imports. The worker itself does not import that
+    // entry, because doing so would bundle every strict schema the readers
+    // check, so this test is where the literal and the SDK constant are compared.
+    expect(WBA_DIRECTORY_MEDIA_TYPE).toBe('application/http-message-signatures-directory+json');
+    expect(WBA_DIRECTORY_CONTENT_TYPE).toBe(WBA_DIRECTORY_MEDIA_TYPE);
   });
 
   it('the canonical schema does not adjudicate the version at all', () => {

@@ -14,12 +14,12 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/service"
 )
 
-// TestPushResources_ForeignTenantIdRejected proves the server-side tenant derivation: a caller that is a
-// legitimate contributor for one publisher domain cannot write a catalog row
-// under a DIFFERENT tenant by naming that tenant on the wire. The server derives
-// the owning tenant_id from the entry's publisher domain (tenants.domain is
-// UNIQUE) and rejects the disagreeing client tenant_id, rather than honouring it
-// and binding the row to the victim tenant's downstream signing key.
+// TestPushResources_ForeignTenantIdRejected proves the server-side seat
+// resolution: a caller that is a legitimate contributor for one publisher domain
+// cannot write a catalog row under a DIFFERENT seat by naming that seat on the
+// wire. The server resolves the owning tenant_id from its own EXCHANGE_DOMAIN
+// and rejects the disagreeing client tenant_id, rather than honouring it and
+// binding the row to the victim seat's downstream signing key.
 //
 // Round-trip: write attempt goes through the public PushResources RPC and is
 // rejected (count); the absence of the side effect is confirmed through the
@@ -29,15 +29,16 @@ func TestPushResources_ForeignTenantIdRejected(t *testing.T) {
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 	client := h.signedCat(callerID, priv)
 
-	// A victim tenant the caller has no authority over.
-	victimTenant, _ := seedTenant(t, h)
+	// A victim seat the caller has no authority over, and which this deployment
+	// does not sell as.
+	victimTenant := seedForeignSeat(t, h)
 
 	const path = "/articles/cross-tenant"
 	resp, err := client.PushResources(h.ctx, connect.NewRequest(newPushRequest(victimTenant, callerID, []*forav1.ResourceEntry{{
@@ -60,10 +61,15 @@ func TestPushResources_ForeignTenantIdRejected(t *testing.T) {
 }
 
 // TestPushResources_CollidingContentIdDoesNotOverwriteVictim proves that a
-// caller cannot overwrite a victim tenant's catalog row by reusing the victim's
-// content_id. resource_id is namespaced server-side by the owning tenant, so
-// two tenants pushing the SAME content_id produce two DISTINCT rows — the
-// attacker can neither address nor clobber the victim's row.
+// caller cannot overwrite another publisher's catalog row by reusing that
+// publisher's content_id. resource_id is namespaced server-side by the seat AND
+// by the publisher site, so two sites pushing the SAME content_id produce two
+// DISTINCT rows — the attacker can neither address nor clobber the victim's row.
+//
+// The site half of that namespace is what this test turns on. Both publishers
+// sell through the same seat, so scoping by seat alone would put both entries on
+// one resource_id, and content_id is the publisher's own identifier with no
+// meaning outside their site.
 //
 // Round-trip: both pushes go through PushResources; both rows are observed
 // through DiscoverResources. Row identity is observed through each offer's
@@ -73,15 +79,16 @@ func TestPushResources_ForeignTenantIdRejected(t *testing.T) {
 func TestPushResources_CollidingContentIdDoesNotOverwriteVictim(t *testing.T) {
 	h := newPushHarness(t)
 
-	// Victim: a second tenant whose publisher fora.json lists a victim caller.
-	victimTenant, victimDom := seedTenant(t, h)
+	// Victim: a second publisher site on the same seat, whose fora.json lists a
+	// victim caller.
+	victimTenant, victimDom := seedSite(t, h)
 	victimCaller := "victim.example"
 	h.publishPublisher(t, victimDom, victimCaller)
-	vpub, vpriv, err := ed25519.GenerateKey(rand.Reader)
+	_, vpriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen victim: %v", err)
 	}
-	h.publishAgent(t, victimCaller, vpub)
+	h.publishAgent(t, victimCaller, vpriv)
 	victimClient := h.signedCat(victimCaller, vpriv)
 
 	const sharedContentID = "shared-content-id"
@@ -104,11 +111,11 @@ func TestPushResources_CollidingContentIdDoesNotOverwriteVictim(t *testing.T) {
 	// reusing the victim's content_id in an attempt to clobber the victim row.
 	attackerCaller := "caller.example"
 	h.publisher.setContributors(attackerCaller)
-	apub, apriv, err := ed25519.GenerateKey(rand.Reader)
+	_, apriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen attacker: %v", err)
 	}
-	h.publishAgent(t, attackerCaller, apub)
+	h.publishAgent(t, attackerCaller, apriv)
 	attackerClient := h.signedCat(attackerCaller, apriv)
 
 	const attackerPath = "/attacker/article"
@@ -122,7 +129,7 @@ func TestPushResources_CollidingContentIdDoesNotOverwriteVictim(t *testing.T) {
 
 	// The victim row is untouched: its URI still resolves to exactly one offer
 	// bound to the victim URI. Had the attacker's push clobbered the victim row
-	// (same content_id, no tenant namespacing), the row's URI would now be the
+	// (same content_id, no per-site namespacing), the row's URI would now be the
 	// attacker's and this lookup would come back empty. offer_id is minted fresh
 	// per issued offer, so row identity is observed through the signed
 	// canonical URL, never through offer_id stability.

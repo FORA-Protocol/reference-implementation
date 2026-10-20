@@ -3,6 +3,7 @@ package repo
 import (
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -36,6 +37,24 @@ func textFromPG(t pgtype.Text) *string {
 	}
 	s := t.String
 	return &s
+}
+
+// timeFromPG decodes a nullable pgtype.Timestamptz to *time.Time: SQL NULL
+// becomes nil. The listing's two timestamps both have a meaningful "never", so
+// they cannot collapse to the zero time -- a zero time.Time is a real instant a
+// caller could format and print.
+func timeFromPG(t pgtype.Timestamptz) *time.Time {
+	if !t.Valid {
+		return nil
+	}
+	v := t.Time
+	return &v
+}
+
+// pgTime encodes a present instant as a pgtype.Timestamptz. It is the inverse
+// of timeFromPG for a value that is never NULL.
+func pgTime(t time.Time) pgtype.Timestamptz {
+	return pgtype.Timestamptz{Time: t, Valid: true}
 }
 
 // pgBoolPtr encodes an optional bool as a pgtype.Bool: a nil pointer becomes SQL

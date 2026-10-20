@@ -1,9 +1,9 @@
 """The SDK's own FORA client, driven against the running stack.
 
-Every other suite here builds a FORA body by hand, signs it with
-``signing.sign_post`` and posts it to a path constant. That proves the services;
-it says nothing about the client the SDK now ships, which is what an external
-integrator will actually hold. This suite drives that client and nothing else.
+A suite that builds a FORA body by hand and posts it to a path constant proves
+the services; it says nothing about the client the SDK ships, which is what an
+external integrator will actually hold. This suite drives that client and
+nothing else.
 
 Five properties, and each one fails in a way that is easy to mistake for a
 broken stack:
@@ -40,36 +40,31 @@ that skips the per-test cleanup chain.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
 import pytest
 from fora_sdk.client import NOT_CANONICAL_WIRE_NAMING, CallError, CallErrorKind
-from fora_sdk.core import DiscoveryResult, OfferGroupResult, VerifiedOffer, Verifier
+from fora_sdk.core import Verifier
 from fora_sdk.errordetail import error_detail_from
-from fora_sdk.multisig_parse import parse_multisig_signature_input
+from fora_sdk import sfv
 from fora_sdk.sync import BrokerClient, Client
 
-from ._multi_exchange_common import (
-    _EXCHANGE_DOMAIN_TO_DB,
-    _MUSIC_URI,
-    _PHILOSOPHY_URI,
-    _SFX_URI,
-    _usage_record,
-)
+from ._multi_exchange_common import _MUSIC_URI, _PHILOSOPHY_URI, _SFX_URI
+from .broker_purchase import one_group_per_uri, only_verified_offer
 from .conftest import StackURLs
 from .exchanges import EXCHANGE_A_DOMAIN, EXCHANGE_B_DOMAIN, EXCHANGE_C_DOMAIN
 from .httpsig_signer import load_keypair, signing_transport
-from .reporting import report_body
+from .reporting import assert_report_recorded_only_at, report_body
 from .sdk_client import offer_verifier, sdk_broker_client, sdk_exchange_client
 from .seed import (
     DEMO_PHILOSOPHY_DOMAIN,
     USD_AGENT_ID,
     SeededFixture,
 )
-from .signing import AGENT_E2E_KEY_PATH, USD_AGENT_KEY_PATH
+from .e2e_catalog import USD_AGENT_KEY_PATH
 
 # epicurus: PER_UNIT 0.0001/characters USD — a PAID resource, deliberately. The
 # report path needs an obligation to record, and the philosophy URI the
@@ -123,7 +118,7 @@ def _call(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
 def verifier(compose_stack: StackURLs) -> Verifier:  # noqa: ARG001 — the stack must be up to fetch
     """The offer-key verifier every client in this module shares.
 
-    Built once per module, not once per test. It reads all three Exchanges' Web
+    Built once per module, not once per test. It reads three Exchanges' Web
     Bot Auth directories over HTTP at a ten-second timeout, and three tests
     building it separately paid that three times for one identical answer.
 
@@ -133,10 +128,7 @@ def verifier(compose_stack: StackURLs) -> Verifier:  # noqa: ARG001 — the stac
     last.
 
     The domains come from the URI-ownership map, which is the same list this
-    module already uses to say which Exchange serves what. Reading them off the
-    database-topology map instead named the right three by coincidence: this
-    fixture opens no database, and coupling it to that map would make a change in
-    the storage layout look like a change in who signs offers.
+    module already uses to say which Exchange serves what.
     """
     return offer_verifier(list(_URI_OWNERS.values()))
 
@@ -193,46 +185,6 @@ def clients(compose_stack: StackURLs, verifier: Verifier) -> Iterator[_ClientFac
         yield _ClientFactory(stack=compose_stack, verifier=verifier, closing=closing)
 
 
-def _only_verified_offer(group: OfferGroupResult, leg: str) -> VerifiedOffer:
-    """The single verified offer in one group, refusing a partial success.
-
-    Reports what was rejected and why, because a fail-closed rejection is the
-    shape a mis-wired key resolver takes and it is otherwise indistinguishable
-    from an Exchange that offered nothing. An EMPTY rejected list is asserted as
-    well: a result carrying one verified offer beside a rejected one is a key
-    resolver that reached some Exchange and not another, and reading index 0 and
-    moving on would call that a pass.
-    """
-    # A verified or rejected offer wraps the offer as the canonical snake_case
-    # proto-JSON object it arrived as, not a parsed model, so it is read by key.
-    rejected = [(r.offer.get("offer_id"), r.reason) for r in group.result.rejected]
-    assert group.result.verified, (
-        f"{leg} verified no offers for {group.uri}: rejected={rejected} "
-        f"absence_reason={group.absence_reason}. A rejection here usually means the "
-        f"offer-key resolver never reached the Exchange's Web Bot Auth directory."
-    )
-    assert not rejected, (
-        f"{leg} rejected {rejected} for {group.uri} alongside what it verified. "
-        f"Every offer here is signed by an Exchange this verifier holds a key for, so a "
-        f"rejection means one directory was not read."
-    )
-    return group.result.verified[0]
-
-
-def _one_group_per_uri(
-    result: DiscoveryResult, wanted: Iterable[str], leg: str
-) -> dict[str, OfferGroupResult]:
-    """Index a discovery result by URI, refusing anything but one group each."""
-    by_uri: dict[str, OfferGroupResult] = {}
-    for group in result.groups:
-        assert group.uri not in by_uri, f"{leg} returned two groups for {group.uri}"
-        by_uri[group.uri] = group
-    assert set(by_uri) == set(wanted), (
-        f"{leg} answered for {sorted(by_uri)}, asked about {sorted(wanted)}"
-    )
-    return by_uri
-
-
 def test_broker_resolve_verifies_an_offer_from_every_exchange(
     clients: _ClientFactory,
     seeded: SeededFixture,  # noqa: ARG001 — ordering: seed ingests the demo catalog
@@ -256,9 +208,9 @@ def test_broker_resolve_verifies_an_offer_from_every_exchange(
     against the issuer's published key exactly as a paid one would be.
     """
     result = _call(clients.broker().resolve, {"uris": list(_URI_OWNERS)})
-    by_uri = _one_group_per_uri(result, _URI_OWNERS, "broker resolve")
+    by_uri = one_group_per_uri(result, _URI_OWNERS, "broker resolve")
     for uri, owner in _URI_OWNERS.items():
-        offer = _only_verified_offer(by_uri[uri], f"broker resolve for {uri}")
+        offer = only_verified_offer(by_uri[uri], f"broker resolve for {uri}")
         assert offer.offer.get("exchange") == owner, (
             f"{uri} came back verified but stamped with "
             f"{offer.offer.get('exchange')!r}, want {owner!r} — the offer was checked "
@@ -281,14 +233,16 @@ def test_sdk_client_walks_the_paid_path(
     origin, a regression to configuration lands in the same place and nothing
     here would notice.
 
-    Where it landed is then read from the issuing Exchange's OWN database, and
-    from the other two to show it is absent there. The ledger has no protocol
-    read surface by design, so that read is the documented black-box exception
-    the multi-exchange suites already take.
+    Where it landed is then observed through the report surface itself, at
+    every Exchange. The issuer answers a replay of the same report with the
+    report_id it recorded, which it can only do from a stored, accepted report.
+    Every other Exchange refuses the same report not_found, because no
+    transaction it holds has that id. Both are protocol round-trips: the report
+    goes in through ReportUsage and the evidence comes back out of it.
     """
     discovered = _call(clients.broker().resolve, {"uris": [_RESOURCE_URI]})
-    by_uri = _one_group_per_uri(discovered, [_RESOURCE_URI], "broker resolve")
-    offer = _only_verified_offer(by_uri[_RESOURCE_URI], "broker resolve")
+    by_uri = one_group_per_uri(discovered, [_RESOURCE_URI], "broker resolve")
+    offer = only_verified_offer(by_uri[_RESOURCE_URI], "broker resolve")
     issuer = offer.offer.get("exchange")
     assert issuer, f"the verified offer names no exchange: {offer.offer}"
 
@@ -305,49 +259,35 @@ def test_sdk_client_walks_the_paid_path(
     assert purchased.items, f"execute answered an envelope with no items: {purchased}"
     item = purchased.items[0]
     assert item.retrieval_endpoint, f"execute minted no delivery URL: {purchased}"
+    # The Exchange mints this at execute, and the usage report below is filed
+    # against it -- so an item without one cannot be reported at all, and the
+    # lookups that follow would search for a record keyed on nothing.
+    assert item.transaction_id, f"execute answered an item with no transaction id: {item}"
 
     # Property 3: the delivery leg presents the agent key and returns bytes.
     content = _call(buyer.fetch, item.retrieval_endpoint)
     assert content.body, "the delivery URL returned an empty body"
 
-    reported = _call(
-        reporter.report_usage,
-        report_body(
-            exchange=issuer,
-            transaction_id=item.transaction_id,
-            agent_id=USD_AGENT_ID,
-            domain=DEMO_PHILOSOPHY_DOMAIN,
-            # The Exchange minted this at execute and checks the report
-            # against it, so a report that omits it is refused as a
-            # billing_id mismatch rather than recorded.
-            billing_id=item.billing_id,
-            # consumed_quantity is left at its default 0. The epicurus term
-            # carries no estimate, so the obligation records zero, and the
-            # validator strict-rejects any positive quantity against a
-            # zero-estimate obligation. What this test proves is WHERE the
-            # report landed; the quantity is incidental to that.
-        ),
+    report = report_body(
+        exchange=issuer,
+        transaction_id=item.transaction_id,
+        # The Exchange minted this at execute and checks the report
+        # against it, so a report that omits it is refused as a
+        # billing_id mismatch rather than recorded.
+        billing_id=item.billing_id,
+        # consumed_quantity is left at its default 0, which every Exchange
+        # accepts. The reference Exchange drops the record-level estimate
+        # epicurus states, so its obligation records zero and its validator
+        # refuses a positive quantity against it. What this test proves is
+        # WHERE the report landed; the quantity is incidental to that.
     )
-
+    reported = _call(reporter.report_usage, report)
     assert reported.report_id, (
         f"the usage report answered no report_id, so nothing shows it was recorded: {reported}"
     )
 
     # Property 2, the observable half: the ISSUER recorded it, and nobody else.
-    issued, outcome = _usage_record(_EXCHANGE_DOMAIN_TO_DB[issuer], item.transaction_id)
-    assert issued == reported.report_id, (
-        f"{issuer} recorded issued_report_id {issued!r}, want the client's "
-        f"{reported.report_id!r} — the report did not land at the issuing Exchange"
-    )
-    assert outcome == "VALIDATED", f"{issuer} recorded outcome {outcome!r}, want VALIDATED"
-    for domain, db in _EXCHANGE_DOMAIN_TO_DB.items():
-        if domain == issuer:
-            continue
-        leaked, _ = _usage_record(db, item.transaction_id)
-        assert leaked is None, (
-            f"{domain} (db {db}) also holds a record for {item.transaction_id} — "
-            f"the report reached an Exchange that did not issue the offer"
-        )
+    assert_report_recorded_only_at(clients.stack, report, reported.report_id)
 
 
 def test_a_refusal_carries_its_decoded_error_detail(
@@ -363,13 +303,15 @@ def test_a_refusal_carries_its_decoded_error_detail(
     cannot be falsy. Asserting only that ``exc.detail`` is not None proves little
     more, for the reason below.
 
-    This path carries NO typed reason. The Exchange routes a ReportUsage fault
-    through its shared reasonless envelope, which stamps domain and message and
-    nothing else; the per-domain usage-report rejection reason is a later step in
-    that service. Every field it does carry is a single word, so the proto name
-    and the lowerCamelCase json_name alias are the same string, and this test
-    cannot tell the SDK's alias rewrite from a reader that never had one. That
-    property is pinned by ``test_the_sdk_reads_a_camelcase_error_detail`` below.
+    The protocol requires this refusal to carry its typed reason,
+    ``usage_report_rejection`` TRANSACTION_NOT_FOUND. Whether the Exchange sends
+    it is obligation MONEY-024, asserted in ``obligations/test_money_reports.py``;
+    this test holds only the SDK's half, that the detail the Exchange sends is
+    decoded, so it reads the two fields every ExchangeService fault carries. Each
+    is a single word, so the proto name and the lowerCamelCase json_name alias
+    are the same string, and this test cannot tell the SDK's alias rewrite from a
+    reader that never had one. That property is pinned by
+    ``test_the_sdk_reads_a_camelcase_error_detail`` below.
     """
     client = clients.exchange(EXCHANGE_A_DOMAIN)
     with pytest.raises(CallError) as caught:
@@ -378,8 +320,6 @@ def test_a_refusal_carries_its_decoded_error_detail(
             report_body(
                 exchange=EXCHANGE_A_DOMAIN,
                 transaction_id="tx-nobody-holds-this-one",
-                agent_id=USD_AGENT_ID,
-                domain=DEMO_PHILOSOPHY_DOMAIN,
             ),
         )
 
@@ -474,7 +414,7 @@ def test_the_signer_sends_every_covered_header() -> None:
     ``@``-prefixed covered names are derived components (the method, the target
     URI) rather than header fields, and are excluded.
     """
-    _, priv = load_keypair(AGENT_E2E_KEY_PATH)
+    _, priv = load_keypair(USD_AGENT_KEY_PATH)
     signed = signing_transport("https://agent.example", priv).sign_outbound(
         method="POST",
         url="http://exchange.example/fora.v1.ExchangeService/DiscoverResources",
@@ -482,9 +422,11 @@ def test_the_signer_sends_every_covered_header() -> None:
         authorization="",
     )
 
-    members = parse_multisig_signature_input([signed.headers["signature-input"]])
+    members = list(sfv.parse_dictionary(signed.headers["signature-input"]).values())
     assert members, f"Signature-Input did not parse: {signed.headers['signature-input']!r}"
-    covered = {name for name in members[0].covered_names if not name.startswith("@")}
+    first = members[0]
+    assert isinstance(first, sfv.InnerList), first
+    covered = {str(item.value) for item in first.items if not str(item.value).startswith("@")}
     assert "authorization" in covered, (
         "the covered set no longer binds authorization. Dropping it is not a fix for "
         "the header never being sent -- it removes the binding that stops a bearer "

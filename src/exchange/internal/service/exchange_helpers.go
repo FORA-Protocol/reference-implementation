@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
@@ -203,26 +204,59 @@ func (s *ExchangeService) authorizeBilling(
 // non-empty ULID handle from Authorize, so the empty check is exact.
 func hasNoReservation(billingID string) bool { return billingID == "" }
 
-// mintSignedURL dispatches to the correct URL signer based on the tenant's
-// signing scheme and returns a ready-to-embed SignedURL. agentThumbprint, when
-// non-empty, is embedded as the `agent_id` query parameter and covered by the
-// signature, binding the URL to the requesting agent's key (ADR-013).
+// siteForEntry resolves the registered publisher site a catalog entry belongs
+// to, so the URL signer can read the scheme and the CloudFront key-pair id from
+// it.
+//
+// A stored entry whose site is no longer registered is an Internal failure, not
+// a caller mistake: the push gate refuses an entry for an unregistered domain,
+// so reaching here means the row and the registration have gone out of step and
+// nothing the agent can send would fix it.
+func (s *ExchangeService) siteForEntry(
+	ctx context.Context, entry repo.CatalogEntry,
+) (repo.PublisherDomain, error) {
+	domain, err := siteDomainFromURI(entry.URI)
+	if err != nil {
+		return repo.PublisherDomain{}, exchange.Wrap(exchange.KindInternal, err,
+			"resolve publisher site for delivery URL")
+	}
+	site, err := s.sites.ByDomain(ctx, domain)
+	if err != nil {
+		return repo.PublisherDomain{}, exchange.Wrap(exchange.KindInternal, err,
+			"resolve publisher site for delivery URL")
+	}
+	return site, nil
+}
+
+// mintSignedURL dispatches to the correct URL signer and returns a
+// ready-to-embed SignedURL. agentThumbprint, when non-empty, is embedded as the
+// `agent_id` query parameter and covered by the signature, binding the URL to
+// the requesting agent's key (ADR-013).
+//
+// The signing inputs come from two rows, per ADR-026 D5. The SITE the entry
+// belongs to decides which scheme its edge verifies and carries the CloudFront
+// key-pair id its publisher's AWS account assigned. The SEAT holds the private
+// keys, one reference per scheme, which never leave this deployment.
 func (s *ExchangeService) mintSignedURL(
 	ctx context.Context,
 	tenant repo.Tenant,
 	entry repo.CatalogEntry,
 	agentThumbprint string,
 ) (helpers.SignedURL, error) {
-	urlSigner, err := signing.URLSignerFor(signing.TenantKeys{
-		Scheme:              signing.Scheme(tenant.SigningScheme),
+	site, err := s.siteForEntry(ctx, entry)
+	if err != nil {
+		return helpers.SignedURL{}, err
+	}
+	urlSigner, err := signing.URLSignerFor(signing.URLSigningKeys{
+		Scheme:              signing.Scheme(site.SigningScheme),
 		Ed25519Ref:          tenant.Ed25519KeyRef,
 		RSARef:              tenant.RSAKeyRef,
-		CloudFrontKeyPairID: tenant.CloudFrontKeyPairID,
+		CloudFrontKeyPairID: site.CloudFrontKeyPairID,
 	}, s.keyStore)
 	if err != nil {
 		// A deliberately unprovisioned RSA key is a configuration precondition,
 		// not a server fault: the operator chose to run without one and a
-		// CloudFront-scheme tenant arrived anyway. FailedPrecondition mirrors
+		// CloudFront-scheme site arrived anyway. FailedPrecondition mirrors
 		// the unseeded-default-tenant mapping in Register — same class of
 		// deterministic, operator-fixable state. Everything else on this path
 		// (unknown scheme, missing key ref, corrupt key) stays Internal.
@@ -236,13 +270,14 @@ func (s *ExchangeService) mintSignedURL(
 			reqctx.FromContext(ctx).WarnContext(ctx, "exchange.execute_transaction",
 				"event", "url_signer_unprovisioned",
 				"tenant_id", tenant.ID,
+				"publisher_domain", site.Domain,
 				"err", err.Error())
 			return helpers.SignedURL{}, exchange.Newf(exchange.KindFailedPrecondition,
 				"delivery URL signing is not provisioned for this publisher")
 		}
 		return helpers.SignedURL{}, exchange.Wrap(exchange.KindInternal, err, "resolve url signer")
 	}
-	signed, err := urlSigner.SignURL(ctx, entry.URI, agentThumbprint, s.clk.Now().Add(s.cfg.URLTTL))
+	signed, err := urlSigner.SignURL(ctx, entry.URI, agentThumbprint, s.clk.Now().Add(s.urlTTL(tenant.ID)))
 	if err != nil {
 		return helpers.SignedURL{}, exchange.Wrap(exchange.KindInternal, err, "sign url")
 	}
@@ -256,10 +291,25 @@ func maxInt32(v, fallback int32) int32 {
 	return v
 }
 
+// Outcomes of an ExecuteTransaction or ReportUsage attempt that are not a
+// refusal. logOutcome logs these two at INFO and every other outcome at WARN.
+const (
+	outcomeValidated = "VALIDATED"
+	outcomeReplay    = "REPLAY"
+)
+
 // logOutcome emits one structured log line per ExecuteTransaction or
 // ReportUsage attempt, correlated by request_id. tenant may be nil (e.g. for
 // failures that happen before tenant resolution). err is the
 // outcome-classifying error; nil on success.
+//
+// The level follows the outcome, never the presence of err: an accepted
+// attempt is the per-call audit trail at INFO, and every refusal is WARN,
+// whether or not an error came with it. Every outcome logged here is decided from the request; a read that
+// fails returns KindInternal without reaching this line. So the level does not
+// depend on whether the caller is still connected when the line is written,
+// and a caller cannot move the record of its own attempt out of view by
+// hanging up.
 func (s *ExchangeService) logOutcome(
 	ctx context.Context, op, outcome string,
 	caller Caller, tenant *repo.Tenant,
@@ -283,13 +333,14 @@ func (s *ExchangeService) logOutcome(
 	// attribute, so logging through it would silently drop the correlation
 	// this doc comment promises. Falls back to
 	// slog.Default() when no middleware ran (e.g. a direct service call).
-	logger := reqctx.FromContext(ctx)
 	if err != nil {
 		attrs = append(attrs, "kind", err.Kind.String(), "err", err.Message)
-		logger.WarnContext(ctx, "exchange."+op, attrs...)
-		return
 	}
-	logger.InfoContext(ctx, "exchange."+op, attrs...)
+	level := slog.LevelWarn
+	if outcome == outcomeValidated || outcome == outcomeReplay {
+		level = slog.LevelInfo
+	}
+	reqctx.FromContext(ctx).Log(ctx, level, "exchange."+op, attrs...)
 }
 
 func callerKindLabel(k CallerKind) string {

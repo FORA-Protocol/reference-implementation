@@ -17,13 +17,13 @@ import (
 	"time"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/oidcup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/session"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/account"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/directory"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/keystore"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/oauth"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/oidcup"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/session"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/signup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/token"
 )
@@ -48,9 +48,10 @@ const (
 	maxFormBytes = 16 << 10
 )
 
-// Config wires a Server. Issuer is this authorization server's own issuer URL (the
-// base the metadata endpoints are advertised under); every other field is a
-// collaborator the handlers compose.
+// Config wires a Server. Issuer is this authorization server's own issuer URL: the
+// base the metadata endpoints are advertised under, and the iss value every
+// authorization response carries (RFC 9207). Every other field is a collaborator
+// the handlers compose.
 type Config struct {
 	Issuer        string
 	Codec         *session.Codec
@@ -69,6 +70,10 @@ type Config struct {
 type Server struct {
 	cfg   Config
 	grant *grant
+	// flow is the upstream leg to the login provider: /authorize starts it and
+	// /callback finishes it, carrying the downstream client's request across
+	// the trip sealed in the flow cookie.
+	flow *oidcup.Flow[authFlow]
 }
 
 // validate reports the first missing required field, one field per message, and
@@ -115,7 +120,7 @@ func New(cfg Config) (*Server, error) {
 	if cfg.CodeTTL <= 0 {
 		cfg.CodeTTL = defaultCodeTTL
 	}
-	return &Server{
+	s := &Server{
 		cfg: cfg,
 		grant: &grant{
 			clients:  cfg.Clients,
@@ -124,7 +129,15 @@ func New(cfg Config) (*Server, error) {
 			codeTTL:  cfg.CodeTTL,
 			tokenTTL: cfg.TokenTTL,
 		},
-	}, nil
+	}
+	flow, err := oidcup.NewFlow[authFlow](oidcup.FlowConfig{
+		Upstream: cfg.Upstream, Jar: sealedJar{s: s}, Cookie: authFlowCookie, TTL: authFlowTTL,
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.flow = flow
+	return s, nil
 }
 
 // RegisterRoutes mounts the authorization-server routes on mux. The patterns are

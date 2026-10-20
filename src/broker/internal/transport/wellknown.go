@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/server"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/wellknownbuild"
@@ -37,10 +39,15 @@ var WellKnownRebuildInterval = server.RebuildIntervalFor(brokerKeyLifetime)
 // role=ROLE_BROKER commercial overlay manifest (no identity keys) plus a WBA
 // directory carrying the Broker's own keys (the co-signing identity key and
 // the relay key).
+//
+// KeySigners hold the private halves of Keys' keys (the relay key). The
+// directory response is signed once per listed key, by Signer's identity key
+// and by each of these.
 type WellKnownConfig struct {
 	Signer        *signing.CoSigner
 	BrokerID      string
 	Keys          *KeyRegistry
+	KeySigners    []helpers.Signer
 	RevocationURL string
 }
 
@@ -64,12 +71,18 @@ func NewWellKnown(cfg WellKnownConfig) (server.Handlers, error) {
 	if cfg.Keys == nil {
 		return server.Handlers{}, fmt.Errorf("transport: broker well-known requires a non-nil *KeyRegistry")
 	}
+	identity, err := cfg.Signer.DirectorySigner()
+	if err != nil {
+		return server.Handlers{}, fmt.Errorf("transport: broker well-known: %w", err)
+	}
 	return wellknownbuild.Build(wellknownbuild.Config{
 		Manifest: server.Config{
 			Role:   forawellknown.RoleBroker,
 			Domain: cfg.Signer.Domain(),
 		},
 		Keys:          brokerKeySource{signer: cfg.Signer, keys: cfg.Keys},
+		Signers:       append([]helpers.Signer{identity}, cfg.KeySigners...),
+		Now:           cfg.Signer.Now,
 		RevocationURL: cfg.RevocationURL,
 	})
 }

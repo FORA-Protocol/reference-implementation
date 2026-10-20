@@ -3,7 +3,7 @@
 # secrets.auto.tfvars, or export them as TF_VAR_* environment variables.
 #
 # Before the first apply:
-#   1. ../../scripts/gen-staging-keys.sh    # writes ./keys/ (gitignored)
+#   1. ../../scripts/gen-keys.sh staging-aws   # writes ./keys/ (gitignored)
 #   2. ../../scripts/build-push-images.sh   # builds + pushes the images
 #   3. ../../scripts/build-cloudflare-edge.sh   # builds the worker bundle
 
@@ -49,6 +49,11 @@ domain                = "staging-zone.example"
 # <agent-slug>.mcp.<domain>, and those names cannot be known ahead of time.
 # identity_subdomain = "mcp"
 # zitadel_subdomain  = "login"
+# Optional: serve the MCP endpoint under its own label. The token audience
+# follows <mcp_subdomain>.<domain>; the issuer and the agent wildcard stay on
+# identity_subdomain. Changing it on a running stack replaces the VM and
+# invalidates every issued bearer.
+# mcp_subdomain      = "agents"
 
 # Images: <image_registry>/<image_prefix>/{exchange,broker,identity,publisher}:<image_tag>,
 # as pushed by ../../scripts/build-push-images.sh. Use the same values here
@@ -70,23 +75,19 @@ acme_email = "ops@example.com"
 # hostnames under `domain`: Caddy serves each identity's public key directory
 # at <label>.<domain>, which is how the services verify their signatures. The
 # label defaults ("smoke-agent", "catalog-contributor") match what
-# gen-staging-keys.sh mints, so normally nothing to set here:
+# gen-keys.sh mints, so normally nothing to set here:
 # smoke_agent_subdomain         = "smoke-agent"
 # catalog_contributor_subdomain = "catalog-contributor"
 
 # The stack also deploys its own Cloudflare edge worker (demo.<domain>) by
 # default. Set false to skip ONLY the worker — the backend and the demo origin
-# still run in full. That is the mode for fronting a client hostname with a
-# separately applied stacks/edge (see the client-simulation section in
-# ../../docs/deploy-edge-standalone.md):
+# still run in full. That is the mode for fronting another publisher's hostname
+# with a separately applied stacks/edge (see the separate-edge section in
+# ../../docs/deploy-edge-standalone.md). In that mode the publisher is seeded as
+# a site listed on this stack's seat — pass its hostname as PUBLISHER_DOMAIN to
+# seed-staging.sh. Nothing to set here: the seat is the Exchange itself either
+# way:
 # deploy_edge = false
-
-# In that mode the tenant is seeded under the CLIENT publisher's hostname
-# (PUBLISHER_DOMAIN in seed-staging.sh), so name it here too — this is the
-# tenant agent registration reads its activation policy from, and a mismatch
-# makes every agent registration fail. Leave it out for the normal
-# deploy_edge = true stack, where it defaults to this stack's demo hostname:
-# default_tenant_domain = "client-news.example.com"
 
 # Agent-key proof-of-possession on staging's own edge worker (deploy_edge =
 # true). Left unset (as here), the worker enforces the proof — the

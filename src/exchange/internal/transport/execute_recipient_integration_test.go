@@ -56,7 +56,7 @@ func TestExecuteTransaction_OneItemNamesAnotherExchange_RefusesTheWholeRequest(t
 	assertRecipientRefusal(t, err, "mismatch")
 	assertReportRejectionField(t, err, "offer.exchange")
 	assertRefusedItemIndex(t, err, "1")
-	assertErrorDomain(t, err, exchangeServiceDomainLiteral)
+	assertErrorDomain(t, err)
 
 	// The first item was addressed correctly and still must not execute: whole
 	// request, whole refusal.

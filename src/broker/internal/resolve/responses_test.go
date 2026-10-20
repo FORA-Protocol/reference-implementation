@@ -7,8 +7,8 @@
 // (NO_HEALTHY_EXCHANGE, NO_AGENT_ENTITLEMENT, GRANTS_DO_NOT_COVER,
 // UNKNOWN_RESOURCE, INTERNAL_ERROR, OUTSTANDING_OBLIGATIONS,
 // BILLING_BLOCK, SUBSCRIPTION_EXPIRED) in favour of the canonical
-// FORA-protocol vocabulary (NOT_IN_CATALOG, SCOPE_INSUFFICIENT,
-// NOT_AUTHORIZED, TEMPORARILY_UNAVAILABLE). The assertions below
+// FORA-protocol vocabulary (NOT_IN_CATALOG, NOT_AUTHORIZED,
+// TEMPORARILY_UNAVAILABLE). The assertions below
 // follow the new mapping documented on
 // `pickResolveAbsenceReason` in resolve_responses.go.
 
@@ -36,10 +36,9 @@ func TestPickResolveAbsenceReason(t *testing.T) {
 			name: "TEMPORARILY_UNAVAILABLE: every upstream call failed",
 			flags: discoverFlags{
 				allUpstreamFailed: true,
-				// scopeRestricted/upstreamReason cannot suppress
-				// the transient-upstream verdict — ADR-008 D2 rule.
-				scopeRestricted: true,
-				upstreamReason:  forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_SCOPE_INSUFFICIENT,
+				// upstreamReason cannot suppress the transient-upstream
+				// verdict — ADR-008 D2 rule.
+				upstreamReason: forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_NOT_AUTHORIZED,
 			},
 			want: forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_TEMPORARILY_UNAVAILABLE,
 		},
@@ -58,21 +57,16 @@ func TestPickResolveAbsenceReason(t *testing.T) {
 			want: forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_NOT_AUTHORIZED,
 		},
 		{
-			name: "upstream SCOPE_INSUFFICIENT propagates",
+			name: "TEMPORARILY_UNAVAILABLE: a named exchange was down, nothing else set",
 			flags: discoverFlags{
-				upstreamReason: forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_SCOPE_INSUFFICIENT,
+				namedExchangeDown: true,
 			},
-			want: forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_SCOPE_INSUFFICIENT,
+			want: forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_TEMPORARILY_UNAVAILABLE,
 		},
 		{
-			name: "SCOPE_INSUFFICIENT: scopeRestricted, no upstream reason",
-			flags: discoverFlags{
-				scopeRestricted: true,
-			},
-			want: forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_SCOPE_INSUFFICIENT,
-		},
-		{
-			name:  "NOT_IN_CATALOG: nothing else set (catalog miss)",
+			// An Exchange answers a requester whose scopes cover nothing with an
+			// empty group and no reason, so this is also the scope-short answer.
+			name:  "NOT_IN_CATALOG: nothing else set (catalog miss, or nothing to offer)",
 			flags: discoverFlags{},
 			want:  forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_NOT_IN_CATALOG,
 		},

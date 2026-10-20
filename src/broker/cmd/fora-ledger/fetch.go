@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"time"
 
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/agentid"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/db"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/evidenceclient"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/evidenceview"
@@ -34,7 +33,7 @@ func Gather(ctx context.Context, cfg Config) (Sources, error) {
 		Transaction: resp.TransactionState,
 		Obligation:  resp.ObligationState,
 	}
-	s.Selection, s.SelectionAbsence = fetchSelection(ctx, cfg, s.Evidence)
+	s.Selection, s.SelectionAbsence = fetchSelection(ctx, cfg, s.Evidence, s.Transaction)
 	s.Delivery, s.DeliveryAbsence = fetchDelivery(ctx, cfg, s)
 	return s, nil
 }
@@ -58,16 +57,20 @@ func fetchEvidence(ctx context.Context, cfg Config) (*evidenceview.Response, err
 // tunnel it needs, and this comment all go away. Going through the repository
 // rather than issuing SQL here is what keeps the query, the tenant of its
 // index, and the JSONB decoding in the one place that owns them.
+//
+// It keys on the agent the Exchange attributed the transaction to, never on a
+// requester field: Requester.id is a free label, and Requester.domain is not
+// checked against the caller on a direct execute, so an agent that resolved
+// through the Broker and then executed directly may carry any domain.
 func fetchSelection(
-	ctx context.Context, cfg Config, e *evidenceview.Evidence,
+	ctx context.Context, cfg Config, e *evidenceview.Evidence, tx *evidenceview.TransactionState,
 ) (*repo.SelectionLogEntry, string) {
 	if cfg.BrokerDBURL == "" {
 		return nil, "not read: no Broker database URL configured, so the routing leg was skipped"
 	}
-	agent, err := agentid.FromDirectory(e.RequesterID)
-	if err != nil {
-		return nil, fmt.Sprintf("not read: the signed requester id %q does not name a directory host: %v",
-			e.RequesterID, err)
+	agent := tx.AgentID
+	if agent == "" {
+		return nil, noTransactionAgent
 	}
 	pool, err := db.Open(ctx, db.Config{DSN: cfg.BrokerDBURL}, slog.New(slog.DiscardHandler))
 	if err != nil {

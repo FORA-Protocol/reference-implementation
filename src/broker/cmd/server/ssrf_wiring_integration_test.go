@@ -60,8 +60,8 @@ func TestBrokerWiring_BuildersUseSDKGuardedClient(t *testing.T) {
 	_ = newOfferVerifier(clock.System{})
 
 	// The health probe is the leg that was wired to a bare client: it dials the
-	// address an exchange advertises about itself, and it writes that address
-	// into the column the discover relay's allowlist compares against.
+	// address an exchange advertises about itself, and its verdict decides
+	// whether that exchange is routed to at all.
 	assertGuardedClient(t, "newHealthProbeClient", newHealthProbeClient())
 }
 

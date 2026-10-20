@@ -51,7 +51,7 @@ func TestPushResources_TermValidation(t *testing.T) {
 		}
 		return term
 	}
-	perUnit := &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.02", Currency: "USD", Unit: proto.String("accesses")}
+	perUnit := &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.02", Currency: "USD", Unit: proto.String("accesses"), EstimatedQuantity: proto.Int32(1)}
 
 	// Shape rules (pricing-required, REFERENCE_ONLY⇒uri) are enforced by
 	// protovalidate at the boundary => a violating push is rejected wholesale
@@ -150,7 +150,7 @@ func TestPushResources_TermValidationMixedBatch(t *testing.T) {
 	validTerm := func() *forav1.LicenseTerm {
 		return &forav1.LicenseTerm{
 			Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
-			Pricing:   &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.07", Currency: "USD", Unit: proto.String("accesses")},
+			Pricing:   &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.07", Currency: "USD", Unit: proto.String("accesses"), EstimatedQuantity: proto.Int32(1)},
 		}
 	}
 
@@ -209,7 +209,7 @@ func TestPushResources_RuleAudit(t *testing.T) {
 	callerID := "caller.example"
 	client := setupTermContributor(t, h, callerID)
 
-	pricing := &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.07", Currency: "USD", Unit: proto.String("accesses")}
+	pricing := &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.07", Currency: "USD", Unit: proto.String("accesses"), EstimatedQuantity: proto.Int32(1)}
 	base := func(mutate func(*forav1.LicenseTerm)) *forav1.LicenseTerm {
 		term := &forav1.LicenseTerm{Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED, Pricing: pricing}
 		mutate(term)
@@ -261,7 +261,7 @@ func TestPushResources_RuleAudit(t *testing.T) {
 			name: "pricing unit unregistered bare token is rejected",
 			path: "/audit/pricing-unit-bad",
 			term: base(func(t *forav1.LicenseTerm) {
-				t.Pricing = &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.07", Currency: "USD", Unit: proto.String("frobnications")}
+				t.Pricing = &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.07", Currency: "USD", Unit: proto.String("frobnications"), EstimatedQuantity: proto.Int32(1)}
 			}),
 			refusal: &ingestRefusal{
 				rule:   helpers.RulePricingUnitRegistered,
@@ -392,7 +392,7 @@ func TestPushResources_LintWarnings(t *testing.T) {
 	callerID := "caller.example"
 	client := setupTermContributor(t, h, callerID)
 
-	pricing := &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.07", Currency: "USD", Unit: proto.String("accesses")}
+	pricing := &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.07", Currency: "USD", Unit: proto.String("accesses"), EstimatedQuantity: proto.Int32(1)}
 
 	cases := []struct {
 		name        string
@@ -462,7 +462,7 @@ func TestPushResources_PricingUnitAccepted(t *testing.T) {
 	enumeratedWithUnit := func(unit string) *forav1.LicenseTerm {
 		return &forav1.LicenseTerm{
 			Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
-			Pricing:   &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.07", Currency: "USD", Unit: proto.String(unit)},
+			Pricing:   &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.07", Currency: "USD", Unit: proto.String(unit), EstimatedQuantity: proto.Int32(1)},
 		}
 	}
 
@@ -519,11 +519,11 @@ func warningsContain(warnings []string, sub string) bool {
 func setupTermContributor(t *testing.T, h *pushHarness, callerID string) foraconnect.CatalogServiceClient {
 	t.Helper()
 	h.publisher.setContributors(callerID)
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen caller key: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 	return h.signedCat(callerID, priv)
 }
 

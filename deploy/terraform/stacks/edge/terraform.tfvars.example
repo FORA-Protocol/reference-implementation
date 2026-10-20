@@ -35,7 +35,7 @@ exchange_url = "https://exchange.operator.example"
 #
 # exchanges_json is the list of Exchanges this publisher works with.
 provider_domain = "news.example.com"
-exchanges_json  = "[{\"domain\":\"exchange.operator.example\",\"endpoint\":\"https://exchange.operator.example\",\"supported_profiles\":[\"fora-news-v1\"]}]"
+exchanges_json  = "[{\"domain\":\"exchange.operator.example\",\"endpoint\":\"https://exchange.operator.example\",\"supported_profiles\":[\"fora-news-v1\",\"fora-comp-v1\",\"fora-music-v1\"]}]"
 
 # Origin the worker forwards verified requests to. Remove when the CDN
 # already routes to origin (CloudFront-native style setups).

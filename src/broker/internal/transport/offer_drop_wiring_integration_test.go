@@ -90,6 +90,8 @@ func (v rejectingVerifier) Sort(_ context.Context, offers []*forav1.Offer) core.
 // BrokerService handler → shared resolve core → Deps.Verifier.Sort → the typed
 // DiscoveryResponse the client decodes. The offer verify/reject verdict is the
 // ONLY injected seam; the offers themselves are real Exchange-signed offers.
+//
+// Needs an e2e test: the Broker dropping a rejected offer; impossible while no real Exchange issues one.
 func TestResolve_RejectingVerifierDropsOfferFromOfferGroups(t *testing.T) {
 	ctx := context.Background()
 
@@ -107,7 +109,7 @@ func TestResolve_RejectingVerifierDropsOfferFromOfferGroups(t *testing.T) {
 	fx.exchange.offerSigningKey = exchangePriv
 	fx.exchange.offerSigningPub = exchangePub
 
-	_, out := resolveOverConnect(t, fx, "agent-1", reqOpts{
+	_, out := resolveOverConnect(t, fx, reqOpts{
 		uri:         "https://acme.example/article-42",
 		budgetMinor: 10000,
 	})
@@ -186,6 +188,8 @@ func (rejectAllVerifier) Sort(_ context.Context, offers []*forav1.Offer) core.Re
 // the offers are real Exchange-signed offers. This test PASSES on HEAD — it guards
 // existing behavior before the extraction (sanctioned refactor exception to
 // red-first).
+//
+// Needs an e2e test: the Broker dropping a rejected offer; impossible while no real Exchange issues one.
 func TestResolve_AllOffersRejected_FailClosedNoOffersRefusal(t *testing.T) {
 	ctx := context.Background()
 
@@ -203,7 +207,7 @@ func TestResolve_AllOffersRejected_FailClosedNoOffersRefusal(t *testing.T) {
 	fx.exchange.offerSigningKey = exchangePriv
 	fx.exchange.offerSigningPub = exchangePub
 
-	srv, out := resolveOverConnect(t, fx, "agent-1", reqOpts{
+	srv, out := resolveOverConnect(t, fx, reqOpts{
 		uri:         "https://acme.example/article-42",
 		budgetMinor: 10000,
 	})

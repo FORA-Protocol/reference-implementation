@@ -80,7 +80,9 @@ func HeadlessLogin(
 // chaseToRedirect follows the post-login redirect chain one hop at a time until a
 // Location starts with redirectPrefix, then extracts the code + state. Relative
 // Locations are resolved against zitadelBase.
-func chaseToRedirect(ctx context.Context, client *http.Client, zitadelBase, redirectPrefix, loc string) (string, string, error) {
+func chaseToRedirect(
+	ctx context.Context, client *http.Client, zitadelBase, redirectPrefix, loc string,
+) (string, string, error) {
 	for hop := 0; hop < 20; hop++ {
 		if loc == "" {
 			return "", "", fmt.Errorf("zitadel: redirect chain ended before reaching %s", redirectPrefix)

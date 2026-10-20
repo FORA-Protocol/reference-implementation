@@ -12,7 +12,6 @@ import (
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/httpsig"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/app"
 )
@@ -65,17 +64,17 @@ func TestExecute_ABatchFetchesOverOneConnection(t *testing.T) {
 	edge.SetBody([]byte("licensed"), "text/plain")
 
 	const items = 4
-	result := &forav1.TransactionResponse{
-		Ver:               helpers.ProtocolVersion,
-		AgentIdentityHash: a.Thumbprint,
+	result := &forav1.BrokerTransactionResponse{
+		Ver:       helpers.ProtocolVersion,
+		Exchanges: []*forav1.ExchangeOutcome{{AgentIdentityHash: a.Thumbprint}},
 	}
 	offers := make([]map[string]any, 0, items)
 	for i := range items {
 		id := fmt.Sprintf("offer-%d", i)
-		result.Items = append(result.Items, deliveredItem(id, edge.URLFor(a.Thumbprint)))
-		offers = append(offers, signedOffer(id, "exchange.example"))
+		result.Items = append(result.Items, deliveredItem(id, f.exchange.SignDelivery(t, edge.URLFor(a.Thumbprint))))
+		offers = append(offers, signedOffer(id, f.exchange.Domain(t)))
 	}
-	f.broker.relayResp = result
+	f.broker.executeResp = result
 
 	out := callTool[deliveryResult](t, f.connect(t, a.Token), "fora_execute", map[string]any{
 		"offers": offers,
@@ -116,16 +115,16 @@ func TestExecute_DeliveryCarriesTheCallsCorrelationID(t *testing.T) {
 
 	edge := testutil.NewEdgeDouble(t, time.Now().Unix())
 	edge.SetBody([]byte("licensed"), "text/plain")
-	f.broker.relayResp = &forav1.TransactionResponse{
-		Ver:               helpers.ProtocolVersion,
-		AgentIdentityHash: a.Thumbprint,
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
+		Ver:       helpers.ProtocolVersion,
+		Exchanges: []*forav1.ExchangeOutcome{{AgentIdentityHash: a.Thumbprint}},
 		Items: []*forav1.TransactionResultItem{
-			deliveredItem("offer-1", edge.URLFor(a.Thumbprint)),
+			deliveredItem("offer-1", f.exchange.SignDelivery(t, edge.URLFor(a.Thumbprint))),
 		},
 	}
 
 	out := callTool[deliveryResult](t, f.connect(t, a.Token), "fora_execute", map[string]any{
-		"offers": []map[string]any{signedOffer("offer-1", "exchange.example")},
+		"offers": []map[string]any{signedOffer("offer-1", f.exchange.Domain(t))},
 	})
 	if len(out.DeliveryFailures) != 0 {
 		t.Fatalf("delivery failed: %+v", out.DeliveryFailures)
@@ -159,15 +158,15 @@ func TestExecute_EmptyBodyIsDeliveredContent(t *testing.T) {
 
 	edge := testutil.NewEdgeDouble(t, time.Now().Unix())
 	edge.SetBody(nil, "text/plain")
-	f.broker.relayResp = &forav1.TransactionResponse{
-		Ver:               helpers.ProtocolVersion,
-		AgentIdentityHash: a.Thumbprint,
-		Items:             []*forav1.TransactionResultItem{deliveredItem("offer-1", edge.URLFor(a.Thumbprint))},
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
+		Ver:       helpers.ProtocolVersion,
+		Exchanges: []*forav1.ExchangeOutcome{{AgentIdentityHash: a.Thumbprint}},
+		Items:     []*forav1.TransactionResultItem{deliveredItem("offer-1", f.exchange.SignDelivery(t, edge.URLFor(a.Thumbprint)))},
 	}
 
-	res := callToolRaw(t, f.connect(t, a.Token), "fora_execute", map[string]any{
+	res := callExecuteRaw(t, f.connect(t, a.Token), map[string]any{
 		"offers": []map[string]any{
-			offerWithCanonicalURL("offer-1", "exchange.example", canonicalArticle),
+			offerWithCanonicalURL("offer-1", f.exchange.Domain(t), canonicalArticle),
 		},
 	})
 
@@ -217,23 +216,23 @@ func TestExecute_ProofWindowIsTheConfiguredOne(t *testing.T) {
 
 	f := newBoundedFixture(t, func(c *app.MCPConfig, _ peerSet) { c.PoPTTL = configuredPoPTTL })
 	a := f.provision(t, "dev-one")
-	f.broker.relayResp = &forav1.TransactionResponse{
-		Ver:               helpers.ProtocolVersion,
-		AgentIdentityHash: a.Thumbprint,
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
+		Ver:       helpers.ProtocolVersion,
+		Exchanges: []*forav1.ExchangeOutcome{{AgentIdentityHash: a.Thumbprint}},
 		Items: []*forav1.TransactionResultItem{
-			deliveredItem("offer-1", edge.URLFor(a.Thumbprint)),
+			deliveredItem("offer-1", f.exchange.SignDelivery(t, edge.URLFor(a.Thumbprint))),
 		},
 	}
 
 	out := callTool[deliveryResult](t, f.connect(t, a.Token), "fora_execute", map[string]any{
-		"offers": []map[string]any{signedOffer("offer-1", "exchange.example")},
+		"offers": []map[string]any{signedOffer("offer-1", f.exchange.Domain(t))},
 	})
 	if len(out.DeliveryFailures) != 0 {
 		t.Fatalf("delivery failed: %+v", out.DeliveryFailures)
 	}
 
 	raw, _ := sigInput.Load().(string)
-	created, expires, err := httpsig.PoPWindowOf(raw)
+	created, expires, err := testutil.PoPWindowOf(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,16 +283,16 @@ func TestExecute_AnExpiredProofIsRefused(t *testing.T) {
 
 			f := newBoundedFixture(t, func(c *app.MCPConfig, _ peerSet) { c.PoPTTL = configuredPoPTTL })
 			a := f.provision(t, "dev-one")
-			f.broker.relayResp = &forav1.TransactionResponse{
-				Ver:               helpers.ProtocolVersion,
-				AgentIdentityHash: a.Thumbprint,
+			f.broker.executeResp = &forav1.BrokerTransactionResponse{
+				Ver:       helpers.ProtocolVersion,
+				Exchanges: []*forav1.ExchangeOutcome{{AgentIdentityHash: a.Thumbprint}},
 				Items: []*forav1.TransactionResultItem{
-					deliveredItem("offer-1", edge.URLFor(a.Thumbprint)),
+					deliveredItem("offer-1", f.exchange.SignDelivery(t, edge.URLFor(a.Thumbprint))),
 				},
 			}
 
 			out := callTool[deliveryResult](t, f.connect(t, a.Token), "fora_execute", map[string]any{
-				"offers": []map[string]any{signedOffer("offer-1", "exchange.example")},
+				"offers": []map[string]any{signedOffer("offer-1", f.exchange.Domain(t))},
 			})
 
 			if !tc.wantFail {

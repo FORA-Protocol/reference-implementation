@@ -6,9 +6,16 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
 
 	vaultapi "github.com/hashicorp/vault/api"
 	tcvault "github.com/testcontainers/testcontainers-go/modules/vault"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/tcstart"
 )
 
 // devRootToken is the root token the dev-mode Vault container boots with. Dev
@@ -51,6 +58,51 @@ func (v *SharedVault) Reset(ctx context.Context) error {
 	return nil
 }
 
+// ScopedClient writes rules as the Vault policy name and returns a client for the
+// same Vault whose token carries that policy and nothing else. The "default" policy
+// is left out, as the e2e stack leaves it out, so a test measures exactly what the
+// named policy grants. The token lives ten minutes, longer than any test.
+func (v *SharedVault) ScopedClient(tb testing.TB, name, rules string) *vaultapi.Client {
+	tb.Helper()
+	ctx := tb.Context()
+	if err := v.Client.Sys().PutPolicyWithContext(ctx, name, rules); err != nil {
+		tb.Fatalf("write policy %q: %v", name, err)
+	}
+	secret, err := v.Client.Auth().Token().CreateWithContext(ctx, &vaultapi.TokenCreateRequest{
+		Policies:        []string{name},
+		NoDefaultPolicy: true,
+		TTL:             "10m",
+	})
+	if err != nil {
+		tb.Fatalf("create token for policy %q: %v", name, err)
+	}
+	client, err := v.Client.Clone()
+	if err != nil {
+		tb.Fatalf("clone vault client: %v", err)
+	}
+	client.SetToken(secret.Auth.ClientToken)
+	return client
+}
+
+// IdentityServiceClient returns a client whose token carries only the Identity
+// Service's policy for this Vault's mount, rendered from the template production
+// and the e2e stack write (deploy/storage/vault/identity-policy.hcl). A suite that
+// builds its store over this client runs under the policy production grants, so it
+// fails the day the service needs a capability the template does not give.
+func (v *SharedVault) IdentityServiceClient(tb testing.TB) *vaultapi.Client {
+	tb.Helper()
+	_, here, _, ok := runtime.Caller(0)
+	if !ok {
+		tb.Fatal("locate the testutil source file")
+	}
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(here), "..", "..",
+		"deploy", "storage", "vault", "identity-policy.hcl"))
+	if err != nil {
+		tb.Fatalf("read the shared policy template: %v", err)
+	}
+	return v.ScopedClient(tb, "identity-service", strings.ReplaceAll(string(raw), "${KV_MOUNT}", v.Mount))
+}
+
 // mountKV mounts the KV v2 engine at path with Vault's DEFAULT version retention
 // (ten versions), deliberately not a hardened max_versions=1.
 //
@@ -77,7 +129,9 @@ func mountKV(ctx context.Context, client *vaultapi.Client, path string) error {
 // returns a handle plus a cleanup func for the caller (TestMain) to defer. The
 // per-test reset is (*SharedVault).Reset. Sibling of StartSharedRedis.
 func StartSharedVault(ctx context.Context, logger *slog.Logger, mount string) (*SharedVault, func(), error) {
-	container, err := tcvault.Run(ctx, "hashicorp/vault:1.20", tcvault.WithToken(devRootToken))
+	container, err := tcstart.Run(ctx, func(ctx context.Context) (*tcvault.VaultContainer, error) {
+		return tcvault.Run(ctx, "hashicorp/vault:1.20", tcvault.WithToken(devRootToken))
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("start vault: %w", err)
 	}

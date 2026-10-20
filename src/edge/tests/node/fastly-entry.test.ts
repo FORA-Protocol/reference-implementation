@@ -13,9 +13,11 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { WBA_PATH } from '../../src/types.js';
 import {
   type TestKeypair,
+  boundUrl,
   futureExp,
   generateKeypair,
   keyThumbprint,
+  popHeaders,
   signUrl,
   tamperSignature,
 } from '../helpers/ed25519.js';
@@ -44,6 +46,9 @@ const env: Record<string, string> = {
   // A Fastly deployment must name its origin — the entry refuses to serve
   // without one (see the misconfiguration test at the bottom).
   ORIGIN_URL,
+  // The bot gate applies under /article/ only; the scope tests below read
+  // this through the entry's hand-forwarded env.
+  LICENSED_PATHS_JSON: JSON.stringify(['/article/']),
 };
 
 let keypair: TestKeypair;
@@ -82,7 +87,7 @@ beforeAll(async () => {
   // Both intercepts persist: they are the file's whole outbound surface.
   fetchMock.activate();
   fetchMock.disableNetConnect();
-  setupWbaDirectoryMock(keypair);
+  await setupWbaDirectoryMock(keypair);
   fetchMock
     .get(ORIGIN_URL)
     .intercept({ path: /.*/, method: 'GET' })
@@ -128,6 +133,14 @@ describe('Fastly Compute entry (stubbed runtime)', () => {
     );
   });
 
+  it('lets a bot UA read outside the licensed paths', async () => {
+    const res = await invoke(
+      new Request(`${PUB_ORIGIN}/about/team`, { headers: { 'user-agent': 'GPTBot/1.0' } }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(ORIGIN_BODY);
+  });
+
   it('passes through valid signed URL and serves the origin body', async () => {
     const signed = await signUrl(PUB_ORIGIN, keypair.privateKey, {
       exp: futureExp(),
@@ -158,6 +171,72 @@ describe('Fastly Compute entry (stubbed runtime)', () => {
       'signature_mismatch',
     ]).toContain(body.reason);
     expect(body.reason).toBe('signature_mismatch');
+  });
+
+  it('refuses a signed URL whose signature is not 64 bytes with 403, not a 503', async () => {
+    const signed = await signUrl(PUB_ORIGIN, keypair.privateKey, {
+      exp: futureExp(),
+      kid: exchangeKid,
+    });
+    const res = await invoke(new Request(tamperSignature(signed, 10)));
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { reason?: string }).reason).toBe('signature_mismatch');
+  });
+
+  it('refuses a delivery proof whose signature is not 64 bytes with 403, not a 500', async () => {
+    const agentKp = await generateKeypair('agent-short-proof');
+    const { url, agentId } = await boundUrl(PUB_ORIGIN, keypair.privateKey, agentKp, {
+      exp: futureExp(),
+      kid: exchangeKid,
+    });
+    const headers = await popHeaders(url, agentKp, agentId);
+    headers.Signature = `sig1=:${btoa('\0'.repeat(10))}:`;
+    const res = await invoke(new Request(url, { headers }));
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { reason?: string }).reason).toBe('pop_sig_invalid');
+  });
+});
+
+// Fastly's SubtleCrypto has no Ed25519. This suite refuses it the same way and
+// drives a freshly imported entry, so nothing is cached: the key directory's
+// response signatures, the signed URL and the delivery proof must each be
+// checked through the primitive the entry injects. A check that fell back to
+// WebCrypto answers 503 (the directory or the URL) or a bare 500 (the proof).
+describe('Fastly entry without WebCrypto Ed25519', () => {
+  it('reads the key directory and serves a bound delivery through the injected primitive', async () => {
+    const agentKp = await generateKeypair('agent');
+    const { url, agentId } = await boundUrl(PUB_ORIGIN, keypair.privateKey, agentKp, {
+      exp: futureExp(),
+      kid: exchangeKid,
+    });
+    const headers = await popHeaders(url, agentKp, agentId);
+
+    const subtle = crypto.subtle;
+    const asked: string[] = [];
+    const isEd25519 = (algorithm: unknown): boolean => {
+      const name =
+        typeof algorithm === 'string' ? algorithm : (algorithm as { name?: string }).name;
+      return name?.toLowerCase() === 'ed25519';
+    };
+    const refuse = (method: 'importKey' | 'verify', algorithmAt: number) => {
+      const real = subtle[method].bind(subtle) as (...args: unknown[]) => Promise<unknown>;
+      return vi.spyOn(subtle, method).mockImplementation(((...args: unknown[]) => {
+        if (!isEd25519(args[algorithmAt])) return real(...args);
+        asked.push(method);
+        return Promise.reject(new DOMException('Ed25519 is not supported', 'NotSupportedError'));
+      }) as never);
+    };
+    const spies = [refuse('importKey', 2), refuse('verify', 0)];
+    try {
+      vi.resetModules();
+      await import('../../src/entries/fastly.js');
+      const res = await invoke(new Request(url, { headers }));
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(ORIGIN_BODY);
+      expect(asked).toEqual([]);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
   });
 });
 

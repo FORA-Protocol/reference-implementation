@@ -8,6 +8,7 @@ import (
 
 	connect "connectrpc.com/connect"
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
+	"google.golang.org/protobuf/proto"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
 )
@@ -27,7 +28,7 @@ func TestTransactionReadSurface_ByID(t *testing.T) {
 
 	unit := "accesses"
 	if _, err := h.catalogClient.PushResources(ctx, connect.NewRequest(newPushRequest(h.tenantID, "agent-test", []*forav1.ResourceEntry{{
-		Domain: h.tenantDomain,
+		Domain: h.siteDomain,
 		Path:   "/articles/read-surface",
 		Terms: []*forav1.LicenseTerm{{
 			Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
@@ -36,13 +37,15 @@ func TestTransactionReadSurface_ByID(t *testing.T) {
 				Rate:     "0.05",
 				Currency: "USD",
 				Unit:     &unit,
+				// A metered offer carries a positive estimate at the pinned protocol.
+				EstimatedQuantity: proto.Int32(1),
 			},
 		}},
 	}}))); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 
-	discovered, err := h.exchangeClient.DiscoverResources(ctx, connect.NewRequest(newResourceQuery(newRequester("agent-test", "agent.example"), []string{"https://" + h.tenantDomain + "/articles/read-surface"})))
+	discovered, err := h.exchangeClient.DiscoverResources(ctx, connect.NewRequest(newResourceQuery(newRequester("agent-test", "agent.example"), []string{"https://" + h.siteDomain + "/articles/read-surface"})))
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}

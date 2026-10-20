@@ -10,7 +10,9 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/metadatacodec"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/termscodec"
 )
 
 // CatalogSnapshot is the published, read-only view consumed by the
@@ -26,7 +28,7 @@ type CatalogSnapshot struct {
 	// terms caches each row's protojson-decoded license terms, decoded ONCE at
 	// rebuild rather than on every discovery/billing read. Keyed by resource_id.
 	// DecodedTerms is the read accessor; nothing on the hot path calls
-	// unmarshalTerms per request anymore.
+	// termscodec.Unmarshal per request anymore.
 	terms map[string][]*forav1.LicenseTerm
 	// metadata caches each row's protojson-decoded resource extension metadata,
 	// decoded ONCE at rebuild() rather than per discovery read (mirrors terms).
@@ -77,7 +79,7 @@ func (s *CatalogSnapshot) DecodedMetadata(resourceID string) *forav1.ResourceEnt
 }
 
 // RenderedProfile returns the CoMP projection precomputed at rebuild for
-// (resourceID, the selected headline term's stored index, profile), or nil for
+// (resourceID, the sold term's stored index, profile), or nil for
 // any missing level (unknown resource/index/profile, or a row not rendered).
 // Nil-receiver safe and nil-safe through the nested maps, so the discovery path
 // treats "not cached" as "no comp blob". Mirrors DecodedMetadata.
@@ -92,7 +94,7 @@ func (s *CatalogSnapshot) RenderedProfile(resourceID string, termIndex int, prof
 // row at rebuild when fora-comp-v1 is advertised — the only profile
 // with a renderer today. The render is a pure fn of stored state (term[i] +
 // metadata), keyed on the term's ORIGINAL stored index, so the discovery path
-// looks up the headline term's blob by index. A render error is logged and the
+// looks up each sold term's blob by index. A render error is logged and the
 // term is skipped (no cached blob -> that offer emits no comp ext); unlike the
 // old inline path which failed the discovery, but renderCompProfile is
 // effectively infallible for an ingest-validated term (mirrors decodeRowMetadata
@@ -131,7 +133,7 @@ func renderRowProfiles(ctx context.Context, snap *CatalogSnapshot, resourceID st
 // per-discovery-call) does not make the JSONB trusted — the error is still
 // handled gracefully; it only moves the cost off the hot read path.
 func decodeRowTerms(ctx context.Context, row repo.CatalogEntry) []*forav1.LicenseTerm {
-	terms, err := unmarshalTerms(row.TermsJSON)
+	terms, err := termscodec.Unmarshal(row.TermsJSON)
 	if err != nil {
 		reqctx.FromContext(ctx).WarnContext(
 			ctx,
@@ -152,7 +154,7 @@ func decodeRowTerms(ctx context.Context, row repo.CatalogEntry) []*forav1.Licens
 // rebuild, so one bad row cannot poison the snapshot. A nil result surfaces as
 // an Offer with empty metadata on the discovery path.
 func decodeRowMetadata(ctx context.Context, row repo.CatalogEntry) *forav1.ResourceEntry {
-	md, err := unmarshalResourceMetadata(row.MetadataJSON)
+	md, err := metadatacodec.Unmarshal(row.MetadataJSON)
 	if err != nil {
 		reqctx.FromContext(ctx).WarnContext(
 			ctx,

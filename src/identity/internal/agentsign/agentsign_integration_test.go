@@ -10,22 +10,28 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/yaronf/httpsign"
+	"github.com/FORA-Protocol/protocol/sdk/go/core"
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forahttpsig"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/httpsig"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/keypolicy"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil/record"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/agentsign"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/keystore"
 )
 
 // These cases drive the whole custody-to-wire path with a REAL Vault holding the
 // keys and a REAL HTTP origin receiving the request: mint a key through the
-// KeyStore, sign an outbound request through the production transport, and verify
-// the signature at the origin.
+// KeyStore, sign an outbound request through forahttpsig's per-request key seam
+// (WithKeySource) over Source(), and verify the signature at the origin.
+// Production does not sign through that transport: its outbound legs build one
+// SDK client per call from the same Source(). The resolver under test is the
+// same either way.
 //
 // What each leg traverses, named honestly: the write leg is
 // KeyStore → Vault; the read leg is transport → agentsign → KeyStore → Vault →
@@ -40,59 +46,88 @@ const (
 	bob   = "bob.foramcp.org"
 )
 
-// origin is a WBA-aware receiver: it records the requests it is handed, body
-// restored, so a test verifies the signature against the bytes that crossed the
+// signedPath is a FORA RPC path: the requests the identity service signs as an
+// agent are FORA RPCs, signed under the Web Bot Auth profile.
+const signedPath = "/fora.v1.ExchangeService/DiscoverResources"
+
+// origin is a FORA receiver: it records the requests it is handed, with their
+// bodies, so a test verifies the signature against the bytes that crossed the
 // wire.
 type origin struct {
 	srv  *httptest.Server
-	seen []*http.Request
+	reqs *record.Recorder[*record.CaptureResult]
+	tb   testing.TB
 }
 
 func newOrigin(t *testing.T) *origin {
 	t.Helper()
-	o := &origin{}
-	o.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		clone := r.Clone(context.Background())
-		body, _ := io.ReadAll(r.Body)
-		clone.Body = io.NopCloser(bytes.NewReader(body))
-		o.seen = append(o.seen, clone)
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(o.srv.Close)
-	return o
+	srv, reqs := record.CaptureServer(t)
+	return &origin{srv: srv, reqs: reqs, tb: t}
 }
 
-// verify checks the recorded request under the Web Bot Auth profile against pub —
-// what a WBA-aware origin does once it has fetched the signer's directory.
-func (o *origin) verify(t *testing.T, i int, pub ed25519.PublicKey) error {
-	t.Helper()
-	cfg := httpsign.NewVerifyConfig().SetVerifyCreated(false).SetAllowedTags([]string{httpsig.WBATag})
-	verifier, err := httpsign.NewEd25519Verifier(pub, cfg, httpsign.Headers("@authority", "signature-agent"))
-	if err != nil {
-		t.Fatalf("build verifier: %v", err)
+// requests returns a point-in-time copy of every request the origin received.
+func (o *origin) requests() []*http.Request {
+	snap := o.reqs.Snapshot()
+	reqs := make([]*http.Request, len(snap))
+	for i, r := range snap {
+		r.CheckReadErr(o.tb) // Fail fast if body read failed
+		reqs[i] = r.Req
 	}
-	return httpsign.VerifyRequest("sig1", *verifier, o.seen[i])
+	return reqs
 }
 
-// signingClient wires the production shape: one transport, keys resolved per
-// request from custody.
+// verify checks the recorded request with the SDK verifier, resolving the key
+// only in the directory of the agent whose subdomain is given — what a FORA
+// receiver does once it has fetched that agent's directory. A signature naming
+// any other directory resolves no key.
+func (o *origin) verify(t *testing.T, i int, subdomain string, pub ed25519.PublicKey) error {
+	t.Helper()
+	reqs := o.requests()
+	if i >= len(reqs) {
+		t.Fatalf("verify request index %d out of bounds (saw %d)", i, len(reqs))
+	}
+	resolver := keypolicy.ResolverFunc(func(ctx context.Context, _ string) (ed25519.PublicKey, error) {
+		if helpers.SignatureAgentFromContext(ctx) != "https://"+subdomain {
+			return nil, helpers.ErrUnknownKey
+		}
+		return pub, nil
+	})
+	body := receivedBody(t, reqs[i])
+	_, err := helpers.VerifyRequestResolved(context.Background(), reqs[i], body, resolver, helpers.VerifyOptions{})
+	return err
+}
+
+// receivedBody returns the bytes of a recorded request's body, which the SDK
+// verifier takes as an argument rather than reading off the request. Reading
+// drains the body, so it is put back as a fresh reader over the same bytes. A
+// test verifies one request several times; with a drained body every check after
+// the first fails on the content digest, and a negative check would then pass
+// without ever testing the key or the directory it names.
+func receivedBody(t *testing.T, req *http.Request) []byte {
+	t.Helper()
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read recorded body: %v", err)
+	}
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	return body
+}
+
+// signingClient builds one transport whose key is resolved per request from
+// custody, through Source().
 //
 // The signature window runs on the SYSTEM clock even though custody runs on a
 // deterministic one, because the two instants are judged by different parties.
 // Custody's clock decides which key is active, and only this suite reads it. The
-// signature's expires is read by the origin's yaronf/httpsign verifier, which
-// compares it against time.Now() and offers no hook to override that. Stamping
-// expires off a clock frozen at a fixed instant therefore yields a signature that
-// is born expired from the moment real time passes that instant — green until the
-// anchor's day and hour, then permanently red.
+// signature's window is judged by the origin's verifier against the wall clock.
 func signingClient(t *testing.T, custody agentsign.Custody) *http.Client {
 	t.Helper()
-	resolver, err := agentsign.New(agentsign.Config{Keys: custody, Scheme: "https"})
+	resolver, err := agentsign.New(agentsign.Config{Keys: custody, BaseDomain: "foramcp.org"})
 	if err != nil {
 		t.Fatalf("new resolver: %v", err)
 	}
-	transport, err := forahttpsig.New(nil, "", nil, forahttpsig.ClockWindow(clock.System{}, 5*time.Minute),
-		forahttpsig.WithKeySource(resolver.Source()), forahttpsig.WithWBASigning())
+	transport, err := forahttpsig.New(nil, "", nil, core.ClockWindow(clock.System{}.Now, 5*time.Minute),
+		forahttpsig.WithKeySource(resolver.Source()))
 	if err != nil {
 		t.Fatalf("build transport: %v", err)
 	}
@@ -107,7 +142,7 @@ func fetchAs(t *testing.T, client *http.Client, url, subdomain string) error {
 	if subdomain != "" {
 		ctx = agentsign.WithSubdomain(ctx, subdomain)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader([]byte(`{"q":"x"}`)))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -130,26 +165,24 @@ func TestSigningTransport_SignsWithTheAgentsCustodiedKey(t *testing.T) {
 	}
 	o := newOrigin(t)
 
-	if err := fetchAs(t, signingClient(t, custody), o.srv.URL+"/article", alice); err != nil {
+	if err := fetchAs(t, signingClient(t, custody), o.srv.URL+signedPath, alice); err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
 
-	if len(o.seen) != 1 {
-		t.Fatalf("origin saw %d requests, want 1", len(o.seen))
+	reqs := o.requests()
+	if len(reqs) != 1 {
+		t.Fatalf("origin saw %d requests, want 1", len(reqs))
 	}
-	if err := o.verify(t, 0, minted.Public); err != nil {
+	if err := o.verify(t, 0, alice, minted.Public); err != nil {
 		t.Fatalf("origin could not verify against the agent's custodied key: %v", err)
 	}
-	got := o.seen[0]
-	if want := `"https://` + alice + `"`; got.Header.Get(httpsig.SignatureAgentHeader) != want {
-		t.Errorf("Signature-Agent = %s, want %s", got.Header.Get(httpsig.SignatureAgentHeader), want)
+	got := reqs[0]
+	if want := `sig1="https://` + alice + `"`; got.Header.Get(helpers.SignatureAgentHeader) != want {
+		t.Errorf("Signature-Agent = %s, want %s", got.Header.Get(helpers.SignatureAgentHeader), want)
 	}
-	params, err := httpsig.ParseSignatureLabels(got.Header)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if params[0].KeyID != minted.Ref.Thumbprint {
-		t.Errorf("keyid = %q, want the custodied key's thumbprint %q", params[0].KeyID, minted.Ref.Thumbprint)
+	if !strings.Contains(got.Header.Get("Signature-Input"), `keyid="`+minted.Ref.Thumbprint+`"`) {
+		t.Errorf("Signature-Input %q does not name the custodied key's thumbprint %q",
+			got.Header.Get("Signature-Input"), minted.Ref.Thumbprint)
 	}
 }
 
@@ -170,21 +203,24 @@ func TestSigningTransport_SignsEachAgentWithItsOwnKey(t *testing.T) {
 	client := signingClient(t, custody)
 
 	for _, subdomain := range []string{alice, bob} {
-		if err := fetchAs(t, client, o.srv.URL+"/article", subdomain); err != nil {
+		if err := fetchAs(t, client, o.srv.URL+signedPath, subdomain); err != nil {
 			t.Fatalf("fetch as %s: %v", subdomain, err)
 		}
 	}
 
-	if err := o.verify(t, 0, aliceKey.Public); err != nil {
+	if err := o.verify(t, 0, alice, aliceKey.Public); err != nil {
 		t.Errorf("first request did not verify as alice: %v", err)
 	}
-	if err := o.verify(t, 1, bobKey.Public); err != nil {
+	if err := o.verify(t, 1, bob, bobKey.Public); err != nil {
 		t.Errorf("second request did not verify as bob: %v", err)
 	}
-	// Cross-check: bob's request must NOT verify under alice's key, or the two
-	// agents are not actually distinguishable at the origin.
-	if err := o.verify(t, 1, aliceKey.Public); err == nil {
+	// Cross-check: bob's request must NOT verify under alice's key or through
+	// alice's directory, or the two agents are not distinguishable at the origin.
+	if err := o.verify(t, 1, bob, aliceKey.Public); err == nil {
 		t.Error("bob's request verified under alice's key")
+	}
+	if err := o.verify(t, 1, alice, bobKey.Public); err == nil {
+		t.Error("bob's request resolved through alice's directory")
 	}
 }
 
@@ -200,7 +236,7 @@ func TestSigningTransport_FollowsARotation(t *testing.T) {
 	}
 	o := newOrigin(t)
 	client := signingClient(t, custody)
-	if err := fetchAs(t, client, o.srv.URL+"/article", alice); err != nil {
+	if err := fetchAs(t, client, o.srv.URL+signedPath, alice); err != nil {
 		t.Fatalf("fetch before rotation: %v", err)
 	}
 
@@ -216,14 +252,14 @@ func TestSigningTransport_FollowsARotation(t *testing.T) {
 	}
 	clk.Advance(2 * time.Hour)
 
-	if err := fetchAs(t, client, o.srv.URL+"/article", alice); err != nil {
+	if err := fetchAs(t, client, o.srv.URL+signedPath, alice); err != nil {
 		t.Fatalf("fetch after rotation: %v", err)
 	}
 
-	if err := o.verify(t, 1, fresh.Public); err != nil {
+	if err := o.verify(t, 1, alice, fresh.Public); err != nil {
 		t.Errorf("post-rotation request did not verify under the new key: %v", err)
 	}
-	if err := o.verify(t, 1, old.Public); err == nil {
+	if err := o.verify(t, 1, alice, old.Public); err == nil {
 		t.Error("post-rotation request still verified under the retired key")
 	}
 }
@@ -238,13 +274,13 @@ func TestSigningTransport_RefusesAnUnauthenticatedRequest(t *testing.T) {
 	}
 	o := newOrigin(t)
 
-	err := fetchAs(t, signingClient(t, custody), o.srv.URL+"/article", "")
+	err := fetchAs(t, signingClient(t, custody), o.srv.URL+signedPath, "")
 
 	if !errors.Is(err, agentsign.ErrNoIdentity) {
 		t.Fatalf("err = %v, want ErrNoIdentity", err)
 	}
-	if len(o.seen) != 0 {
-		t.Errorf("origin saw %d requests; an unidentified request must not be sent", len(o.seen))
+	if reqs := o.requests(); len(reqs) != 0 {
+		t.Errorf("origin saw %d requests; an unidentified request must not be sent", len(reqs))
 	}
 }
 
@@ -262,12 +298,12 @@ func TestSigningTransport_RefusesWhenTheAgentHasNoActiveKey(t *testing.T) {
 	}
 	o := newOrigin(t)
 
-	err := fetchAs(t, signingClient(t, custody), o.srv.URL+"/article", alice)
+	err := fetchAs(t, signingClient(t, custody), o.srv.URL+signedPath, alice)
 
 	if !errors.Is(err, keystore.ErrNotFound) {
 		t.Fatalf("err = %v, want the keystore not-found sentinel", err)
 	}
-	if len(o.seen) != 0 {
-		t.Errorf("origin saw %d requests; want none", len(o.seen))
+	if reqs := o.requests(); len(reqs) != 0 {
+		t.Errorf("origin saw %d requests; want none", len(reqs))
 	}
 }

@@ -33,8 +33,10 @@ func declaredKinds() []exchacct.Kind {
 // The transport's guard is one "if": a marked error is answered to the agent and
 // never logged, because its text can quote the caller's own registration data.
 // Without this table the guard can be deleted, or the predicate made to return
-// false, with every other test still passing — the marked kind is not reachable
-// through a tool call, so nothing else drives it.
+// false, with every other test still passing. Neither marked kind is driven
+// through it elsewhere: one is unreachable through a tool call at all, and the
+// other reaches an arm that writes no log line, so unmarking it would leak
+// nothing until the routing changed and then leak silently.
 //
 // Completeness is mechanical rather than promised. The cases come from the enum
 // via declaredKinds, and a kind with no entry in the decision map fails here
@@ -43,10 +45,11 @@ func declaredKinds() []exchacct.Kind {
 // at that default and agree with it.
 func TestSensitive_EveryKindCarriesADecision(t *testing.T) {
 	t.Parallel()
-	// Each entry is the decision and the reason for it. Only one kind's text can
-	// quote the payload: structpb reports a value it cannot pack by quoting it,
-	// and that value is the operator's business detail. Every other kind names a
-	// condition, never a submitted value.
+	// Each entry is the decision and the reason for it. Two kinds can carry the
+	// caller's own data and they carry different halves of it: one quotes a VALUE
+	// structpb refused to pack, the other points at a member by NAME, which is the
+	// caller's where the published schema constrains members it does not itself
+	// name. Every other kind names a condition, never anything submitted.
 	decisions := map[exchacct.Kind]struct {
 		want bool
 		why  string
@@ -58,7 +61,7 @@ func TestSensitive_EveryKindCarriesADecision(t *testing.T) {
 		exchacct.KindRequirements:           {false, "names a manifest that could not be read"},
 		exchacct.KindManifestVersionRefused: {false, "names a version the Exchange published, never anything the caller sent"},
 		exchacct.KindFieldsOutOfBounds:      {false, "names the SDK's verdict, not the payload"},
-		exchacct.KindFieldsRefused:          {false, "names members at fault, and Fields is a separate channel"},
+		exchacct.KindFieldsRefused:          {true, "its cause points at members by name, and a name the caller chose is the caller's data"},
 		exchacct.KindOutbound:               {false, "carries the peer's own text, bounded at the transport"},
 		exchacct.KindNotes:                  {false, "names this service's own store"},
 	}
@@ -135,7 +138,7 @@ func TestSensitive_IsFalseForAForeignError(t *testing.T) {
 // longer needed and this test is where that shows up.
 func TestRegister_MarksAMalformedPayloadSensitive(t *testing.T) {
 	t.Parallel()
-	svc := newTestService(t, &recordingNotes{})
+	svc := newService(t, exchacct.Config{})
 
 	_, err := svc.Register(context.Background(), "agent", "exchange.example",
 		map[string]any{"vat_id": malformedValue})
@@ -172,14 +175,7 @@ func TestRegister_SendsNothingWhenThePayloadIsMalformed(t *testing.T) {
 	t.Parallel()
 	notes := &recordingNotes{}
 	peer := &countingCaller{}
-	svc, err := exchacct.New(exchacct.Config{
-		Requirements: publishingNothing{},
-		Caller:       peer,
-		Notes:        notes,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	svc := newService(t, exchacct.Config{Caller: peer, Notes: notes})
 	if _, err := svc.Register(context.Background(), "agent", "exchange.example",
 		map[string]any{"vat_id": malformedValue}); err == nil {
 		t.Fatal("Register accepted a payload structpb cannot pack")

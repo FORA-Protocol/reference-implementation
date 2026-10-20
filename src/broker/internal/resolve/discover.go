@@ -2,7 +2,6 @@ package resolve
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
@@ -12,7 +11,6 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/probe"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/repo"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/selection"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/xclient"
 )
 
 // discover.go — the S2 route-per-URL discovery dispatch. Each requested URL is
@@ -24,23 +22,29 @@ import (
 // discover routes the resolve to the right discovery strategy and returns the
 // per-URL OfferGroups (response order). The URL path (route-per-URL) routes
 // each URL ONLY to the exchange(s) its publisher manifest names and concatenates
-// the per-URL groups each exchange returns; the EXA-query path (no URLs) keeps
-// the legacy broadcast (relay the free-text query to every manifest-named
-// exchange). A non-nil *Response is a request-level refusal the caller
-// returns verbatim (no healthy exchange / no route).
+// the per-URL groups each exchange returns. It serves URLs the agent named and
+// URLs the Broker's own catalog search chose (searchQuery). The EXA-query path
+// (no URLs, catalog search not enabled) keeps the legacy broadcast (relay the
+// free-text query to every manifest-named exchange). A non-nil *Response is a
+// request-level refusal the caller returns verbatim (no healthy exchange / no
+// route).
 func (h *Service) discover(
 	ctx context.Context, req Request, manifests map[string]probe.Manifest,
-) ([]OfferGroup, discoverFlags, *Response, error) {
+) ([]OfferGroup, discoverFlags, *Response) {
 	if uris := requestURIs(req); len(uris) > 0 {
-		groups, flags, err := h.discoverByRoute(ctx, req, uris, manifests)
-		return stampMethod(groups, forav1.DiscoveryMethod_DISCOVERY_METHOD_EXCHANGE), flags, nil, err
+		method := forav1.DiscoveryMethod_DISCOVERY_METHOD_EXCHANGE
+		if req.searched {
+			method = forav1.DiscoveryMethod_DISCOVERY_METHOD_SEARCH
+		}
+		groups, flags := h.discoverByRoute(ctx, req, uris, manifests)
+		return stampMethod(groups, method), flags, nil
 	}
 	exchanges, hasHealthy := h.exchangesFor(ctx, manifests)
 	if !hasHealthy {
-		return nil, discoverFlags{}, noHealthyExchangeResponse(), nil
+		return nil, discoverFlags{}, noHealthyExchangeResponse()
 	}
-	groups, flags, err := h.broadcastQuery(ctx, req, exchanges)
-	return stampMethod(groups, forav1.DiscoveryMethod_DISCOVERY_METHOD_SEARCH), flags, nil, err
+	groups, flags := h.broadcastQuery(ctx, req, exchanges)
+	return stampMethod(groups, forav1.DiscoveryMethod_DISCOVERY_METHOD_SEARCH), flags, nil
 }
 
 // stampMethod records how the Broker found these URIs, on every group the
@@ -50,22 +54,20 @@ func (h *Service) discover(
 //
 // The Broker is also the only component that CAN know. It either received the
 // URIs from the agent or chose them itself; the exchange it then queries is
-// handed a URI list and cannot tell those apart. So EXCHANGE for the route path
-// covers both halves of the protocol's definition of that value — the agent
-// asked for the URI directly, and the Broker looked it up in a catalog — and it
-// is correct for a synthesised absence group too, which describes a URI the
-// agent named that no exchange would serve.
+// handed a URI list and cannot tell those apart. URIs the agent named are
+// EXCHANGE, including a synthesised absence group for a named URI that no
+// exchange would serve. URIs the Broker chose are SEARCH, both from the search
+// provider's broadcast and from the Broker's own catalog search, because in
+// either case the Broker searched on the agent's behalf.
 //
-// A Broker-side discovery source that is not the free-text query — syndication,
+// A Broker-side discovery source that is neither — syndication,
 // recommendation — adds a branch to discover and nothing else. The exchange
 // never changes.
 //
-// This governs the Resolve path only. The discover relay is the other
-// agent-facing discovery surface, and it does not come through here: it decodes
-// the Exchange's ResourceResponse and protojson-marshals it again, carrying
-// whatever method the Exchange stated. So the same field means two things by
-// design — on Resolve the Broker vouches for it, on the relay the queried
-// Exchange does.
+// Resolve is the Broker's only discovery surface. An agent that queries an
+// Exchange directly reads the method the Exchange stated, so the same field
+// means two things by design: on Resolve the Broker vouches for it, and on a
+// direct query the Exchange does.
 func stampMethod(groups []OfferGroup, method forav1.DiscoveryMethod) []OfferGroup {
 	for i := range groups {
 		groups[i].DiscoveryMethod = method
@@ -81,10 +83,11 @@ func stampMethod(groups []OfferGroup, method forav1.DiscoveryMethod) []OfferGrou
 // where no URL routes anywhere still yields a per-URL absence response rather
 // than a bare refusal. It never produces a request-level refusal of its own —
 // an unroutable batch is still a per-URL answer — so unlike discover it returns
-// no *Response.
+// no *Response. A failed exchange query is logged and counted toward
+// allUpstreamFailed, never returned.
 func (h *Service) discoverByRoute(
 	ctx context.Context, req Request, uris []string, manifests map[string]probe.Manifest,
-) ([]OfferGroup, discoverFlags, error) {
+) ([]OfferGroup, discoverFlags) {
 	plan, scan, anyRouted := h.buildRoutePlan(ctx, uris, manifests)
 	flags := discoverFlags{namedExchangeDown: scan.sawTransientDecline}
 	byURL := make(map[string]OfferGroup, len(uris))
@@ -93,9 +96,6 @@ func (h *Service) discoverByRoute(
 		ex := plan.exchanges[domain]
 		resp, err := h.queryExchange(ctx, req, ex, plan.exchangeURLs[domain])
 		if err != nil {
-			if errors.Is(err, errSignForward) {
-				return nil, flags, err
-			}
 			reqctx.FromContext(ctx).WarnContext(ctx, "broker.discover",
 				"exchange", ex.Domain, "err", err)
 			failures++
@@ -104,7 +104,7 @@ func (h *Service) discoverByRoute(
 		h.collectGroups(ctx, byURL, exchangeRefOf(ex), resp, &flags)
 	}
 	flags.allUpstreamFailed = anyRouted && failures > 0 && failures == len(plan.exchangeOrder)
-	return plan.assemble(byURL), flags, nil
+	return plan.assemble(ctx, byURL), flags
 }
 
 // broadcastQuery is the EXA-query discovery path. The agent named no URL, so
@@ -118,11 +118,11 @@ func (h *Service) discoverByRoute(
 // compliant Exchange this path returns no groups today, and a batch with no
 // groups answers TEMPORARILY_UNAVAILABLE. Only a test double answers a
 // uri-less query. The path is kept wired, and stamped SEARCH by discover,
-// because the Broker searched: the work that forwards the matched URLs to the
-// Exchange makes it live without moving where the method is decided.
+// because the Broker searched. When catalog search is enabled, searchQuery
+// turns the query into URIs first and this path is not reached.
 func (h *Service) broadcastQuery(
 	ctx context.Context, req Request, exchanges []repo.Exchange,
-) ([]OfferGroup, discoverFlags, error) {
+) ([]OfferGroup, discoverFlags) {
 	flags := discoverFlags{}
 	byURL := make(map[string]OfferGroup)
 	var order []string
@@ -130,9 +130,6 @@ func (h *Service) broadcastQuery(
 	for _, ex := range exchanges {
 		resp, err := h.queryExchange(ctx, req, ex, nil)
 		if err != nil {
-			if errors.Is(err, errSignForward) {
-				return nil, flags, err
-			}
 			reqctx.FromContext(ctx).WarnContext(ctx, "broker.discover",
 				"exchange", ex.Domain, "err", err)
 			failures++
@@ -142,15 +139,10 @@ func (h *Service) broadcastQuery(
 		h.collectGroups(ctx, byURL, exchangeRefOf(ex), resp, &flags)
 	}
 	flags.allUpstreamFailed = failures > 0 && failures == len(exchanges)
-	return groupsInOrder(order, byURL), flags, nil
+	return groupsInOrder(ctx, order, byURL), flags
 }
 
-// errSignForward marks a forward-signing failure so the dispatch loops can
-// distinguish it (a broker-internal error to surface) from a per-exchange RPC
-// failure (tolerated, counted toward allUpstreamFailed).
-var errSignForward = errors.New("sign forward")
-
-// queryExchange signs and issues one DiscoverResources call to a single
+// queryExchange issues one DiscoverResources call to a single
 // exchange, scoped to the supplied URL subset (nil for the broadcast-query
 // path). The route-per-URL caller passes ONLY the URLs routed to this exchange.
 func (h *Service) queryExchange(
@@ -169,12 +161,7 @@ func (h *Service) queryExchange(
 			ex.Domain)
 	}
 	rq := buildResourceQuery(ctx, req, h.deps.Clk, ex.Domain, uris)
-	sig, err := h.deps.Signer.SignForward(rq)
-	if err != nil {
-		return nil, errors.Join(errSignForward, err)
-	}
-	callCtx := xclient.WithSignature(ctx, sig)
-	return h.deps.Exchange.DiscoverResources(callCtx, ex.Endpoint, rq)
+	return h.deps.Exchange.DiscoverResources(ctx, ex.Endpoint, rq)
 }
 
 // collectGroups folds one exchange's per-URL OfferGroups into byURL: each group
@@ -186,7 +173,7 @@ func (h *Service) queryExchange(
 // reach selection. No cross-exchange merge — under route-per-URL each URL is
 // routed to exactly one exchange, so a URL key is seen once; multiple offers for
 // one URL are Dedup+Ranked within the group at assembly. flags accumulate the
-// scope/upstream signals for the all-empty fallback.
+// upstream signals for the all-empty fallback.
 func (h *Service) collectGroups(
 	ctx context.Context, byURL map[string]OfferGroup, ref selection.ExchangeRef,
 	resp *forav1.ResourceResponse, flags *discoverFlags,
@@ -207,9 +194,6 @@ func (h *Service) collectGroups(
 		if reason := group.GetAbsenceReason(); reason != forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_UNSPECIFIED {
 			acc.AbsenceReason = reason
 			flags.upstreamReason = reason
-			if isCredentialsRestricted(reason) {
-				flags.scopeRestricted = true
-			}
 		}
 		byURL[uri] = acc
 	}
@@ -228,10 +212,10 @@ func appendGroupOrder(order []string, byURL map[string]OfferGroup, resp *forav1.
 }
 
 // groupsInOrder finalises the broadcast-query groups (Dedup+Rank within each).
-func groupsInOrder(order []string, byURL map[string]OfferGroup) []OfferGroup {
+func groupsInOrder(ctx context.Context, order []string, byURL map[string]OfferGroup) []OfferGroup {
 	out := make([]OfferGroup, 0, len(order))
 	for _, uri := range order {
-		out = append(out, byURL[uri].finalize())
+		out = append(out, byURL[uri].finalize(ctx))
 	}
 	return out
 }

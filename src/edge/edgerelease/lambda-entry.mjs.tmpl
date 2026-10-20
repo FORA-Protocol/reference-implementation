@@ -1,0 +1,11 @@
+// The Lambda@Edge entry for {{DOMAIN}}.
+//
+// Lambda@Edge passes no environment variables, so the settings are assigned
+// here. {{BUNDLE}} beside this file is the release bundle, byte for byte,
+// and is the same for every publisher.
+//
+// The export below is loaded before the assignment runs. That works because
+// the bundle reads process.env on its first invocation, not when it loads.
+Object.assign(process.env, {{SETTINGS}});
+
+export { handler } from './{{BUNDLE}}';

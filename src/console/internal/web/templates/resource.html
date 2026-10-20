@@ -1,0 +1,42 @@
+{{define "content"}}
+{{with .Resource}}
+<nav aria-label="breadcrumb">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="{{.Catalog}}">Catalog</a></li>
+    <li class="breadcrumb-item active text-break" aria-current="page">{{if .Title}}{{.Title}}{{else}}{{.URI}}{{end}}</li>
+  </ol>
+</nav>
+<h1 class="h3 mb-3">{{if .Title}}{{.Title}}{{else}}Resource{{end}}</h1>
+
+<section class="card p-3 mb-3" aria-labelledby="resource-heading">
+  <h2 class="h6" id="resource-heading">The resource</h2>
+  <dl class="facts mb-0">
+    <dt>Page</dt><dd class="text-break">{{.URI}}</dd>
+    <dt>Resource id</dt><dd class="text-break"><code>{{.ResourceID}}</code></dd>
+    <dt>Listed (UTC)</dt><dd>{{.Created}}</dd>
+    <dt>Updated (UTC)</dt><dd>{{.Updated}}</dd>
+  </dl>
+</section>
+
+<section class="card p-3 mb-3" aria-labelledby="terms-heading">
+  <h2 class="h6" id="terms-heading">Terms</h2>
+  <p class="text-body-secondary small">What an agent is offered when it asks for this page.</p>
+  {{if .Terms}}
+  <ul class="mb-0">
+    {{range .Terms}}<li>{{.}}</li>{{end}}
+  </ul>
+  {{else}}
+  <p class="text-body-secondary mb-0">This resource was listed with no terms.</p>
+  {{end}}
+</section>
+
+<section class="card p-3 mb-3" aria-labelledby="sales-heading">
+  <h2 class="h6" id="sales-heading">Sales</h2>
+  <p class="text-body-secondary small">This page's transactions and income over the current month.</p>
+  <div class="d-flex flex-wrap gap-2">
+    <a class="btn btn-sm btn-outline-primary" href="{{.Transactions}}">Show its transactions</a>
+    <a class="btn btn-sm btn-outline-primary" href="{{.Income}}">Show its income</a>
+  </div>
+</section>
+{{end}}
+{{end}}

@@ -153,18 +153,40 @@ func (e *Error) Unwrap() error { return e.Err }
 // sensitive reports whether this error's text may contain the caller's own
 // registration data, and so must reach the caller but never a log line.
 //
-// Exactly one kind can today. structpb reports a value it cannot pack by
-// quoting it — "invalid UTF-8 in string: %q" is the one this service can reach —
-// and registration data is the operator's business detail, which this service passes
-// through without logging or storing. The privacy guard over the log call sites
-// matches on the identifiers this data travels under, so it would not catch a
-// line built from a message that merely embeds the value.
+// Two kinds can, and they carry the caller's data in different halves of the
+// message.
+//
+// KindFieldsMalformed carries a VALUE. structpb reports a value it cannot pack
+// by quoting it — "invalid UTF-8 in string: %q" is the one this service can
+// reach — and registration data is the operator's business detail, which this
+// service passes through without logging or storing.
+//
+// KindFieldsRefused carries a NAME. Its cause is the outbound leg's schema
+// refusal, which names each offending member by JSON pointer into the payload
+// that was submitted. Where the published schema constrains members it does not
+// itself name — additionalProperties with a subschema, patternProperties,
+// propertyNames — that pointer IS a member name the caller chose. The SDK draws
+// the same line: it drops such names from the refusal it renders for an
+// additionalProperties violation, because a member name an operator chose is as
+// much their data as its value. The instance pointer is the route by which they
+// still travel.
+//
+// The second was false until the pre-check moved out of this package. It ran
+// here and built its refusal with no cause at all, so there was nothing to leak;
+// the leg computes it now and the cause comes with it. Nothing writes that text
+// to a log today, but only because the arm that renders this kind happens to
+// take no logger — a property of the routing rather than of the error, which is
+// the arrangement asking the error was meant to replace.
+//
+// The privacy guard over the log call sites matches on the identifiers this data
+// travels under, so it would not catch a line built from a message that merely
+// embeds the value or the name.
 //
 // Sensitive is the exported reader. It is what the transport asks before it
 // writes an operator line, so this predicate is the rule rather than a
 // description of one written somewhere else.
 func (e *Error) sensitive() bool {
-	return e.Kind == KindFieldsMalformed
+	return e.Kind == KindFieldsMalformed || e.Kind == KindFieldsRefused
 }
 
 // errorOf returns err as this package's error, so a caller branching on the kind

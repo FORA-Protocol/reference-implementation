@@ -9,6 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+	"github.com/shopspring/decimal"
 )
 
 // AssetScale is the deployment ledger's power-of-ten asset scale, deliberately
@@ -43,6 +46,20 @@ func DecimalString(v *big.Rat) string {
 	return v.FloatString(int(AssetScale))
 }
 
+// WireString renders an amount of minor units at the asset scale as the
+// protocol's canonical money string: "0.1", "1", "0.05", never "0.10000000".
+// Every amount the Exchange holds in minor units reaches the wire through it:
+// the console's revenue figures and an account's available balances. A price
+// the Exchange holds as a decimal goes to helpers.FormatMoney directly, which
+// this calls, so both leave in the same form. A negative amount is an error,
+// because the wire carries none. A nil amount is an error too.
+func WireString(minor *big.Int) (string, error) {
+	if minor == nil {
+		return "", fmt.Errorf("money: nil amount")
+	}
+	return helpers.FormatMoney(decimal.NewFromBigInt(minor, -int32(AssetScale)))
+}
+
 // MinorUnits converts an exact rational amount to an integer number of minor
 // units at the asset scale. A value with finer precision than the scale can
 // represent is rejected with ErrAmountNotRepresentable rather than silently
@@ -50,9 +67,9 @@ func DecimalString(v *big.Rat) string {
 // error. Sign-agnostic: negative amounts convert to negative minor units.
 //
 // This is the single money-conversion source of truth: the TigerBeetle
-// adapter's toMinor, the integration-test fixtures (tbtest), and the repo
-// layer's default-credit write guard all call it, so the exactness rule cannot
-// diverge between what production stores and what a test asserts.
+// adapter's toMinor, the integration-test fixtures (tbtest), and the boot-time
+// welcome-credit parser all call it, so the exactness rule cannot diverge
+// between what production stores and what a test asserts.
 func MinorUnits(v *big.Rat) (*big.Int, error) {
 	if v == nil {
 		return nil, fmt.Errorf("money: nil amount")

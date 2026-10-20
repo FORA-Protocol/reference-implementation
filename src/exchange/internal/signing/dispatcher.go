@@ -35,21 +35,27 @@ type KeyStore interface {
 // fault — the distinction between "the operator has not provisioned this yet"
 // and "something broke".
 var ErrRSAKeyUnavailable = errors.New(
-	"no RSA signing key: this tenant signs delivery URLs with the " +
+	"no RSA signing key: this site's delivery URLs are signed with the " +
 		"AWS_CLOUDFRONT_RSA scheme, which needs one")
 
-// TenantKeys is the minimal set of signing-related tenant fields the
-// dispatcher needs. It decouples the signing package from sqlc-generated
-// types so the signing layer can be unit-tested in isolation.
-type TenantKeys struct {
+// URLSigningKeys is the minimal set of signing inputs the dispatcher needs. It
+// decouples the signing package from sqlc-generated types so the signing layer
+// can be unit-tested in isolation.
+//
+// The two halves come from two rows and that is the point (per ADR-026 D5).
+// Scheme and CloudFrontKeyPairID describe the SITE whose content is being
+// delivered: which edge verifies its URLs, and the key-pair id CloudFront
+// assigned in the publisher's own AWS account. Ed25519Ref and RSARef point at
+// the private keys, which belong to the Exchange seat and never leave it.
+type URLSigningKeys struct {
 	Scheme              Scheme
 	Ed25519Ref          string
 	RSARef              string
 	CloudFrontKeyPairID string
 }
 
-// URLSignerFor returns the URL signer appropriate for the tenant's scheme.
-func URLSignerFor(keys TenantKeys, store KeyStore) (URLSigner, error) {
+// URLSignerFor returns the URL signer appropriate for the site's scheme.
+func URLSignerFor(keys URLSigningKeys, store KeyStore) (URLSigner, error) {
 	switch keys.Scheme {
 	case SchemeEd25519:
 		pub, priv, err := store.Ed25519(keys.Ed25519Ref)
@@ -66,7 +72,7 @@ func URLSignerFor(keys TenantKeys, store KeyStore) (URLSigner, error) {
 		return &ed25519URLSigner{private: priv, keyID: keyID}, nil
 	case SchemeCFRSA:
 		if keys.CloudFrontKeyPairID == "" {
-			return nil, errors.New("cloudfront: key pair id missing on tenant")
+			return nil, errors.New("cloudfront: key pair id missing on the publisher site")
 		}
 		priv, err := store.RSA(keys.RSARef)
 		if err != nil {

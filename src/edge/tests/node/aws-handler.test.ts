@@ -14,6 +14,7 @@ import {
   futureExp,
   generateKeypair,
   keyThumbprint,
+  rawPublicKey,
   signUrl,
   tamperSignature,
 } from '../helpers/ed25519.js';
@@ -51,7 +52,7 @@ beforeAll(async () => {
       supported_profiles: ['fora-news-v1'],
     },
     exchangeUrl: 'https://exchange.test',
-    resolveKey: async (kid) => (kid === exchangeKid ? keypair.publicKey : undefined),
+    resolveKey: async (kid) => (kid === exchangeKid ? rawPublicKey(keypair) : undefined),
     acmeTokens: { demo: 'response-body' },
     originUrl: ORIGIN_URL,
     fetcher: (async (input: RequestInfo | URL) => {

@@ -1,14 +1,16 @@
-"""E2E: three REAL exchanges with SEPARATE catalog DBs + distinct identities (S1).
+"""E2E: four REAL exchanges with SEPARATE catalog DBs + distinct identities (S1).
 
 Core invariant under test
 --------------------------------------------------------
-The 3-exchange e2e topology gives each publisher its OWN exchange instance, with
-its OWN catalog database and its OWN Ed25519 offer-signing identity:
+The multi-exchange e2e topology gives each publisher its OWN exchange instance,
+with its OWN catalog database and its OWN Ed25519 offer-signing identity:
 
 * exchange-a (DB ``fora``)   serves the PHILOSOPHY catalog; its offers carry
   ``offer.exchange == "exchange:8081"``.
 * exchange-b (DB ``fora_b``) serves the MUSIC catalog;      ``"exchange-b:8081"``.
 * exchange-c (DB ``fora_c``) serves the SFX catalog;        ``"exchange-c:8081"``.
+* exchange-d (DB ``fora_d``) serves the ARCHIVE catalog on a seat that refuses
+  the Broker relay; the money-path suite (``test_broker_money_path``) owns it.
 
 Two properties prove the topology:
 
@@ -22,79 +24,64 @@ Two properties prove the topology:
    exchange-b's catalog. Separate DBs are what make that absence real — a shared DB
    would leak every catalog onto every exchange.
 
-2. **Distinct signing identity.** The three exchanges' ``/.well-known/fora.json``
-   serve DISTINCT Ed25519 public keys (each minted from its own keypair by the
+2. **Distinct signing identity.** The exchanges' Web Bot Auth directories serve
+   DISTINCT Ed25519 public keys (each minted from its own keypair by the
    rsa-keygen one-shot), so an offer signed by one exchange cannot be verified
-   against another's manifest.
+   against another's key.
 
-This file owns the DIRECT per-exchange isolation leg, the broker fan-out
-legs, and the batch lifecycle capstone that replaced the retired
-MCP-shim-driven sibling: the Python shim is gone (the MCP surface is the Go
-adapter), so those legs are driven through the Broker/Exchange directly. The
-shared per-exchange constants and black-box ledger readers live in
-``_multi_exchange_common``.
+This file owns the DIRECT per-exchange isolation leg, the broker fan-out legs and
+the batch lifecycle capstone. Every Broker leg goes through the SDK's own
+``BrokerClient``: ``resolve`` discovers and verifies the offers, ``execute``
+sends ``BrokerService.ExecuteTransaction``. Usage reports go through the SDK's
+``Client``, routed by the exchange the report names. Every test that buys does
+so as its own agent (``fresh_agent``), funded at the Exchanges it buys from, so
+the sales and the reporting obligations it leaves belong to no other test.
 
 Round-trip honesty: each discover leg is a full protocol round-trip on that
-exchange's ``ExchangeService/DiscoverResources`` RPC (signed httpsig →
-resolveCaller against THAT exchange's own ``fora.agents`` DB → catalog trie
-lookup). The well-known leg is a plain GET of the public manifest each exchange
-serves. No DB short-circuit, no internal-state read.
-
-RED on the single-exchange stack: ``compose_stack`` exposes no ``exchange_b`` /
-``exchange_c`` URLs (and the stack has no exchange-b/c services), so the test
-cannot even resolve its fixtures — the multi-exchange topology must be built for
-it to collect and pass.
+exchange's ``ExchangeService/DiscoverResources`` RPC. Each Broker leg is a full
+round-trip on ``BrokerService``: Broker, then the Exchanges it fans out to, then
+the combined answer read back through the same RPC. Where a sale was recorded is
+observed through ``ExchangeService/ReportUsage`` (see
+``reporting.assert_report_recorded_only_at``). No test here reads a database.
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import Any, cast
+from contextlib import closing
 
-import httpx
 import pytest
+from fora_sdk.client import CallError
+from fora_sdk.core import OfferGroupResult, VerifiedOffer
+from wire.models import TransactionResultItem, UsageReport
 
-from . import broker_client
-from ._multi_exchange_common import (
-    _MUSIC_URI,
-    _PHILOSOPHY_URI,
-    _EXCHANGE_DOMAIN_TO_DB,
-    _SFX_URI,
-    _transaction_log_agent,
-    _usage_record,
+from ._multi_exchange_common import _MUSIC_URI, _PHILOSOPHY_URI, _SFX_URI
+from .broker_purchase import (
+    discover_group,
+    one_group_per_uri,
+    only_item,
+    only_verified_offer,
+    resolve_offer,
+    resolve_request,
 )
 from .conftest import StackURLs
+from .edge_fetch import fetch_signed
 from .exchanges import (
     EXCHANGE_A_DOMAIN,
     EXCHANGE_B_DOMAIN,
     EXCHANGE_C_DOMAIN,
+    SERVICE_IDENTITIES,
     exchange_url,
-    recipient_of,
 )
-from .connect_errors import assert_refused
-from .discovery import discover_body
-from .reporting import REPORT_USAGE_PATH, report_body
-from .constants import WBA_DIRECTORY_PATH
-from .obligations.flow import discover_first_offer
-from .edge_fetch import fetch_signed
-from .relay import relay_execute_batch
-from .resolve_carriers import (
-    absence_reasons_by_uri,
-    offer_exchanges_by_uri,
-    retrieval_endpoint_of,
-)
-from .seed import (
-    DEMO_MUSIC_DOMAIN,
-    DEMO_PHILOSOPHY_DOMAIN,
-    DEMO_SFX_DOMAIN,
-    USD_AGENT_ID,
-    SeededFixture,
-)
-from .signing import USD_AGENT_KEY_PATH, sign_post
+from .fresh_agent import FreshAgent
+from .money_path import discover_offer
+from .protocol_documents import wba_directory_at
+from .reporting import assert_report_recorded_only_at, file_report, report_body
+from .sdk_client import sdk_broker_client
+from .seed import DEMO_PHILOSOPHY_DOMAIN, SeededFixture
 
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
-_DISCOVER_PATH = "/fora.v1.ExchangeService/DiscoverResources"
 
 # A string from the REAL body of each URI's content (deploy/content/demo/...), so
 # the delivery leg can assert the licensed bytes actually arrived. Status 200 alone
@@ -106,6 +93,13 @@ _URI_TO_MARKER = {
     _SFX_URI: "Rain on Tin Roof",
 }
 
+# Which exchange sells each URI.
+_URI_OWNERS = {
+    _PHILOSOPHY_URI: EXCHANGE_A_DOMAIN,
+    _MUSIC_URI: EXCHANGE_B_DOMAIN,
+    _SFX_URI: EXCHANGE_C_DOMAIN,
+}
+
 
 def _offer_exchange(offer: dict[str, object]) -> str | None:
     """Read the canonical ``Offer.exchange`` (proto3-JSON camelCase ``exchange``)."""
@@ -113,26 +107,22 @@ def _offer_exchange(offer: dict[str, object]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _discover_uris(url: str, uri: str) -> set[str]:
-    """Return the URIs the exchange at ``url`` carries an OFFER for, for one ``uri``.
+def _discover_uris(agent: FreshAgent, exchange: str, uri: str) -> set[str]:
+    """Return the URIs the Exchange ``exchange`` carries an OFFER for, for one ``uri``.
 
-    A full DiscoverResources protocol round-trip on that exchange's RPC. An empty
-    ``offers`` list (the URI is not in THAT exchange's catalog DB) yields the empty
-    set — the absence-of-side-effect signal the isolation legs assert on.
+    A full DiscoverResources protocol round-trip on that exchange's RPC, through
+    the agent's SDK client. A group with no offer (the URI is not in THAT
+    exchange's catalog DB) yields the empty set — the absence-of-side-effect
+    signal the isolation legs assert on.
 
     The query names the exchange it is going to. Getting that wrong is refused
     outright rather than answered with an empty catalog, so the isolation legs
     below would read a refusal as "not in this exchange's catalog" if the
-    addressing were sloppy.
+    addressing were sloppy; the SDK raises on a refusal, so it cannot be read
+    that way.
     """
-    resp = sign_post(
-        f"{url}{_DISCOVER_PATH}",
-        body=discover_body(agent_id=USD_AGENT_ID, uris=[uri], exchange=recipient_of(url)),
-        key_path=USD_AGENT_KEY_PATH,
-    )
-    assert resp.status_code == httpx.codes.OK, resp.text
-    offers = cast(list[dict[str, Any]], resp.json().get("offers") or [])
-    return {uri} if offers else set()
+    group = discover_group(agent.exchange(exchange), exchange, uri, f"{uri} at {exchange}")
+    return {uri} if group.result.verified else set()
 
 
 def _wellknown_offer_key(exchange_url: str) -> str:
@@ -143,437 +133,281 @@ def _wellknown_offer_key(exchange_url: str) -> str:
     is the base64url raw Ed25519 public key — the keyless fora.json overlay carries
     none. The ``x`` byte string is the identity fingerprint compared across exchanges.
     """
-    doc = httpx.get(f"{exchange_url}{WBA_DIRECTORY_PATH}", timeout=5.0).json()
-    keys = doc.get("keys") or []
-    assert keys, f"exchange WBA directory serves no keys: {doc!r}"
-    x = keys[0].get("x")
-    assert isinstance(x, str) and x, f"exchange WBA key has no x: {keys[0]!r}"
+    directory = wba_directory_at(exchange_url).message
+    keys = directory.keys or []
+    assert keys, f"exchange WBA directory serves no keys: {directory!r}"
+    x = keys[0].x
+    assert x, f"exchange WBA key has no x: {keys[0]!r}"
     return x
 
 
 def test_three_exchanges_isolated_catalogs(
     compose_stack: StackURLs,
     seeded: SeededFixture,  # noqa: ARG001 — ordering: seed ingests each catalog into its DB
+    fresh_agent: FreshAgent,
 ) -> None:
     """Each publisher resolves on its OWN exchange (distinct identity) and nowhere else.
 
     (a) music URI → exchange-b's domain; (b) sfx URI → exchange-c's domain;
-    (c) philosophy URI → exchange-a's domain; (d) the 3 well-known manifests serve
-    DISTINCT offer keys; PLUS cross-catalog absence (separate DBs).
+    (c) philosophy URI → exchange-a's domain; (d) every exchange's Web Bot Auth
+    directory serves a DISTINCT offer key; PLUS cross-catalog absence (separate DBs).
     """
     # (a) music URI resolves on exchange-b, stamped with exchange-b's identity.
-    music_offer = discover_first_offer(
-        compose_stack.exchange_b,
-        uri=_MUSIC_URI,
-        agent_id=USD_AGENT_ID,
-        domain=DEMO_MUSIC_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
-    )
+    music_offer = discover_offer(fresh_agent, _MUSIC_URI, EXCHANGE_B_DOMAIN).offer
     assert _offer_exchange(music_offer) == EXCHANGE_B_DOMAIN, music_offer
 
     # (b) sfx URI resolves on exchange-c, stamped with exchange-c's identity.
-    sfx_offer = discover_first_offer(
-        compose_stack.exchange_c,
-        uri=_SFX_URI,
-        agent_id=USD_AGENT_ID,
-        domain=DEMO_SFX_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
-    )
+    sfx_offer = discover_offer(fresh_agent, _SFX_URI, EXCHANGE_C_DOMAIN).offer
     assert _offer_exchange(sfx_offer) == EXCHANGE_C_DOMAIN, sfx_offer
 
     # (c) philosophy URI resolves on exchange-a, stamped with exchange-a's identity.
-    philo_offer = discover_first_offer(
-        compose_stack.exchange,
-        uri=_PHILOSOPHY_URI,
-        agent_id=USD_AGENT_ID,
-        domain=DEMO_PHILOSOPHY_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
-    )
+    philo_offer = discover_offer(fresh_agent, _PHILOSOPHY_URI, EXCHANGE_A_DOMAIN).offer
     assert _offer_exchange(philo_offer) == EXCHANGE_A_DOMAIN, philo_offer
 
     # The isolation probe must also detect a present offer, or empty results
     # could hide a response-shape mismatch.
-    assert _discover_uris(compose_stack.exchange, _PHILOSOPHY_URI) == {_PHILOSOPHY_URI}
-    assert _discover_uris(compose_stack.exchange_b, _MUSIC_URI) == {_MUSIC_URI}
+    assert _discover_uris(fresh_agent, EXCHANGE_A_DOMAIN, _PHILOSOPHY_URI) == {_PHILOSOPHY_URI}
+    assert _discover_uris(fresh_agent, EXCHANGE_B_DOMAIN, _MUSIC_URI) == {_MUSIC_URI}
 
     # Catalog ISOLATION (separate DBs): a music URI is ABSENT from exchange-a's
     # catalog, and a philosophy URI is ABSENT from exchange-b's catalog. A shared
     # DB would leak both catalogs onto both exchanges (global ListAll).
-    assert _discover_uris(compose_stack.exchange, _MUSIC_URI) == set(), (
+    assert _discover_uris(fresh_agent, EXCHANGE_A_DOMAIN, _MUSIC_URI) == set(), (
         "music URI leaked into exchange-a's catalog — DBs are not isolated"
     )
-    assert _discover_uris(compose_stack.exchange_b, _PHILOSOPHY_URI) == set(), (
+    assert _discover_uris(fresh_agent, EXCHANGE_B_DOMAIN, _PHILOSOPHY_URI) == set(), (
         "philosophy URI leaked into exchange-b's catalog — DBs are not isolated"
     )
 
-    # (d) the three exchanges serve DISTINCT offer-signing keys.
-    key_a = _wellknown_offer_key(compose_stack.exchange)
-    key_b = _wellknown_offer_key(compose_stack.exchange_b)
-    key_c = _wellknown_offer_key(compose_stack.exchange_c)
-    assert len({key_a, key_b, key_c}) == 3, (
-        f"exchanges must serve distinct offer keys; got a={key_a!r} b={key_b!r} c={key_c!r}"
+    # (d) every exchange in the stack serves its OWN offer-signing key.
+    keys = {
+        domain: _wellknown_offer_key(exchange_url(compose_stack, domain))
+        for domain in SERVICE_IDENTITIES.values()
+    }
+    assert len(set(keys.values())) == len(keys), (
+        f"exchanges must serve distinct offer keys; got {keys}"
     )
+
+
+def _issuers(group: OfferGroupResult) -> set[str]:
+    """The exchanges that issued the verified offers in one group."""
+    return {str(offer.offer.get("exchange")) for offer in group.result.verified}
+
+
+def _resolve_one_offer_each(agent: FreshAgent, uris: list[str]) -> list[VerifiedOffer]:
+    """One Broker resolve over ``uris`` as ``agent``; the verified winner for each, in order."""
+    result = agent.broker.resolve(resolve_request(uris))
+    by_uri = one_group_per_uri(result, uris, "broker resolve")
+    return [only_verified_offer(by_uri[uri], f"broker resolve of {uri}") for uri in uris]
 
 
 def test_broker_fans_out_batch_across_exchanges(
     compose_stack: StackURLs,
     seeded: SeededFixture,  # noqa: ARG001 — ordering: seed ingests each catalog into its DB
 ) -> None:
-    """ONE broker Resolve over a 3-publisher batch returns a per-URI offer_group routed
-    to the correct exchange, plus a typed-absence group for an uncatalogued URI.
+    """ONE broker Resolve over a 3-publisher batch returns a per-URI offer group from
+    the right exchange, plus a typed-absence group for an uncatalogued URI.
 
-    PROTOCOL round-trip (distinct from S1's DIRECT per-exchange legs): the agent
-    signs ONE ``BrokerService/Resolve`` over ``uris=[philosophy, music, sfx, miss]``;
-    the Broker probes each URI's publisher ``/.well-known/fora.json``, unions the
-    named exchanges ({a, b, c}), queries each with the full batch, and MERGES the
-    per-URI ``OfferGroup``s the exchanges return — keyed on ``OfferGroup.uri``.
+    PROTOCOL round-trip: the agent sends ONE ``BrokerService/Resolve`` over
+    ``uris=[philosophy, music, sfx, miss]`` through the SDK. The Broker probes each
+    URI's publisher ``/.well-known/fora.json``, queries each named exchange, and
+    MERGES the per-URI groups. The SDK verifies every offer against its issuing
+    exchange's published key before the test sees it.
 
-    Positive legs (Doctrine #9 full-surface): each publisher's URI comes back in
-    its OWN group whose offer carries that exchange's ``offer.exchange``
-    (``exchange:8081`` / ``exchange-b:8081`` / ``exchange-c:8081``) — proving the
-    fan-out routed each URI to the manifest-authorized exchange and nowhere else.
+    Positive legs: each publisher's URI comes back in its OWN group whose every
+    verified offer was issued by that publisher's exchange.
 
-    Negative leg (Doctrine #10): a philosophy-domain URI absent from every
-    authorized exchange's catalog comes back as a present-but-empty group carrying
-    a typed ``absenceReason`` (NOT_IN_CATALOG) — the per-URI absence the merge must
-    surface, NOT a dropped/silent miss.
+    Negative leg: a philosophy-domain URI absent from every authorized exchange's
+    catalog comes back as a present-but-empty group carrying the typed absence
+    reason NOT_IN_CATALOG, not as a dropped or silent miss.
     """
     miss_uri = (
         f"http://{DEMO_PHILOSOPHY_DOMAIN}/articles/philosophers/nonexistent-{uuid.uuid4().hex}.txt"
     )
-    resp = broker_client.resolve(
-        compose_stack,
-        body={
-            "agent_id": USD_AGENT_ID,
-            "uris": [_PHILOSOPHY_URI, _MUSIC_URI, _SFX_URI, miss_uri],
-        },
-        key_path=USD_AGENT_KEY_PATH,
+    uris = [*_URI_OWNERS, miss_uri]
+    with closing(sdk_broker_client(compose_stack)) as client:
+        result = client.resolve(resolve_request(uris))
+    by_uri = one_group_per_uri(result, uris, "broker resolve")
+
+    for uri, owner in _URI_OWNERS.items():
+        only_verified_offer(by_uri[uri], f"broker resolve of {uri}")
+        assert _issuers(by_uri[uri]) == {owner}, (
+            f"{uri} came back with offers from {_issuers(by_uri[uri])}, want only {owner}"
+        )
+
+    miss = by_uri[miss_uri]
+    assert not miss.result.verified and not miss.result.rejected, (
+        f"the uncatalogued URI came back with offers: {miss}"
     )
-    assert resp.status_code == httpx.codes.OK, resp.text
-    payload = cast(dict[str, Any], resp.json())
-
-    by_uri = offer_exchanges_by_uri(payload)
-    # Each requested URI gets its OWN offer_group keyed on the requested uri.
-    assert by_uri.get(_PHILOSOPHY_URI) == {EXCHANGE_A_DOMAIN}, payload
-    assert by_uri.get(_MUSIC_URI) == {EXCHANGE_B_DOMAIN}, payload
-    assert by_uri.get(_SFX_URI) == {EXCHANGE_C_DOMAIN}, payload
-
-    # Negative leg: the uncatalogued philosophy URI is PRESENT as a typed-absence
-    # group (empty offers + NOT_IN_CATALOG), not silently dropped.
-    assert by_uri.get(miss_uri) == set(), payload
-    assert absence_reasons_by_uri(payload).get(miss_uri) == (
-        "OFFER_ABSENCE_REASON_NOT_IN_CATALOG"
-    ), payload
-
-
-# A single SHARED requester profile drives the batch (requester is request-scoped
-# in a batch TransactionRequest). individual/US satisfies all three discovered
-# offers' projection; each is FREE or affordable for the USD buyer (the FREE-EUR
-# philosophy offer authorizes under the zero-charge billing short-circuit), so the
-# whole 3-exchange batch executes and every item comes back with its own signed
-# retrieval endpoint. (The NON-ATOMIC partial-failure path — one exchange denying
-# while others succeed — is pinned at the broker integration layer by
-# TestExchangeRelay_BatchPartialFailure.)
-_BATCH_REQUESTER_DOMAIN = DEMO_MUSIC_DOMAIN
+    assert miss.absence_reason == "OFFER_ABSENCE_REASON_NOT_IN_CATALOG", miss
 
 
 def test_broker_batch_execute_fans_out_across_three_exchanges(
-    compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: seed ingests each catalog into its DB
+    fresh_agent: FreshAgent,
 ) -> None:
-    """ONE broker batch ExecuteTransaction over offers spanning all 3 exchanges returns
-    a per-item retrieval endpoint for every item, in original order (S4 fan-out + merge).
+    """ONE Broker ExecuteTransaction over offers from three exchanges answers every
+    item, in the original order, each with its own delivery URL and transaction.
 
-    PROTOCOL round-trip: the agent discovers one offer on EACH exchange
-    (music on exchange-b, sfx on exchange-c, philosophy on exchange-a), reflects
-    all three onto ONE ``TransactionRequest.items[]`` with per-item acceptances over
-    the SHARED requester + idempotency_key, sig1-signs the whole batch body over the
-    Broker relay route, and POSTs ONCE to ``/broker/v1/exchange/execute``. The broker
-    groups the items by each item's signed ``offer.exchange``, fans out one
-    broker-signed sub-request per DISTINCT exchange, and MERGES the per-exchange
-    ``items[]`` back in ORIGINAL order.
+    PROTOCOL round-trip: the agent resolves one offer per exchange through the
+    Broker and buys all three in ONE ``BrokerService.ExecuteTransaction``, through
+    the SDK. The Broker groups the items by each signed ``offer.exchange``, sends
+    one sub-request per exchange signed with its own key, and combines the answers
+    back in request order.
 
-    Doctrine #9 (full-surface): each of the three items comes back with its OWN
-    signed ``retrievalEndpoint`` — proving every item was routed to and executed on
-    its correct exchange and the per-exchange results were merged in original order.
-    The derived per-item key (idempotency_key+":"+offer_id) keeps the three items
-    from collapsing onto one transaction under the shared request idempotency_key. A
-    sizing sanity assert pins the inbound 3-exchange batch body comfortably under the
-    broker's 64 KiB pre-auth bound.
+    Two assertions of the retired hand-built version are dropped, because the SDK
+    builds the request now and each one checked the harness rather than the
+    product. The body-size check pinned the harness's own body under the Broker's
+    64 KiB pre-auth bound. The ``requester.domain`` check pinned that the harness
+    named the buyer's directory, which the SDK refuses to get wrong locally and
+    the Broker refuses with request_auth_failure, so a purchase that succeeds
+    already proves it.
     """
-    # Discover one offer per exchange under the SHARED requester domain.
-    music_offer = discover_first_offer(
-        compose_stack.exchange_b,
-        uri=_MUSIC_URI,
-        agent_id=USD_AGENT_ID,
-        domain=_BATCH_REQUESTER_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
+    order = [_MUSIC_URI, _SFX_URI, _PHILOSOPHY_URI]
+    fresh_agent.fund(*(_URI_OWNERS[uri] for uri in order))
+    offers = _resolve_one_offer_each(fresh_agent, order)
+    buyer = fresh_agent.broker_client()
+    response = buyer.execute(offers)
+
+    items = response.items or []
+    want_ids = [offer.offer.get("offer_id") for offer in offers]
+    assert [item.offer_id for item in items] == want_ids, (
+        f"the combined answer must carry one item per offer, in request order: "
+        f"{[item.offer_id for item in items]} != {want_ids}"
     )
-    sfx_offer = discover_first_offer(
-        compose_stack.exchange_c,
-        uri=_SFX_URI,
-        agent_id=USD_AGENT_ID,
-        domain=_BATCH_REQUESTER_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
-    )
-    philo_offer = discover_first_offer(
-        compose_stack.exchange,
-        uri=_PHILOSOPHY_URI,
-        agent_id=USD_AGENT_ID,
-        domain=_BATCH_REQUESTER_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
-    )
+    for uri, item in zip(order, items, strict=True):
+        assert item.refusal is None, f"{uri}: the exchange refused upstream: {item.refusal}"
+        assert item.denial_reason is None, f"{uri}: item unexpectedly denied: {item}"
+        assert item.retrieval_endpoint, f"{uri}: item carries no delivery URL: {item}"
 
-    # ONE batch relay over all three (original order: music, sfx, philosophy).
-    resp, payload = relay_execute_batch(
-        compose_stack.broker,
-        [music_offer, sfx_offer, philo_offer],
-        agent_id=USD_AGENT_ID,
-        domain=_BATCH_REQUESTER_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
-    )
-    assert resp.status_code == httpx.codes.OK, (
-        f"batch relay should succeed at the request level (non-atomic); "
-        f"got {resp.status_code}: {resp.text[:512]}"
-    )
-    # Sizing sanity: a realistic 3-exchange batch body stays well under 64 KiB.
-    assert len(payload) < 64 * 1024, (
-        f"batch body {len(payload)} B exceeds the 64 KiB pre-auth bound"
-    )
-
-    body = cast(dict[str, Any], resp.json())
-    items = cast(list[dict[str, Any]], body.get("items") or [])
-    assert len(items) == 3, f"merged batch must return 3 items in original order, got {body}"
-
-    by_offer = {it.get("offer_id"): it for it in items}
-    music_id = music_offer.get("offer_id")
-    sfx_id = sfx_offer.get("offer_id")
-    philo_id = philo_offer.get("offer_id")
-
-    # Every item (one per exchange) carries its OWN signed retrieval endpoint.
-    for label, offer_id in (("music", music_id), ("sfx", sfx_id), ("philosophy", philo_id)):
-        item = by_offer.get(offer_id)
-        assert item is not None, f"no result item for {label} offer {offer_id!r} in {body}"
-        endpoint = item.get("retrieval_endpoint")
-        assert endpoint, f"{label} item missing retrieval_endpoint: {item}"
-        assert not (item.get("denial_reason")), f"{label} item unexpectedly denied: {item}"
-
-    # The three items resolved to three DISTINCT transactions (the derived per-item
-    # key did not collapse them onto one under the shared request idempotency_key).
-    tx_ids = {it.get("transaction_id") for it in items}
-    assert len(tx_ids) == 3, f"expected 3 distinct transaction_ids, got {tx_ids}"
-
-    # Original item order is preserved across the fan-out + merge.
-    assert [it.get("offer_id") for it in items] == [music_id, sfx_id, philo_id], (
-        f"merged items[] must preserve original order, got {[it.get('offer_id') for it in items]}"
-    )
+    # Three DISTINCT transactions: the shared request idempotency key did not
+    # collapse the items onto one.
+    tx_ids = {item.transaction_id for item in items}
+    assert len(tx_ids) == 3, f"expected 3 distinct transaction ids, got {tx_ids}"
 
 
-def _report_usage(compose_stack: StackURLs, issuer_domain: str, item: dict[str, Any]) -> str:
-    """Sign a ReportUsage for item to its issuing exchange; return the report_id.
+def _report_for(agent: FreshAgent, issuer: str, item: TransactionResultItem) -> UsageReport:
+    """``agent``'s usage report for one bought item, addressed to the exchange that sold it.
 
-    Reports go DIRECTLY to the issuing exchange, never the broker. ``issuer_domain``
-    is the offer's own ``exchange`` value: it both selects the URL to post to —
-    the harness's in-network stand-in for the well-known endpoint resolution the
-    MCP adapter does in production — and travels in the body as the recipient.
     consumed quantity is 0: the demo terms carry no reporting estimate, and the
-    validator strict-rejects a positive quantity against a zero-estimate
-    obligation.
+    validator strict-rejects a positive quantity against a zero-estimate obligation.
     """
-    # The report is addressed to the exchange that ISSUED the offer, which is the
-    # same exchange the URL below resolves to. Naming a different one is refused
-    # before any obligation is looked up.
-    body = report_body(
-        exchange=issuer_domain,
-        transaction_id=str(item.get("transaction_id") or ""),
-        agent_id=USD_AGENT_ID,
-        domain=_BATCH_REQUESTER_DOMAIN,
-        billing_id=str(item.get("billing_id") or ""),
+    return report_body(
+        exchange=issuer,
+        transaction_id=str(item.transaction_id or ""),
+        billing_id=item.billing_id,
     )
-    resp = sign_post(
-        f"{exchange_url(compose_stack, issuer_domain)}{REPORT_USAGE_PATH}",
-        body=body,
-        key_path=USD_AGENT_KEY_PATH,
-    )
-    assert resp.status_code == httpx.codes.OK, (
-        f"ReportUsage to {issuer_domain} refused: {resp.status_code} {resp.text[:512]}"
-    )
-    report_id = resp.json().get("report_id")
-    assert report_id, f"ReportUsage to {issuer_domain} returned no report_id: {resp.text}"
-    return str(report_id)
 
 
 def test_full_multi_exchange_batch_lifecycle(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: seed ingests each catalog into its DB
+    fresh_agent: FreshAgent,
 ) -> None:
     """HEADLINE capstone: ONE narrative drives the whole multi-exchange batch
     lifecycle over the real stack and asserts every leg end to end.
 
-    An agent discovers an offer on each of three exchanges, licenses all three in
-    ONE batch relay, fetches the delivered content from each publisher's edge, and
-    reports usage to each issuing exchange — and each exchange records it in its
-    OWN database, with the transaction ABSENT from the other two (topology
-    isolation). Every leg is a real protocol round-trip driven the way an agent
-    drives it: signed Broker/Exchange calls over HTTP, no shim, no re-implemented
-    tool bodies; the one documented black-box exception is the per-DB ledger read
-    (out of FORA's protocol scope).
+    An agent resolves an offer from each of three exchanges, buys all three in ONE
+    Broker purchase, fetches the delivered content from each publisher's edge, and
+    reports usage to each issuing exchange. Each exchange recorded the report, and
+    no other exchange holds the transaction (topology isolation). Every leg is a
+    real protocol round-trip driven the way an agent drives it, through the SDK.
 
-    This replaces the former MCP-shim-driven S6/S7 pair. The MCP tool surface
-    itself is covered by the Go integration suite (src/identity/internal/mcp); the
-    behavioural invariants those e2e tests asserted — per-exchange fan-out, content
-    delivery, usage recorded per DB, cross-DB isolation — are preserved here,
-    driven through the Broker/Exchange directly. The ed25519 edges enforce
-    delivery-URL binding, so each content fetch presents the key the transaction
-    was executed with; the CloudFront-RSA leg carries no ``agent_id=`` and needs
-    none.
+    Where a sale was recorded was previously read from each exchange's database.
+    It is now observed through ReportUsage, which is the public surface that
+    answers it: the issuer replays the report from its stored record, and every
+    other exchange refuses the same report not_found (see
+    ``reporting.assert_report_recorded_only_at``). The ed25519 edges enforce
+    delivery-URL binding, so each content fetch presents the buyer's key; the
+    CloudFront-RSA leg carries no ``agent_id=`` and needs none.
     """
-    # ---- Leg 1: DISCOVER one offer on each of the 3 exchanges. --------------
-    philo_offer = discover_first_offer(
-        compose_stack.exchange,
-        uri=_PHILOSOPHY_URI,
-        agent_id=USD_AGENT_ID,
-        domain=_BATCH_REQUESTER_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
+    # ---- Leg 1: RESOLVE one offer from each of the 3 exchanges. -------------
+    uris = list(_URI_OWNERS)
+    fresh_agent.fund(*_URI_OWNERS.values())
+    offers = _resolve_one_offer_each(fresh_agent, uris)
+    assert [o.offer.get("exchange") for o in offers] == list(_URI_OWNERS.values()), (
+        "the 3 chosen offers must route to 3 distinct exchanges"
     )
-    music_offer = discover_first_offer(
-        compose_stack.exchange_b,
-        uri=_MUSIC_URI,
-        agent_id=USD_AGENT_ID,
-        domain=_BATCH_REQUESTER_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
-    )
-    sfx_offer = discover_first_offer(
-        compose_stack.exchange_c,
-        uri=_SFX_URI,
-        agent_id=USD_AGENT_ID,
-        domain=_BATCH_REQUESTER_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
-    )
-    chosen = [philo_offer, music_offer, sfx_offer]
-    # Each offer's URI is known from the discover that produced it. Carrying the
-    # mapping forward is what lets the delivery leg assert that the bytes for THAT
-    # resource came back, rather than only that something answered 200.
-    uri_by_offer = {
-        philo_offer.get("offer_id"): _PHILOSOPHY_URI,
-        music_offer.get("offer_id"): _MUSIC_URI,
-        sfx_offer.get("offer_id"): _SFX_URI,
-    }
-    assert {_offer_exchange(o) for o in chosen} == {
-        EXCHANGE_A_DOMAIN,
-        EXCHANGE_B_DOMAIN,
-        EXCHANGE_C_DOMAIN,
-    }, "the 3 chosen offers must route to 3 distinct exchanges"
 
-    # ---- Leg 2: PURCHASE all three in ONE batch (broker fans out per exchange).
-    resp, _ = relay_execute_batch(
-        compose_stack.broker,
-        chosen,
-        agent_id=USD_AGENT_ID,
-        domain=_BATCH_REQUESTER_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
+    # ---- Leg 2: PURCHASE all three in ONE Broker call. -----------------------
+    # One of the three is the sfx site, sold on the CloudFront RSA scheme; the
+    # edges verify every URL below when each is fetched.
+    buyer = fresh_agent.broker_client()
+    response = buyer.execute(offers)
+    items = response.items or []
+    assert len(items) == 3, f"the combined answer must carry 3 items, got {response}"
+    assert len({item.transaction_id for item in items}) == 3, (
+        f"expected 3 distinct transactions, got {[item.transaction_id for item in items]}"
     )
-    assert resp.status_code == httpx.codes.OK, (
-        f"batch relay should succeed at the request level; "
-        f"got {resp.status_code}: {resp.text[:512]}"
-    )
-    items = cast(list[dict[str, Any]], resp.json().get("items") or [])
-    assert len(items) == 3, f"merged batch must return 3 items, got {resp.json()}"
 
-    # Distinct transactions — the shared idempotency_key did not collapse them.
-    tx_ids = {it.get("transaction_id") for it in items}
-    assert len(tx_ids) == 3, f"expected 3 distinct transaction_ids, got {tx_ids}"
-
-    exchange_by_offer = {o.get("offer_id"): _offer_exchange(o) for o in chosen}
-
-    for item in items:
-        offer_id = item.get("offer_id")
-        exchange = exchange_by_offer[offer_id]
-        assert exchange is not None, f"result item {offer_id!r} has no known exchange: {item}"
-        own_db = _EXCHANGE_DOMAIN_TO_DB[exchange]
-        tx_id = str(item.get("transaction_id") or "")
-        assert not item.get("denial_reason"), (
-            f"item for {offer_id} on {exchange} unexpectedly denied: {item}"
+    for uri, item in zip(uris, items, strict=True):
+        issuer = _URI_OWNERS[uri]
+        assert item.refusal is None and item.denial_reason is None, (
+            f"item for {uri} on {issuer} was not bought: {item}"
         )
 
         # ---- Leg 3: CONTENT DELIVERED — fetch the signed URL from its edge. --
-        signed_url = retrieval_endpoint_of(item)
-        assert signed_url, f"item for {offer_id} carried no retrieval_endpoint: {item}"
+        assert item.retrieval_endpoint, f"item for {uri} carried no delivery URL: {item}"
         # The marker is what makes this a DELIVERY assertion: an edge error-stub or
         # a wrong-route body also answers 200, so status alone would pass for both.
-        # The key is presented for whichever of these legs is agent-bound — the two
-        # ed25519 edges enforce the binding, and fetch_signed skips the proof for
-        # the CloudFront-RSA leg, whose URL carries no agent_id to bind to.
         fetch_signed(
-            str(signed_url),
+            item.retrieval_endpoint,
             compose_stack,
-            expect_marker=_URI_TO_MARKER[uri_by_offer[offer_id]],
-            key_path=USD_AGENT_KEY_PATH,
+            expect_marker=_URI_TO_MARKER[uri],
+            key_path=fresh_agent.key_path,
         )
 
-        # ---- Leg 4a: REPORT usage to the issuing exchange. ------------------
-        report_id = _report_usage(compose_stack, exchange, item)
-
-        # ---- Leg 4b: the exchange RECORDED the report in its OWN db. --------
-        issued, outcome = _usage_record(own_db, tx_id)
-        assert issued == report_id, (
-            f"exchange {exchange} (db {own_db}) recorded issued_report_id {issued!r}, "
-            f"want the report_id it returned {report_id!r}"
+        # ---- Leg 4: REPORT usage to the issuing exchange, which recorded it, -
+        # ---- and which alone holds the transaction. --------------------------
+        report = _report_for(fresh_agent, issuer, item)
+        reporter = fresh_agent.agent_id
+        report_id = file_report(
+            compose_stack, report, agent_id=reporter, key_path=fresh_agent.key_path
         )
-        assert outcome == "VALIDATED", (
-            f"exchange {exchange} recorded a non-VALIDATED outcome {outcome!r}"
+        assert_report_recorded_only_at(
+            compose_stack, report, report_id, agent_id=reporter, key_path=fresh_agent.key_path
         )
-
-        # ---- Leg 4c: topology isolation — the tx is in its OWN db only. -----
-        own_agent = _transaction_log_agent(own_db, tx_id)
-        assert own_agent == USD_AGENT_ID, (
-            f"exchange {exchange} (db {own_db}) must record transaction {tx_id!r} "
-            f"under agent {USD_AGENT_ID!r}; got {own_agent!r}"
-        )
-        for other_exchange, other_db in _EXCHANGE_DOMAIN_TO_DB.items():
-            if other_db == own_db:
-                continue
-            leaked = _transaction_log_agent(other_db, tx_id)
-            assert leaked is None, (
-                f"transaction {tx_id!r} (exchange {exchange}) leaked into "
-                f"{other_exchange} (db {other_db}) — DBs are not isolated"
-            )
 
 
 def test_cross_agent_usage_report_refused_no_ledger_side_effect(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: seed registers buyers per-DB
+    fresh_agent: FreshAgent,
 ) -> None:
-    """A usage report for a transaction that does not exist on an exchange is refused
-    and leaves NO ledger side effect (Doctrine #10 negative leg; mirrors test_04).
+    """A usage report for a transaction an exchange does not hold is refused, and
+    leaves nothing behind.
 
-    The agent signs (with its own registered key) a ReportUsage to exchange-b's
-    resolved endpoint for a fabricated transaction_id. resolveCaller admits the
-    signature (the key is registered in fora_b) but no obligation exists for the
-    transaction, so the Exchange refuses with a non-2xx code AND writes no obligation
-    row. This proves the report path does not invent state to make an unclaimed
-    report succeed.
+    Control first: a report for a sale exchange-b really made is accepted, so the
+    agent, its key and the report shape are all ones exchange-b takes. Then the
+    same agent reports a fabricated transaction id to exchange-b. No obligation
+    holds that transaction, so the service layer refuses it not_found.
+
+    The absent side effect is observed through the same RPC. The refused report is
+    sent again, unchanged. Had the first one created anything for that
+    transaction, the second would find it and be answered from it; it is refused
+    not_found again, so nothing was created.
     """
-    phantom_tx = f"tx-phantom-{uuid.uuid4().hex}"
-    report_url = f"{compose_stack.exchange_b}{REPORT_USAGE_PATH}"
+    fresh_agent.fund(EXCHANGE_B_DOMAIN)
+    offer = resolve_offer(fresh_agent.broker, _MUSIC_URI)
+    sold = only_item(fresh_agent.broker.execute([offer]), "broker purchase of a lyric")
+    control = _report_for(fresh_agent, EXCHANGE_B_DOMAIN, sold)
+    assert file_report(
+        compose_stack, control, agent_id=fresh_agent.agent_id, key_path=fresh_agent.key_path
+    ), "control: the real sale's report was refused"
 
-    resp = sign_post(
-        report_url,
-        body=report_body(
-            exchange=recipient_of(report_url),
-            transaction_id=phantom_tx,
-            agent_id=USD_AGENT_ID,
-        ),
-        key_path=USD_AGENT_KEY_PATH,
+    phantom = report_body(
+        exchange=EXCHANGE_B_DOMAIN,
+        transaction_id=f"tx-phantom-{uuid.uuid4().hex}",
     )
-    # The refusal must be the one this test is named for: no obligation holds
-    # this transaction, which the service layer answers with not_found. A
-    # status-only assertion passes on any 4xx, including the wire-validation
-    # refusal this test was changed to stop producing — it would keep passing
-    # while proving that protovalidate works.
-    assert_refused(resp, {"not_found"}, f"report for phantom transaction {phantom_tx}")
-    # No ledger side effect: no obligation row was invented for the phantom tx.
-    issued, outcome = _usage_record("fora_b", phantom_tx)
-    assert issued is None and outcome is None, (
-        f"phantom report left a ledger side effect: issued={issued!r} outcome={outcome!r}"
-    )
+    for attempt in ("first", "repeated"):
+        # The refusal must be the one this test is named for: no obligation holds
+        # this transaction, which the service layer answers with not_found. Wire
+        # validation answers invalid_argument, a different refusal.
+        with pytest.raises(CallError) as refused:
+            file_report(
+                compose_stack,
+                phantom,
+                agent_id=fresh_agent.agent_id,
+                key_path=fresh_agent.key_path,
+            )
+        assert refused.value.code == "not_found", (
+            f"the {attempt} report for a phantom transaction was refused "
+            f"{refused.value.code!r}, want not_found: {refused.value}"
+        )

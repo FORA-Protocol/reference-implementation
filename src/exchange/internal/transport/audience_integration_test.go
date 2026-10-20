@@ -20,7 +20,7 @@ func TestAudienceRPCRejectsOtherExchange(t *testing.T) {
 	_, err := h.exchangeClient.DiscoverResources(h.ctx, connect.NewRequest(&forav1.ResourceQuery{
 		Ver: helpers.ProtocolVersion, Exchange: other,
 		Requester: &forav1.Requester{Id: "agent-test", Domain: "agent-test", Type: forav1.RequesterType_REQUESTER_TYPE_AGENT},
-		Uris:      []string{"https://" + h.tenantDomain + "/wrong-recipient"},
+		Uris:      []string{"https://" + h.siteDomain + "/wrong-recipient"},
 	}))
 	assertConnectCode(t, err, connect.CodeInvalidArgument)
 	assertRejectionFieldInDomain(t, err, exchangeServiceDomainLiteral, "exchange")
@@ -35,7 +35,7 @@ func TestAudienceRPCRejectsOtherExchange(t *testing.T) {
 	assertRejectionMeta(t, err, "verdict", "mismatch")
 	_, err = h.catalogClient.PushResources(h.ctx, connect.NewRequest(&forav1.PushResourcesRequest{
 		Ver: helpers.ProtocolVersion, Exchange: other, TenantId: h.tenantID, CallerId: "agent-test",
-		Entries: []*forav1.ResourceEntry{{Domain: h.tenantDomain, Path: "/wrong-recipient", Terms: []*forav1.LicenseTerm{seedPricedTermEst(100)}}},
+		Entries: []*forav1.ResourceEntry{{Domain: h.siteDomain, Path: "/wrong-recipient", Terms: []*forav1.LicenseTerm{seedPricedTermEst(100)}}},
 	}))
 	assertConnectCode(t, err, connect.CodeInvalidArgument)
 	assertRejectionFieldInDomain(t, err, "fora.v1.CatalogService", "exchange")
@@ -43,7 +43,7 @@ func TestAudienceRPCRejectsOtherExchange(t *testing.T) {
 	discovery, err := h.exchangeClient.DiscoverResources(h.ctx, connect.NewRequest(&forav1.ResourceQuery{
 		Ver: helpers.ProtocolVersion, Exchange: harnessExchangeDomain,
 		Requester: &forav1.Requester{Id: "agent-test", Domain: "agent-test", Type: forav1.RequesterType_REQUESTER_TYPE_AGENT},
-		Uris:      []string{"https://" + h.tenantDomain + "/wrong-recipient"},
+		Uris:      []string{"https://" + h.siteDomain + "/wrong-recipient"},
 	}))
 	if err != nil {
 		t.Fatal(err)

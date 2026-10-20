@@ -1,0 +1,135 @@
+{
+  "_comment": [
+    "The onboarding path shown on the public preview page. Wording is provisional:",
+    "the onboarding guide written against a real publisher integration will own this",
+    "text, and replacing it is an edit to this file alone.",
+    "Sources for the commands: the edge worker's deployment instructions for the",
+    "Cloudflare path, the CloudFront edge Terraform module for the AWS path, and the",
+    "publisher discovery-document reference for the manifest checks.",
+    "The integration field on each variant below is the one place that says whether",
+    "a network gets a package (edge_package) or a conversation (contact_us). The",
+    "preview copies it into cdn.integration; nothing in Go decides it again.",
+    "A command marked \"checked\" is one a signed-in publisher never runs: the console",
+    "asks their site the same question and reports the answer. It stays here because",
+    "the public preview page has no account and no button, so a visitor reading what",
+    "onboarding involves has to see the whole procedure.",
+    "Fastly is a conversation, not a package: nothing builds a Fastly package, because the edge build script has presets for the Cloudflare and AWS runtimes only and the Fastly entry point that reads a configuration store belongs to the end-to-end harness. It still has a variant of its own, so a publisher reads that we recognised their network."
+  ],
+  "steps": [
+    {
+      "id": "register",
+      "title": "Register and describe your site",
+      "summary": "Tell us the domain, which paths carry licensed content, and the terms you want. Registration creates your account on the Exchange and records you as the party who gets paid. Nothing is published yet and nothing changes on your site."
+    },
+    {
+      "id": "manifest",
+      "title": "Serve your discovery document at <host>/.well-known/fora.json",
+      "summary": "This document is how an AI agent that is refused access learns who sells that access and where to negotiate. The Exchange reads it too: it names the account that gets paid, and who may add content to the catalogue on your behalf. Serving it is also how you prove the domain is yours, so it is the step that activates your account. The edge package in the next step serves this document for you, which is why its routes have to cover the well-known paths.",
+      "commands": [
+        {
+          "label": "Check what you are serving",
+          "run": "curl -s https://<host>/.well-known/fora.json",
+          "expect": "The document below, with \"role\": \"ROLE_PUBLISHER\" and your own domain.",
+          "checked": true
+        }
+      ]
+    },
+    {
+      "id": "edge",
+      "title": "Deploy the edge package",
+      "summary": "Replaced per network."
+    },
+    {
+      "id": "terms",
+      "title": "Set your terms",
+      "summary": "Choose what an agent may do with your content and what it costs. The terms travel with every offer, so an agent knows the price and the permitted uses before it asks for anything. You can change them later; new offers carry the new terms."
+    }
+  ],
+  "integrations": {
+    "cloudfront": {
+      "id": "edge",
+      "title": "Deploy the edge package on CloudFront",
+      "integration": "edge_package",
+      "summary": "Your site is served by AWS CloudFront. The package is a Lambda@Edge function for your licensed paths: it lets people and search crawlers through, refuses unlicensed AI agents, and verifies the signed addresses of agents that have paid. Your settings are already inside the zip, so there is nothing to build or configure. Create the function in us-east-1, whatever region your distribution serves from.",
+      "commands": [
+        {
+          "label": "Create the function from the package",
+          "run": "aws lambda create-function \\\n  --region us-east-1 \\\n  --function-name fora-edge \\\n  --runtime nodejs22.x \\\n  --handler index.handler \\\n  --zip-file fileb://fora-lambda-edge.zip \\\n  --role <your-lambda-edge-role-arn>",
+          "expect": "A function ARN. The role must be one Lambda@Edge can assume, which is the one AWS documents for edge functions."
+        },
+        {
+          "label": "Publish a version",
+          "run": "aws lambda publish-version \\\n  --region us-east-1 \\\n  --function-name fora-edge",
+          "expect": "A numbered version. CloudFront associates a version, never $LATEST."
+        },
+        {
+          "label": "Associate it with your cache behaviour",
+          "expect": "In the CloudFront console, open your distribution, edit the cache behaviour for your licensed paths and add the published version as a viewer-request Lambda@Edge association. Leave the distribution's own signed-address check switched off: the function is what verifies, and both at once would refuse addresses the function had already accepted."
+        },
+        {
+          "label": "Check an agent is refused",
+          "run": "curl -s -D - -o /dev/null -A \"GPTBot/1.0\" \\\n  https://<host>/your-article-path",
+          "expect": "403, with an x-content-rules header pointing at your discovery document.",
+          "checked": true
+        },
+        {
+          "label": "Check a person is not",
+          "run": "curl -s -o /dev/null -w '%{http_code}\\n' \\\n  -A \"Mozilla/5.0\" \\\n  https://<host>/your-article-path",
+          "expect": "200. Ordinary visitors and search crawlers are unaffected.",
+          "checked": true
+        }
+      ]
+    },
+    "cloudflare": {
+      "id": "edge",
+      "title": "Deploy the edge package on Cloudflare",
+      "integration": "edge_package",
+      "summary": "The package is a Cloudflare Worker. It lets people and search crawlers through, refuses AI agents without a licence, and serves paid agents a signed address. The zip is ready to deploy as it is. Keep your DNS records proxied, or requests never reach the Worker.",
+      "commands": [
+        {
+          "label": "Unpack it",
+          "run": "unzip fora-cloudflare.zip -d fora-edge\ncd fora-edge",
+          "expect": "The Worker and its wrangler.toml. Read the toml if you like -- it holds no secret, only your own settings."
+        },
+        {
+          "label": "Deploy",
+          "run": "npx wrangler deploy",
+          "expect": "The upload, then the route it is attached to. That is the whole of it: the settings and the route are already in the file."
+        },
+        {
+          "label": "Check the routes reach the well-known paths",
+          "run": "curl -s -o /dev/null -w '%{http_code}\\n' \\\n  https://<host>/.well-known/fora.json",
+          "expect": "200. A 404 means your origin answered instead, so the route does not cover that path.",
+          "checked": true
+        },
+        {
+          "label": "Check an agent is refused",
+          "run": "curl -s -D - -o /dev/null -A \"GPTBot/1.0\" \\\n  https://<host>/your-article-path",
+          "expect": "403, with an x-content-rules header pointing at your discovery document.",
+          "checked": true
+        }
+      ]
+    },
+    "fastly": {
+      "id": "edge",
+      "title": "Talk to us about your Fastly setup",
+      "integration": "contact_us",
+      "summary": "Your site is served by Fastly. We do not hand out a Fastly package yet, so there is nothing for you to deploy today. A publisher can set the package up themselves on Cloudflare and on AWS CloudFront. Adding a network is work we do rather than work you do: the part that runs on your side is small. Tell us about your setup and we will say what is involved.",
+      "note": "You will receive the relevant edge package and its deployment instructions when onboarding for Fastly becomes available."
+    },
+    "akamai": {
+      "id": "edge",
+      "title": "Talk to us about your Akamai setup",
+      "integration": "contact_us",
+      "summary": "Your site is served by Akamai. We do not ship an edge package for Akamai yet, so there is nothing for you to deploy today. A publisher can set the package up themselves on Cloudflare and on AWS CloudFront. Adding a network is work we do rather than work you do: the part that runs on your side is small. Tell us about your setup and we will say what is involved.",
+      "note": "You will receive the relevant edge package and its deployment instructions when onboarding for Akamai becomes available."
+    },
+    "none": {
+      "id": "edge",
+      "title": "Talk to us about your setup",
+      "integration": "contact_us",
+      "summary": "We could not hand you a package to deploy on <host>. Either we could not tell which content delivery network serves it, or it is one we do not ship a package for yet. A publisher can set the package up themselves on Cloudflare and on AWS CloudFront. That does not mean your site cannot take part: the part that runs on your side is small, and adding a network is work we do rather than work you do. Tell us what serves your site and we will say what is involved.",
+      "note": "This answer is also what you see when a site sits behind something that hides its origin, so it is worth telling us even if you do run one of the two."
+    }
+  }
+}

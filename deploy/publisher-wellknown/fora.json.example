@@ -12,7 +12,7 @@
       }
     }
   ],
-  "supported_profiles": ["fora-news-v1"],
+  "supported_profiles": ["fora-news-v1", "fora-comp-v1", "fora-music-v1"],
   "catalog_contributors": [
     {
       "domain": "catalog-contributor.example",

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { decodeBase64Url, encodeBase64Url } from '@fora-protocol/sdk-l1/base64url';
-import { canonicalMessage, verifyEd25519SignedUrl } from '@fora-protocol/sdk-l1/verify';
+import { decodeBase64Url, encodeBase64Url } from '@fora-protocol/sdk/base64url';
+import { canonicalMessage, verifyEd25519SignedUrl } from '@fora-protocol/sdk/verify';
 import { generateKeypair, signUrl } from '../helpers/ed25519.js';
 
 const ORIGIN = 'https://pub.example.com';

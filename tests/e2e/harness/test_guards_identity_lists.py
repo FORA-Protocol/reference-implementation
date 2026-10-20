@@ -21,6 +21,19 @@ compose file with a YAML parser, then asserts:
 * every jwks service is named in some service's ``depends_on``, so the stack
   actually waits for the directory hosts it relies on.
 
+The per-test agents (``fresh_agent.py``, ADR-028 D7) are in none of these lists,
+by design: each is minted at run time under a random host, so there is nothing
+per agent to list, and this guard needs no edit when a test mints one. What they
+all depend on is one mechanism, and the guard checks that instead:
+
+* the wildcard-DNS sidecar resolves the agent zone to the capture proxy, the
+  stack's TLS endpoint, and the proxy routes the zone to the ``agent-directory``
+  service, so every agent host reaches the service over http and https;
+* the sidecar keeps every zone it answers local, so no query for an agent host
+  is forwarded out of the stack;
+* the service serves the zone the harness mints agents in;
+* the runner waits for the service before any test mints an agent.
+
 Pure file reading: no stack, no Docker, no database.
 """
 
@@ -31,6 +44,7 @@ import re
 import yaml
 
 from .conftest import REPO_ROOT
+from .fresh_agent import AGENT_ZONE
 from .guard_harness import guard_marks
 
 _KEYGEN = REPO_ROOT / "scripts" / "gen-e2e-keys.sh"
@@ -146,4 +160,85 @@ def test_every_jwks_service_is_depended_on() -> None:
         f"jwks services {orphans} appear in nobody's depends_on — the stack "
         "does not wait for them, so their identities resolve only by luck of "
         "startup order"
+    )
+
+
+# The service that serves every per-test agent's key directory, the DNS sidecar
+# that points the agent zone at the capture proxy, and the proxy that routes it on.
+_AGENT_DIRECTORY = "agent-directory"
+_DNS = "dns"
+_PROXY = "capture-proxy"
+
+
+def proxy_zone_routes(services: dict) -> tuple[str, dict[str, str]]:
+    """The capture proxy's static address and its zone-to-service table (CAPTURE_ZONES)."""
+    proxy = services.get(_PROXY)
+    assert proxy is not None, f"no {_PROXY!r} service in docker-compose.e2e.yml"
+    address = (proxy.get("networks") or {}).get("default", {}).get("ipv4_address")
+    assert address, f"the {_PROXY!r} service holds no static address to resolve to"
+    table = str((proxy.get("environment") or {}).get("CAPTURE_ZONES", ""))
+    routes = dict(item.strip().split("=", 1) for item in table.split(",") if "=" in item)
+    return address, routes
+
+
+def _dnsmasq_addresses(services: dict) -> dict[str, str]:
+    """The ``--address=/zone/ip`` pairs the DNS sidecar's dnsmasq command answers with."""
+    dns = services.get(_DNS)
+    assert dns is not None, f"no {_DNS!r} service in docker-compose.e2e.yml"
+    command = " ".join(dns.get("command") or [])
+    pairs = dict(re.findall(r"--address=/([^/\s]+)/(\S+)", command))
+    assert pairs, f"the {_DNS!r} service's command names no --address zone: {command!r}"
+    return pairs
+
+
+def test_every_answered_zone_is_kept_local() -> None:
+    # dnsmasq answers only the record type an --address gives and forwards every
+    # other query for the name. Without --local, an AAAA lookup of a fresh agent
+    # host leaves the stack for the zone's public servers and can stall for a
+    # whole resolver timeout, which an Exchange's agent-directory fetch does not
+    # survive.
+    services = _compose_services()
+    command = " ".join(services[_DNS].get("command") or [])
+    local = set(re.findall(r"--local=/([^/\s]+)/(?=\s|$)", command))
+    forwarded = sorted(set(_dnsmasq_addresses(services)) - local)
+    assert not forwarded, (
+        f"the DNS sidecar answers {forwarded} with an --address but has no --local for "
+        "them, so their AAAA and other queries are forwarded out of the stack"
+    )
+
+
+def test_agent_zone_reaches_the_agent_directory_through_the_proxy() -> None:
+    services = _compose_services()
+    assert services.get(_AGENT_DIRECTORY) is not None, (
+        f"no {_AGENT_DIRECTORY!r} service in docker-compose.e2e.yml — no per-test "
+        "agent's key directory would be served anywhere"
+    )
+    address, routes = proxy_zone_routes(services)
+    zones = _dnsmasq_addresses(services)
+    assert zones.get(AGENT_ZONE) == address, (
+        f"the DNS sidecar answers {AGENT_ZONE} with {zones.get(AGENT_ZONE)!r}, but the "
+        f"capture proxy, which serves the zone's https, holds {address!r}"
+    )
+    assert routes.get(AGENT_ZONE) == _AGENT_DIRECTORY, (
+        f"the capture proxy routes {AGENT_ZONE} to {routes.get(AGENT_ZONE)!r}, not "
+        f"{_AGENT_DIRECTORY!r} — every per-test agent's host would reach a service that "
+        "does not serve its directory"
+    )
+
+
+def test_agent_directory_serves_the_zone_the_harness_mints_in() -> None:
+    environment = _compose_services()[_AGENT_DIRECTORY].get("environment") or {}
+    assert environment.get("AGENT_ZONE") == AGENT_ZONE, (
+        f"{_AGENT_DIRECTORY!r} serves AGENT_ZONE={environment.get('AGENT_ZONE')!r}; the "
+        f"harness mints agents under {AGENT_ZONE!r}, so it would refuse to register them"
+    )
+
+
+def test_the_runner_waits_for_the_agent_directory() -> None:
+    runner = _compose_services().get("runner") or {}
+    deps = runner.get("depends_on") or {}
+    condition = deps.get(_AGENT_DIRECTORY, {}).get("condition") if isinstance(deps, dict) else None
+    assert condition == "service_healthy", (
+        f"the runner does not wait for {_AGENT_DIRECTORY!r} to be healthy, so the first "
+        "test to mint an agent could register it before the service listens"
     )

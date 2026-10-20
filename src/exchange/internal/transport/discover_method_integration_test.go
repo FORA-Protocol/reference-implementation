@@ -15,12 +15,11 @@ import (
 // offer, which is where an "only set it on the happy path" implementation
 // leaves the field at UNSPECIFIED.
 //
-// The absent-field case is not a cosmetic gap. The Broker's discover relay
-// parses this ResourceResponse and encodes it again, carrying whatever method
-// it finds and inventing nothing, so a field missing here is a field the agent
-// never sees on that surface. The Broker's Resolve path does not read this
-// value at all — it states how IT found the URI — so this RPC is the only place
-// the Exchange's own answer is decided.
+// The absent-field case is not a cosmetic gap. An agent that queries this
+// Exchange directly reads the method from this ResourceResponse, so a field
+// missing here is a field that agent never sees. The Broker's Resolve path
+// does not read this value at all — it states how IT found the URI — so this
+// RPC is the only place the Exchange's own answer is decided.
 //
 // Round-trip: pushed through the public CatalogService.PushResources surface,
 // read back through the public ExchangeService.DiscoverResources surface. No
@@ -35,8 +34,9 @@ func TestDiscover_EveryGroupCarriesExchangeDiscoveryMethod(t *testing.T) {
 	pushTerms(t, h, client, callerID, "/method/open", scopedTerm("open"))
 	// A term gated on a scope the requester does not hold: the entry is in the
 	// catalog, but no term survives Select, so there is no priced term and
-	// therefore no offer (catalog_scope_integration_test.go pins that
-	// behaviour). The group is still returned, bound to its URI.
+	// therefore no offer. The group states no reason, so the scope is not
+	// named (catalog_scope_integration_test.go pins that behaviour). The group
+	// is still returned, bound to its URI.
 	pushTerms(t, h, client, callerID, "/method/gated", scopedTerm("gated", "dist:US"))
 
 	cases := []struct {
@@ -53,7 +53,7 @@ func TestDiscover_EveryGroupCarriesExchangeDiscoveryMethod(t *testing.T) {
 			wantOffers: 1,
 		},
 		{
-			name:       "catalog hit, no eligible priced term: the group is present and empty",
+			name:       "catalog hit, scope covers no term: the group is present, empty and states no reason",
 			uri:        "https://" + h.publisherDom + "/method/gated",
 			spec:       requesterWithScopes("agent-method-gated"),
 			wantOffers: 0,

@@ -1,0 +1,1009 @@
+/* The console's own theme, layered over Bootstrap.
+ *
+ * It is the protocol website's palette and type, so a publisher who read the
+ * public pages and then signed in is looking at one product rather than two.
+ * Bootstrap supplies the grid, the form controls and the spacing scale; this
+ * file supplies the colours, the type and the few components the website has
+ * that Bootstrap does not -- the segmented control and the offer preview.
+ *
+ * Bootstrap's own variables are redefined rather than overridden selector by
+ * selector: a component this file has never heard of still comes out in the
+ * right colours, and a Bootstrap upgrade does not silently revert half a theme.
+ */
+
+:root {
+  /* The website's palette, by its own names. */
+  --fora-black: #0a0a0f;
+  --fora-near-black: #12121a;
+  --fora-dark: #1a1a26;
+  --fora-mid: #2a2a3a;
+  --fora-gray: #a5a5b8;
+  --fora-light-gray: #c0c0d0;
+  --fora-off-white: #e8e8f0;
+  --fora-white: #f5f5fa;
+  --fora-accent: #4f6df5;
+  --fora-accent-dark: #3d58d6;
+  --fora-accent-text: #9aaeff;
+  --fora-key: #9cdcfe;
+  --fora-str: #7ec8a0;
+  --fora-warn: #e0a458;
+  --fora-bad: #e74c3c;
+
+  /* The website's type. Both faces are loaded from the deployment itself when
+   * they are vendored; the fallbacks are what a stack without them renders,
+   * and they are chosen so the layout does not move when it falls back. */
+  --fora-sans: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --fora-mono: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Bootstrap's own variables, pointed at the above. */
+  --bs-body-bg: var(--fora-black);
+  --bs-body-color: var(--fora-off-white);
+  --bs-body-font-family: var(--fora-sans);
+  --bs-emphasis-color: var(--fora-white);
+  --bs-secondary-color: var(--fora-gray);
+  --bs-border-color: var(--fora-mid);
+  --bs-link-color: var(--fora-accent-text);
+  --bs-link-hover-color: var(--fora-white);
+  --bs-code-color: var(--fora-str);
+  --bs-primary: var(--fora-accent);
+}
+
+body {
+  background: var(--fora-black);
+  color: var(--fora-off-white);
+  font-family: var(--fora-sans);
+}
+
+/* Bootstrap's background utilities name light-mode colours. The three the
+ * templates use are redefined rather than removed, so a template reads the
+ * same in either theme. */
+.bg-body-tertiary { background: var(--fora-black) !important; }
+.bg-white { background: var(--fora-near-black) !important; }
+.text-secondary, .text-body-secondary { color: var(--fora-gray) !important; }
+
+.navbar { border-bottom: 1px solid var(--fora-mid) !important; }
+.navbar-brand { color: var(--fora-white); font-weight: 600; }
+/* Bootstrap darkens the brand on hover and focus for a light navbar, which on
+ * this dark one turned it black. */
+.navbar-brand:hover, .navbar-brand:focus { color: var(--fora-white); }
+
+.card {
+  background: var(--fora-near-black);
+  border: 1px solid var(--fora-mid);
+  border-radius: 4px;
+}
+
+h1, h2, h3, h4 { color: var(--fora-white); letter-spacing: -0.01em; }
+code { font-family: var(--fora-mono); background: rgba(126, 200, 160, 0.1); padding: 0.1em 0.3em; border-radius: 3px; }
+.form-text { color: var(--fora-gray); }
+
+.form-control, .form-select {
+  background-color: var(--fora-black);
+  border: 1px solid var(--fora-mid);
+  color: var(--fora-off-white);
+}
+/* background-color, never the background shorthand: the shorthand also clears
+ * background-image, and on a select that image IS the dropdown arrow. Bootstrap
+ * ships a dark arrow for light pages, so the theme draws its own in a colour
+ * that reads on this one. */
+.form-select {
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23a5a5b8' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
+}
+.form-control:focus, .form-select:focus {
+  background-color: var(--fora-black);
+  border-color: var(--fora-accent);
+  color: var(--fora-off-white);
+  box-shadow: 0 0 0 0.2rem rgba(79, 109, 245, 0.2);
+}
+.form-control::placeholder { color: var(--fora-gray); opacity: 0.7; }
+/* Bootstrap paints a disabled field in its own light colour, which on this
+   page comes out white on black with unreadable text in it. */
+.form-control:disabled, .form-select:disabled {
+  background: var(--fora-near-black);
+  color: var(--fora-gray);
+  border-color: var(--fora-mid);
+}
+
+/* A field the browser filled in. Chrome and Safari paint those with a
+ * background of their own that an ordinary background-color does not
+ * override, so an autofilled field came out white on a dark page and the text
+ * in it was unreadable.
+ *
+ * An inset shadow large enough to cover the field is the way to repaint it:
+ * the shadow IS honoured, where the background is not. The text colour needs
+ * -webkit-text-fill-color for the same reason. The transition delay keeps the
+ * browser's own fade from flashing white on the way in.
+ *
+ * :autofill is the standard selector, supported by Firefox; the -webkit- one
+ * is what Chrome and Safari still match. They are written as separate rules
+ * on purpose: a selector list is dropped whole by a browser that does not know
+ * one of its members, which would put us back where we started. */
+.form-control:autofill,
+.form-select:autofill {
+  -webkit-text-fill-color: var(--fora-off-white);
+  caret-color: var(--fora-off-white);
+  box-shadow: 0 0 0 100vmax var(--fora-black) inset;
+}
+.form-control:-webkit-autofill,
+.form-control:-webkit-autofill:hover,
+.form-control:-webkit-autofill:focus,
+.form-control:-webkit-autofill:active,
+.form-select:-webkit-autofill,
+.price input:-webkit-autofill {
+  -webkit-text-fill-color: var(--fora-off-white);
+  caret-color: var(--fora-off-white);
+  -webkit-box-shadow: 0 0 0 100vmax var(--fora-black) inset;
+  box-shadow: 0 0 0 100vmax var(--fora-black) inset;
+  transition: background-color 100000s ease-in-out 0s;
+}
+
+.btn-primary {
+  background: var(--fora-accent);
+  border-color: var(--fora-accent);
+  color: var(--fora-white);
+  font-weight: 500;
+}
+.btn-primary:hover, .btn-primary:focus {
+  background: var(--fora-accent-dark);
+  border-color: var(--fora-accent-dark);
+}
+/* A locked Next has to look locked: drawn in the accent colour it reads as a
+   button that ignores the click. */
+.btn-primary:disabled, .btn-primary.disabled {
+  background: var(--fora-mid);
+  border-color: var(--fora-mid);
+  color: var(--fora-white);
+  opacity: .6;
+  cursor: not-allowed;
+}
+.btn-outline, .btn-outline-secondary, .btn-outline-primary {
+  background: transparent;
+  border: 1px solid var(--fora-mid);
+  color: var(--fora-light-gray);
+}
+.btn-outline:hover, .btn-outline-secondary:hover, .btn-outline-primary:hover {
+  background: var(--fora-dark);
+  border-color: var(--fora-gray);
+  color: var(--fora-white);
+}
+.btn-link { color: var(--fora-accent-text); }
+
+.list-group-item {
+  background: var(--fora-near-black);
+  border-color: var(--fora-mid);
+  color: var(--fora-off-white);
+}
+.list-group-item-action:hover,
+.list-group-item-action:focus,
+.list-group-item-action:active { background: var(--fora-dark); color: var(--fora-white); }
+
+.badge.text-bg-success { background: rgba(126, 200, 160, 0.15) !important; color: var(--fora-str) !important; }
+.badge.text-bg-warning { background: rgba(224, 164, 88, 0.15) !important; color: var(--fora-warn) !important; }
+.badge.text-bg-secondary { background: var(--fora-dark) !important; color: var(--fora-gray) !important; }
+.badge.text-bg-danger { background: rgba(231, 76, 60, 0.15) !important; color: #f3a79f !important; }
+
+.alert-danger {
+  background: rgba(231, 76, 60, 0.12);
+  border: 1px solid rgba(231, 76, 60, 0.35);
+  color: #f3a79f;
+}
+.alert-success {
+  background: rgba(126, 200, 160, 0.12);
+  border: 1px solid rgba(126, 200, 160, 0.35);
+  color: var(--fora-str);
+}
+.alert-warning {
+  background: rgba(224, 164, 88, 0.12);
+  border: 1px solid rgba(224, 164, 88, 0.35);
+  color: var(--fora-warn);
+}
+
+.table { --bs-table-color: var(--fora-off-white); --bs-table-bg: transparent; }
+
+/* The licensing page: the website's own controls-over-preview arrangement.
+ * Bootstrap has neither a segmented control nor a key-value code block, so
+ * these are written out, in the website's measurements. */
+
+/* The controls and the offer they produce, as one block inside the step.
+ *
+ * It used to break out of the page's reading column, centred on the window and
+ * wider than everything around it. That was written for a page of its own; in
+ * the wizard the same rule made it hang over the card it sits in and read as a
+ * dialog on top of the step rather than a part of it. It is the step's width
+ * now, and the columns below fit whatever that is. */
+.sample { width: 100%; }
+
+.controls {
+  /* Three columns in a row -- price, uses, attribution -- split by a rule
+     rather than boxed. The price column is as wide as its control, so the field
+     under it lines up with Free/Charge; the other two share what is left. No
+     frame of its own: inside the step it is already in a card. */
+  display: flex;
+  align-items: stretch;
+  margin-bottom: 1.25rem;
+}
+.controls > .ctl { flex: 1 1 0; padding: 0 1.25rem; }
+.controls > .ctl:first-child { flex: 0 0 auto; padding-left: 0; }
+.controls > .ctl:last-child { padding-right: 0; }
+.controls > .ctl + .ctl { border-left: 1px solid var(--fora-mid); }
+/* Too narrow for three columns: stack them, and the rule moves to the top. */
+@media (max-width: 36rem) {
+  .controls { flex-direction: column; gap: 1rem; }
+  .controls > .ctl { padding: 0; }
+  .controls > .ctl + .ctl { border-left: 0; border-top: 1px solid var(--fora-mid); padding-top: 1rem; }
+}
+.ctl { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
+.ctl .k {
+  font-family: var(--fora-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fora-gray);
+}
+
+/* align-self, because the column stretches its children: without it the
+   control was as wide as the column and the border ran on past the last
+   option, leaving an empty third cell that looked like a missing button. */
+.seg {
+  display: inline-flex;
+  align-self: start;
+  border: 1px solid var(--fora-mid);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg label {
+  padding: 0.4rem 1rem;
+  font-size: 0.875rem;
+  color: var(--fora-light-gray);
+  cursor: pointer;
+  background: var(--fora-black);
+  margin: 0;
+}
+.seg input:checked + label { background: var(--fora-accent); color: var(--fora-white); }
+.seg input:focus-visible + label { outline: 2px solid var(--fora-accent-text); outline-offset: -2px; }
+
+/* The price sits under the control that turns it on, in the same column: it is
+   the second half of one answer, not a separate question. */
+.price {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  border: 1px solid var(--fora-mid);
+  border-radius: 3px;
+  background: var(--fora-black);
+  overflow: hidden;
+}
+.price > span { padding: 0 0.6rem; font-family: var(--fora-mono); font-size: 0.8125rem; color: var(--fora-gray); }
+.price input {
+  /* Zero basis, so the field takes the column's width rather than setting it:
+     the column is as wide as Free/Charge and the price lines up under it. */
+  flex: 1;
+  width: 0;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  color: var(--fora-off-white);
+  font-family: var(--fora-mono);
+  font-size: 0.875rem;
+  padding: 0.4rem 0.6rem 0.4rem 0;
+}
+.price input:focus { outline: none; }
+.ctl .per {
+  font-family: var(--fora-mono);
+  font-size: 0.75rem;
+  color: var(--fora-gray);
+}
+
+.checks { display: flex; flex-direction: column; gap: 0.35rem; }
+.checks label { font-size: 0.875rem; color: var(--fora-off-white); cursor: pointer; margin: 0; }
+.checks label { display: grid; grid-template-columns: auto 1fr; column-gap: 0.5rem; align-items: start; }
+.checks label > input { margin-top: 0.25rem; }
+.checks .note { grid-column: 2; display: block; color: var(--fora-gray); font-size: 0.75rem; }
+/* The same controls on a registered domain's page, shown and not changed:
+ * the fieldset is disabled, and nothing in it looks clickable. */
+.terms-readonly { border: 0; margin: 0; padding: 1rem 1.25rem; min-width: 0;
+  background: var(--fora-near-black); border-radius: 8px; border: 1px solid var(--fora-mid); }
+.terms-readonly label, .terms-readonly .seg label { cursor: default; }
+.terms-readonly .checks input:disabled { opacity: 1; }
+
+.terms-source {
+  font-size: 0.8125rem;
+  color: var(--fora-gray);
+  margin: 0 0 1rem;
+}
+
+.codebox { background: var(--fora-black); border: 1px solid var(--fora-mid); border-radius: 4px; }
+.offer {
+  padding: 1.25rem 1.5rem;
+  font-family: var(--fora-mono);
+  font-size: 0.875rem;
+  line-height: 1.75;
+  color: var(--fora-light-gray);
+  overflow-x: auto;
+}
+/* A file offered inside the step it belongs to. */
+.filerow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  background: var(--fora-black);
+  border: 1px solid var(--fora-mid);
+  border-radius: 4px;
+  padding: 0.75rem 1rem;
+}
+
+/* The deployment steps, shown in place rather than downloaded as a file. */
+.steps .cmd { margin-top: 0.75rem; }
+.steps .cmd-label {
+  display: block;
+  font-family: var(--fora-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fora-gray);
+  margin-bottom: 0.35rem;
+}
+.steps pre.codebox {
+  margin: 0;
+  padding: 0.6rem 0.9rem;
+  overflow-x: auto;
+}
+.steps pre.codebox code {
+  background: none;
+  padding: 0;
+  font-family: var(--fora-mono);
+  font-size: 0.8125rem;
+  color: var(--fora-str);
+  white-space: pre;
+}
+.steps .cmd-expect {
+  display: block;
+  color: var(--fora-gray);
+  font-size: 0.8125rem;
+  margin-top: 0.35rem;
+}
+/* A phone is narrower than the longest continuation line (about 44
+   characters), and a block that scrolls sideways hides the half of the command
+   being copied. The type shrinks with the screen so that line still fits; on
+   anything narrower still it wraps, which changes what is shown but not what
+   is copied. */
+@media (max-width: 36rem) {
+  .steps pre.codebox { padding: 0.5rem 0.65rem; }
+  .steps pre.codebox code {
+    font-size: clamp(0.5625rem, calc((100vw - 5rem) / 27), 0.8125rem);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}
+
+.offer ul { list-style: none; margin: 0; padding: 0; }
+.offer li.in { padding-left: 1.5rem; }
+.offer .lbl { color: var(--fora-key); }
+.offer .lbl::after { content: ":"; }
+.offer .val { color: var(--fora-str); }
+
+/* What the button found out, one row per question asked. The mark carries the
+   outcome and the colour repeats it, because a coloured dot alone is invisible
+   to a reader who cannot distinguish the colours. */
+.probes { display: flex; flex-direction: column; gap: 0.5rem; }
+.probe {
+  display: grid;
+  grid-template-columns: 1.25rem 1fr;
+  column-gap: 0.6rem;
+  align-items: start;
+  font-size: 0.9rem;
+}
+.probe-mark {
+  display: inline-block;
+  text-align: center;
+  font-weight: 700;
+  line-height: 1.4;
+}
+.probe-passed .probe-mark { color: var(--fora-str); }
+.probe-failed .probe-mark { color: #e5736f; }
+.probe-unclear .probe-mark { color: var(--fora-key); }
+
+/* The finished-setup dialog. Styled for both states it can be in: open in the
+   page when the script did not run, and modal when it did. */
+.donedialog {
+  max-width: 32rem;
+  border: 1px solid var(--fora-mid);
+  border-radius: 0.5rem;
+  background: var(--fora-near-black);
+  color: var(--fora-off-white);
+  padding: 1.5rem;
+}
+.donedialog::backdrop { background: rgba(10, 10, 15, 0.7); }
+
+/* The add-a-domain progress header: one numbered circle per step, the step's
+   title under it, joined by a rule.
+ *
+ * Four states, in the colours the dashboard already uses for its badges:
+ * green for a step whose check passed, amber for the step being worked on,
+ * grey for one not reached yet, and grey in a dashed ring for one passed over
+ * with Skip for now. The number is not the only signal -- a passed step shows a
+ * tick, a skipped one a dash, and the current one is the only bold title --
+ * because a reader who cannot distinguish the colours would otherwise see five
+ * identical circles.
+ *
+ * The numbers are positions in the list the server sent, not constants. A
+ * publisher who already has a business name is not shown that step at all, and
+ * a hard-coded set would then start their wizard at two. */
+.wiz-steps {
+  display: flex;
+  align-items: flex-start;
+  list-style: none;
+  margin: 0 0 2rem;
+  padding: 0;
+}
+.wiz-step { flex: 1; position: relative; min-width: 0; }
+/* The rule between two circles. It is drawn from the item on the right so the
+   first one has none, and it sits behind the circle it points at. */
+.wiz-step + .wiz-step::before {
+  content: "";
+  position: absolute;
+  top: 1rem;
+  right: 50%;
+  left: -50%;
+  height: 1px;
+  background: var(--fora-mid);
+}
+.wiz-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  text-align: center;
+}
+/* A step already passed is a way back. The ones ahead are not controls at all,
+   so there is nothing to disable. */
+button.wiz-stack {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+button.wiz-stack:hover .wiz-label { color: var(--fora-white); }
+.wiz-num {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  border: 1px solid var(--fora-mid);
+  background: var(--fora-dark);
+  color: var(--fora-gray);
+  font-family: var(--fora-mono);
+  font-size: 0.8125rem;
+}
+.wiz-label {
+  font-size: 0.8125rem;
+  color: var(--fora-gray);
+  padding: 0 0.25rem;
+}
+.wiz-done .wiz-num {
+  border-color: rgba(126, 200, 160, 0.5);
+  background: rgba(126, 200, 160, 0.15);
+  color: var(--fora-str);
+}
+.wiz-done .wiz-label { color: var(--fora-light-gray); }
+.wiz-skipped .wiz-num { border-style: dashed; }
+.wiz-skipped .wiz-label { color: var(--fora-light-gray); }
+.wiz-now .wiz-num {
+  border-color: rgba(224, 164, 88, 0.5);
+  background: rgba(224, 164, 88, 0.15);
+  color: var(--fora-warn);
+}
+.wiz-now .wiz-label { color: var(--fora-white); font-weight: 600; }
+
+@media (max-width: 560px) {
+  /* Under a phone width five titles side by side wrap to three lines each.
+     The circles carry the position on their own there. */
+  .wiz-label { display: none; }
+}
+
+/* Alpine hides what it has not taken over yet. Without this the whole wizard
+   renders once, unstyled and with every step visible at the same time, before
+   the script runs. */
+[x-cloak] { display: none !important; }
+
+/* The wizard's own body: one step visible at a time, in a card like every
+   other page's. */
+.wiz-body { min-height: 18rem; }
+.wiz-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+.wiz-actions .spacer { flex: 1; }
+
+/* The support address on the dead end. It is the only way off that screen, so
+   it is set apart from the sentence around it rather than left to the link
+   colour alone, which on an amber panel is barely a difference. */
+.support-address {
+  font-family: var(--fora-mono);
+  font-weight: 600;
+  color: var(--fora-white);
+  background: rgba(224, 164, 88, 0.18);
+  border-bottom: 1px solid var(--fora-warn);
+  padding: 0.05em 0.35em;
+  border-radius: 3px;
+}
+.support-address:hover { background: rgba(224, 164, 88, 0.3); color: var(--fora-white); }
+
+/* The dashboard.
+ *
+ * Its pages sit beside a full-height sidebar: the console's mark, the four
+ * sections with their icons, and sign-out at the foot. The collapse button
+ * shrinks it to the icons alone, and sidebar.js remembers that between pages.
+ * Below the md breakpoint the sidebar is hidden and the same list opens from a
+ * Menu button in a top bar: a <details> element, so it needs no script and a
+ * keyboard reaches it like any other control. */
+.app { display: flex; min-height: 100vh; }
+.app-main { flex: 1; min-width: 0; }
+.dashboard-main { max-width: 72rem; padding: 1.5rem 2rem; }
+@media (max-width: 767.98px) {
+  .dashboard-main { padding: 1.25rem 1rem; }
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  flex: 0 0 15rem;
+  width: 15rem;
+  flex-direction: column;
+  padding: 1rem 0.75rem;
+  background: var(--fora-near-black);
+  border-right: 1px solid var(--fora-mid);
+  transition: flex-basis 0.15s ease, width 0.15s ease;
+}
+.sidebar-brand {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.25rem 0.25rem 1.5rem;
+}
+.brand-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 2.25rem;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 8px;
+  background: var(--fora-accent);
+  color: var(--fora-white);
+  font-weight: 700;
+  text-decoration: none;
+}
+.brand-mark:hover { color: var(--fora-white); background: var(--fora-accent-dark); }
+.brand-text { min-width: 0; line-height: 1.2; }
+.brand-text strong { display: block; color: var(--fora-white); font-size: 0.95rem; }
+.brand-text small {
+  display: block;
+  overflow: hidden;
+  color: var(--fora-gray);
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-toggle {
+  position: absolute;
+  top: 0.6rem;
+  right: -1.55rem;
+  display: grid;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 2px solid var(--fora-black);
+  border-radius: 50%;
+  background: var(--fora-accent);
+  color: var(--fora-white);
+}
+.sidebar-toggle .nav-icon { width: 14px; height: 14px; transition: transform 0.15s ease; }
+
+.nav-icon {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.sections { gap: 0.25rem; }
+.sections .nav-link,
+.sidebar-foot .nav-link {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.55rem 0.75rem;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--fora-light-gray);
+  white-space: nowrap;
+}
+.sections .nav-link:hover,
+.sidebar-foot .nav-link:hover { color: var(--fora-white); background: var(--fora-dark); }
+.sections .nav-link.active { color: var(--fora-white); background: var(--fora-accent); }
+.sidebar-foot {
+  margin: auto 0 0;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--fora-mid);
+}
+
+/* Collapsed: the icons alone, each keeping its tooltip. */
+.sidebar-collapsed .sidebar { flex-basis: 4.5rem; width: 4.5rem; }
+.sidebar-collapsed .sidebar .brand-text,
+.sidebar-collapsed .sidebar .nav-label { display: none; }
+.sidebar-collapsed .sidebar .nav-link { justify-content: center; padding-inline: 0; }
+.sidebar-collapsed .sidebar .sidebar-brand { justify-content: center; padding-inline: 0; }
+.sidebar-collapsed .sidebar-toggle .nav-icon { transform: rotate(180deg); }
+
+.menu { position: relative; margin-right: 0.75rem; }
+.menu > summary { list-style: none; }
+.menu > summary::-webkit-details-marker { display: none; }
+.menu-panel {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  left: 0;
+  z-index: 10;
+  min-width: 13rem;
+  padding: 0.5rem;
+  background: var(--fora-near-black);
+  border: 1px solid var(--fora-mid);
+  border-radius: 8px;
+}
+
+.empty-state {
+  padding: 2.5rem 1rem;
+  text-align: center;
+  border: 1px dashed var(--fora-mid);
+  border-radius: 4px;
+}
+
+/* The period's figures: four tiles, two across on a phone. */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+@media (max-width: 575.98px) {
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.stat {
+  display: flex;
+  flex-direction: column;
+  padding: 0.75rem 1rem;
+  background: var(--fora-near-black);
+  border: 1px solid var(--fora-mid);
+  border-radius: 4px;
+}
+.stat-label { color: var(--fora-gray); font-size: 0.8rem; }
+.stat-value { color: var(--fora-white); font-size: 1.4rem; font-weight: 600; }
+.stat-value small { color: var(--fora-gray); font-size: 0.8rem; font-weight: 400; }
+
+/* Transactions per day. One series in the accent colour, with hairline
+ * gridlines a step off the surface and axis text in the muted text colour,
+ * never in the series colour. Each day's whole slot is its hover area, so an
+ * empty day has a tooltip too. */
+.chart { display: block; width: 100%; height: auto; }
+.chart .grid, .chart .axis { stroke: var(--fora-mid); stroke-width: 1; }
+.chart .tick { fill: var(--fora-gray); font-size: 11px; text-anchor: end; font-variant-numeric: tabular-nums; }
+.chart .day-label { fill: var(--fora-gray); font-size: 11px; text-anchor: middle; }
+.chart .hit { fill: transparent; }
+.chart .bar { fill: var(--fora-accent); }
+.chart .day:hover .hit { fill: rgba(245, 245, 250, 0.04); }
+.chart .day:hover .bar { fill: var(--fora-accent-text); }
+/* The chart scales with its column, and its text with it: at phone width the
+ * axis text would shrink to a few pixels, so it is set larger there, in the
+ * chart's own units, to land near the size it has on a desktop. */
+@media (max-width: 575.98px) {
+  .chart .tick, .chart .day-label { font-size: 22px; }
+}
+
+/* A transaction row opens its detail from anywhere on the row. Nothing inside
+ * it is a link of its own, so a click anywhere means the same thing. */
+.row-link { position: relative; }
+
+/* The row's own link carries no visible text: the time beside it reads as
+ * plain text, and what a screen reader announces for the row is what the link
+ * does rather than a timestamp. */
+
+/* A resource address is long enough to push every other column off a narrow
+ * screen, so the cell keeps a fixed share of the table and cuts what does not
+ * fit. The whole address is on the cell's title, which is why the link's title
+ * carries it rather than describing the link. */
+.cell-clip {
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Lists and facts as label-and-value pairs. */
+.terms, .facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.35rem 1.25rem;
+}
+.terms dt, .facts dt { color: var(--fora-gray); font-weight: 400; }
+.terms dd, .facts dd { margin: 0; }
+
+/* At phone width a table of rows becomes a stack of cards, each cell with its
+ * column's name beside it, so nothing scrolls sideways. */
+@media (max-width: 767.98px) {
+  .table-responsive-stack thead { display: none; }
+  .table-responsive-stack tr {
+    display: block;
+    margin-bottom: 0.75rem;
+    border: 1px solid var(--fora-mid);
+    border-radius: 4px;
+    padding: 0.25rem 0.75rem;
+  }
+  .table-responsive-stack td {
+    display: flex;
+    gap: 0.75rem;
+    border: 0;
+    padding: 0.3rem 0;
+  }
+  .table-responsive-stack td[data-label]::before {
+    content: attr(data-label);
+    flex: 0 0 7rem;
+    color: var(--fora-gray);
+  }
+  .cell-clip {
+    max-width: none;
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .terms, .facts { grid-template-columns: 1fr; gap: 0.1rem; }
+  .terms dd, .facts dd { margin-bottom: 0.5rem; }
+}
+
+/* The evidence check's outcome, one line per signature. */
+.verify-results .ok { color: var(--fora-str); }
+.verify-results .bad { color: #f3a79f; }
+
+
+/* The period picker. The layout follows the usual two-month range picker: a
+ * rail of presets on the left, two calendars beside it, and the chosen range
+ * with its two buttons along the foot. The colours are the console's own, so
+ * it reads as part of the dark page rather than a light widget dropped onto
+ * it. */
+.daterange { position: relative; }
+
+.daterange-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.28rem 0.7rem;
+  font-size: 0.875rem;
+  color: var(--fora-off-white);
+  background: var(--fora-near-black);
+  border: 1px solid var(--fora-mid);
+  border-radius: 0.375rem;
+}
+.daterange-trigger:hover { border-color: var(--fora-accent); }
+.daterange-icon {
+  width: 1rem;
+  height: 1rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+
+/* The panel is taken out of the flow, so it has no width to inherit and its
+ * tracks would resolve against nothing: an `auto 1fr` pair collapsed the
+ * calendars to 21px each and the two months drew on top of one another. Sizing
+ * the box to max-content and giving both tracks their content width is what
+ * makes the day grids, which are a fixed 7 x 2rem, actually fit.
+ *
+ * It hangs from the right edge because the control sits at the end of a header
+ * row: growing leftwards keeps a panel this wide inside the viewport. */
+.daterange-panel {
+  position: absolute;
+  z-index: 1050;
+  top: calc(100% + 0.4rem);
+  right: 0;
+  width: max-content;
+  max-width: calc(100vw - 2rem);
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-areas: "presets body" "foot foot";
+  background: var(--fora-near-black);
+  border: 1px solid var(--fora-mid);
+  border-radius: 0.6rem;
+  box-shadow: 0 1rem 2.5rem rgb(0 0 0 / 55%);
+}
+
+.daterange-presets {
+  grid-area: presets;
+  min-width: 10rem;
+  margin: 0;
+  padding: 0.6rem;
+  list-style: none;
+  border-right: 1px solid var(--fora-mid);
+}
+.daterange-preset {
+  width: 100%;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.875rem;
+  text-align: left;
+  color: var(--fora-light-gray);
+  background: none;
+  border: 0;
+  border-radius: 0.3rem;
+}
+.daterange-preset:hover { background: var(--fora-dark); color: var(--fora-white); }
+.daterange-preset.is-active {
+  color: var(--fora-accent-text);
+  background: color-mix(in srgb, var(--fora-accent) 18%, transparent);
+}
+
+.daterange-body { grid-area: body; padding: 0.6rem 0.75rem 0.25rem; }
+.daterange-months {
+  display: grid;
+  grid-template-columns: repeat(2, max-content);
+  gap: 1.5rem;
+}
+.daterange-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  text-align: center;
+  color: var(--fora-white);
+}
+
+/* The month and the year are dropdowns that move the calendar to another
+ * month. Their border shows on hover, so the heading reads as a heading until
+ * it is worth knowing it can be changed. */
+.daterange-choose {
+  padding: 0.1rem 0.2rem;
+  font: inherit;
+  color: inherit;
+  background: var(--fora-dark);
+  border: 1px solid transparent;
+  border-radius: 0.25rem;
+}
+.daterange-choose:hover { border-color: var(--fora-mid); }
+.daterange-choose:focus-visible { outline: 2px solid var(--fora-accent); }
+.daterange-choose option { background: var(--fora-near-black); }
+
+/* A day later than today is shown so the week keeps its shape, but it is dim
+ * and refuses the pointer: there is nothing to read about it yet. */
+.daterange-day.is-future {
+  color: var(--fora-mid);
+  cursor: default;
+}
+.daterange-day.is-future:hover { background: none; }
+.daterange-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 2rem);
+  gap: 0.1rem;
+}
+.daterange-weekday {
+  font-size: 0.75rem;
+  line-height: 1.6rem;
+  text-align: center;
+  color: var(--fora-gray);
+}
+
+/* A day is a flat square so the selected stretch reads as one band. The two
+ * ends are rounded, which is what tells a one-day range from a longer one. */
+.daterange-day {
+  height: 2rem;
+  font-size: 0.8125rem;
+  color: var(--fora-off-white);
+  background: none;
+  border: 0;
+  border-radius: 0;
+}
+.daterange-day:hover { background: var(--fora-mid); }
+.daterange-day.is-outside { color: var(--fora-mid); }
+.daterange-day.is-in {
+  color: var(--fora-accent-text);
+  background: color-mix(in srgb, var(--fora-accent) 16%, transparent);
+}
+.daterange-day.is-edge {
+  color: var(--fora-white);
+  background: var(--fora-accent);
+  border-radius: 50%;
+}
+.daterange-day.is-today:not(.is-edge) { box-shadow: inset 0 0 0 1px var(--fora-mid); }
+
+.daterange-note {
+  min-height: 1.2rem;
+  margin: 0.4rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--fora-warn);
+}
+
+.daterange-foot {
+  grid-area: foot;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 0.75rem;
+  border-top: 1px solid var(--fora-mid);
+}
+.daterange-selected { font-size: 0.875rem; color: var(--fora-gray); }
+.daterange-selected strong { color: var(--fora-white); }
+.daterange-actions { display: flex; gap: 0.5rem; }
+
+/* Opened from the button's start edge, running rightwards, where opening from
+ * its end edge would run off the left of the screen. daterange.js decides. */
+.daterange-panel.daterange-panel-start {
+  left: 0;
+  right: auto;
+}
+
+/* On a phone the panel takes the whole screen, with the two months one above
+ * the other and the screen scrolling when they do not fit. Anchored under its
+ * button it was only as wide as the button, which squeezed the calendar and
+ * covered the filters beside it. Cancel closes it. Which side of the button
+ * it opens from does not apply here. */
+@media (max-width: 575.98px) {
+  .daterange-panel,
+  .daterange-panel.daterange-panel-start {
+    position: fixed;
+    inset: 0;
+    width: auto;
+    max-width: none;
+    overflow-y: auto;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto;
+    grid-template-areas: "presets" "body" "foot";
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  /* Kept in view while the screen scrolls, so Apply is always one tap away. */
+  .daterange-foot {
+    position: sticky;
+    bottom: 0;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    background: var(--fora-near-black);
+  }
+  .daterange-presets {
+    display: flex;
+    flex-wrap: wrap;
+    min-width: 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--fora-mid);
+  }
+  .daterange-preset { width: auto; }
+  .daterange-months { grid-template-columns: minmax(0, 1fr); }
+  /* Square days, as in the two-month view, only larger: a month takes the
+     width it is given up to a limit, centred, and each day is as tall as it
+     is wide. Stretched columns at a fixed height turned days into bars. */
+  .daterange-month {
+    width: 100%;
+    max-width: 24rem;
+    margin-inline: auto;
+  }
+  .daterange-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  .daterange-day {
+    height: auto;
+    aspect-ratio: 1;
+  }
+}
+

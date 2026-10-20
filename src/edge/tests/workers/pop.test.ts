@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { encodeBase64Url } from '@fora-protocol/sdk-l1/base64url';
-import { type PopFailure, verifyAgentBinding } from '@fora-protocol/sdk-l1/pop';
-import { thumbprint } from '@fora-protocol/sdk-l1/thumbprint';
+import { encodeBase64Url } from '@fora-protocol/sdk/base64url';
+import { type PopFailure, verifyAgentBinding } from '@fora-protocol/sdk/pop';
+import { thumbprint } from '@fora-protocol/sdk/thumbprint';
 import {
   type TestKeypair,
   generateKeypair,
@@ -18,7 +18,8 @@ async function thumbOf(kp: TestKeypair): Promise<string> {
 
 function headersFrom(rec: Record<string, string>): Headers {
   const h = new Headers();
-  for (const [k, v] of Object.entries(rec)) h.set(k, v);
+  // An empty value stands for an absent header, so a case can remove one.
+  for (const [k, v] of Object.entries(rec)) if (v !== '') h.set(k, v);
   return h;
 }
 
@@ -86,6 +87,26 @@ describe('verifyAgentBinding', () => {
     }, 'missing_sig');
   });
 
+  it('rejects a proof with no tag', async () => {
+    await expectFail((h) => {
+      h['Signature-Input'] = (h['Signature-Input'] as string).replace(/;tag="[^"]*"/, '');
+    }, 'bad_tag');
+  });
+
+  // The proof covers the Signature-Agent member, so a request that carries none
+  // is missing a covered component, refused as the SDK refuses any other.
+  it('rejects a proof with no Signature-Agent member', async () => {
+    await expectFail((h) => {
+      h['Signature-Agent'] = '';
+    }, 'bad_covered_components');
+  });
+
+  it('rejects a Signature-Agent member that is not an https origin', async () => {
+    await expectFail((h) => {
+      h['Signature-Agent'] = 'sig1="http://agent.example"';
+    }, 'bad_signature_agent');
+  });
+
   it('rejects keyid != agent_id', async () => {
     await expectFail(() => {}, 'keyid_mismatch', { keyid: () => 'not-the-agent-id' });
   });
@@ -148,17 +169,13 @@ describe('verifyAgentBinding', () => {
   });
 
   it('rejects an incomplete covered-component set', async () => {
-    const kp = await generateKeypair();
-    const agentId = await thumbOf(kp);
-    const url = URL_UNDER_TEST + agentId;
-    const rawParams = `("@method");keyid="${agentId}";alg="ed25519";created=1700000000;expires=${FAR_FUTURE}`;
-    const headers = headersFrom({
-      'X-FORA-Agent-Key': encodeBase64Url(rawPublicKey(kp)),
-      'Signature-Input': `sig1=${rawParams}`,
-      Signature: 'sig1=:AAAA:',
-    });
-    const res = await verifyAgentBinding({ url, method: 'GET', headers, agentId, now });
-    expect(res.reason).toBe('bad_covered_components');
+    // The v1.0.8 proof shape: @method and @target-uri only, no Signature-Agent member.
+    await expectFail((h) => {
+      h['Signature-Input'] = (h['Signature-Input'] as string).replace(
+        '("@method" "@target-uri" "signature-agent";key="sig1")',
+        '("@method" "@target-uri")',
+      );
+    }, 'bad_covered_components');
   });
 
   it('rejects an unsupported algorithm', async () => {

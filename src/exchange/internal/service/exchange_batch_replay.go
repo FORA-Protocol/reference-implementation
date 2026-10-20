@@ -254,7 +254,7 @@ func proveRequesterPossession(
 func (s *ExchangeService) relayPolicyGate(
 	ctx context.Context, req *forav1.TransactionRequest, agent resolvedAgent,
 ) error {
-	chain := classifyTransportChain(helpers.AllSignaturesFromContext(ctx))
+	chain := agent.relay
 	if !chain.hasBroker {
 		return nil
 	}
@@ -292,30 +292,35 @@ func (s *ExchangeService) relayPolicyGate(
 }
 
 // resolveRelayTenant names the tenant that owns an item's offer for the relay
-// verdict, WITHOUT gating on expiry. The offer signature is checked (VerifyOffer,
+// verdict, WITHOUT gating on expiry (entryForAuthenticOffer). ok=false means the
+// item cannot be attributed to a tenant, and the relay gate fails the whole
+// request closed rather than skipping it. Skipping was unsafe on the replay
+// path: the stored response can disclose a still-live signed URL for an item
+// whose offer no longer resolves, so "unresolvable ⇒ skip" would route that
+// disclosure around the tenant's relay opt-out.
+func (s *ExchangeService) resolveRelayTenant(item *forav1.TransactionItem) (string, bool) {
+	entry, ok := s.entryForAuthenticOffer(item.GetOffer())
+	return entry.TenantID, ok
+}
+
+// entryForAuthenticOffer names the catalog entry an authentic offer was issued
+// for, WITHOUT gating on expiry. The offer signature is checked (VerifyOffer,
 // signature-only), because an expired but authentic offer still carries a
 // trustworthy signed canonical_url; then that canonical_url is looked up in the
-// catalog snapshot. ok=false means the item cannot be attributed to a tenant — the
-// signature is invalid, the offer carries no canonical_url, or the canonical_url
-// matches no catalog entry — and the relay gate fails the whole request closed
-// rather than skipping it. Skipping was unsafe on the replay path: the stored
-// response can disclose a still-live signed URL for an item whose offer no longer
-// resolves, so "unresolvable ⇒ skip" would route that disclosure around the
-// tenant's relay opt-out.
-func (s *ExchangeService) resolveRelayTenant(item *forav1.TransactionItem) (string, bool) {
-	offer := item.GetOffer()
+// catalog snapshot. ok=false means the offer cannot be traced to an entry: the
+// signature is invalid, the offer carries no canonical_url, or the
+// canonical_url matches no catalog entry. The relay gate uses it to find an
+// item's seat, and the denial journal to attribute an expired offer.
+func (s *ExchangeService) entryForAuthenticOffer(offer *forav1.Offer) (repo.CatalogEntry, bool) {
 	if err := helpers.VerifyOffer(offer, offer.GetSignature(), s.offerSigner.PublicKey()); err != nil {
-		return "", false
+		return repo.CatalogEntry{}, false
 	}
 	canonicalURL := offer.GetIdentity().GetCanonicalUrl()
 	if canonicalURL == "" {
-		return "", false
+		return repo.CatalogEntry{}, false
 	}
 	entry, ok := s.catalog.Snapshot().byURI[canonicalURL]
-	if !ok {
-		return "", false
-	}
-	return entry.TenantID, true
+	return entry, ok
 }
 
 // releaseDuplicateLossHold decides the hold's fate after losing the per-item

@@ -1,0 +1,1221 @@
+# The catalog: what a publisher or its contributor pushes to an Exchange through
+# CatalogService, the terms that push carries and the vocabularies they use, how
+# discovery presents those terms through extension profiles and critical
+# extensions, and the discovery headers an edge sends on a refusal. Registry
+# entries (ADR-028 D1); the tests that prove them say so on themselves.
+#
+# Areas:
+#   CATALOG  - CatalogService: authorization, the publisher manifest and resource
+#              owner, the wire caps, the host and URI rules, attestations, the RPCs
+#   TERMS    - LicenseTerm and the vocabularies at ingest, and the term an offer
+#              sells
+#   PROFILE  - DiscoverResources and Broker Resolve as they present terms:
+#              supported_profiles, acceptable_restrictions, ext_critical,
+#              fora-comp-v1 and fora-music-v1
+#   EDGEHINT - the edge discovery headers X-Content-Rules and X-FORA-Exchange, and
+#              the bot gate whose refusal carries them
+#
+# Sources: fora.proto, vocab.proto and the website docs of the pinned protocol
+# module github.com/FORA-Protocol/protocol (the version in the root go.mod), and
+# this repository's ADRs.
+#
+# Held elsewhere and not repeated here: one offer per term and the offer's one
+# price (MONEY-001 to MONEY-003), Resolve forwarding signed offers unchanged
+# (RELAY-023), scope existence hiding (PUBLIC-004), the importer's path scope and
+# repeat import (PUB-009, PUB-011), and a publisher withdrawing its contributor
+# (PUB-012).
+#
+# A push the Exchange processed and could not apply carries
+# ErrorDetail.catalog_rejection: fora.proto says so, and the request-flow page
+# names MALFORMED_ENTRY as the reason the envelope rules make the common one. A
+# push refused before processing follows the general rules instead: a
+# mis-addressed push (CATALOG-014) and a malformed request, such as one with no
+# entries or more than 256 (CATALOG-009), are INVALID_ARGUMENT with no typed
+# reason, and one whose signature fails is UNAUTHENTICATED with
+# request_auth_failure (CATALOG-003).
+#
+# A "# harness:" comment above an entry says why the e2e harness cannot drive it
+# through a public surface yet, and what it would need. The comment is not part of
+# the entry: the registry schema is strict, so the note lives beside it.
+#
+# A "negative:" case is a refusal with a typed error response (ADR-028 D1). What
+# an answer that refuses nothing must leave out is a "must not" in "positive:".
+
+# ---------------------------------------------------------------- CATALOG
+
+- id: CATALOG-001
+  title: A catalog push is stored whole or refused whole, at the wire tier and at the ingest tier
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A push is ALL-OR-NOTHING, at both tiers.
+  positive: >-
+    A push of one valid entry is accepted with accepted = 1, and DiscoverResources then
+    answers offers for its URI.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        wire tier: the push adds, beside a fresh valid entry, an entry whose term carries a
+        SHARE_ALIKE obligation without scope_license
+      side_effect: neither added entry is stored; DiscoverResources offers neither URI
+    - code: invalid_argument
+      reason: >-
+        ingest tier: beside a valid entry, an entry whose term's bare Pricing.unit is not a
+        registered token
+      side_effect: the valid sibling is not stored
+
+- id: CATALOG-002
+  title: A push the Exchange processed and refused carries catalog_rejection with its typed reason and the paths of exactly the entries that failed
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A push the Exchange processed and could not apply is not a response at all: it
+      travels as a non-OK transport error carrying ErrorDetail.catalog_rejection.
+  positive: A push of valid entries is answered OK with a PushResourcesResponse.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        catalog_rejection UNKNOWN_VOCAB_TOKEN for an entry whose bare Pricing.unit is not
+        registered, rejected_paths naming that entry's path and not its valid sibling's
+      side_effect: nothing of the submission is stored
+
+- id: CATALOG-003
+  title: A catalog call must be signed by the caller's own key; an unsigned or wrongly signed push is refused unauthenticated
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/exchange/multi-tenant.mdx
+    quote: >-
+      Invalid signatures are rejected with `CodeUnauthenticated` and an
+      `ErrorDetail.request_auth_failure` reason: `SIGNATURE_MISSING`,
+      `SIGNATURE_INVALID` or `SIGNATURE_STALE`.
+  positive: >-
+    A push signed by the key the caller's Web Bot Auth directory publishes is accepted.
+  negative:
+    - code: unauthenticated
+      reason: >-
+        request_auth_failure and no catalog_rejection: the push is sent with its
+        signature removed
+      side_effect: the entry is not stored
+    - code: unauthenticated
+      reason: >-
+        request_auth_failure and no catalog_rejection: the push names an authorized
+        contributor's directory, and is signed by a key that directory does not publish
+      side_effect: the entry is not stored
+
+- id: CATALOG-004
+  title: A caller the publisher's manifest does not list in catalog_contributors cannot push entries for its domain
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/getting-started/for-providers.mdx
+    quote: >-
+      besides your own domain, only contributors listed in `catalog_contributors` can
+      push resource metadata to the Exchange for it.
+  positive: >-
+    A push for the publisher's domain by a contributor the publisher's served
+    /.well-known/fora.json lists in catalog_contributors is accepted and discoverable.
+  negative:
+    - code: non-OK
+      reason: >-
+        catalog_rejection NOT_CATALOG_CONTRIBUTOR: the caller is a real, signing identity
+        (another publisher) that the manifest does not list
+      side_effect: the entry is not stored and DiscoverResources offers nothing for it
+
+- id: CATALOG-005
+  title: A push naming a tenant the caller may not push for is refused permission_denied, and nothing is stored
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/exchange/multi-tenant.mdx
+    quote: >-
+      Unauthorized tenant access is rejected with `CodePermissionDenied`.
+  positive: >-
+    A push whose tenant_id is the seat of the Exchange it is sent to is accepted.
+  negative:
+    - code: permission_denied
+      reason: catalog_rejection TENANT_MISMATCH, tenant_id naming another Exchange's seat
+      side_effect: the entry is not stored
+
+- id: CATALOG-006
+  title: A push is refused unless the domain's manifest names this Exchange with the registered publisher id
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: docs/architecture/adr-026-publisher-registration-model.md
+    quote: >-
+      The manifest fetched for the push must list this seat with that publisher's id
+      (D2) and the listing must be active.
+  positive: >-
+    For a publisher registered through the console, serving the manifest the console
+    built, the operator's contributor pushes a page of its domain and the page is
+    offered.
+  negative:
+    - code: non-OK
+      reason: >-
+        catalog_rejection NOT_CATALOG_CONTRIBUTOR naming the page: the served manifest
+        names another publisher id as the resource owner for this Exchange
+      side_effect: the page is not stored
+    - code: non-OK
+      reason: >-
+        catalog_rejection EXCHANGE_NOT_LISTED naming the page: the served manifest lists
+        only another Exchange
+      side_effect: the page is not stored
+
+- id: CATALOG-007
+  title: A push for a domain that is not registered at this Exchange is refused DOMAIN_NOT_VERIFIED
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      contributing domain is not verified
+  positive: A push for a registered, listed domain is accepted (CATALOG-004).
+  negative:
+    - code: non-OK
+      reason: >-
+        catalog_rejection DOMAIN_NOT_VERIFIED: the entry's domain was never registered at
+        this Exchange
+      side_effect: the entry is not stored
+
+- id: CATALOG-008
+  title: A push is refused when the publisher's manifest version is an unknown major; an unknown minor is accepted
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      They REJECT an unrecognised MAJOR, a value that is not MAJOR.MINOR, and an ABSENT
+      `ver`:
+  positive: >-
+    A push is accepted while the publisher's manifest carries ver "1.7", an unrecognised
+    minor of the recognised major.
+  negative:
+    - code: non-OK
+      reason: >-
+        catalog_rejection NOT_CATALOG_CONTRIBUTOR naming the page: the publisher's manifest
+        carries ver "2.0", which the Exchange cannot read, so the manifest authorizes no
+        contributor
+      side_effect: the page is not stored
+
+- id: CATALOG-009
+  title: A push carries one to 256 entries; an empty or larger submission is refused by wire validation
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      At least one: an empty push asks for nothing and is refused rather than answered
+      with zero counts.
+  positive: A push of one valid entry is accepted.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        none, no catalog_rejection: the push carries no entries (declared malformation of
+        the control push)
+      side_effect: no zero-count response is returned
+    - code: invalid_argument
+      reason: none, no catalog_rejection; the push carries 257 entries
+      side_effect: none of the 257 entries is stored
+
+- id: CATALOG-010
+  title: The per-entry caps are wire rules, so an over-cap entry refuses the whole submission
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      At most 32 terms per entry, stated on the wire so every implementation refuses
+      the same size.
+  positive: A push of one valid entry is accepted.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        catalog_rejection MALFORMED_ENTRY naming the entry: it carries 33 terms, beside a
+        fresh valid sibling; likewise a 513-character title
+      side_effect: neither entry is stored
+
+- id: CATALOG-011
+  title: ResourceEntry.domain is a bare host; a path or userinfo in it is refused
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      With path it forms the catalog URI by concatenation, so a value carrying anything
+      but a host would choose the URI rather than merely name the host.
+  positive: >-
+    An entry whose domain is the publisher's bare host is stored under the URI formed from
+    that host and the path.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        catalog_rejection MALFORMED_ENTRY: domain "<host>/evil" or "user@<host>", each a
+        declared malformation of the control push
+      side_effect: nothing is stored, under either the host's URI or another one
+
+- id: CATALOG-012
+  title: ResourceEntry.path is an absolute path with no query, fragment, whitespace or control character
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      starts with "/", carries no query or fragment delimiter, no whitespace and no
+      control character, and is at most 2048 characters.
+  positive: A push of an entry with an absolute path is accepted and discoverable at its URI.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        catalog_rejection MALFORMED_ENTRY: path "relative/page", "/page?x=1" or "/a b"
+      side_effect: nothing is stored
+
+- id: CATALOG-013
+  title: A push claiming a URI another resource holds is refused URI_UNAVAILABLE, and the holder is unchanged
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      it MUST NOT disclose that another resource/ contributor already owns the URI.
+  positive: >-
+    A re-push of the same resource at the same URI updates it in place (CATALOG-018).
+  negative:
+    - code: non-OK
+      reason: >-
+        catalog_rejection URI_UNAVAILABLE: a push of another resource (another content_id)
+        at a URI a stored resource holds
+      side_effect: the holder's offer is unchanged, at the same price
+
+- id: CATALOG-014
+  title: A catalog call whose exchange field names another Exchange is refused invalid_argument with no typed reason
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A recipient MUST reject a request whose `exchange` is not its own domain
+  positive: A push whose exchange is this Exchange's own domain is accepted.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        none: exchange names a sibling Exchange of the stack, signed correctly (declared
+        alteration of the control push)
+      side_effect: the entry is not stored
+
+# harness: the positive needs an attestation signed over JCS by a verifier key a
+# Web Bot Auth directory publishes, which only an oracle module may produce
+# (ADR-028 H5); no such oracle exists yet. The negative needs no signing.
+- id: CATALOG-015
+  title: Attestations in a push are verified at push time; an attestation by an unauthorized verifier refuses the push
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Attestations pushed via CatalogService are verified at push time:
+  positive: >-
+    An entry carrying a self-attestation by the publisher, signed with a key its directory
+    publishes, over the entry's own URI, is accepted.
+  negative:
+    - code: non-OK
+      reason: >-
+        the attestation's verifier is neither the publisher nor a listed contributor, and
+        its signature verifies under no published key
+      side_effect: the entry is not stored
+
+- id: CATALOG-016
+  title: RemoveResources removes the resources it names by domain and path, under the push's authentication
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/exchange/multi-tenant.mdx
+    quote: >-
+      The same authentication mechanism applies to RemoveResources and RefreshCatalog
+      calls.
+  positive: >-
+    RemoveResources naming a resource the caller pushed, by its domain and path, answers
+    removed = 1, and DiscoverResources then offers nothing for that URI.
+  negative:
+    - code: non-OK
+      reason: >-
+        a caller the publisher's manifest does not list removes a resource of that
+        publisher, named by domain and path
+      side_effect: the entry stays and is still offered
+
+- id: CATALOG-017
+  title: A successful push reports accepted as the submission's own size, and its warnings refuse nothing
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A push is all-or-nothing, so a successful push stored every entry it carried and
+      this is the submission's own size.
+  positive: >-
+    A push of three entries, one of which carries an unregistered restriction token,
+    answers accepted = 3 with no rejected count, its warnings name the token, and all three
+    URIs are offered.
+  negative: []
+
+- id: CATALOG-018
+  title: Re-pushing a resource at its URI replaces it, so its offers carry the new terms
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: docs/architecture/adr-014-universal-licensing-core.md
+    quote: >-
+      re-sending converges, because a push upserts on the resource URI.
+  positive: >-
+    A resource pushed with one FREE term and pushed again with one FLAT term is then
+    offered once, at the FLAT price.
+  negative:
+    - code: non-OK
+      reason: the second push moves the same content_id to another path
+      side_effect: the resource is still offered at its first URI, and the second URI offers nothing
+
+- id: CATALOG-019
+  title: An omitted resource_mutability defaults to STATIC on the offer, and DYNAMIC is carried as pushed
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      When omitted, the Exchange applies the `STATIC` default at Offer build; an
+      explicit `UNSPECIFIED` is rejected.
+  positive: >-
+    An entry pushed without resource_mutability is offered with identity.resource_mutability
+    STATIC, and one pushed as DYNAMIC is offered DYNAMIC.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        catalog_rejection MALFORMED_ENTRY: resource_mutability set to
+        RESOURCE_MUTABILITY_UNSPECIFIED
+      side_effect: the entry is not stored
+
+- id: CATALOG-020
+  title: A publisher pushes its own catalog without listing itself as a contributor
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Publisher-only. Authorized third-party catalog contributors.
+  positive: >-
+    A push for the publisher's domain, signed by the publisher's own key under its own
+    domain's directory, is accepted and discoverable.
+  negative: []
+
+- id: CATALOG-021
+  title: RefreshCatalog is answered with whether the refresh started
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Trigger a full catalog refresh from configured sources.
+  positive: >-
+    A signed RefreshCatalog for the Exchange's own seat, by a caller the publisher lists,
+    is answered OK with a RefreshCatalogResponse.
+  negative: []
+
+- id: CATALOG-022
+  title: A push whose own ext_critical names a key the Exchange does not understand is refused UNKNOWN_CRITICAL_EXTENSION
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/extension-profiles.mdx
+    quote: >-
+      A catalog push is refused with
+      `CATALOG_REJECTION_REASON_UNKNOWN_CRITICAL_EXTENSION`.
+  positive: >-
+    A push whose ext carries an unknown key that its ext_critical does not list is stored.
+  negative:
+    - code: non-OK
+      reason: >-
+        catalog_rejection UNKNOWN_CRITICAL_EXTENSION: the push carries ext {"acme.must":
+        true} and ext_critical ["acme.must"] (declared alteration of the control push)
+      side_effect: the entry is not stored
+
+- id: CATALOG-023
+  title: An entry's ext_critical is carried onto its offer for the agent and never refuses the push
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/extension-profiles.mdx
+    quote: >-
+      The Exchange carries it onto `Offer.ext_critical`, with the `ext` keys it names,
+      and does not consume it, so a key the Exchange does not understand there never
+      refuses the push.
+  positive: >-
+    A push of an entry whose ext is {"acme.must": true} and whose ext_critical is
+    ["acme.must"] is stored, and the entry's offer carries ext_critical ["acme.must"] and
+    the ext key acme.must.
+  negative: []
+
+- id: CATALOG-024
+  title: A push without the deprecated caller_id is applied; the caller is whoever signs
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      DEPRECATED, never needed. Each entry's domain names whose resource it is, and the
+      caller is the party that signs the request
+  positive: >-
+    The listed contributor's push, signed by its key and carrying no caller_id, is
+    accepted and discoverable.
+  negative: []
+
+# ---------------------------------------------------------------- TERMS
+
+- id: TERMS-001
+  title: Restriction aliases and case are canonicalised at ingest, and an alias is never stored or emitted
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/vocab.proto
+    quote: >-
+      a consumer canonicalises it to the registered token at ingest and never stores or
+      emits it.
+  positive: >-
+    A term pushed with FUNCTION permitted ["generative-ai", "Search"] and USER_TYPE
+    permitted ["business"] is offered with ["ai-input", "search"] and ["commercial_entity"],
+    and the push carries no warning for those tokens.
+  negative: []
+
+- id: TERMS-002
+  title: An unregistered bare restriction token is accepted and reported in warnings; a namespaced one is accepted without
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Unknown tokens produce a PushResourcesResponse.warnings[] entry but do NOT cause
+      rejection (forward-compatible).
+  positive: >-
+    A term whose FUNCTION permitted carries "totally-made-up-use" is accepted, the
+    response's warnings name that token, and the offer carries the token unchanged. A
+    vendor-namespaced token ("acme:summarize") is accepted with no warning naming it.
+  negative: []
+
+- id: TERMS-003
+  title: A bare Pricing.unit or Quota.metric that is not registered refuses the whole push
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      after which a bare (non-namespaced) Pricing.unit or Quota.metric that is not a
+      registered token is rejected,
+  positive: >-
+    A PER_UNIT term with the registered unit "accesses" and one with the namespaced unit
+    "acme:widgets" are accepted.
+  negative:
+    - code: non-OK
+      reason: catalog_rejection UNKNOWN_VOCAB_TOKEN, unit "widgets"
+      side_effect: the entry is not stored
+    - code: non-OK
+      reason: catalog_rejection UNKNOWN_VOCAB_TOKEN, quota metric "views"
+      side_effect: the entry is not stored
+
+- id: TERMS-004
+  title: A token cannot be both permitted and prohibited, as written or once canonicalised
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      The ingest tier therefore asserts the same property a second time, over the
+      canonicalised tokens, under the SDK rule id restriction.canonical_disjoint;
+  positive: >-
+    A FUNCTION restriction permitting "ai-input" and prohibiting "ai-train" is accepted and
+    offered unchanged.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        catalog_rejection MALFORMED_ENTRY (wire tier): permitted ["crawl"], prohibited
+        ["crawl"]
+      side_effect: nothing is stored
+    - code: non-OK
+      reason: >-
+        catalog_rejection MALFORMED_ENTRY (ingest tier): permitted ["scrape"], prohibited
+        ["crawl"], one token once the alias resolves
+      side_effect: nothing is stored
+
+- id: TERMS-005
+  title: A term carries at most one restriction per axis
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      At most one Restriction per axis — restrictions on the same kind are AND-combined,
+      so duplicates are an authoring error.
+  positive: >-
+    A term with one FUNCTION, one GEOGRAPHY and one USER_TYPE restriction is accepted and
+    offered with all three.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        catalog_rejection MALFORMED_ENTRY: two FUNCTION restrictions on one term
+      side_effect: nothing is stored
+
+- id: TERMS-006
+  title: A REFERENCE_ONLY term references its document, and a document reference carries a digest
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A REFERENCE_ONLY term MUST carry a License with a non-empty uri — a term that
+      defers to a document but references nothing is rejected.
+  positive: >-
+    A REFERENCE_ONLY term carrying license.uri and a sha256 uri_digest is accepted and
+    offered with both unchanged.
+  negative:
+    - code: invalid_argument
+      reason: catalog_rejection MALFORMED_ENTRY; REFERENCE_ONLY with no license
+      side_effect: nothing is stored
+    - code: invalid_argument
+      reason: catalog_rejection MALFORMED_ENTRY; a license.uri with no uri_digest
+      side_effect: nothing is stored
+
+- id: TERMS-007
+  title: A SHARE_ALIKE obligation names the license derivatives inherit
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      REQUIRED for SHARE_ALIKE (rejected if absent), where it MUST identify a license
+  positive: >-
+    A SHARE_ALIKE obligation with scope_license.id "CC-BY-SA-4.0" is accepted and offered
+    unchanged.
+  negative:
+    - code: invalid_argument
+      reason: catalog_rejection MALFORMED_ENTRY; SHARE_ALIKE with no scope_license
+      side_effect: nothing is stored
+
+- id: TERMS-008
+  title: The required term enums are non-zero and a quota grants at least one unit
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A quota of 0 grants nothing — express "no access" by omitting the term, not a
+      zero quota.
+  positive: >-
+    A term with a quota {metric "accesses", limit 1, window TOTAL} and an ATTRIBUTION
+    ON_USE obligation is accepted and offered unchanged.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        catalog_rejection MALFORMED_ENTRY: quota limit 0, or semantics UNSPECIFIED, each
+        against the valid control term
+      side_effect: nothing is stored
+
+- id: TERMS-009
+  title: An OTHER obligation without detail is accepted and reported in warnings
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      an OBLIGATION_KIND_OTHER obligation without detail are accepted and reported in
+      PushResourcesResponse.warnings.
+  positive: >-
+    A term with an OBLIGATION_KIND_OTHER obligation and no detail is accepted, the
+    response carries a warning, and the offer carries the obligation.
+  negative: []
+
+- id: TERMS-010
+  title: A catalog term's pricing obeys the cross-field rules
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      PER_UNIT ⇒ unit must be set; FREE ⇒ rate must be 0.
+  positive: A PER_UNIT term with unit "accesses" is accepted.
+  negative:
+    - code: invalid_argument
+      reason: catalog_rejection MALFORMED_ENTRY; PER_UNIT with no unit
+      side_effect: nothing is stored
+    - code: invalid_argument
+      reason: catalog_rejection MALFORMED_ENTRY; FREE with rate "0.01"
+      side_effect: nothing is stored
+
+- id: TERMS-011
+  title: The term an offer sells is the publisher's term unchanged, apart from canonical tokens and its price
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Its semantics, license, restrictions, quotas, obligations, scopes and part_label
+      are the publisher's, unchanged.
+  positive: >-
+    A term pushed with its license, semantics, restrictions (one advisory), a quota,
+    obligations with details and a scope_license, and a part_label is offered with each of
+    those fields equal to what was pushed.
+  negative: []
+
+- id: TERMS-013
+  title: A term's restrictions never hide it at discovery
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      The Exchange never enforces a restriction: it is NOT an Exchange-side gate the
+      requester must pass to see or buy a term.
+  positive: >-
+    A resource with a GEOGRAPHY [US]-prohibited term and a USER_TYPE [academic]-only term
+    is offered with both terms, at the Exchange and through Broker Resolve.
+  negative: []
+
+- id: TERMS-015
+  title: A REFERENCE_ONLY term may carry only its price and document
+  level: MAY
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      The machine restrictions/quotas/obligations are OPTIONAL here — the publisher MAY
+      send Pricing alone
+  positive: >-
+    A REFERENCE_ONLY term with license uri and digest, pricing, and no restrictions,
+    quotas or obligations is accepted with no warning and offered with the license.
+  negative: []
+
+# harness: the identity service's purchase tool would need a resource whose only
+# term carries a binding restriction with an unknown vendor token, and a tool
+# result that reports a declined term. Not written in this pass.
+- id: TERMS-016
+  title: A custodial agent declines a term with a binding restriction it cannot evaluate
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      an agent that cannot evaluate every token in it — including an unknown vendor
+      token — MUST decline the term.
+  positive: >-
+    The purchase tool buys a resource whose term's restriction carries only registered
+    tokens, and one whose unknown-token restriction is advisory. Asked for a resource
+    whose only term carries a binding restriction with "acme:unknown-use", it declines
+    the term: no transaction is recorded and no balance moves.
+  negative: []
+
+# ---------------------------------------------------------------- PROFILE
+
+- id: PROFILE-002
+  title: A caller that omits supported_profiles receives every ext field the Exchange has
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Absence means "send all available metadata" — Exchange MUST NOT withhold ext
+      fields solely because the caller omitted this field.
+  positive: >-
+    A resource discovered with supported_profiles absent carries every ext key the
+    discovery with ["fora-comp-v1"] carries.
+  negative: []
+
+- id: PROFILE-003
+  title: An Exchange declaring fora-comp-v1 puts comp.package_id on every offer, as a flat Offer.ext key
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/ext-comp.mdx
+    quote: >-
+      Include `comp.package_id` on every Offer
+  positive: >-
+    With the Exchange's manifest listing fora-comp-v1, every offer returned to a caller
+    declaring fora-comp-v1 carries Offer.ext["comp.package_id"] as a non-empty string,
+    distinct across the offers of one resource's terms.
+  negative: []
+
+- id: PROFILE-004
+  title: A fora-comp-v1 Exchange validates comp.* fields, and every comp key a publisher pushes comes out on the offer
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/ext-comp.mdx
+    quote: >-
+      Validate `comp.*` ext fields against this profile's schema
+  positive: >-
+    A resource pushed with valid comp.title, comp.seller and comp.citation_required keys
+    in its ext is offered, to a caller declaring fora-comp-v1, with each of those keys and
+    values unchanged.
+  negative:
+    - code: non-OK
+      reason: >-
+        the push carries comp.citation_required as the string "yes", where the profile
+        defines an integer
+      side_effect: the entry is not stored
+
+- id: PROFILE-006
+  title: An Exchange declaring fora-music-v1 forwards the publisher's music.* keys unchanged and unvalidated
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/ext-music.mdx
+    quote: >-
+      An **Exchange** that declares `fora-music-v1` MUST forward the publisher's
+      `music.*` keys unchanged inside the signed offer. It does not validate them.
+  positive: >-
+    A track pushed with music.* keys, among them an unknown "music.iswc" key and an
+    upper-case "music.genre" the profile does not allow, is accepted, and its verified
+    offer carries exactly those keys and values.
+  negative: []
+
+- id: PROFILE-007
+  title: The Broker applies music search filters as required constraints
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/ext-music.mdx
+    quote: >-
+      A **Broker** that answers `music.*` search filters MUST apply them as required
+      constraints, in the [order of checks](#order-of-checks-and-errors) above.
+  positive: >-
+    Resolve with search_filters {"music.isrc": "USUAN2300011"} and no query returns exactly
+    the one track that carries that ISRC.
+  negative:
+    - code: ok
+      reason: a well-formed filter value no track carries ({"music.instruments" "ukulele"})
+      side_effect: >-
+        no offer group is returned, and the absence reason is NOT_IN_CATALOG; the filter is
+        not dropped
+
+- id: PROFILE-008
+  title: The Broker checks a music search in the stated order; explicit URIs first, bad values and missing input refused
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/ext-music.mdx
+    quote: >-
+      A defined key with a value outside its format rejects the request with
+      `INVALID_ARGUMENT`, and no search runs.
+  positive: >-
+    Resolve with uris and a malformed "music.bpm_range" "fast" resolves the URIs and
+    ignores the filter.
+  negative:
+    - code: invalid_argument
+      reason: none; no uris, no query, and "music.bpm_range" "fast"
+      side_effect: no offer is returned
+    - code: invalid_argument
+      reason: none; no uris, no query, and only a key the profile does not define ("music.tempo")
+      side_effect: no offer is returned
+
+# harness: the stack runs one Broker, with catalog search on. Driving this needs a
+# Broker with query discovery off: a compose profile, or an e2e-only control surface
+# (ADR-028 D6).
+- id: PROFILE-009
+  title: A Broker with catalog search off refuses a music filter as unimplemented rather than ignore it
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/ext-music.mdx
+    quote: >-
+      When its catalog search is switched off, it MUST reject a request with a defined
+      filter key with `UNIMPLEMENTED`.
+  positive: The same Broker resolves a request with uris and no filter.
+  negative:
+    - code: unimplemented
+      reason: none; a request with a query and "music.genre" "jazz"
+      side_effect: no result that ignores the filter is returned
+
+- id: PROFILE-010
+  title: The Broker forwards the agent's supported_profiles to each Exchange it queries
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      The Broker MUST forward this list unchanged in ResourceQuery.supported_profiles on
+      every query it sends an Exchange, and forward an absent list as absent.
+  positive: >-
+    Resolve with supported_profiles ["fora-comp-v1"] for a URI returns an offer carrying
+    every ext key that a direct DiscoverResources with that profile returns.
+  negative: []
+
+- id: PROFILE-012
+  title: The Broker forwards the agent's acceptable_restrictions to each Exchange unchanged
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      The Broker forwards these to Exchanges in
+      ResourceQuery.acceptable_restrictions.
+  positive: >-
+    Resolve with acceptable_restrictions on the FUNCTION and GEOGRAPHY axes produces a
+    ResourceQuery to each queried Exchange carrying exactly those axes and values, in order.
+  negative: []
+
+- id: PROFILE-013
+  title: Acceptable restrictions are advisory; a filtering Exchange says so with RESTRICTION_FILTERED and the axes
+  level: MAY
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      When an Exchange does drop offers this way it MAY signal it via
+      OfferAbsenceReason.RESTRICTION_FILTERED (with the axes in
+      OfferGroup.restriction_filters).
+  positive: >-
+    DiscoverResources with acceptable_restrictions GEOGRAPHY ["US"] for a resource whose
+    only term prohibits US is answered OK, either with the term's offer or with an empty
+    group whose absence_reason is RESTRICTION_FILTERED and whose restriction_filters names
+    GEOGRAPHY; never with another absence reason.
+  negative: []
+
+- id: PROFILE-014
+  title: An Exchange answers a query whose ext_critical names a key it does not understand with UNKNOWN_CRITICAL_EXTENSION
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/extension-profiles.mdx
+    quote: >-
+      If a consumer encounters a key in `ext_critical` that it does not recognize, it
+      **MUST** reject the message.
+  positive: >-
+    A ResourceQuery whose ext carries an unknown key that ext_critical does not list is
+    answered with the same offers as the query without ext.
+  negative:
+    - code: ok
+      reason: >-
+        ext {"acme.must": true}, ext_critical ["acme.must"]: the group answers no offers
+        and absence_reason UNKNOWN_CRITICAL_EXTENSION
+      side_effect: no offer is issued for the URI
+
+- id: PROFILE-015
+  title: The Broker answers a Resolve whose ext_critical names a key it does not understand with UNKNOWN_CRITICAL_EXTENSION
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/extension-profiles.mdx
+    quote: >-
+      Discovery and `Resolve` answer OK with no offers and
+      `OFFER_ABSENCE_REASON_UNKNOWN_CRITICAL_EXTENSION`.
+  positive: >-
+    A DiscoveryRequest whose ext carries an unknown key that ext_critical does not list is
+    resolved as the request without ext.
+  negative:
+    - code: ok
+      reason: >-
+        ext {"acme.must": true}, ext_critical ["acme.must"]: the Resolve answers no offers,
+        with UNKNOWN_CRITICAL_EXTENSION as the absence reason
+      side_effect: no offer is returned
+
+# ---------------------------------------------------------------- EDGEHINT
+
+- id: EDGEHINT-001
+  title: Every edge 403 to a request for licensed content without a valid signed URL carries X-Content-Rules
+  level: SHOULD
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      An edge SHOULD send X-Content-Rules on every such refusal, and MAY add
+      X-FORA-Exchange.
+  positive: >-
+    On each runtime, the 403 to an AI bot with no signed URL, the 403 to an expired signed
+    URL and the 403 to a tampered signed URL each carry X-Content-Rules.
+  negative: []
+
+- id: EDGEHINT-002
+  title: X-Content-Rules is exactly the refused host's manifest URL
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      exactly "https://", a domain, and "/.well-known/fora.json", with nothing else: no
+      userinfo, query, fragment, trailing slash or other path.
+  positive: >-
+    The header is the scheme, the Host the refused request named and
+    "/.well-known/fora.json", on every runtime, with no query or path of the refused
+    request.
+  negative: []
+
+- id: EDGEHINT-003
+  title: X-FORA-Exchange names one Exchange as a bare domain, in the form of Offer.exchange
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      The value is that Exchange's bare domain, in the same form as Offer.exchange: the
+      "Request recipient" shape, a port allowed, no scheme, path or other part.
+  positive: >-
+    When present, the header matches the Request-recipient shape and equals the
+    offer.exchange of the offers that Exchange issues for the refused page.
+  negative: []
+
+- id: EDGEHINT-004
+  title: The Exchange X-FORA-Exchange names is listed in the publisher's manifest
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      that Exchange MUST be listed in the publisher's WellKnownManifest.exchanges.
+  positive: >-
+    The header's value is the domain of one entry in exchanges[] of the manifest
+    X-Content-Rules points at.
+  negative: []
+
+- id: EDGEHINT-005
+  title: X-FORA-Exchange is never sent without X-Content-Rules
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      It MUST NOT send X-FORA-Exchange without X-Content-Rules:
+  positive: >-
+    On every 403 that carries X-FORA-Exchange, X-Content-Rules is present.
+  negative: []
+
+- id: EDGEHINT-006
+  title: The discovery headers are sent only on that 403
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      When an edge sends them. Only on that 403.
+  positive: >-
+    A browser read that passes through (200) carries neither header.
+  negative: []
+
+# harness: no product agent consumes these headers. The identity service never
+# fetches a page bare and never reads them, so the rule binds only an agent built on
+# an SDK, where the protocol's own vectors prove it.
+- id: EDGEHINT-007
+  title: An agent never treats X-FORA-Exchange as authorization, and the manifest wins on disagreement
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      An agent MUST NOT treat X-FORA-Exchange as authorization.
+  positive: >-
+    Following a 403 whose X-FORA-Exchange names an Exchange the publisher's manifest lists,
+    the agent discovers there. When the header names an Exchange the manifest does
+    not list, the agent buys nothing from that Exchange.
+  negative: []
+
+# The bot gate: which unsigned reads the edge refuses with the 403 that carries the
+# discovery headers, and which it lets through. Each runtime the stack runs
+# (Cloudflare, Fastly, Lambda@Edge) is driven. Cloudflare's verified-bot signal is
+# not: Miniflare attaches no request.cf verified-bot data, so the gate there reads
+# the User-Agent alone, as on the other two.
+
+- id: EDGEHINT-008
+  title: Every User-Agent on the protocol's maintained AI-bot list is refused an unsigned read of licensed content
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/bot-detection.mdx
+    quote: >-
+      The Edge Function detects AI crawlers accessing protected content without a
+      signed URL and returns a `403 Forbidden` response directing them to the
+      Exchange.
+  positive: >-
+    The same page read unsigned under a browser's User-Agent is served (EDGEHINT-009).
+  negative:
+    - code: "403"
+      reason: the AI-bot refusal; the protocol names no reason token for it
+      side_effect: >-
+        the page is not served, for each token of the maintained list sent as the
+        User-Agent, on Cloudflare, Fastly and Lambda@Edge
+
+- id: EDGEHINT-009
+  title: A reader whose User-Agent is not on the AI-bot list, a browser or a search engine's crawler, reads licensed content unsigned
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/bot-detection.mdx
+    quote: >-
+      **User-Agent matching is exact substring match**, not fuzzy. Unknown
+      User-Agents pass through.
+  positive: >-
+    An unsigned read of a licensed page under a browser's User-Agent, Googlebot's and
+    bingbot's is served on each runtime, and the answer carries neither discovery
+    header.
+  negative: []
+
+- id: EDGEHINT-010
+  title: A valid signed URL is served whatever the User-Agent, an AI bot's included
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/bot-detection.mdx
+    quote: >-
+      Bot detection only applies to requests *without* signed URL parameters -- a
+      valid signed URL always takes precedence.
+  positive: >-
+    A bound delivery URL presented with its buyer's proof is served under an AI bot's
+    User-Agent, a search engine crawler's and a browser's, on each runtime.
+  negative: []
+
+- id: EDGEHINT-011
+  title: A signed URL that fails verification is refused whatever the User-Agent, a browser's included
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/overview.mdx
+    quote: >-
+      A request with signed URL parameters that fails signature verification always
+      gets a 403, regardless of whether the requester is a bot or a browser.
+  positive: The untampered URL presented with the buyer's proof is served.
+  negative:
+    - code: "403"
+      reason: signature_mismatch
+      side_effect: >-
+        a bound URL with one character of its signature changed, presented with the
+        buyer's proof, is not served under a browser's User-Agent, a search engine
+        crawler's or an AI bot's, on each runtime
+
+- id: EDGEHINT-012
+  title: The publisher's manifest is served to every client, an AI bot included
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/overview.mdx
+    quote: >-
+      so protocol-aware agents discover the Exchange without triggering a 403.
+  positive: >-
+    GET /.well-known/fora.json under an AI bot's User-Agent, a search engine
+    crawler's, a browser's and with no User-Agent answers 200 with the manifest of
+    the refused host, on each runtime.
+  negative: []
+
+# untested: no edge in the e2e stack sets a licensed scope (LICENSED_PATHS_JSON), so
+# every path of every demo publisher is licensed and no request can reach open
+# content. Driving it needs an edge deployment with a scope that leaves a path out.
+- id: EDGEHINT-013
+  title: An unsigned read outside the publisher's licensed paths is never refused, an AI bot's included
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/bot-detection.mdx
+    quote: >-
+      never block requests to open content.
+  positive: >-
+    An AI bot's unsigned read of a path outside the licensed scope is passed to the
+    origin.
+  negative: []
+
+- id: EDGEHINT-014
+  title: An unsigned read of licensed content with no User-Agent is refused as an AI bot's
+  level: DECISION
+  actor: edge
+  surface: sdk
+  source:
+    cite: src/edge/README.md
+    quote: >-
+      **No User-Agent at all** counts as a bot (normal browsers always send one).
+  positive: >-
+    The edge's documented contract, pending the protocol author's confirmation: the
+    protocol does not say how an edge treats a request that carries no User-Agent, so
+    the edge treats it as an AI bot. The same page read under a browser's
+    User-Agent is served.
+  negative:
+    - code: "403"
+      reason: the AI-bot refusal
+      side_effect: >-
+        the page is not served to an unsigned GET that carries no User-Agent header,
+        on each runtime
+
+- id: EDGEHINT-015
+  title: An unsigned request with a method other than GET or HEAD is never bot-gated
+  level: DECISION
+  actor: edge
+  surface: sdk
+  source:
+    cite: src/edge/README.md
+    quote: >-
+      POST/PUT and other non-read methods on *unsigned* requests are forwarded as-is
+      (body included) and are never bot-gated
+  positive: >-
+    The edge's documented contract, pending the protocol author's confirmation: the
+    protocol's bot gate names no methods, and the edge gates content reads only. An
+    unsigned POST to a licensed page under an AI bot's User-Agent goes to the origin:
+    Lambda@Edge hands it to CloudFront, and over HTTP the answer is the origin's, not
+    the edge's 403 with the discovery headers.
+  negative: []

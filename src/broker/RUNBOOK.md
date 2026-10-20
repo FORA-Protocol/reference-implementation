@@ -70,6 +70,12 @@ curl -s https://broker.example/.well-known/fora-key-revocations.json
 JSON, one object per line, on stdout — `docker compose logs broker`. **There is no
 `/metrics` endpoint and no Prometheus support**, so alerting is on log events.
 
+Everything in this section assumes the default `BROKER_LOG_LEVEL` of `INFO`. Raised to
+`WARN`, the service stops writing the `INFO` lines below, and several checks and
+procedures in this runbook read those; lowered to `DEBUG`, it adds routine detail,
+such as an `http request` line for every request. [`CONFIGURATION.md`](CONFIGURATION.md)
+§2 says what each level hides.
+
 Every line carries `request_id`, and it is the same value across the Edge, the
 Broker and the Exchange — grep it in all three to trace one request end to end.
 
@@ -78,30 +84,34 @@ Broker and the Exchange — grep it in all three to trace one request end to end
 | `broker.exit` | ERROR | Refused to start. The message names the cause. |
 | `broker.revocation.unavailable` | ERROR | The withdrawn-keys file is unreadable or malformed. |
 | `broker.resolve.record` | ERROR | Could not write the audit row. The request itself succeeded. |
-| `broker.httpsig.reject` | WARN | A request was rejected before it reached a handler. `outcome` says why: `signature`, `replay`, `broken_chain`, `hop_budget` or `body_too_large`. The first four are authentication outcomes and point at the caller's key, clock or relay chain. `body_too_large` is not one of them — the body passed the read cap before verification, and the caller fixes it by sending less. This Broker sets no cap of its own, so the bound is the SDK's own default rather than nothing. **On this Broker the line appears only for a request that carried a `Signature-Input` header.** The verification seam is what writes it, and this Broker admits an unsigned request to the handler without entering that seam, so an unsigned body past the cap is still refused and still bounded but leaves no audit line. Watching this line for over-size abuse therefore does not show you unauthenticated callers. |
+| `broker.httpsig.reject` | WARN | A request was rejected before it reached a handler. `outcome` says why: `signature`, `replay`, `broken_chain`, `hop_budget` or `body_too_large`. The first four are authentication outcomes and point at the caller's key, clock or relay chain. `body_too_large` is not one of them — the body passed the read cap before verification, and the caller fixes it by sending less. This Broker caps every agent-facing request body at 64 KiB. **On this Broker the line appears only for a request that went through the verification seam: every purchase (`ExecuteTransaction`), signed or not, and any other request that carried a `Signature-Input` header.** The seam is what writes it, and this Broker admits an unsigned `Resolve` to the handler without entering the seam, so an unsigned `Resolve` body past the cap is still refused and still bounded but leaves no audit line. Watching this line for over-size abuse therefore does not show you unauthenticated `Resolve` callers. |
 | `foraaudience.refused` | WARN, **ERROR** for an unusable identity | A request named a recipient other than this Broker and was refused before the handler ran. Carries `path` (the RPC — the same key `broker.httpsig.reject` uses), `verdict`, `self` (the identity this service answers to) and `reason`. No agent-facing RPC names a recipient today, so on this service the line should be rare; at **ERROR** it means this Broker's own identity is unusable and every addressed request would be refused. |
 | `broker.registry.no_bootstrap` | WARN | No Exchange registry file — the Broker routes to no Exchange until one is registered. |
 | `broker.relay.key_absent` | WARN | No relay key — calls to the Exchange go unsigned and get 401. |
 | `broker.registry.set_probe_result` | WARN | Could not **write** what a health probe pass learned — the probe state, the endpoint, or both. Fires on a failed write, not on a change. Field `exchange_id`. |
-| `broker.registry.probe_state_changed` | INFO | An Exchange stopped being routable, changed how, or came back. Fields `exchange_id`, `domain`, `was`, `now`; `was` and `now` carry `LIVE`, `DOWN` or `REFUSED`. This is the only line that timestamps an outage; the routing-skip line says an Exchange is not routable now but not when that started. A `DOWN` that becomes `REFUSED` is worth reading: the Exchange came back and is still unusable. |
+| `broker.registry.probe_state_changed` | WARN into `DOWN` or `REFUSED`, INFO back to `LIVE` | An Exchange stopped being routable, changed how, or came back. Fields `exchange_id`, `domain`, `was`, `now`; `was` and `now` carry `LIVE`, `DOWN` or `REFUSED`. This is the only line that timestamps an outage; the routing-skip line says an Exchange is not routable now but not when that started. A `DOWN` that becomes `REFUSED` is worth reading: the Exchange came back and is still unusable. |
 | `broker.registry.endpoint_changed` | INFO | The address an Exchange advertises in its own `fora.json` differs from the one the registry held, and the registry now holds the advertised one. Fields `exchange_id`, `domain`, `was`, `now`. Expected once after a bootstrap file names an address the Exchange has outgrown; repeating every polling interval means the Exchange is advertising an address that does not stay put. |
-| `broker.registry.resolve` | **INFO** | A probe pass could not read an Exchange's own `fora.json`, so it learned nothing about where that Exchange is. Fields `domain`, `err`. The pass keeps the address already stored and marks the row `DOWN`, because routing resolves the same way and could not reach it either. Note the level: this is the one probe-loop fault logged below WARN, while the same failure on the request path (`broker.routing.resolve`) is a WARN. Filtering at WARN shows you the request-path copy and hides the probe that took the Exchange out of service. |
+| `broker.registry.resolve` | WARN | A probe pass could not read an Exchange's own `fora.json`, so it learned nothing about where that Exchange is. Fields `domain`, `err`. The pass keeps the address already stored and marks the row `DOWN`, because routing resolves the same way and could not reach it either. The same failure on the request path is `broker.routing.resolve`, also a WARN. |
 | `broker.registry.resolve.refused` | WARN | A probe pass DID read an Exchange's own `fora.json` and would not use it — a document version this Broker does not implement, no endpoint, or an endpoint on a host the document does not speak for. Fields `domain`, `err`. The row is marked `REFUSED`. Unlike the line above, waiting does not clear this: every pass reads the same document, so it repeats until the Exchange republishes. |
 | `broker.registry.list` | WARN | A probe pass could not read the registry at all and did no work. Field `err`. Every Exchange keeps its last known state until the next pass. |
 | `broker.registry.refresh` | WARN | The same fault, reported by the polling loop. Field `err`. Paired with the line above for one failure. |
 | `broker.routing.skipped` | INFO (`unhealthy`, `refused`, `blocked`), DEBUG (`unregistered`) | A manifest named an Exchange that discovery then declined. Fields `domain`, `reason`. `unhealthy` clears when the Exchange answers `/healthz` again; `refused` only when the Exchange republishes a `fora.json` this Broker can use; `blocked` only when an operator restores trust; `unregistered` means the manifest names an Exchange this Broker has never heard of, which is common and logged at DEBUG. |
-| `broker.batch.total_cost_aggregation_failed` | WARN | The relay could not total a batch's cost. The transaction itself is unaffected. |
 | `broker.discover` | WARN | An Exchange failed the discovery call. Field `exchange`. |
 | `broker.discover.offer_rejected` | WARN | An offer arrived but failed signature verification. Fields `exchange`, `uri`, `reason`. |
 | `broker.routing.resolve` | WARN | A request could not reach a registered Exchange's `fora.json`. Transient; the request answers retryably. |
 | `broker.routing.resolve.refused` | WARN | A request read a registered Exchange's `fora.json` and would not use it. Fields `domain`, `err`. Settled: the URL answers "not in catalog" rather than "try again", because the retry reads the same document. |
-| `broker.resolve.probe` | WARN | Could not read a publisher's `fora.json`. Field `domain`. |
+| `broker.resolve.probe` | WARN | Could not read a publisher's `fora.json`. Field `domain`. The prober's own copy of the same failure, `broker.probe`, carries no `request_id` and is logged at DEBUG. |
 | `broker.routing.lookup` | WARN | Reading a registered Exchange from the database failed with a real error (not "not registered"). Field `domain`. That Exchange is skipped for the current request. |
-| `broker.discover_relay` / `broker.exchange_relay` | INFO on success, WARN on a fault | The relay audit trail: one record per relay attempt, carrying `outcome` and `endpoint`. The outcomes are listed below. |
+| `broker.execute_transaction` | INFO for `VALIDATED`, **ERROR** for `REJECTED_INTERNAL`, WARN for every other outcome | The purchase audit trail: one record per refusal the purchase service makes or fault it meets, carrying `outcome` and, when it concerns one Exchange, `exchange`, plus one `VALIDATED` record per purchase the Broker sent. The outcomes are listed below. A request that the strict wire validation refuses (no items, or an item with no offer) is refused before the purchase service and leaves no record here; the agent still receives the violated field. The level follows the outcome: a refusal of the caller or a fault at an Exchange is WARN, and `REJECTED_INTERNAL`, a fault on the Broker's own side, is ERROR. One exception, for a fault only: a `REJECTED_INTERNAL` or `UPSTREAM_REFUSED` record whose `err` is the request itself ending — the agent disconnected, or its deadline passed, while the Broker read its registry or waited on an Exchange — is DEBUG, because nothing failed on either side. A refusal of the caller never moves: `REJECTED_AUTHZ`, `REJECTED_INVALID` and `REJECTED_EXCHANGE` stay WARN whatever the caller does. |
 | `broker.redis.ready` / `.disabled` | INFO | Whether replay protection is shared or per-process. |
 | `broker.exa.disabled` | INFO | `EXA_API_KEY` is unset. Logged once at start-up; free-text query requests will fail with `no domains for query`. |
 | `broker.exa.init_failed` | WARN | The key is set but the search client could not be built. Field `err`. The Broker starts anyway, and free-text query requests fail exactly as if the key were unset. |
 | `broker.relay.signing` | INFO | The relay key in use. `keyid` is a fingerprint, not the name you chose. |
+
+The four `broker.registry.*` failures at WARN above (`set_probe_result`, `resolve`,
+`list` and `refresh`) are written at DEBUG instead when the failure is the Broker
+shutting down: a probe pass cut short by a stop is neither a registry fault nor an
+Exchange outage.
 
 ### 2.3 Alerts
 
@@ -119,19 +129,22 @@ on duty, at any hour.**
 | `broker.revocation.unavailable` | **Wake on-call** | While broken, the Exchange cannot learn of any withdrawal. |
 | `broker.discover.offer_rejected` in bulk | Business hours | Exchange key rotation, or clocks that are out of sync between the two. |
 
-**Relay `outcome` values.** Every refusal begins with `REJECTED_`, so one filter on
-that prefix catches all of them, and each stays searchable on its own.
+**Purchase `outcome` values.** Every refusal the purchase service records begins with
+`REJECTED_`, so one filter on that prefix catches all of them, and each stays
+searchable on its own. A request whose signature does not verify never reaches the
+purchase service; it is recorded as `broker.httpsig.reject` instead. A request the
+strict wire validation refuses never reaches it either, and is not recorded.
 
 | `outcome` | Means |
 |---|---|
-| `VALIDATED` | The request passed every gate and was forwarded. |
-| `REJECTED_ENDPOINT` | The caller named an address no registered Exchange advertises. This is the shape an SSRF attempt takes; a `BLOCKED` Exchange also lands here, because an agent is owed no distinction between "withdrawn" and "never registered". |
-| `REJECTED_ENDPOINT_DOWN` | The Exchange is registered and still trusted, and its last health probe failed. Routine, and it clears on its own — this is the one to exclude before reading a `REJECTED_` rate as an attack signal. |
-| `REJECTED_AUTHZ` | Either the agent's own signature did not verify at the Broker boundary, or the transaction named an Exchange that is registered but not approved to be paid (`DISCOVERED`). The message says which. |
-| `REJECTED_REPLAY` | The signature had already been used. |
-| `REJECTED_UPSTREAM` | Reaching the Exchange failed in a way the Exchange owns. |
+| `VALIDATED` | Every item passed admission and the sub-requests were sent. `exchanges` counts them. |
+| `REJECTED_AUTHZ` | `requester.domain` is not the host of the directory the request was signed from. |
+| `REJECTED_INVALID` | The purchase passed the wire checks but cannot be executed as sent: an item without its agent acceptance, no request acceptance, a request acceptance that does not describe this request, or two items presenting one `offer_id`. The message and the `field` metadata say which. Nothing was sent. |
+| `REJECTED_EXCHANGE` | An item named an Exchange the Broker will not send a purchase to: unregistered or `BLOCKED` (reported the same, because an agent is owed no distinction between "withdrawn" and "never registered"), down at its last health probe, refused at its last manifest read, not approved to be paid (`DISCOVERED`), or advertising no endpoint the Broker can use. The message says which. A down Exchange is routine and clears on its own. |
 | `REJECTED_INTERNAL` | The Broker's own fault, such as a registry read that failed. Nothing is wrong with the Exchange; do not chase it. |
-| `RELAY_UPSTREAM_ERROR` | The Exchange was reached and answered with an error. |
+| `UPSTREAM_REFUSED` | An Exchange was reached, or could not be reached, and its items are reported refused. `code` carries the refusal code. |
+| `UPSTREAM_UNATTRIBUTABLE` | An Exchange answered, but not item by item, so every item sent to it is reported refused with `internal`. |
+| `TOTALS_OMITTED` | The purchase was answered, but the costs of the charged items could not be totalled, so the answer carries no totals. The items themselves are unaffected. Field `err`. |
 
 ---
 
@@ -148,7 +161,7 @@ that prefix catches all of them, and each stays searchable on its own.
 | Discovery returns nothing **and the logs are empty** | Several paths return "no offers" silently | §3.2 — read the `absence_reason` the agent got. |
 | Refuses to start: "no Broker identity key" | Neither `BROKER_ED25519_SEED` nor `BROKER_ED25519_KEY_FILE` is set. The Broker will not mint one for you, because the key it publishes must survive a restart | Set a seed: [`DEPLOYMENT.md`](DEPLOYMENT.md) §5. |
 | The Exchange answers the Broker with 401 | Relay key missing, or its public half not loaded by the Exchange | Check for `broker.relay.signing` at start-up, then confirm the key with the Exchange operator. |
-| Broker will not start | `BROKER_DSN` unset or the database unreachable | Read the `broker.exit` line; it names the cause. |
+| Broker will not start | `BROKER_DSN` unset or the database unreachable, or `BROKER_LOG_LEVEL` set to something other than `DEBUG`, `INFO`, `WARN` or `ERROR` | Read the `broker.exit` line; it names the cause. |
 | Ed25519 PEM rejected at start-up | `openssl genpkey` writes a format the Broker does not accept | Use `BROKER_ED25519_SEED`: [`CONFIGURATION.md`](CONFIGURATION.md) §3. |
 | A withdrawn key still works | The published list is empty — file unset or missing, or `as_of` did not move forward | Fetch the revocations document (§2.1). Procedure: §4.2. |
 | Revocations route returns 500 | The withdrawn-keys file is malformed | **Urgent** — while broken the Exchange learns of no withdrawal. The `broker.revocation.unavailable` line carries the exact error. |
@@ -185,15 +198,14 @@ An Exchange declined for its registry state does leave a line:
 `refused` or `blocked`, at INFO. The quiet causes are the rest — the publisher has no
 `fora.json`, its hostname could not be read, or the manifest names an Exchange
 this Broker has never heard of (that last one logs at DEBUG, below the default
-floor). A zero-offer discovery also writes **no audit row**, so there is no
+floor; restart with `BROKER_LOG_LEVEL=DEBUG` to see it). A zero-offer discovery also writes **no audit row**, so there is no
 database trail either. The reliable signal is the `absence_reason` in the response
 the agent received:
 
 | `absence_reason` | Meaning |
 |---|---|
-| `NOT_IN_CATALOG` | A publisher returned 404 for its `fora.json` — or, as a fallback, everything routed nowhere. Check the Exchange list next. |
+| `NOT_IN_CATALOG` | A publisher returned 404 for its `fora.json` — or, as a fallback, everything routed nowhere, or the Exchange had nothing to offer. A requester whose scopes cover none of a resource's terms lands here too: the Exchange answers it with no offer and no reason, so the resource stays hidden. Check the Exchange list next. |
 | `TEMPORARILY_UNAVAILABLE` | Manifest fetches or Exchange calls failed. Correlate with `broker.resolve.probe` and `broker.discover`. |
-| `SCOPE_INSUFFICIENT` | The caller's credentials unlocked nothing. |
 | `NOT_AUTHORIZED` | The budget check refused — the agent's accumulated spend this month has reached the request's limit, or the top-ranked offer would push it past. This path **does** write an audit row (`outcome=budget_exhausted`). |
 
 An `absence_reason` may also be passed through unchanged from the Exchange. When the
@@ -428,8 +440,7 @@ PostgreSQL and Redis are covered by their own operating guides.
 - **No rate-limit information is returned to agents.**
 - **The reported discovery method depends on the path.** Offers for requests that
   name URLs are reported as `EXCHANGE`; offers for free-text query requests are
-  reported as `SEARCH`. On the relay surface the Broker passes through whatever
-  method the queried Exchange stated.
+  reported as `SEARCH`.
 - **Free-text search discovery is incomplete.** With `EXA_API_KEY` set, EXA supplies
   candidate publisher domains, but the query is never forwarded to the Exchange, so
   a compliant Exchange returns no offers for a free-text request (§3.3).

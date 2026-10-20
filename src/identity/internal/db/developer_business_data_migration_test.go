@@ -40,6 +40,25 @@ func TestDropDeveloperBusinessDataMigration(t *testing.T) {
 	ctx := context.Background()
 	dsn := sharedb.AcquireTestDSN(t, ctx, sharedPG)
 
+	assertBusinessDataDroppedAtHead(t, ctx, dsn)
+
+	m := schemaProbe.Migrator(t, dsn)
+	defer func() { _, _ = m.Close() }()
+
+	// Migrate to an explicit version rather than counting Steps(-1) from a moving
+	// head: any migration added above 000006 would otherwise shift the step math.
+	// Version 5 is the state immediately before 000006 ran.
+	if err := m.Migrate(5); err != nil {
+		t.Fatalf("migrate to version 5 (reverse 000006): %v", err)
+	}
+
+	assertBusinessDataRestored(t, ctx, dsn)
+}
+
+// assertBusinessDataDroppedAtHead checks the schema at head, before any down
+// migration runs.
+func assertBusinessDataDroppedAtHead(t *testing.T, ctx context.Context, dsn string) {
+	t.Helper()
 	// At head: the four are dropped and the table stays. The up migration keeps
 	// the table deliberately — identity.exchange_registration keys its rows to
 	// this row's subdomain with ON DELETE CASCADE.
@@ -62,17 +81,12 @@ func TestDropDeveloperBusinessDataMigration(t *testing.T) {
 			t.Errorf("after up: identity.developer_account lost %s, which 000006 does not drop", col)
 		}
 	}
+}
 
-	m := schemaProbe.Migrator(t, dsn)
-	defer m.Close()
-
-	// Migrate to an explicit version rather than counting Steps(-1) from a moving
-	// head: any migration added above 000006 would otherwise shift the step math.
-	// Version 5 is the state immediately before 000006 ran.
-	if err := m.Migrate(5); err != nil {
-		t.Fatalf("migrate to version 5 (reverse 000006): %v", err)
-	}
-
+// assertBusinessDataRestored checks the schema after the down migration of
+// 000006 has run.
+func assertBusinessDataRestored(t *testing.T, ctx context.Context, dsn string) {
+	t.Helper()
 	for _, col := range droppedColumns {
 		if !schemaProbe.HasColumn(t, ctx, dsn, developerAccount, col) {
 			t.Errorf("after down: %s was not restored", col)

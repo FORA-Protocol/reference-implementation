@@ -9,6 +9,11 @@
 #                     KEY (a versioned key id, JOSE "kid" — rotating the key
 #                     changes it). Resolved by the Exchange from the Broker's
 #                     own Web Bot Auth directory, so it needs no DNS hostname.
+#                     Like the smoke ids, an existing key file is the source
+#                     of truth; before it exists the default is
+#                     broker.<stack>.v1 (broker.staging.v1, broker.demo.v1,
+#                     broker.production.v1), so no stack is named after
+#                     another.
 #
 #   AGENT_ID          The smoke agent and catalog contributor identities.
 #   CONTRIBUTOR_ID    Each id IS the hostname of the identity's Web Bot Auth
@@ -19,7 +24,7 @@
 #                     is therefore the single source of truth: when the file
 #                     exists the id is read FROM it, so key generation,
 #                     seeding, and smoke can never disagree. Before the file
-#                     exists (first gen-staging-keys.sh run) the id is derived
+#                     exists (first gen-keys.sh run) the id is derived
 #                     as <label>.<STAGING_DOMAIN>, where STAGING_DOMAIN must
 #                     be the domain the stack serves the identity directories
 #                     directly under — the tfvars `domain` for
@@ -30,11 +35,12 @@
 #                     require_ids_match_stack below catches a mismatch.
 #                     Env overrides still win, for a deliberate one-off.
 #
-#   STACK_DIR         Staging stack directory, overridable via env; tf_out()
+#   STACK_DIR         Stack directory, overridable via env (gen-keys.sh sets
+#                     it from its argument before sourcing this file); tf_out()
 #   tf_out            reads one raw terraform output from it. Shared by
 #                     seed-staging.sh and smoke.sh.
 #
-#   KEYS_DIR          The stack's key directory — where gen-staging-keys.sh
+#   KEYS_DIR          The stack's key directory — where gen-keys.sh
 #                     WRITES and seed-staging.sh, fund-staging-agent.sh, and
 #                     smoke.sh READ. Derived from STACK_DIR so an overridden
 #                     stack keeps producer and consumers on the same
@@ -92,20 +98,49 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 # machine that has uv but no system python3.
 . "${REPO_ROOT}/scripts/lib/select-python.sh"
 
-BROKER_RELAY_KID="${BROKER_RELAY_KID:-broker.staging.v1}"
-
-STACK_DIR="${STACK_DIR:-${REPO_ROOT}/deploy/terraform/stacks/staging-aws}"
+# A script that works on another stack by default names it in DEFAULT_STACK
+# before sourcing this file (drop-issuer-publishers.sh, for example, names
+# production-aws); STACK_DIR still overrides it.
+STACK_DIR="${STACK_DIR:-${REPO_ROOT}/deploy/terraform/stacks/${DEFAULT_STACK:-staging-aws}}"
 KEYS_DIR="${STACK_DIR}/keys"
 tf_out() { terraform -chdir="${STACK_DIR}" output -raw "$1"; }
+
+# tf_value NAME — one output's value, or nothing for an output that is null.
+# Terraform leaves a null output out of the state, so a stack without the
+# console has no console_url at all, and `output -raw` fails on a missing one;
+# JSON reads both as empty, while a state Terraform cannot read still fails.
+# The JSON is piped, never stored: it holds every sensitive output too.
+tf_value() {
+    terraform -chdir="${STACK_DIR}" output -json | jq -r --arg name "$1" '.[$name].value // empty'
+}
+
+# relay_kid: the kid inside the existing relay key file, else broker.<stack>.v1
+# from the stack directory's name (staging-aws -> staging).
+relay_kid() {
+    if [ -f "${KEYS_DIR}/broker-relay-key.json" ]; then
+        "${PYTHON[@]}" -c 'import json, sys; print(json.load(open(sys.argv[1]))["kid"])' "${KEYS_DIR}/broker-relay-key.json"
+    else
+        local stack
+        stack="$(basename "${STACK_DIR}")"
+        echo "broker.${stack%-aws}.v1"
+    fi
+}
+BROKER_RELAY_KID="${BROKER_RELAY_KID:-$(relay_kid)}"
 
 # Builds SSH_CMD as an array. Building the array directly, rather than word-
 # splitting a Terraform output, also keeps an identity path containing a space
 # in one element.
+# load_ssh_cmd [batch] — SSH_CMD, the command that reaches the stack's VM.
+# With "batch", ssh fails instead of asking anything (BatchMode): an operator
+# script that runs unattended must never stop at a prompt.
 load_ssh_cmd() {
     local host
     host="$(tf_out vm_public_ip)"
 
     SSH_CMD=(ssh)
+    if [ "${1:-}" = batch ]; then
+        SSH_CMD+=(-o BatchMode=yes)
+    fi
 
     if [ -n "${FORA_SSH_IDENTITY_FILE:-}" ]; then
         SSH_CMD+=(
@@ -169,9 +204,9 @@ require_ids_match_stack() {
     fi
     if [ "${AGENT_ID}" != "${agent_host}" ] || [ "${CONTRIBUTOR_ID}" != "${contributor_host}" ]; then
         echo "smoke identity ids do not match the stack's directory hostnames:" >&2
-        echo "  agent-key.json kid:       ${AGENT_ID:-<missing — run gen-staging-keys.sh>}" >&2
+        echo "  agent-key.json kid:       ${AGENT_ID:-<missing — run gen-keys.sh>}" >&2
         echo "  stack serves agent at:    ${agent_host}" >&2
-        echo "  contributor-key.json kid: ${CONTRIBUTOR_ID:-<missing — run gen-staging-keys.sh>}" >&2
+        echo "  contributor-key.json kid: ${CONTRIBUTOR_ID:-<missing — run gen-keys.sh>}" >&2
         echo "  stack serves contrib at:  ${contributor_host}" >&2
         echo "The services fetch each signer's key from https://<kid>/.well-known/..., so a mismatch is a guaranteed 401." >&2
         echo "Regenerate the smoke keys with STAGING_DOMAIN equal to the stack tfvars 'domain' (delete the two key files first), or fix the stack's subdomain variables." >&2
@@ -181,3 +216,36 @@ require_ids_match_stack() {
 
 VM_COMPOSE_FILE="/opt/fora/docker-compose.yml"
 VM_COMPOSE_PROJECT="fora"
+
+# Execute operator SQL using the installed scoped RDS client, or the local
+# database of self-hosted stacks. Preserve stdin and quote every psql argument.
+remote_psql() {
+    local database="${1:-}" service=postgres user=fora args
+    case "${database}" in
+        fora|sor|identity|console) ;;
+        zitadel) service=zitadel-db; user=zitadel ;;
+        *) echo "unsupported database: ${database}" >&2; return 2 ;;
+    esac
+    shift
+    args=""
+    [ "$#" -eq 0 ] || args="$(printf '%q ' "$@")"
+    "${SSH_CMD[@]}" "if sudo test -f /opt/fora/database/connection.json; then
+        sudo /usr/local/bin/fora-db $(printf '%q' "${database}") ${args}
+    else
+        sudo docker compose -f $(printf '%q' "${VM_COMPOSE_FILE}") exec -T ${service} psql -X -v ON_ERROR_STOP=1 -U ${user} -d $(printf '%q' "${database}") ${args}
+    fi"
+}
+
+# installed_console_issuer: the OIDC issuer the console in the VM's installed
+# Compose file trusts, or nothing when that file defines no console. A failed
+# read fails the caller: what it may change depends on the answer. The value
+# is picked out on the VM, so only it crosses SSH: the rendered file holds
+# every secret of the deployment. The VM's python3 does the picking, because
+# every Ubuntu host has it and not every host has jq.
+installed_console_issuer() {
+    local select='import json, sys; services = json.load(sys.stdin).get("services") or {}; issuer = ((services.get("console") or {}).get("environment") or {}).get("CONSOLE_OIDC_ISSUER"); issuer and print(issuer)'
+    "${SSH_CMD[@]}" "set -o pipefail; sudo docker compose -f $(printf '%q' "${VM_COMPOSE_FILE}") config --format json | python3 -c $(printf '%q' "${select}")" || {
+        echo "could not read ${VM_COMPOSE_FILE} on the VM" >&2
+        return 1
+    }
+}

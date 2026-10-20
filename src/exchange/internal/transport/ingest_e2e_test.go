@@ -4,9 +4,6 @@ package transport_test
 
 import (
 	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,8 +15,10 @@ import (
 	connect "connectrpc.com/connect"
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/catalogfeed"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/ingest"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/ingest/ingesttest"
 )
 
 // feedFixturePath resolves the committed reference sample JSON-L fixture
@@ -30,51 +29,26 @@ func feedFixturePath(t *testing.T) string {
 	return filepath.Join("..", "..", "..", "..", "deploy", "fixtures", "publisher", "sample.jsonl")
 }
 
-// generateContributorKeyFile generates a fresh Ed25519 catalog-contributor
-// keypair and writes it to a temp file in the {kid,private_key,public_key} shape
-// LoadContributorKey decodes. No private-key material is tracked in git:
-// every run mints its own demo key at setup. Returns the file path so the test
-// can drive the production LoadContributorKey path, exactly as the CLI does.
-func generateContributorKeyFile(t *testing.T, kid string) string {
-	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate contributor key: %v", err)
-	}
-	seed := priv.Seed()
-	doc := map[string]string{
-		"kid":         kid,
-		"private_key": base64.RawURLEncoding.EncodeToString(seed),
-		"public_key":  base64.RawURLEncoding.EncodeToString(pub),
-	}
-	raw, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatalf("marshal contributor key: %v", err)
-	}
-	path := filepath.Join(t.TempDir(), "catalog-contributor-key.json")
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatalf("write contributor key: %v", err)
-	}
-	return path
-}
+// ingestDomain is the publisher site every push test registers its contributor
+// against and pushes entries for.
+const ingestDomain = "publisher.example"
 
 // registerContributor wires both auth gates for a freshly-generated
-// contributor key against the given entry domain: it generates a demo keypair at
-// setup, loads it through the production LoadContributorKey path, registers the
-// pubkey via the agent self-signup origin (Gate 1) and lists the kid as a
-// contributor in the domain's publisher manifest (Gate 2). It returns the kid the
-// caller pushes as.
-func registerContributor(t *testing.T, h *pushHarness, domain string) (kid string, priv ed25519.PrivateKey) {
+// contributor key against ingestDomain: it generates a demo keypair at setup,
+// loads it through the production LoadContributorKey path, registers the pubkey
+// via the agent self-signup origin (Gate 1) and lists the kid as a contributor
+// in the domain's publisher manifest (Gate 2). It returns the kid the caller
+// pushes as.
+func registerContributor(t *testing.T, h *pushHarness) (kid string, priv ed25519.PrivateKey) {
 	t.Helper()
 	const contributorKID = "catalog-contributor-e2e"
-	keyPath := generateContributorKeyFile(t, contributorKID)
+	keyPath := ingesttest.WriteContributorKeyFile(t, contributorKID)
 	loadedKid, loadedPriv, err := ingest.LoadContributorKey(keyPath)
 	if err != nil {
 		t.Fatalf("load contributor key: %v", err)
 	}
-	pub := loadedPriv.Public().(ed25519.PublicKey)
-	h.publishAgent(t, loadedKid, pub)        // Gate 1: kid -> pubkey via fora.json
-	h.publishPublisher(t, domain, loadedKid) // Gate 2: kid listed as contributor
+	h.publishAgent(t, loadedKid, loadedPriv)       // Gate 1: kid -> key via its signed directory
+	h.publishPublisher(t, ingestDomain, loadedKid) // Gate 2: kid listed as contributor
 	return loadedKid, loadedPriv
 }
 
@@ -132,20 +106,19 @@ func TestIngest_FixtureAcceptedAndDiscoverable(t *testing.T) {
 	// tenant whose domain matches the entry's publisher domain (server-side
 	// derivation), so publisher.example must be a registered tenant and the
 	// ingest must push under that tenant's id — not the harness's primary tenant.
-	const publisherDomain = "publisher.example"
-	kid, priv := registerContributor(t, h, publisherDomain)
-	publisherTenant := seedTenantForDomain(t, h, publisherDomain)
+	kid, priv := registerContributor(t, h)
+	publisherTenant := seedSiteForDomain(t, h, ingestDomain)
 
 	feed, err := os.Open(feedFixturePath(t))
 	if err != nil {
 		t.Fatalf("open fixture: %v", err)
 	}
 	defer func() { _ = feed.Close() }()
-	records, err := ingest.ParseJSONL(feed)
+	records, err := catalogfeed.ParseJSONL(feed)
 	if err != nil {
 		t.Fatalf("parse fixture: %v", err)
 	}
-	entries, err := ingest.MapRecords(records)
+	entries, err := catalogfeed.MapRecords(records)
 	if err != nil {
 		t.Fatalf("map fixture: %v", err)
 	}
@@ -166,13 +139,15 @@ func TestIngest_FixtureAcceptedAndDiscoverable(t *testing.T) {
 	// commercial PER_UNIT term. An academic requester must discover its term back
 	// through the public RPC — proving the mapped terms[] were validated, stored,
 	// and are Select-projectable (a SQL backdoor could not produce this).
-	uri := "https://" + publisherDomain + records[0].Path
-	terms := discoverTermsAs(t, h, uri, requesterWithExt("agent-discover", "academic", "DE", "ai-input"))
-	if len(terms) == 0 {
+	uri := "https://" + ingestDomain + records[0].Path
+	// The term's price is read off the offer that sells it, Offer.pricing: an
+	// offer states its price once, and the term it carries holds none.
+	offers := discoverOffersAs(t, h, uri, requesterWithExt("agent-discover", "academic", "DE", "ai-input"))
+	if terms := offerTerms(t, uri, offers); len(terms) == 0 {
 		t.Fatalf("discover %s: no terms projected for academic requester", uri)
 	}
-	if terms[0].GetPricing().GetModel() != forav1.PricingModel_PRICING_MODEL_FREE {
-		t.Fatalf("academic term pricing model = %v, want FREE", terms[0].GetPricing().GetModel())
+	if offers[0].GetPricing().GetModel() != forav1.PricingModel_PRICING_MODEL_FREE {
+		t.Fatalf("academic term pricing model = %v, want FREE", offers[0].GetPricing().GetModel())
 	}
 }
 
@@ -190,15 +165,14 @@ func TestIngest_FixtureAcceptedAndDiscoverable(t *testing.T) {
 // TestIngest_WireViolationRefusedBeforeSending covers the other tier.
 func TestIngest_BadTermRejectedNotPersisted(t *testing.T) {
 	h := newPushHarness(t)
-	const publisherDomain = "publisher.example"
-	kid, priv := registerContributor(t, h, publisherDomain)
-	publisherTenant := seedTenantForDomain(t, h, publisherDomain)
+	kid, priv := registerContributor(t, h)
+	publisherTenant := seedSiteForDomain(t, h, ingestDomain)
 
 	goodPath := "/article/valid-term"
 	badPath := "/article/bad-term"
 	entries := []*forav1.ResourceEntry{
-		{Domain: publisherDomain, Path: goodPath, Terms: []*forav1.LicenseTerm{seedPricedTerm()}},
-		{Domain: publisherDomain, Path: badPath, Terms: []*forav1.LicenseTerm{unregisteredUnitTerm()}},
+		{Domain: ingestDomain, Path: goodPath, Terms: []*forav1.LicenseTerm{seedPricedTerm()}},
+		{Domain: ingestDomain, Path: badPath, Terms: []*forav1.LicenseTerm{unregisteredUnitTerm()}},
 	}
 
 	_, err := ingest.PushEntries(h.ctx,
@@ -211,7 +185,7 @@ func TestIngest_BadTermRejectedNotPersisted(t *testing.T) {
 
 	// All-or-nothing: NEITHER the bad nor the valid sibling persisted.
 	for _, p := range []string{goodPath, badPath} {
-		uri := "https://" + publisherDomain + p
+		uri := "https://" + ingestDomain + p
 		if offers := discoverOffersAs(t, h, uri, requesterWithExt("agent-discover", "", "", "ai-input")); len(offers) != 0 {
 			t.Fatalf("entry %s yielded %d offer(s); want 0 (all-or-nothing: nothing persists)", p, len(offers))
 		}
@@ -230,9 +204,8 @@ func TestIngest_BadTermRejectedNotPersisted(t *testing.T) {
 // never gets that far.
 func TestIngest_WireViolationRefusedBeforeSending(t *testing.T) {
 	h := newPushHarness(t)
-	const publisherDomain = "publisher.example"
-	kid, priv := registerContributor(t, h, publisherDomain)
-	publisherTenant := seedTenantForDomain(t, h, publisherDomain)
+	kid, priv := registerContributor(t, h)
+	publisherTenant := seedSiteForDomain(t, h, ingestDomain)
 
 	var requests atomic.Int32
 	forward := forwardWithoutTrailers(h.server.URL)
@@ -245,9 +218,9 @@ func TestIngest_WireViolationRefusedBeforeSending(t *testing.T) {
 	goodPath := "/article/valid-sibling"
 	badPath := "/article/share-alike-without-scope"
 	entries := []*forav1.ResourceEntry{
-		{Domain: publisherDomain, Path: goodPath, Terms: []*forav1.LicenseTerm{seedPricedTerm()}},
+		{Domain: ingestDomain, Path: goodPath, Terms: []*forav1.LicenseTerm{seedPricedTerm()}},
 		{
-			Domain: publisherDomain, Path: badPath,
+			Domain: ingestDomain, Path: badPath,
 			Terms: []*forav1.LicenseTerm{{
 				Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
 				Pricing:   seedPricedTerm().GetPricing(),
@@ -267,7 +240,7 @@ func TestIngest_WireViolationRefusedBeforeSending(t *testing.T) {
 		t.Fatalf("the proxy saw %d request(s); a wire-invalid submission must be refused before it is sent", n)
 	}
 	for _, p := range []string{goodPath, badPath} {
-		uri := "https://" + publisherDomain + p
+		uri := "https://" + ingestDomain + p
 		if got := discoverOfferCount(t, h, uri); got != 0 {
 			t.Fatalf("entry %s yielded %d offer(s); want 0 (nothing was sent)", p, got)
 		}
@@ -279,12 +252,11 @@ func TestIngest_WireViolationRefusedBeforeSending(t *testing.T) {
 // is accepted but the unknown token is surfaced in warnings[].
 func TestIngest_UnknownVocabAcceptedWithWarning(t *testing.T) {
 	h := newPushHarness(t)
-	const publisherDomain = "publisher.example"
-	kid, priv := registerContributor(t, h, publisherDomain)
-	publisherTenant := seedTenantForDomain(t, h, publisherDomain)
+	kid, priv := registerContributor(t, h)
+	publisherTenant := seedSiteForDomain(t, h, ingestDomain)
 
 	entries := []*forav1.ResourceEntry{{
-		Domain: publisherDomain, Path: "/article/warn-term",
+		Domain: ingestDomain, Path: "/article/warn-term",
 		Terms: []*forav1.LicenseTerm{{
 			Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
 			Pricing:   seedPricedTerm().GetPricing(),
@@ -320,15 +292,14 @@ func TestIngest_UnknownVocabAcceptedWithWarning(t *testing.T) {
 // test.
 func TestIngest_PushCrossesTrailerlessProxy(t *testing.T) {
 	h := newPushHarness(t)
-	const publisherDomain = "publisher.example"
-	kid, priv := registerContributor(t, h, publisherDomain)
-	publisherTenant := seedTenantForDomain(t, h, publisherDomain)
+	kid, priv := registerContributor(t, h)
+	publisherTenant := seedSiteForDomain(t, h, ingestDomain)
 
 	proxy := httptest.NewServer(forwardWithoutTrailers(h.server.URL))
 	defer proxy.Close()
 
 	entries := []*forav1.ResourceEntry{{
-		Domain: publisherDomain, Path: "/article/behind-proxy",
+		Domain: ingestDomain, Path: "/article/behind-proxy",
 		Terms: []*forav1.LicenseTerm{{
 			Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
 			Pricing:   seedPricedTerm().GetPricing(),

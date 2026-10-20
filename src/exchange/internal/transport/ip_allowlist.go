@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"strings"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/iplimit"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
 )
 
@@ -37,7 +38,7 @@ func ParseAllowlist(raw string) ([]netip.Prefix, error) {
 }
 
 // IPAllowlistMiddleware rejects (403) any request whose source IP is not covered
-// by one of allowed. The source is taken from RemoteAddr via clientIPFromRequest —
+// by one of allowed. The source is taken from RemoteAddr via iplimit.ClientIP —
 // X-Forwarded-For is deliberately NOT consulted, so this is sound only for a
 // directly-bound internal listener (the handoff: a fronting proxy makes
 // RemoteAddr the proxy and the allowlist vacuous). An empty allowlist denies
@@ -47,7 +48,7 @@ func IPAllowlistMiddleware(allowed []netip.Prefix, next http.Handler) http.Handl
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !ipAllowed(allowed, r) {
 			reqctx.FromContext(r.Context()).WarnContext(r.Context(),
-				"exchange.admin.ip_reject", "client_ip", clientIPFromRequest(r))
+				"exchange.admin.ip_reject", "client_ip", clientIP(r))
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -56,7 +57,7 @@ func IPAllowlistMiddleware(allowed []netip.Prefix, next http.Handler) http.Handl
 }
 
 func ipAllowed(allowed []netip.Prefix, r *http.Request) bool {
-	addr, err := netip.ParseAddr(clientIPFromRequest(r))
+	addr, err := netip.ParseAddr(clientIP(r))
 	if err != nil {
 		return false
 	}
@@ -67,4 +68,12 @@ func ipAllowed(allowed []netip.Prefix, r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+// clientIP reads the admin plane's notion of the caller. The forwarding header
+// is never consulted here, which is what the allowlist's own contract above
+// requires: a caller that could name its own address would walk straight
+// through the check.
+func clientIP(r *http.Request) string {
+	return iplimit.ClientIP(r, false)
 }

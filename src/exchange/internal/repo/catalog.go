@@ -33,6 +33,17 @@ type CatalogEntry struct {
 	// It is stored in its own column rather than in MetadataJSON because that
 	// document projects only the extension-metadata fields.
 	Title *string
+	// AutoImported is true when the last accepted push that wrote the row
+	// carried the automatic import's label, and false otherwise -- which is
+	// also what every row written before the label existed reads. The
+	// automatic import refreshes only rows that read true; a false row is
+	// protected, left to whoever pushed it.
+	AutoImported bool
+	// Domain is the registered publisher domain the push matched the entry
+	// against, the host of URI in the lower-case form every publisher_domains
+	// row keys on. Reads that narrow the catalog by domain compare this value
+	// rather than parsing URI.
+	Domain string
 }
 
 // CatalogRepo is the narrow contract CatalogService needs.
@@ -56,6 +67,14 @@ var ErrCatalogNotFound = errors.New("repo: catalog entry not found")
 // race-safe database backstop (the upsert's DO UPDATE is guarded on an
 // unchanged uri and returns no row when the guard fails).
 var ErrCatalogURIImmutable = errors.New("repo: catalog uri is immutable for an existing resource_id")
+
+// ErrCatalogOwnerNotRegistered is returned when an entry names a payee that is
+// not a registered publisher. The push gate already refuses an entry whose
+// manifest attests no owner at all; this is the case it cannot see -- an owner
+// id that is present and well-formed but belongs to nobody on this deployment.
+// Kept distinct from a wrapped Postgres error so the handler above can answer it
+// as the caller's mistake rather than as an internal failure.
+var ErrCatalogOwnerNotRegistered = errors.New("repo: catalog resource owner is not a registered publisher")
 
 // NewCatalogRepo composes a CatalogRepo over a sqlc.Querier.
 func NewCatalogRepo(q sqlc.Querier) CatalogRepo { return &catalogRepo{q: q} }
@@ -84,6 +103,8 @@ func upsertCatalog(ctx context.Context, q sqlc.Querier, e CatalogEntry) (Catalog
 		Metadata:        e.MetadataJSON,
 		ResourceOwnerID: e.ResourceOwnerID,
 		Title:           pgTextPtr(e.Title),
+		AutoImported:    e.AutoImported,
+		Domain:          e.Domain,
 	})
 	if err != nil {
 		// The guarded DO UPDATE (WHERE catalog.uri = EXCLUDED.uri) is the only
@@ -92,7 +113,9 @@ func upsertCatalog(ctx context.Context, q sqlc.Querier, e CatalogEntry) (Catalog
 		if errors.Is(err, pgx.ErrNoRows) {
 			return CatalogEntry{}, ErrCatalogURIImmutable
 		}
-		return CatalogEntry{}, fmt.Errorf("upsert catalog entry: %w", err)
+		return CatalogEntry{}, mapInsertErr(
+			err, "upsert catalog entry", nil,
+			fkSentinel{"catalog_resource_owner_fk", ErrCatalogOwnerNotRegistered})
 	}
 	return catalogFromRow(row), nil
 }
@@ -132,6 +155,8 @@ func catalogFromRow(row sqlc.ForaCatalog) CatalogEntry {
 		MetadataJSON:    row.Metadata,
 		ResourceOwnerID: row.ResourceOwnerID,
 		Title:           textFromPG(row.Title),
+		AutoImported:    row.AutoImported,
+		Domain:          row.Domain,
 	}
 }
 

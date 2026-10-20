@@ -30,6 +30,110 @@ func offerWith(id, canonical string, unitCost float64) *forav1.Offer {
 	}
 }
 
+// termWith builds a license term whose pricing matches the offer that carries
+// it. A term carries its own price, so two offers with byte-identical terms
+// always cost the same — the tests below never pair an identical term with a
+// different offer price.
+func termWith(model forav1.PricingModel, unitCost float64, scopes ...string) *forav1.LicenseTerm {
+	u, err := helpers.FormatMoney(decimal.NewFromFloat(unitCost))
+	if err != nil {
+		panic(err)
+	}
+	return &forav1.LicenseTerm{
+		Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
+		Pricing:   &forav1.Pricing{Model: model, UnitCost: &u, Currency: "USD"},
+		Scopes:    scopes,
+	}
+}
+
+// oneArticle is the canonical URL every per-term case below licenses: the whole
+// question these tests ask is what Dedup does with offers that share it.
+const oneArticle = "https://a/article"
+
+// offerSelling builds the shape discovery actually returns now: one offer
+// selling exactly one license term, for oneArticle.
+func offerSelling(id string, unitCost float64, term *forav1.LicenseTerm) *forav1.Offer {
+	o := offerWith(id, oneArticle, unitCost)
+	o.Terms = []*forav1.LicenseTerm{term}
+	return o
+}
+
+// TestDedup_DifferentTermsForOneURLBothSurvive is the property the per-term
+// offer model needs from Dedup: one article licensed two ways is two offers
+// with the same canonical URL, and the agent must see both so it can choose.
+func TestDedup_DifferentTermsForOneURLBothSurvive(t *testing.T) {
+	free := termWith(forav1.PricingModel_PRICING_MODEL_FREE, 0, "academic")
+	paid := termWith(forav1.PricingModel_PRICING_MODEL_PER_UNIT, 0.03)
+	cands := []selection.Candidate{
+		{
+			Offer:    unsafeVerified(offerSelling("free", 0, free)),
+			Exchange: selection.ExchangeRef{Domain: "mp1", Trust: "VERIFIED"},
+		},
+		{
+			Offer:    unsafeVerified(offerSelling("paid", 0.03, paid)),
+			Exchange: selection.ExchangeRef{Domain: "mp1", Trust: "VERIFIED"},
+		},
+	}
+	got := selection.Dedup(t.Context(), cands)
+	if len(got) != 2 {
+		t.Fatalf("got %d candidates, want 2 (two licensing alternatives for one URL)", len(got))
+	}
+}
+
+// TestDedup_SameTermFromTwoExchangesCollapses covers the case Dedup exists for:
+// two exchanges relaying the same resource under the same term is one product,
+// not two. The terms are byte-identical, so both offers carry the same price
+// and either survivor is correct.
+func TestDedup_SameTermFromTwoExchangesCollapses(t *testing.T) {
+	cands := []selection.Candidate{
+		{
+			Offer: unsafeVerified(offerSelling("mp1-offer", 0.03,
+				termWith(forav1.PricingModel_PRICING_MODEL_PER_UNIT, 0.03))),
+			Exchange: selection.ExchangeRef{Domain: "mp1", Trust: "VERIFIED"},
+		},
+		{
+			Offer: unsafeVerified(offerSelling("mp2-offer", 0.03,
+				termWith(forav1.PricingModel_PRICING_MODEL_PER_UNIT, 0.03))),
+			Exchange: selection.ExchangeRef{Domain: "mp2", Trust: "VERIFIED"},
+		},
+	}
+	got := selection.Dedup(t.Context(), cands)
+	if len(got) != 1 {
+		t.Fatalf("got %d candidates, want 1 (same resource, same term, two exchanges)", len(got))
+	}
+}
+
+// TestDedup_TermCardinalityEdges pins the two shapes that are not "exactly one
+// term": an offer with no terms at all, and a fused multi-term offer from an
+// Exchange that has not been upgraded yet. Neither may panic, and a fused offer
+// must not collapse into one of its own single-term parts.
+func TestDedup_TermCardinalityEdges(t *testing.T) {
+	free := termWith(forav1.PricingModel_PRICING_MODEL_FREE, 0, "academic")
+	paid := termWith(forav1.PricingModel_PRICING_MODEL_PER_UNIT, 0.03)
+	fused := offerWith("fused", oneArticle, 0)
+	fused.Terms = []*forav1.LicenseTerm{free, paid}
+	cands := []selection.Candidate{
+		{
+			Offer:    unsafeVerified(offerWith("termless", oneArticle, 0.05)),
+			Exchange: selection.ExchangeRef{Domain: "mp1", Trust: "VERIFIED"},
+		},
+		{
+			Offer:    unsafeVerified(fused),
+			Exchange: selection.ExchangeRef{Domain: "mp1", Trust: "VERIFIED"},
+		},
+		{
+			Offer:    unsafeVerified(offerSelling("single", 0, free)),
+			Exchange: selection.ExchangeRef{Domain: "mp1", Trust: "VERIFIED"},
+		},
+	}
+	got := selection.Dedup(t.Context(), cands)
+	if len(got) != 3 {
+		t.Fatalf("got %d candidates, want 3 (termless, fused and single-term keys are all distinct)", len(got))
+	}
+}
+
+// TestDedup_KeepsCheapestPerIdentity covers offers that carry no terms: those
+// key on identity alone, and the cheapest of them survives.
 func TestDedup_KeepsCheapestPerIdentity(t *testing.T) {
 	cands := []selection.Candidate{
 		{
@@ -45,7 +149,7 @@ func TestDedup_KeepsCheapestPerIdentity(t *testing.T) {
 			Exchange: selection.ExchangeRef{Domain: "mp1", Trust: "VERIFIED"},
 		},
 	}
-	got := selection.Dedup(cands)
+	got := selection.Dedup(t.Context(), cands)
 	if len(got) != 2 {
 		t.Fatalf("got %d, want 2", len(got))
 	}

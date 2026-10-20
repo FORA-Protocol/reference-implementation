@@ -28,7 +28,11 @@
 // consumes are held to the standards-native construction above.
 package directory
 
-import "context"
+import (
+	"context"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
+)
 
 // CardPath is the request path the Signature Agent Card is served at. There is no
 // registered Web Bot Auth path for the card yet (the standard is a moving IETF
@@ -37,10 +41,11 @@ import "context"
 // /.well-known/agent-card.json, a different document with the same short name.
 const CardPath = "/.well-known/signature-agent-card.json"
 
-// Media types for the published documents. The WBA directory is a JWK Set; the
-// card and the revocation list are plain JSON.
+// Media types for the published documents. The WBA directory is served under the
+// Web Bot Auth directory media type, which verifiers require; the card and the
+// revocation list are plain JSON.
 const (
-	WBAMediaType        = "application/jwk-set+json"
+	WBAMediaType        = forawellknown.WBAMediaType
 	CardMediaType       = "application/json"
 	RevocationMediaType = "application/json"
 )

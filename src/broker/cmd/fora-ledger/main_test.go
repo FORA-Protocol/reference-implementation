@@ -56,7 +56,7 @@ func TestSplitRegions_fallsBackWhenTheOperatorNamesNone(t *testing.T) {
 // which leg is missing and why.
 func TestValidate_requiresOnlyTheTransactionAndTheAdminURL(t *testing.T) {
 	t.Parallel()
-	full := Config{TransactionID: "tx-1", AdminURL: "http://127.0.0.1:8091"}
+	full := Config{TransactionID: "tx-1", AdminURL: "http://127.0.0.1:8091", Output: Output{Format: formatText}}
 
 	if err := validate(full); err != nil {
 		t.Errorf("a transaction id and an admin URL should be enough: %v", err)

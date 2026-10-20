@@ -13,9 +13,11 @@ import (
 
 	sharedb "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/db"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing/tbtest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing/tigerbeetle"
 	exchangedb "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo/repotest"
 )
 
 // sharedPG is the package's single Postgres container, migrated once by TestMain
@@ -29,6 +31,9 @@ var (
 	sharedPG *sharedb.SharedPostgres
 	sharedTB *testutil.SharedTigerBeetle
 	tbClient *tigerbeetle.Client
+	// sharedLedger is exchangetest's handle to the same cluster, over tbClient,
+	// for the suites that start an Exchange that sells.
+	sharedLedger *exchangetest.Ledger
 )
 
 // TestMain brings up one Postgres and one TigerBeetle container for the whole
@@ -68,14 +73,39 @@ func runIntegrationMain(m *testing.M) int {
 	sharedPG = pg
 	sharedTB = tb
 	tbClient = client
+	sharedLedger = exchangetest.LedgerOver(tb, client)
 	return m.Run()
+}
+
+// closedPool is a pool on the shared database that is already closed. A
+// repository over it fails every call with pgx's own "closed pool" error, which
+// is what a lost database connection does to the port: nothing is faked. It
+// never connects, because it keeps no minimum connections, so it holds no
+// session and can be built before a harness's per-test reset.
+func closedPool(tb testing.TB) *pgxpool.Pool {
+	tb.Helper()
+	pool, err := pgxpool.New(tb.Context(), sharedPG.DSN)
+	if err != nil {
+		tb.Fatalf("open a pool to close: %v", err)
+	}
+	pool.Close()
+	return pool
 }
 
 // acquireTestDB resets the shared Postgres to its migrated baseline and returns a
 // fresh pool. Every integration test in this package obtains its database through
 // this helper (via setupExchangeTestDB or setupRegisterFixture), exactly once per
 // test. See db.AcquireTestDB for the once-per-test and serial-execution contract.
+//
+// It also registers the payee the harness pushes under. The catch-all manifest
+// stub attests harnessResourceOwner for every domain, and fora.catalog's
+// resource_owner_id references fora.publishers, so without this row every push
+// in the package is refused by the foreign key. Seeding it here rather than in
+// each fixture keeps the one prerequisite in the one place every test already
+// passes through.
 func acquireTestDB(tb testing.TB, ctx context.Context) *pgxpool.Pool {
 	tb.Helper()
-	return sharedb.AcquireTestDB(tb, ctx, sharedPG)
+	pool := sharedb.AcquireTestDB(tb, ctx, sharedPG)
+	repotest.SeedPublisher(tb, ctx, pool, harnessResourceOwner, "Stoa Press")
+	return pool
 }

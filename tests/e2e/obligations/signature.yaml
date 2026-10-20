@@ -1,0 +1,140 @@
+# Request signatures: every protocol RPC carries an RFC 9421 HTTP message
+# signature made with the caller's Ed25519 key. A request whose signature is
+# bad is refused, and the refusal is the product.
+# Registry entries (ADR-028 D1); the tests that prove them say so on themselves.
+#
+# A "negative:" case is a refusal with a typed error response (ADR-028 D1). What
+# an answer that refuses nothing must leave out is a "must not" in "positive:".
+
+- id: SIGNATURE-001
+  title: A request with no signature is refused
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      no signature, or none that parses; remedy: sign the request
+  positive: The same request, signed, is answered with a verified offer.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_MISSING
+      side_effect: no offers are returned
+
+- id: SIGNATURE-002
+  title: A signature by a key the agent's directory does not publish is refused
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      the signature does not verify: bad signature, unresolvable key, content-digest mismatch, required covered component missing
+  positive: The same request signed with the published key is answered.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: no offers are returned
+
+- id: SIGNATURE-003
+  title: A signature outside its created and expires window is refused
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      outside its created/expires window, or already used (replay); remedy: re-sign now
+  positive: The same request signed with a window around now is answered.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_STALE
+      side_effect: no offers are returned for an expired or a future-dated signature
+
+- id: SIGNATURE-004
+  title: A request whose body does not match the signed Content-Digest is refused
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      the signature does not verify: bad signature, unresolvable key, content-digest mismatch, required covered component missing
+  positive: The same request with the body it was signed over is answered.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: no offers are returned
+
+- id: SIGNATURE-005
+  title: A signature already accepted is refused as a replay
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      outside its created/expires window, or already used (replay); remedy: re-sign now
+  positive: The first send of the signed request is answered.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_STALE
+      side_effect: the second send of the same signed bytes returns no offers
+
+- id: SIGNATURE-006
+  title: No bad signature is accepted, whatever is wrong with it
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      RequestAuthFailureReason — why the RFC 9421 HTTP message signature on an RPC request failed verification, refused with the Connect code UNAUTHENTICATED.
+  positive: The unaltered request is answered before each altered one is sent.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned when a covered header is removed, and none for any
+        other alteration this area lists
+
+- id: SIGNATURE-007
+  title: A valid signature is accepted, and a refusal tells a forger nothing
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: so a refusal tells a forger nothing about how far its request got.
+  positive: A correctly signed discovery is answered with a verified offer.
+  negative:
+    - code: unauthenticated
+      reason: one of the three reasons SIGNATURE-008 names
+      side_effect: the refusal does not name the verification step that failed
+
+- id: SIGNATURE-008
+  title: A signature refusal carries one collapsed reason, MISSING, INVALID or STALE
+  level: DECISION
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Deliberately coarse: each value names what the caller does next, never which validation step failed
+  positive: >-
+    Each refusal's ErrorDetail carries request_auth_failure with exactly one reason,
+    chosen by the caller's remedy: sign the request, fix the signature, or sign again
+    now. This decision replaces the earlier requirement that every failure carry a
+    reason of its own.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_MISSING
+      side_effect: no offers are returned for an unsigned request
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned for an unknown key, a body that differs from the signed
+        digest or a covered header removed
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_STALE
+      side_effect: no offers are returned for an expired, future-dated or replayed signature

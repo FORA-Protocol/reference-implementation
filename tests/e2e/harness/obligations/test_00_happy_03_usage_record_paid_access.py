@@ -1,184 +1,181 @@
-"""Obligation 00 happy-path #3: the paid usage record shows one access with price, currency, timestamp.
-
-Scenario (verbatim — the fourth happy-path bullet):
-
-    After delivery, the agent reports the usage back to the platform. The
-    buyer's usage record now shows one paid access with the resource URI,
-    price, currency, and timestamp.
+"""Obligation PAID-004: the agent reports usage, and the paid access is recorded.
 
 Driven against the demo ``epicurus`` resource (PER_UNIT 0.0001/characters USD)
-as the USD demo buyer:
+as the test's own agent (``fresh_agent``), funded at exchange-a. The recorded
+access and the report filed against it belong to that agent alone, so no other
+test's purchases or reports are in the record this test reads:
 
-  1. Discover the offer; accept it (ExecuteTransaction → signed URL + billing_id).
+  1. Discover the offer and accept it. The buyer's balance, read through
+     ``GetAccountStatus`` before and after, drops by exactly the item's cost in
+     USD and does not move in any other currency: the paid access, its price and
+     its currency, as the buyer's own account shows them.
   2. Fetch the signed URL through the Cloudflare edge (the "after delivery" half).
-  3. Report the usage (ReportUsage) for the returned transaction_id.
-  4. Read the ledger row + joined catalog URI and assert the four
-     obligation-mandated observables: URI, non-zero price, currency, timestamp.
+  3. Read the recorded access back from exchange-a's admin plane, the operator
+     evidence read: the offer the sale was made on names the resource URI, and
+     the record carries the time the sale was made.
+  4. Report the usage (ReportUsage, through the SDK's own client) for the
+     returned transaction_id. The agent read the whole article, so it reports
+     the 2331 characters the publisher states for it. The report is accepted.
+  5. Replay the same report under the same idempotency key. The Exchange answers
+     a replay from the accepted report it stored, so the same report_id coming
+     back shows the report was recorded against that transaction; every other
+     exchange refuses the same report not_found, so it was recorded nowhere else.
+     The admin plane then shows the obligation fulfilled with the reported
+     quantity.
 
-The buyer's usage record maps to ``fora.transaction_log``. The ledger has no
-protocol read surface by design (record-read/reporting is downstream
-observability over the operator's datastore, out of FORA's protocol scope —
-scope), so the four-observable assertion reads the row directly via a join on
-``fora.catalog.uri``: a black-box e2e exception, observed on the deployment
-datastore, not an in-process layer bypass (see the read site below).
+Legs 1, 2, 4 and the replay go in through the Exchange's public RPCs and the
+edge, and are read back through them. Legs 3 and 5 also read the Exchange's
+admin plane, which no buyer can reach, because no public RPC returns a buyer's
+recorded transactions. So the URI, the timestamp and the recorded quantity are
+an operator's view of the record, not a protocol round-trip.
+
+The report is refused today. epicurus states its estimate once, on the resource
+(ResourceEntry.estimated_quantity). The Exchange's offer drops it, and the
+Exchange then refuses a positive quantity against the zero it recorded. The test
+is a strict xfail on that defect, which holds only for a quantity refusal of a
+report against an offer that carries no estimate.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
-import httpx
-import psycopg
 import pytest
+from fora_sdk.client import CallError
+from wire.models import UsageReport
 
+from ..admin_plane import require_admin_plane, transaction_evidence
+from ..defects import RECORD_ESTIMATE_DROPPED
 from ..exchanges import recipient_of
-from ..reporting import REPORT_USAGE_PATH, report_body
-from ..conftest import COMPOSE_FILE, StackURLs
+from ..reporting import assert_report_recorded_only_at, file_report, report_body
+from ..conftest import StackURLs
 from ..edge_fetch import fetch_signed
-from ..resolve_carriers import first_item_of, retrieval_endpoint_of
-from ..seed import (
-    DEMO_PHILOSOPHY_DOMAIN,
-    USD_AGENT_ID,
-    SeededFixture,
-    _resolve_pg_dsn,
-)
-from ..signing import USD_AGENT_KEY_PATH, sign_post
-from .flow import accept_offer, discover_first_offer
+from ..fresh_agent import FreshAgent
+from ..money_path import discover_offer
+from ..seed import DEMO_PHILOSOPHY_DOMAIN
+from .flow import buy_verified_and_observe_charge
+from ..obligation_registry import Obligation, obligation
 
 # ADR-008 D5 — declare stack-isolation contract.
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
-
-_OBLIGATION_TEXT = (
-    "After delivery, the agent reports the usage back to the platform. "
-    "The buyer's usage record now shows one paid access with the resource "
-    "URI, price, currency, and timestamp."
-)
 
 
 # epicurus: PER_UNIT 0.0001/characters USD, individual, US/GB.
 _RESOURCE_URI = f"http://{DEMO_PHILOSOPHY_DOMAIN}/articles/philosophers/epicurus.txt"
 _EXPECTED_UNIT_COST = Decimal("0.0001")
 _CURRENCY = "USD"
+# The characters the agent consumed: the whole article, whose size the publisher
+# states on the resource's catalog entry (estimated_quantity).
+_CONSUMED_CHARACTERS = 2331
 
 
-def _post(url: str, body: dict[str, object]) -> httpx.Response:
-    return sign_post(url, body=body, key_path=USD_AGENT_KEY_PATH)
+def _file_consumed_usage(
+    stack: StackURLs, report: UsageReport, offer: dict[str, Any], agent: FreshAgent
+) -> str:
+    """File the report of the consumed characters; return its report_id.
+
+    A refusal for the quantity, of a report against an offer that carries no
+    estimate, is the record-estimate defect: the publisher stated the estimate on
+    the resource, and the Exchange's offer dropped it. Any other refusal fails the
+    test.
+    """
+    try:
+        return file_report(stack, report, agent_id=agent.agent_id, key_path=agent.key_path)
+    except CallError as refused:
+        pricing = offer.get("pricing") or {}
+        RECORD_ESTIMATE_DROPPED.check(
+            "estimated_quantity" in pricing or refused.code != "invalid_argument",
+            f"the offer carries no estimate ({pricing}) and the report of "
+            f"{_CONSUMED_CHARACTERS} characters was refused: {refused}",
+        )
+        raise
 
 
+@obligation(Obligation.PAID_004)
+@RECORD_ESTIMATE_DROPPED.mark
 def test_paid_usage_record_shows_uri_price_currency_and_timestamp(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: seed ingests the demo catalog
+    fresh_agent: FreshAgent,
 ) -> None:
     """Usage record for a paid demo access carries URI, non-zero price, currency, timestamp."""
-    assert _OBLIGATION_TEXT  # traceability anchor
+    require_admin_plane()
+    seller = recipient_of(compose_stack.exchange)
+    fresh_agent.fund(seller)
 
-    # Discover the offer (with its Exchange-minted signature), then accept it.
-    offer = discover_first_offer(
-        compose_stack.exchange,
-        uri=_RESOURCE_URI,
-        agent_id=USD_AGENT_ID,
-        domain=DEMO_PHILOSOPHY_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
+    offer = discover_offer(fresh_agent, _RESOURCE_URI, seller)
+    # (1) Accept, and read the charge off the buyer's own balance: it drops by
+    # exactly the item's cost in that cost's currency, and by nothing elsewhere.
+    item = buy_verified_and_observe_charge(fresh_agent, seller, offer, "the paid access")
+    cost = item.cost
+    assert cost is not None, f"the paid item carries no cost: {item}"
+    # "price" — exact decimal equality against the term rate.
+    assert Decimal(str(cost.unit_cost)) == _EXPECTED_UNIT_COST, (
+        f"the charged unit cost must equal the term rate {_EXPECTED_UNIT_COST}; got {cost}"
     )
-    # "After delivery" — accept and fetch.
-    result = accept_offer(
-        compose_stack.exchange,
-        offer,
-        agent_id=USD_AGENT_ID,
-        domain=DEMO_PHILOSOPHY_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
-    )
-    # The EXECUTE response is an items[] envelope — read the
-    # per-result fields (retrievalEndpoint, transactionId, billingId) from items[0].
-    accept_payload = result.payload
-    item = first_item_of(accept_payload)
-    assert item is not None, f"accept response carried no items[0]: {accept_payload}"
-    signed_url = retrieval_endpoint_of(item)
-    transaction_id = item.get("transaction_id")
-    billing_id = item.get("billing_id") or ""
-    assert signed_url, f"signed URL missing from accept items[0]: {accept_payload}"
-    assert transaction_id, f"transactionId missing from accept items[0]: {accept_payload}"
-    assert billing_id, f"billingId missing from paid accept items[0]: {accept_payload}"
+    # "currency"
+    assert cost.currency == _CURRENCY, f"currency must be {_CURRENCY!r}; got {cost}"
 
-    # Fetch via the shared content-delivery seam: asserts 200 + the ACTUAL
-    # delivered epicurus article (deploy/content/demo/stoa-press/.../epicurus.txt).
-    # The accept-minted ed25519 URL is BOUND to the executing agent's thumbprint
-    # (agent_id=); the edge enforces 3-way proof-of-possession on the GET, so we
-    # present the SAME agent key the URL was bound to at execute time.
+    signed_url = item.retrieval_endpoint
+    transaction_id = str(item.transaction_id)
+    billing_id = str(item.billing_id or "")
+    assert signed_url, f"signed URL missing from the paid item: {item}"
+    assert billing_id, f"billing_id missing from the paid item: {item}"
+
+    # (2) "After delivery" — the accept-minted URL is bound to the executing
+    # agent's key, so the fetch presents that same key.
     fetch_signed(
         signed_url,
         compose_stack,
         expect_marker="Epicurus",
-        timeout=15.0,
-        key_path=USD_AGENT_KEY_PATH,
+        key_path=fresh_agent.key_path,
     )
 
-    # "the agent reports the usage back" — and the report MUST be accepted.
-    # epicurus carries no reporting obligation/estimate, so the consumed
-    # quantity is reported as 0 (the validator strict-rejects a positive
-    # quantity against a zero-estimate obligation).
-    report_resp = _post(
-        f"{compose_stack.exchange}{REPORT_USAGE_PATH}",
-        report_body(
-            exchange=recipient_of(compose_stack.exchange),
-            transaction_id=str(transaction_id),
-            agent_id=USD_AGENT_ID,
-            domain=DEMO_PHILOSOPHY_DOMAIN,
-            billing_id=str(billing_id or ""),
-        ),
+    # (3) "with the resource URI" and "timestamp", read from the admin plane: the
+    # offer the sale was made on names the resource, and the record its time.
+    recorded = transaction_evidence(seller, transaction_id)
+    assert recorded.requester_id == fresh_agent.agent_id, (
+        f"the access is recorded for {recorded.requester_id!r}, not the buyer: {recorded}"
     )
-    assert report_resp.status_code == httpx.codes.OK, (
-        f"ReportUsage refused for transaction {transaction_id}: "
-        f"{report_resp.status_code} {report_resp.text[:512]}"
+    recorded_uri = (recorded.offer.get("identity") or {}).get("canonical_url")
+    assert recorded_uri == _RESOURCE_URI, (
+        f"the recorded access must name {_RESOURCE_URI!r}; got {recorded_uri!r}"
     )
-    # Acceptance is no longer an in-body flag (ADR-019 §2): a successful report
-    # returns OK and carries the issued report_id; a rejection is a transport
-    # error. The OK status above + a non-empty reportId is acceptance.
-    assert report_resp.json().get("report_id"), (
-        f"ReportUsage accepted but returned no reportId: {report_resp.text}"
-    )
-
-    # Read the ledger row + joined catalog URI. BLACK-BOX e2e exception:
-    # the transaction ledger has NO protocol read surface BY
-    # DESIGN — record-read/reporting is downstream observability over the
-    # operator's datastore, out of FORA's protocol scope (no read RPC will be
-    # added). A full-stack e2e observing the deployment's datastore directly is
-    # NOT the pt9 layer-bypass that rule forbids (an in-process test reaching
-    # past a production layer); it is the only way to assert this ledger side
-    # effect (URI / price / currency / timestamp) end-to-end.
-    dsn = _resolve_pg_dsn(str(COMPOSE_FILE))
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT t.transaction_id, t.unit_cost, t.currency, t.created_at, c.uri
-            FROM fora.transaction_log t
-            JOIN fora.catalog c ON c.resource_id = t.resource_id
-            WHERE t.transaction_id = %s
-            """,
-            (transaction_id,),
-        )
-        rows = cur.fetchall()
-
-    assert len(rows) == 1, f"expected exactly one ledger row for {transaction_id!r}, got {rows!r}"
-    _db_txid, unit_cost, currency, created_at, catalog_uri = rows[0]
-
-    # "with the resource URI"
-    assert catalog_uri == _RESOURCE_URI, (
-        f"joined catalog.uri must match the accepted URI {_RESOURCE_URI!r}; got {catalog_uri!r}"
-    )
-    # "price" — exact decimal equality against the term rate.
-    assert isinstance(unit_cost, Decimal), (
-        f"transaction_log.unit_cost must surface as Decimal; got {type(unit_cost).__name__}"
-    )
-    assert unit_cost == _EXPECTED_UNIT_COST, (
-        f"unit_cost must equal the term rate {_EXPECTED_UNIT_COST!r}; got {unit_cost!r}"
-    )
-    # "currency"
-    assert currency == _CURRENCY, f"currency must echo {_CURRENCY!r}; got {currency!r}"
-    # "timestamp" — non-null and recent.
-    assert created_at is not None, "transaction_log.created_at is NULL"
     now = datetime.now(tz=UTC)
-    assert now - created_at < timedelta(minutes=5), (
-        f"transaction_log.created_at = {created_at!r} is older than the test run (now = {now!r})"
+    assert now - recorded.created_at < timedelta(minutes=5), (
+        f"the recorded access time {recorded.created_at!r} is older than the test run "
+        f"(now = {now!r})"
+    )
+
+    # (4) "the agent reports the usage back" — and the report MUST be accepted.
+    report = report_body(
+        exchange=seller,
+        transaction_id=transaction_id,
+        consumed_quantity=_CONSUMED_CHARACTERS,
+        billing_id=billing_id,
+    )
+    # The SDK's client signs as the test's agent, the agent the transaction is
+    # recorded under, and gives every send a fresh signature, so the replay
+    # below is a protocol replay (same idempotency key) rather than a signature
+    # the Exchange's request-replay guard refuses.
+    report_id = _file_consumed_usage(compose_stack, report, offer.offer, fresh_agent)
+
+    # (5) The report was recorded against the transaction: a replay under the same
+    # idempotency key is answered from the stored report with the same report_id,
+    # and the obligation the sale minted is fulfilled with the reported quantity.
+    assert_report_recorded_only_at(
+        compose_stack,
+        report,
+        report_id,
+        agent_id=fresh_agent.agent_id,
+        key_path=fresh_agent.key_path,
+    )
+    owed = transaction_evidence(seller, transaction_id).obligation
+    assert owed is not None and owed.fulfilled_at is not None, (
+        f"the report was not recorded against {transaction_id}: {owed}"
+    )
+    assert Decimal(str(owed.consumed_quantity)) == _CONSUMED_CHARACTERS, (
+        f"the obligation records {owed.consumed_quantity!r} consumed, "
+        f"want the {_CONSUMED_CHARACTERS} reported"
     )

@@ -16,19 +16,18 @@ import (
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/offerkeys"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/oidcup"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/session"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/agentsign"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/exchacct"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/exchpolicy"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/exchreg"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/foraclient"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/forasdk"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/keystore"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/mcp"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/oauthserver"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/oidcup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/publisher"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/repo"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/session"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/signup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/token"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/transport"
@@ -154,6 +153,7 @@ func Build(cfg Config) (http.Handler, *publisher.Service, error) {
 	}
 	svc, err := publisher.New(publisher.Config{
 		Keys:            cfg.Keys,
+		Signers:         cfg.Keys,
 		Cards:           repo.NewCardRepo(cfg.Pool),
 		Revocations:     repo.NewRevocationRepo(cfg.Pool),
 		Registrations:   repo.NewDeveloperRepo(cfg.Pool),
@@ -188,9 +188,16 @@ func Build(cfg Config) (http.Handler, *publisher.Service, error) {
 }
 
 // outboundPosture is what every leg this service dials shares: the one guarded
-// client, the one endpoint resolver, and the deployment's Exchange policy.
+// client, the one endpoint resolver, the deployment's Exchange policy, and the
+// registration-requirements reader built from the guarded client and that policy.
 //
-// Grouped rather than passed as three arguments because they are one decision.
+// The reader takes NO resolver, and the omission is the design rather than an
+// oversight: it reads a manifest freshly on every call, where the resolver is
+// built out of the per-host cache the terms-digest rule forbids. The field
+// comment below says the same thing, and this sentence used to disagree with it
+// by claiming the reader was built from all three.
+//
+// Grouped rather than passed as four arguments because they are one decision.
 // Each is deliberately built ONCE and handed to several consumers, and the
 // reason is the same each time — a second construction is a second answer, and
 // on the account leg a second answer to "where does this Exchange live" sends a
@@ -199,6 +206,14 @@ type outboundPosture struct {
 	guarded   *http.Client
 	endpoints connect.EndpointResolver
 	allow     *exchpolicy.Allowlist
+	// requirements reads what one Exchange asks of a registration. It sits here
+	// for the reason endpoints does: it is built from the guarded client and the
+	// Exchange policy above, so this struct stays the one place the whole
+	// outbound posture is visible at once. One consumer holds it today, the SDK
+	// client's registration verb, and it is still assembled here rather than
+	// there -- a reader built at the point of use is a second reading of the SSRF
+	// environment and a second place the policy could be left off.
+	requirements *exchreg.Reader
 }
 
 // buildOutboundPosture assembles what this service's outbound legs share, and
@@ -236,45 +251,69 @@ func buildOutboundPosture(cfg Config, clk clock.Clock) (outboundPosture, error) 
 	// same-host rule, so the two cannot come to disagree about where an Exchange
 	// lives.
 	//
-	// Allow is the policy overlay, and it sits here because the SDK consults it
-	// BEFORE any fetch — so no leg that routes through a resolver can be sent to a
-	// domain the deployment excluded, whatever its own call site checks.
-	endpoints := resolvers.NewWellKnownEndpointResolver(resolvers.WellKnownOptions{
-		HTTP: guarded,
-		// Now comes from the injected clock so the manifest cache's freshness
-		// window reads the same time source as the signature window, rather than
-		// reading the wall clock behind the port's back.
-		Now:    clk.Now,
-		Scheme: cfg.MCP.WellKnownScheme,
-		Allow:  allow.Permits,
-	})
-	return outboundPosture{guarded: guarded, endpoints: endpoints, allow: allow}, nil
-}
-
-// buildAccountService composes the Exchange-account workflow: what a target
-// Exchange asks of a registration, the signed call that opens or reports one,
-// and the local note behind the no-argument status.
-//
-// The requirements reader is built here rather than inside the service because
-// it needs the ONE guarded client the outbound posture carries — the manifest
-// host comes from an authenticated agent's tool argument, so that read is a
-// request-derived address and has to dial under the same guard as every other
-// leg that fetches from a host somebody named.
-func buildAccountService(
-	cfg Config, clk clock.Clock, posture outboundPosture, fora exchacct.Caller,
-) (*exchacct.Service, error) {
+	// The policy overlay wraps that resolver rather than being handed to it, and
+	// the SDK's own Allow hook is deliberately left unset. Both refuse before any
+	// fetch, so no leg that routes through a resolver can be sent to a domain the
+	// deployment excluded, whatever its own call site checks. What the wrapper adds
+	// is the vocabulary: the SDK reports a rejected host as "this manifest
+	// advertises no endpoint", which the account service cannot tell from a peer
+	// that answered, so the same operator decision was reported as one kind on the
+	// register leg and another on status. Setting both would leave the SDK's copy
+	// unreachable behind this one, which is the second-answer hazard this struct's
+	// own doc names.
+	endpoints := exchpolicy.NewPermittedEndpoints(allow,
+		resolvers.NewWellKnownEndpointResolver(resolvers.WellKnownOptions{
+			HTTP: guarded,
+			// Now comes from the injected clock so the manifest cache's freshness
+			// window reads the same time source as the signature window, rather than
+			// reading the wall clock behind the port's back.
+			Now:    clk.Now,
+			Scheme: cfg.MCP.WellKnownScheme,
+		}))
+	// The registration-requirements reader. It is a SEPARATE face from the
+	// resolver above and cannot be folded into it: the contract requires a
+	// registering client to echo a terms digest read from a freshly fetched
+	// manifest, and the resolver is built out of the per-host cache that rule
+	// forbids. It dials the same guarded client for the same reason — the host
+	// comes from an authenticated agent's tool argument — and consults the same
+	// policy before it dials at all.
 	requirements, err := exchreg.New(exchreg.Config{
-		Fetch:   posture.guarded,
+		Fetch:   guarded,
 		Scheme:  cfg.MCP.WellKnownScheme,
 		Timeout: cfg.MCP.CallTimeout,
-		Allow:   posture.allow.Permits,
+		Allow:   allow.Permits,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("app: exchange registration requirements: %w", err)
+		return outboundPosture{}, fmt.Errorf("app: exchange registration requirements: %w", err)
 	}
+	return outboundPosture{
+		guarded:      guarded,
+		endpoints:    endpoints,
+		allow:        allow,
+		requirements: requirements,
+	}, nil
+}
+
+// The outbound leg satisfies the account service's port, stated here because
+// this is the only package that names both. exchacct must not import forasdk and
+// forasdk must not import exchacct, so neither can assert it about itself, and
+// the binding was otherwise checked only incidentally by the argument passed to
+// buildAccountService below.
+var _ exchacct.Caller = (*forasdk.Client)(nil)
+
+// buildAccountService composes the Exchange-account workflow: the signed calls
+// that open an account or report on one, and the local note behind the
+// no-argument status.
+//
+// What a target Exchange asks of a registration is no longer wired in here. That
+// read happens inside the outbound leg now, through the reader the outbound
+// posture carries, so this service states what it wants sent and the leg decides
+// what it has to read first.
+func buildAccountService(
+	cfg Config, clk clock.Clock, fora exchacct.Caller,
+) (*exchacct.Service, error) {
 	accounts, err := exchacct.New(exchacct.Config{
-		Requirements: requirements,
-		Caller:       fora,
+		Caller: fora,
 		// The service gets the narrow note log, never a handle that could reach a
 		// developer's own record.
 		Notes: repo.NewExchangeRegistrationRepo(cfg.Pool),
@@ -291,16 +330,16 @@ func buildAccountService(
 // that turns an authenticated caller into the key its outbound requests are signed
 // with.
 //
-// The scheme the resolver publishes in Signature-Agent must be the one the agent's
-// directory is actually served on, so it comes from the same WellKnownScheme the
-// publisher builds documents with rather than a second setting that could drift
-// from it. The adapter then takes the resolver's DirectoryOrigin function itself
-// rather than that scheme, so requester.id and Signature-Agent cannot disagree
-// even if a future change gives them separate settings.
+// The origin the resolver publishes in Signature-Agent is https://<subdomain>,
+// the host this service serves the agent's directory on; the zone comes from
+// BaseDomain, and the resolver refuses one whose agent origins could not be
+// https origins. The adapter then takes the resolver's DirectoryOrigin function
+// itself, so the identity a tool call sends and the Signature-Agent it signs
+// cannot disagree.
 func buildMCPServer(cfg Config, clk clock.Clock) (*mcp.Server, error) {
 	signer, err := agentsign.New(agentsign.Config{
-		Keys:   cfg.Keys,
-		Scheme: cfg.WellKnownScheme,
+		Keys:       cfg.Keys,
+		BaseDomain: cfg.BaseDomain,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("app: agentsign: %w", err)
@@ -318,40 +357,25 @@ func buildMCPServer(cfg Config, clk clock.Clock) (*mcp.Server, error) {
 		return nil, err
 	}
 
-	fora, err := foraclient.New(foraclient.Config{
-		Keys:      signer.Source(),
-		BrokerURL: cfg.MCP.BrokerURL,
-		Endpoints: posture.endpoints,
-		// The account RPCs dial a host the CALLER named, so they dial guarded —
-		// and the guard goes UNDER the RFC 9421 signer, which is why this is a
-		// transport rather than the finished client two lines up. Same policy as
-		// that client: the SDK reads the SSRF environment on each construction, in
-		// this process, so the two cannot mean different things.
-		ExchangeBase: resolvers.NewGuardedTransport(nil),
-		Timeout:      cfg.MCP.CallTimeout,
-		SignatureTTL: cfg.MCP.SignatureTTL,
-		Clock:        clk,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("app: fora client: %w", err)
-	}
-
-	// The SDK legs take the SAME key source the FORA client signs offer
-	// acceptances with. That is the whole security argument for fetching content
-	// here: the Exchange binds each delivery URL to the key that signed the
-	// acceptance, so presenting a key resolved any other way would be presenting a
-	// different key, and the edge would refuse it. This is the one place the two
-	// could be made to disagree.
+	// Every outbound leg, the purchase included, takes this one key source. That
+	// is the whole security argument for fetching content here: the Exchange binds
+	// each delivery URL to the key that signed the acceptance, and the purchase
+	// and the content fetch are built by the same client from the same key, so
+	// the key presented at the edge is the key that accepted the offer.
 	sdk, err := forasdk.New(forasdk.Config{
 		Keys:      signer.Source(),
 		BrokerURL: cfg.MCP.BrokerURL,
 		Endpoints: posture.endpoints,
+		// This deployment's own reader, stricter than the SDK's default: it holds
+		// the whole manifest to the published schema and consults the Exchange
+		// policy before it dials. The registration verb reads through it before it
+		// signs anything, so that strictness reaches the wire.
+		Requirements: posture.requirements,
 		// Offers arrive from a Broker that did not mint them, and the agent on the
 		// other end of a tool call runs no verifier of its own. Resolving each
 		// issuing Exchange's key is what lets discovery check them on its behalf.
 		OfferKeys: offerkeys.New(offerkeys.Config{
 			Client: posture.guarded,
-			Scheme: cfg.MCP.WellKnownScheme,
 			Clk:    clk,
 		}),
 		Timeout:      cfg.MCP.CallTimeout,
@@ -364,14 +388,14 @@ func buildMCPServer(cfg Config, clk clock.Clock) (*mcp.Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("app: fora sdk: %w", err)
 	}
-	accounts, err := buildAccountService(cfg, clk, posture, fora)
+	accounts, err := buildAccountService(cfg, clk, sdk)
 	if err != nil {
 		return nil, err
 	}
 
 	srv, err := mcp.New(mcp.Config{
 		Tokens:          cfg.Auth.Tokens,
-		FORA:            fora,
+		Purchases:       sdk,
 		Discovery:       sdk,
 		Reports:         sdk,
 		Content:         sdk,
@@ -385,9 +409,10 @@ func buildMCPServer(cfg Config, clk clock.Clock) (*mcp.Server, error) {
 		MaxCallContentBytes: cfg.MCP.MaxCallContentBytes,
 		MaxItemContentBytes: maxItemBytes,
 		IssuerURL:           cfg.Auth.Issuer,
-		// The signer's OWN directory construction, so a tool's requester.id is
-		// byte-identical to the Signature-Agent origin the Broker/Exchange verify
-		// it against — one function, not two settings that happen to match.
+		// The signer's OWN directory construction, so the origin a tool sends is
+		// byte-identical to the Signature-Agent the Broker and the Exchange derive
+		// the caller's identity from — one function, not two settings that happen
+		// to match.
 		AgentDirectory: signer.DirectoryOrigin,
 		Logger:         cfg.Logger,
 	})

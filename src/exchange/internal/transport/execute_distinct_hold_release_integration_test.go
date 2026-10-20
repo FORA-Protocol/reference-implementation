@@ -121,6 +121,24 @@ func TestExecuteTransaction_ConcurrentDuplicateLoserReleasesDistinctHold(t *test
 	if !proto.Equal(winner.resp.Msg, loserResp.Msg) {
 		t.Fatalf("winner and loser received different responses:\n win=%v\n los=%v", winner.resp.Msg, loserResp.Msg)
 	}
+	assertLoserReleasedDistinctHold(t, h, rec, offer)
+	if _, err := repo.NewTransactionRepo(h.queries).ByIdempotencyKey(h.ctx, derivedTxKey("tx-distinct-hold-release", offer)); err != nil {
+		t.Fatalf("exactly one persisted transaction expected: %v", err)
+	}
+	bal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
+	if err != nil {
+		t.Fatalf("GetBalance: %v", err)
+	}
+	if want := mustBillingAmount(t, "9.95", "USD"); bal.Value.Cmp(want.Value) != 0 {
+		t.Errorf("balance = %s, want 9.95 (charged exactly once; the distinct hold was released)", bal.Value.FloatString(4))
+	}
+}
+
+// assertLoserReleasedDistinctHold checks the billing calls of the race: both
+// callers authorized, only the winner recorded, and the one release was the
+// loser's distinct hold rather than the winner's settled one.
+func assertLoserReleasedDistinctHold(t *testing.T, h *testHarness, rec *recordingAdapter, offer *forav1.Offer) {
+	t.Helper()
 	if got := rec.authorizeCallCount(); got != 2 {
 		t.Errorf("Authorize calls = %d, want 2 (winner + loser each authorized)", got)
 	}
@@ -137,15 +155,5 @@ func TestExecuteTransaction_ConcurrentDuplicateLoserReleasesDistinctHold(t *test
 				t.Errorf("released the winner's settled hold %q; want the loser's distinct hold", rel.BillingID)
 			}
 		}
-	}
-	if _, err := repo.NewTransactionRepo(h.queries).ByIdempotencyKey(h.ctx, derivedTxKey("tx-distinct-hold-release", offer)); err != nil {
-		t.Fatalf("exactly one persisted transaction expected: %v", err)
-	}
-	bal, err := h.billing.GetBalance(h.ctx, h.billingRef)
-	if err != nil {
-		t.Fatalf("GetBalance: %v", err)
-	}
-	if want := mustBillingAmount(t, "9.95", "USD"); bal.Value.Cmp(want.Value) != 0 {
-		t.Errorf("balance = %s, want 9.95 (charged exactly once; the distinct hold was released)", bal.Value.FloatString(4))
 	}
 }

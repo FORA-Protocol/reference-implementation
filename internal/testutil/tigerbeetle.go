@@ -14,6 +14,8 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/tcstart"
 )
 
 const (
@@ -66,9 +68,11 @@ func StartSharedTigerBeetle(ctx context.Context, logger *slog.Logger) (*SharedTi
 			hc.CapAdd = []string{"IPC_LOCK"}
 		},
 	}
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
+	c, err := tcstart.Run(ctx, func(ctx context.Context) (testcontainers.Container, error) {
+		return testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+			ContainerRequest: req,
+			Started:          true,
+		})
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("start tigerbeetle: %w", err)

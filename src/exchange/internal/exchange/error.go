@@ -130,6 +130,14 @@ const (
 	// remedy the agent is being told to apply is to file the missing reports;
 	// they are accepted however late they are.
 	KindReportingOverdue
+	// KindRelayNotAccepted signals that the tenant selling an item does not
+	// accept purchases relayed by a Broker. It maps to the wire reason
+	// DENIAL_REASON_RELAY_NOT_ACCEPTED, whose remedy is to buy the offer
+	// directly at this Exchange. Where it refuses a whole request — the relay
+	// gate at admission — it is PERMISSION_DENIED carrying that reason in a
+	// transaction_denial; inside the batch loop it denies its item and the rest
+	// proceed.
+	KindRelayNotAccepted
 )
 
 // Error is the canonical domain error. Handlers receive it from the service
@@ -180,6 +188,7 @@ var kindStrings = map[Kind]string{
 	KindAccountNotRegistered:  "account_not_registered",
 	KindAccountInactive:       "account_inactive",
 	KindReportingOverdue:      "reporting_overdue",
+	KindRelayNotAccepted:      "relay_not_accepted",
 
 	KindRegistrationDataInvalid: "registration_data_invalid",
 	KindTermsDigestStale:        "terms_digest_stale",
@@ -203,7 +212,8 @@ func (k Kind) ConnectCode() connect.Code {
 		return connect.CodeNotFound
 	case KindSignatureInvalid:
 		return connect.CodeUnauthenticated
-	case KindBillingDenied, KindAccountNotRegistered, KindAccountInactive, KindReportingOverdue:
+	case KindBillingDenied, KindAccountNotRegistered, KindAccountInactive, KindReportingOverdue,
+		KindRelayNotAccepted:
 		return connect.CodePermissionDenied
 	case KindIdempotent:
 		return connect.CodeAlreadyExists

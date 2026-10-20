@@ -52,7 +52,7 @@ func (s *Server) handleConsentPost(w http.ResponseWriter, r *http.Request) {
 	}
 	s.clearCookie(w, pendingCookie)
 	if r.PostFormValue(consentField) != consentApprove {
-		redirectError(w, r, p.RedirectURI, p.ClientState,
+		s.redirectError(w, r, p.RedirectURI, p.ClientState,
 			oauthErr{code: "access_denied", desc: "the developer did not approve the request"})
 		return
 	}

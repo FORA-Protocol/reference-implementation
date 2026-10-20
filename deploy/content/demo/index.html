@@ -13,8 +13,14 @@
   section { margin-bottom: 2rem; }
   h2 { border-bottom: 2px solid #d8cfc0; padding-bottom: 0.3rem; }
   section p { margin-top: 0.4rem; }
+  h3 { font-size: 1rem; margin: 1rem 0 0.3rem; color: #444; }
   ul { list-style: none; padding: 0; columns: 2; column-gap: 2rem; }
   li { margin: 0.35rem 0; break-inside: avoid; }
+  .table-wrap { overflow-x: auto; }
+  table.tracks { border-collapse: collapse; font-size: 0.78rem; width: 100%; }
+  table.tracks th, table.tracks td { border-bottom: 1px solid #d8cfc0; padding: 0.4rem 0.35rem; text-align: left; vertical-align: top; }
+  table.tracks th { background: #eee7da; }
+  table.tracks td:first-child { min-width: 10rem; font-size: 0.9rem; }
   a { color: #1f3a5f; }
   footer { max-width: 46rem; margin: 0 auto; padding: 0 1.5rem 2rem; font-size: 0.85rem; color: #6b6b6b; border-top: 1px solid #d8cfc0; }
   code { background: #eee7da; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
@@ -28,19 +34,40 @@
 </header>
 <main>
   <section>
-    <h2>Stoa Press &mdash; Philosophy Essays</h2>
-    <p>Short essays on the early Greek philosophers.</p>
+    <h2>Publisher Perspectives &mdash; AI Revenue &amp; Licensing</h2>
+    <p>Illustrative articles from the fictional Stoa Press on what a publisher earns from AI crawlers, in Markdown.</p>
+    <h3>Markdown (.md)</h3>
     <ul>
-      <li><a href="/articles/philosophers/thales-of-miletus.txt">Thales of Miletus</a></li>
-      <li><a href="/articles/philosophers/socrates.txt">Socrates</a></li>
-      <li><a href="/articles/philosophers/plato.txt">Plato</a></li>
-      <li><a href="/articles/philosophers/aristotle.txt">Aristotle</a></li>
-      <li><a href="/articles/philosophers/heraclitus.txt">Heraclitus</a></li>
-      <li><a href="/articles/philosophers/parmenides.txt">Parmenides</a></li>
-      <li><a href="/articles/philosophers/epicurus.txt">Epicurus</a></li>
-      <li><a href="/articles/philosophers/democritus.txt">Democritus</a></li>
-      <li><a href="/articles/philosophers/pythagoras.txt">Pythagoras</a></li>
-      <li><a href="/articles/philosophers/zeno-of-citium.txt">Zeno of Citium</a></li>
+      <li><a href="/articles/publishers/md/what-publishers-get-paid-ai-crawlers-revenue.md">What a publisher earned from AI crawlers</a></li>
+      <li><a href="/articles/publishers/md/publishers-pay-per-crawl-ai-licensing.md">Pay per crawl, from the publisher side</a></li>
+      <li><a href="/articles/publishers/md/publisher-ai-content-licensing-terms.md">A publisher&rsquo;s AI licensing terms</a></li>
+    </ul>
+  </section>
+  <section>
+    <h2>Stoa Press &mdash; Philosophy Essays</h2>
+    <p>Short essays on the early Greek philosophers, published in three formats.</p>
+    <h3>Markdown (.md)</h3>
+    <ul>
+      <li><a href="/articles/philosophers/md/anaximenes.md">Anaximenes</a></li>
+      <li><a href="/articles/philosophers/md/zeno-of-elea.md">Zeno of Elea</a></li>
+      <li><a href="/articles/philosophers/md/protagoras.md">Protagoras</a></li>
+      <li><a href="/articles/philosophers/md/pyrrho.md">Pyrrho</a></li>
+      <li><a href="/articles/philosophers/md/epictetus.md">Epictetus</a></li>
+      <li><a href="/articles/philosophers/md/plotinus.md">Plotinus</a></li>
+      <li><a href="/articles/philosophers/md/leucippus.md">Leucippus</a></li>
+      <li><a href="/articles/philosophers/md/marcus-aurelius.md">Marcus Aurelius</a></li>
+    </ul>
+    <h3>HTML (.html)</h3>
+    <ul>
+      <li><a href="/articles/philosophers/html/anaximander.html">Anaximander</a></li>
+      <li><a href="/articles/philosophers/html/anaxagoras.html">Anaxagoras</a></li>
+      <li><a href="/articles/philosophers/html/empedocles.html">Empedocles</a></li>
+      <li><a href="/articles/philosophers/html/diogenes-of-sinope.html">Diogenes of Sinope</a></li>
+    </ul>
+    <h3>PDF (.pdf)</h3>
+    <ul>
+      <li><a href="/articles/philosophers/pdf/xenophanes.pdf">Xenophanes</a></li>
+      <li><a href="/articles/philosophers/pdf/chrysippus.pdf">Chrysippus</a></li>
     </ul>
   </section>
   <section>
@@ -54,6 +81,29 @@
       <li><a href="/tracks/copper-mile.json">Copper Mile (track)</a></li>
       <li><a href="/tracks/static-garden.json">Static Garden (track)</a></li>
     </ul>
+    <h3>Playable tracks (MP3)</h3>
+    <p>Real music by Kevin MacLeod under CC BY 4.0, trimmed to 60 seconds. The
+    Harmonia offers attached to these tracks are fictional. Each column is a
+    field the catalog search matches a request against.</p>
+    <div class="table-wrap">
+      <table class="tracks">
+        <thead>
+          <tr><th>Track</th><th>genre</th><th>mood</th><th>bpm</th><th>energy</th><th>vocals</th><th>use</th><th>instrument</th><th>sec</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><a href="/tracks/adeste-fideles-shorter.mp3">Adeste Fideles - shorter</a><br><small>Kevin MacLeod (incompetech.com), CC BY 4.0 &middot; <a href="/tracks/adeste-fideles-shorter-provenance.txt">source and changes</a></small></td><td>holiday</td><td>relaxed, calm, grooving</td><td>105</td><td>low</td><td>false</td><td>holiday, greeting</td><td>music box, cello, trumpet</td><td>60.03</td></tr>
+          <tr><td><a href="/tracks/almost-bliss.mp3">Almost Bliss</a><br><small>Kevin MacLeod (incompetech.com), CC BY 4.0 &middot; <a href="/tracks/almost-bliss-provenance.txt">source and changes</a></small></td><td>contemporary</td><td>bright, calm, relaxed</td><td>90</td><td>low</td><td>false</td><td>vlog, travel</td><td>guitar, percussion</td><td>60.03</td></tr>
+          <tr><td><a href="/tracks/americana.mp3">Americana</a><br><small>Kevin MacLeod (incompetech.com), CC BY 4.0 &middot; <a href="/tracks/americana-provenance.txt">source and changes</a></small></td><td>soundtrack</td><td>epic, uplifting</td><td>104</td><td>medium</td><td>false</td><td>documentary, trailer</td><td>cello, bass clarinet, alto flute, english horn, clarinet, french horn, trombone, tuba, percussion, celesta, violins, basses</td><td>60.03</td></tr>
+          <tr><td><a href="/tracks/ancient-rite.mp3">Ancient Rite</a><br><small>Kevin MacLeod (incompetech.com), CC BY 4.0 &middot; <a href="/tracks/ancient-rite-provenance.txt">source and changes</a></small></td><td>soundtrack</td><td>calm, mysterious, somber</td><td>70</td><td>low</td><td>false</td><td>documentary, meditation</td><td>choir, percussion, bass</td><td>60.03</td></tr>
+          <tr><td><a href="/tracks/brain-dance.mp3">Brain Dance</a><br><small>Kevin MacLeod (incompetech.com), CC BY 4.0 &middot; <a href="/tracks/brain-dance-provenance.txt">source and changes</a></small></td><td>electronica</td><td>grooving, driving</td><td>124</td><td>high</td><td>false</td><td>podcast, workout</td><td>synths, percussion</td><td>60.03</td></tr>
+          <tr><td><a href="/tracks/evening.mp3">Evening</a><br><small>Kevin MacLeod (incompetech.com), CC BY 4.0 &middot; <a href="/tracks/evening-provenance.txt">source and changes</a></small></td><td>contemporary</td><td>bright, calm, relaxed</td><td>101</td><td>low</td><td>false</td><td>vlog, travel</td><td>guitar, cello, oboe</td><td>60.03</td></tr>
+          <tr><td><a href="/tracks/hiding-your-reality.mp3">Hiding Your Reality</a><br><small>Kevin MacLeod (incompetech.com), CC BY 4.0 &middot; <a href="/tracks/hiding-your-reality-provenance.txt">source and changes</a></small></td><td>soundtrack</td><td>action, driving, epic</td><td>107</td><td>high</td><td>false</td><td>trailer, game</td><td>percussion, synths, brass, tuba, euphonium, bass trombone, trombone, french horn, trumpet</td><td>60.03</td></tr>
+          <tr><td><a href="/tracks/lord-of-the-rangs.mp3">Lord of the Rangs</a><br><small>Kevin MacLeod (incompetech.com), CC BY 4.0 &middot; <a href="/tracks/lord-of-the-rangs-provenance.txt">source and changes</a></small></td><td>world</td><td>grooving, relaxed</td><td>104</td><td>medium</td><td>false</td><td>vlog, travel</td><td>didgeridoo, marimba, flute, percussion</td><td>60.03</td></tr>
+          <tr><td><a href="/tracks/mesmerizing-galaxy-loop.mp3">Mesmerizing Galaxy</a><br><small>Kevin MacLeod (incompetech.com), CC BY 4.0 &middot; <a href="/tracks/mesmerizing-galaxy-provenance.txt">source and changes</a></small></td><td>electronica</td><td>grooving, mysterious</td><td>124</td><td>medium</td><td>false</td><td>podcast, game</td><td>synths</td><td>60.03</td></tr>
+          <tr><td><a href="/tracks/strength-of-the-titans.mp3">Strength of the Titans</a><br><small>Kevin MacLeod (incompetech.com), CC BY 4.0 &middot; <a href="/tracks/strength-of-the-titans-provenance.txt">source and changes</a></small></td><td>soundtrack</td><td>epic, driving, action</td><td>85</td><td>high</td><td>false</td><td>trailer, game</td><td>hurdy gurdy, percussion, french horn, trombone, tuba, cello, basses</td><td>60.03</td></tr>
+        </tbody>
+      </table>
+    </div>
   </section>
   <section>
     <h2>FoleyWorks &mdash; Sound Effects</h2>

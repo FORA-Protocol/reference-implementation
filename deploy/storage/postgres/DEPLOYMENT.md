@@ -67,18 +67,31 @@ psql -h db.internal.example.net -U postgres -c \
 # Expect: CREATE DATABASE
 ```
 
-The names are yours to choose; `fora`, `fora_sor` and `identity` are used throughout
-these documents. What matters is that they are **different databases** on the same
-cluster.
+If you are also deploying the publisher console, it needs one more, owned by the same
+role. At its first boot the console creates its own schema, `console`, and its
+migration tracking table, `public.schema_migrations_console`. Owning the database is
+what allows the role to do both. On a database the role does not own, the console
+stops at boot with `permission denied for schema public`.
+
+```bash
+psql -h db.internal.example.net -U postgres -c \
+  "CREATE DATABASE console OWNER fora"
+# Expect: CREATE DATABASE
+```
+
+The names are yours to choose; `fora`, `fora_sor`, `identity` and `console` are used
+throughout these documents. What matters is that they are **different databases** on
+the same cluster.
 
 Confirm they exist before you go on:
 
 ```bash
 psql -h db.internal.example.net -U postgres -c \
   "SELECT datname FROM pg_database
-    WHERE datname IN ('fora','fora_sor','identity') ORDER BY datname"
-# Expect: identity, fora, fora_sor — or just fora and fora_sor if you are not
-# deploying the Identity Service
+    WHERE datname IN ('fora','fora_sor','identity','console') ORDER BY datname"
+# Expect: console, fora, fora_sor, identity, one row each. The console row is there
+# only if you deploy the publisher console, and the identity row only if you deploy
+# the Identity Service.
 ```
 
 If you are running two Exchanges that serve different tenants, each needs **its own
@@ -144,6 +157,21 @@ has no default. Leaving it out gives you this, and the process exits:
 {"level":"ERROR","msg":"exchange.exit","err":"sor: EXCHANGE_SOR_DSN is required for FORA_SOR_ADAPTER=postgres"}
 ```
 
+If you deploy the publisher console, set `CONSOLE_DSN` on it, pointing at its own
+database:
+
+```
+CONSOLE_DSN=postgres://fora:<password>@db.internal.example.net:5432/console?sslmode=require
+```
+
+The console will not start without it either. It exits with this line:
+
+```
+{"level":"ERROR","msg":"console.exit","err":"CONSOLE_DSN is required"}
+```
+
+`CONSOLE_DSN` is described in [`CONFIGURATION.md`](CONFIGURATION.md) §2.1.
+
 **You do not run migrations yourself.** Each service applies its own on start, before
 it begins listening. A failed migration aborts the boot rather than serving traffic
 on a half-built schema.
@@ -176,6 +204,13 @@ If you are running the Identity Service, it logs one line of its own:
 ```bash
 docker compose logs identity | grep 'migrations applied'
 # Expect: {"level":"INFO","msg":"migrations applied","version":4,"dirty":false,"table":"schema_migrations_identity"}
+```
+
+If you are running the publisher console, it also logs one line of its own:
+
+```bash
+docker compose logs console | grep 'migrations applied'
+# Expect: {"level":"INFO","msg":"migrations applied","version":1,"dirty":false,"table":"schema_migrations_console"}
 ```
 
 `dirty` must be `false` on every line.

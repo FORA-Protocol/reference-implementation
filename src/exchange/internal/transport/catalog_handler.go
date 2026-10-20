@@ -18,6 +18,7 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/keypolicy"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/agentreg"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/catalogid"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/exchange"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/service"
 )
@@ -143,13 +144,33 @@ func (h *CatalogHandler) PushResources(
 		return nil, catalogFaultError(err)
 	}
 	if err := h.verifyCallerSignature(ctx, req.Msg.GetCallerId()); err != nil {
-		return nil, catalogFaultError(err)
+		return nil, withAcceptSignature(catalogFaultError(err), err)
 	}
-	out, err := h.svc.PushResources(ctx, req.Msg)
+	out, err := h.svc.PushResources(ctx, req.Msg, pushSourceOf(req.Header()))
 	if err != nil {
 		return nil, catalogFaultError(err)
 	}
 	return connect.NewResponse(out), nil
+}
+
+// pushSourceOf reads which client made a catalog push off its
+// X-Fora-Catalog-Source header. The push is the automatic import's only when
+// the header is present once, with exactly the value auto-import. The name
+// matches in any case, as every HTTP header name does. Anything else -- no
+// header, another value, the value in another case, or the header sent twice
+// -- is PushSourceOther, which leaves the rows the push writes to their owner.
+//
+// The header is not a trust boundary, and nothing may treat it as one. The
+// push's signature does not cover it, and any contributor a site authorizes
+// can send it on its own push; all that achieves is letting the automatic
+// import refresh the rows that same push wrote. A proxy that strips it only
+// leaves rows protected. It is never used to authorize anything, never stored
+// as page data, and never shown to agents.
+func pushSourceOf(h http.Header) service.PushSource {
+	if v := h.Values(catalogid.SourceHeader); len(v) == 1 && v[0] == catalogid.SourceAutoImport {
+		return service.PushSourceAutoImport
+	}
+	return service.PushSourceOther
 }
 
 // canonicalizeCallerID rewrites msg.CallerId to the canonical directory host, in
@@ -245,9 +266,33 @@ func (h *CatalogHandler) verifyCallerSignature(ctx context.Context, callerID str
 		return err
 	}
 	if err := verify(); err != nil {
+		if _, refusedForm := helpers.AcceptSignatureFor(err); refusedForm {
+			// A missing component or a form the profile refuses is a fact about
+			// the signature, not about the caller's key: re-learning the key
+			// cannot repair it, so no directory is fetched for it.
+			return exchange.Wrap(exchange.KindUnauthenticated, err, "catalog: caller signature refused")
+		}
 		return h.selfSignupOnVerifyFailure(ctx, callerID, err, verify)
 	}
 	return nil
+}
+
+// withAcceptSignature puts the Accept-Signature value on a refusal whose cause
+// is a missing covered component or a signature form the profile refuses
+// (helpers.AcceptSignatureFor), so the caller learns what a signature here must
+// cover — the same answer the SDK's connectserver verify seam writes on its
+// 401. Connect sends a refusal's metadata as response headers. Any other
+// refusal is returned unchanged.
+func withAcceptSignature(refusal, cause error) error {
+	accept, ok := helpers.AcceptSignatureFor(cause)
+	if !ok {
+		return refusal
+	}
+	var cerr *connect.Error
+	if errors.As(refusal, &cerr) {
+		cerr.Meta().Set(helpers.AcceptSignatureHeader, accept)
+	}
+	return refusal
 }
 
 // selfSignupOnVerifyFailure handles a failed caller-signature verification. Two

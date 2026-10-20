@@ -1,0 +1,99 @@
+HARMONIA RECORDS — ILLUSTRATIVE MUSIC LICENSE ALTERNATIVES
+Combined document v0.1 — 2026-09-25
+
+This document contains three alternative licenses, not a cumulative grant.
+The selected offer's flat EUR price and section notice identify its section:
+EUR 29: ONLINE CREATOR; EUR 450: BROADCAST; EUR 1200: ADVERTISING.
+Only that section governs the simulated purchase. The machine restrictions,
+quotas and obligations are advisory summaries (reference_only semantics).
+Each offer models one production, worldwide, perpetually, with metering NONE.
+
+ACTUAL AUDIO PROVENANCE
+This document applies to every Harmonia track whose offer references it.
+The offer's attribution obligation names the track's actual creator, source
+and source license. The track's provenance file, published beside its audio,
+records the source, the ISRC and every modification made to the source file.
+Any later trims, fades or mixing must also be identified in accompanying
+credits. No endorsement by the actual creator is implied.
+Harmonia is a fictional catalog presenter, not the author or rights owner.
+The fictional restrictions and prices below do not limit the permissions of
+the track's source license.
+
+HARMONIA RECORDS — ONLINE CREATOR
+Illustrative license fixture v0.1 — 2026-09-25
+
+DEMONSTRATION NOTICE
+This document is a fictional licensing example used to demonstrate FORA offer selection. Harmonia Records is a fictional publisher. It grants no actual rights to the demonstration audio and asserts no ownership of its recording or composition. The audio's original license, authorship and notices remain controlling. The conditions below describe the simulated offer only; they impose no additional restrictions on audio available under CC BY or another source license. Prices are demo-balance amounts, not real payments or settlement.
+
+1. TRACK, CUSTOMER AND PRODUCTION
+The associated offer identifies the track/resource. The associated purchase record identifies the selected offer and represented customer. Within the simulation, the eligible customer is an individual making their own personal audiovisual production, not acting for a business or client. One production means one audiovisual work; trims, captions, aspect-ratio changes and language versions of that work are included. A different episode or independently conceived work is another production.
+
+2. ILLUSTRATIVE GRANT
+For EUR 29 in demo funds, the offer models a non-exclusive, worldwide, perpetual right to synchronize the identified sound recording and its musical composition into one personal YouTube video and stream that completed video online. Necessary production copies, trimming, fades and mixing under dialogue are included. Platform ad-revenue monetization of the personal video is allowed. The fee is charged once for the one production, not per view, stream or download.
+
+3. EXCLUDED PURPOSES
+This offer does not cover client commissions, sponsored brand integrations, paid advertisements, paid promotion of the production, or television/radio broadcast. It does not cover standalone redistribution of the track, resale as stock music, claiming ownership or registering the track in Content ID. It does not cover AI-model training or fine-tuning. Using an AI assistant to find a license or edit the permitted production is allowed and is not itself model training.
+
+4. ATTRIBUTION AND CONTENT ID OBLIGATION
+In the simulated production's description or credits, include the track title and creator identified in its provenance. Retain the actual source attribution, source link, license link and modification notice where required by that source license.
+Record the published video URL alongside the transaction/offer identifier for submission to the publisher's designated Content ID clearance process. This is an external obligation, not a FORA metering report. This demonstration provides no operational clearance service and guarantees no removal of claims. Until a real authorized process exists and has been used, show the obligation as pending or simulated, never as completed clearance. For actual source-license claims, follow the real rights holder's process.
+
+5. RIGHTS AND EVIDENCE LIMITS
+The hypothetical master-and-composition synchronization grant is not a buyout of collecting-society/public-performance royalties; applicable external permissions and payments remain separate. No permission for other footage, brands or people is supplied. A demo receipt records the offer and transaction evidence, not independent verification of rights ownership or external clearance.
+
+6. METERING
+The associated fixture must specify metering: NONE. No FORA transaction usage-report submission is required. Attribution and the external URL obligation remain part of the simulated license despite that setting.
+
+
+============================================================
+
+HARMONIA RECORDS — BROADCAST
+Illustrative license fixture v0.1 — 2026-09-25
+
+DEMONSTRATION NOTICE
+This document is a fictional licensing example used to demonstrate FORA offer selection. Harmonia Records is a fictional publisher. It grants no actual rights to the demonstration audio and asserts no ownership of its recording or composition. The audio's original license, authorship and notices remain controlling. The conditions below describe the simulated offer only; they impose no additional restrictions on audio available under CC BY or another source license. Prices are demo-balance amounts, not real payments or settlement.
+
+1. TRACK, CUSTOMER AND PRODUCTION
+The associated offer identifies the track/resource. The associated purchase record identifies the selected offer and represented customer. Within the simulation, the eligible customer is a broadcaster or commercial entity, acting directly or through an authorized producer, making a non-advertising television programme. One production means one programme or episode; trims, captions, aspect-ratio changes and language versions of that work are included. Another episode or independently conceived work is another production. The producer must state the represented customer and authority accurately; the Exchange does not verify that representation.
+
+2. ILLUSTRATIVE GRANT
+For EUR 450 in demo funds, the offer models a non-exclusive, worldwide, perpetual right to synchronize the identified sound recording and its musical composition into one non-advertising television production, broadcast the completed programme on television and stream its online version, including catch-up/on-demand distribution. Necessary production copies, trimming, fades and mixing under dialogue are included. The flat fee covers repeat transmissions of that same production; it is not a per-transmission or per-view fee. Distributing the completed programme for the represented client is permitted; supplying the track for the client's unrelated productions is not.
+
+3. EXCLUDED PURPOSES
+This offer does not cover commercials, sponsored brand advertisements, paid promotional spots or other advertising productions. It does not cover standalone redistribution of the track, resale as stock music, claiming ownership or registering the track in Content ID. It does not cover AI-model training or fine-tuning. Using an AI assistant to find a license or edit the permitted production is allowed and is not itself model training.
+
+4. CUE-SHEET OBLIGATION
+Prepare a cue sheet identifying the production/episode, track title, actual composer and publisher information where supplied, cue start and duration, and type of use. Deliver it to the broadcaster for onward reporting through the applicable collecting-society process and on the broadcaster's required schedule. Do not invent identifiers or register Harmonia as the actual rights holder. Retain the cue sheet and any delivery acknowledgment with the production evidence. In a simulated broadcast with no actual recipient, label the prepared sheet and delivery status as simulated; a purchase does not prove filing.
+
+5. RIGHTS AND EVIDENCE LIMITS
+The hypothetical master-and-composition synchronization grant excludes public-performance/collecting-society royalties and other external charges. The customer must ensure that the responsible broadcaster or platform has the applicable permissions and arrangements. The EUR 450 demo fee is not payment of those royalties. Preserve actual source attribution and notices, including modification notices where required, in the production's credits or accompanying publication information. No permission for other footage, brands or people is supplied. A demo receipt records offer and transaction evidence, not proof of real rights ownership, cue-sheet delivery or royalty settlement.
+
+6. METERING
+The associated fixture must specify metering: NONE. No FORA transaction usage-report submission is required. The external cue-sheet and royalty obligations remain part of the simulated license despite that setting.
+
+
+============================================================
+
+HARMONIA RECORDS — ADVERTISING
+Illustrative license fixture v0.1 — 2026-09-25
+
+DEMONSTRATION NOTICE
+This document is a fictional licensing example used to demonstrate FORA offer selection. Harmonia Records is a fictional publisher. It grants no actual rights to the demonstration audio and asserts no ownership of its recording or composition. The audio's original license, authorship and notices remain controlling. The conditions below describe the simulated offer only; they impose no additional restrictions on audio available under CC BY or another source license. Prices are demo-balance amounts, not real payments or settlement.
+
+1. TRACK, CUSTOMER AND PRODUCTION
+The associated offer identifies the track/resource. The associated purchase record identifies the selected offer and represented customer. Within the simulation, the eligible customer is an advertiser/commercial client, acting directly or through its authorized agency or producer, making one audiovisual advertisement. One production means one advertising creative for one named advertiser and product/service. Cutdowns, captions, aspect-ratio changes and language versions of that creative are included. A separately conceived advertisement or another product campaign is another production. The Exchange does not verify the customer's identity or the producer's authority.
+
+2. ILLUSTRATIVE GRANT
+For EUR 1,200 in demo funds, the offer models a non-exclusive, worldwide, perpetual right to synchronize the identified sound recording and its musical composition into that advertisement and distribute the completed advertisement through paid online video/social placements and television advertising. Necessary production copies, trimming, fades and mixing are included. The fee is charged once for the one advertising production; this fixture has no impression or media-spend cap. Media placement itself is not included in the fee.
+
+3. PURPOSE LIMIT AND EXCLUSIONS
+This is an advertising-purpose offer, not an upgrade covering every use. It does not cover an unrelated personal YouTube video or a non-advertising editorial television programme. It does not cover standalone redistribution of the track, resale as stock music, claiming ownership or registering the track in Content ID. It does not cover AI-model training or fine-tuning. Using an AI assistant to find a license or edit the permitted advertisement is allowed and is not itself model training.
+
+4. OBLIGATIONS
+Retain a production/placement record identifying the advertiser, product/service, advertising creative and distribution media. For television placements, prepare a cue sheet with the production title, actual track/composer/publisher details where supplied, cue start and duration, and type of use; deliver it through the broadcaster's required process and schedule. Preserve actual source attribution and notices, including modification notices where required, in appropriate accompanying credits or publication information. Do not invent rights-holder identities, clearance confirmations or filing acknowledgments. A simulated placement or filing must be labelled as simulated.
+
+5. RIGHTS AND EVIDENCE LIMITS
+The hypothetical master-and-composition synchronization grant excludes public-performance/collecting-society royalties and other external charges. The customer must ensure that the responsible broadcaster or platform has the applicable permissions and arrangements. The EUR 1,200 demo fee is not payment of those royalties. No endorsement of the advertiser by the real artist is implied. No permission for other footage, brands or people is supplied. A demo receipt records offer and transaction evidence, not proof of real rights ownership, placement, clearance or royalty settlement.
+
+6. METERING
+The associated fixture must specify metering: NONE. No FORA transaction usage-report submission is required. Production records and applicable external obligations remain part of the simulated license despite that setting.

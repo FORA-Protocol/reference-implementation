@@ -24,14 +24,20 @@
 export const WELL_KNOWN_PATH = '/.well-known/fora.json';
 
 // Fixed path every FORA participant serves its pure Web Bot Auth directory at.
-// The directory is an RFC 7517 JWK Set (keys) plus an optional directory-level
-// revocation_url, served with Content-Type application/jwk-set+json. Mirrors
-// the Go forawellknown.WBAPath.
+// The directory is a `keys` array of JWKs plus an optional directory-level
+// revocation_url, served with Content-Type
+// application/http-message-signatures-directory+json. Mirrors the Go
+// forawellknown.WBAPath.
 export const WBA_PATH = '/.well-known/http-message-signatures-directory';
 
-// Content-Type for the WBA directory response, matching the Go WBA handler
-// (internal/forawellknown/server) and readable by any off-the-shelf WBA verifier.
-export const WBA_DIRECTORY_CONTENT_TYPE = 'application/jwk-set+json';
+// Content-Type of a Web Bot Auth key directory (draft-ietf-webbotauth-httpsig-
+// protocol-00 §5.5). Every reader under the profile refuses any other label,
+// application/jwk-set+json included. The edge serves its own directory under it
+// and requires it of the Exchange directory it fetches. Written as a literal
+// because this file is plain ESM shared with the raw-Node shim, which cannot
+// import the SDK's TypeScript source; a Node test asserts the literal equals the
+// SDK's WBA_DIRECTORY_MEDIA_TYPE.
+export const WBA_DIRECTORY_CONTENT_TYPE = 'application/http-message-signatures-directory+json';
 
 export function buildPublisherManifest(provider, exchanges, contributors) {
   const profiles = [...new Set(exchanges.flatMap((e) => e.supported_profiles ?? []))];
@@ -67,5 +73,49 @@ export function buildPublisherWba(keys, revocationUrl) {
   return {
     keys,
     ...(revocationUrl !== undefined ? { revocation_url: revocationUrl } : {}),
+  };
+}
+
+// The four members of a WBA_SIGNED_DIRECTORY_JSON value, in the order the
+// signing tool (scripts/sign-wba-directory.mjs) writes them.
+const SIGNED_DIRECTORY_FIELDS = ['body', 'content_digest', 'signature_input', 'signature'];
+
+// signedDirectoryFrom reads a WBA_SIGNED_DIRECTORY_JSON value: a pre-signed Web
+// Bot Auth directory response, made offline by whoever holds the publisher's
+// key. It checks the envelope only — four non-empty strings and nothing else —
+// and throws otherwise. Whether the body is a directory is the caller's check:
+// the Hono worker validates it with its key schema, while the raw-Node shim has
+// no schema library and serves what the tool produced.
+export function signedDirectoryFrom(raw) {
+  const value = JSON.parse(raw);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('WBA_SIGNED_DIRECTORY_JSON must be a JSON object');
+  }
+  const extra = Object.keys(value).filter((k) => !SIGNED_DIRECTORY_FIELDS.includes(k));
+  if (extra.length > 0) {
+    throw new Error(`WBA_SIGNED_DIRECTORY_JSON carries unknown member(s): ${extra.join(', ')}`);
+  }
+  for (const field of SIGNED_DIRECTORY_FIELDS) {
+    if (typeof value[field] !== 'string' || value[field] === '') {
+      throw new Error(`WBA_SIGNED_DIRECTORY_JSON: ${field} must be a non-empty string`);
+    }
+  }
+  return {
+    body: value.body,
+    contentDigest: value.content_digest,
+    signatureInput: value.signature_input,
+    signature: value.signature,
+  };
+}
+
+// signedDirectoryHeaders is the header set a pre-signed directory is served
+// with: the profile's media type and the three values the signatures need. The
+// body goes out byte for byte beside them; a changed byte breaks the digest.
+export function signedDirectoryHeaders(signed) {
+  return {
+    'content-type': WBA_DIRECTORY_CONTENT_TYPE,
+    'content-digest': signed.contentDigest,
+    'signature-input': signed.signatureInput,
+    signature: signed.signature,
   };
 }

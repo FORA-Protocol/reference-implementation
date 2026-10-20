@@ -1,7 +1,7 @@
 // Package agentsign is the seam between key custody and outbound signing: it
 // resolves the key an agent should sign with right now and hands it to the
-// outbound RFC 9421 transport, so the Identity Service can sign a request on that
-// agent's behalf.
+// identity service's outbound legs, which build one SDK client per call around
+// it, so the Identity Service can sign a request on that agent's behalf.
 //
 // # The identity comes from the request, never from the payload
 //
@@ -14,10 +14,11 @@
 // by the authenticating layer, and why a request that carries no identity is
 // refused rather than signed as anyone.
 //
-// # Why the key is resolved per request, not per client
+// # Why the key is resolved per call
 //
-// One transport serves every agent, so the key cannot be bound when the transport
-// is built. It is also not cached here: an agent's active key changes under
+// One service signs for every agent it holds keys for, so no key can be bound
+// when the service starts: each outbound call resolves the key of the agent it is
+// made for. It is also not cached here: an agent's active key changes under
 // rotation and disappears under revocation, and a cached key would keep signing
 // with a retired — or revoked — one. Custody already owns "which key signs now"
 // (keystore.Active); this package asks it, every time.
@@ -26,8 +27,8 @@
 //
 // KeyStore.Signer deliberately returns a crypto.Signer rather than the private
 // key, so a Transit/KMS/HSM backend can sign without ever surrendering key bytes.
-// The RFC 9421 signing libraries (yaronf/httpsign and the protocol SDK helpers)
-// both require raw ed25519 key bytes, so this package has to narrow the signer back
+// The protocol SDK's signer (helpers.NewEd25519Signer) requires raw ed25519
+// key bytes, so this package has to narrow the signer back
 // to an ed25519.PrivateKey and fails with ErrNotSignable when a backend will not
 // hand them over. That failure is the honest report of a real gap: moving custody to
 // an HSM means teaching the signing path to drive a crypto.Signer, not swapping an
@@ -40,6 +41,8 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forahttpsig"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/keystore"
@@ -81,34 +84,34 @@ func SubdomainFromContext(ctx context.Context) string {
 	return s
 }
 
-// Config wires a Resolver. Keys is required; Scheme defaults to https.
+// Config wires a Resolver. Both fields are required.
 type Config struct {
 	// Keys is the custody backend holding the agents' private keys.
 	Keys Custody
-	// Scheme is the URL scheme of the directory origin published in the covered
-	// Signature-Agent header ("https" in production, "http" for a local stack).
-	// It must match the scheme the agent's directory is actually served on, or an
-	// origin following the pointer will not find it.
-	Scheme string
+	// BaseDomain is the identity zone (IDENTITY_BASE_DOMAIN): every agent's
+	// directory is served at https://<slug>.<BaseDomain>, which is the origin its
+	// signatures name as their Signature-Agent member.
+	BaseDomain string
 }
 
 // Resolver turns an authenticated agent into the key that signs for it.
 type Resolver struct {
-	keys   Custody
-	scheme string
+	keys Custody
 }
 
-// New builds a Resolver, defaulting the scheme to https. It fails on a missing
-// custody backend rather than nil-panicking on the first signed request.
+// New builds a Resolver. It fails on a missing custody backend rather than
+// nil-panicking on the first signed request, and on a zone whose agent origins
+// could not be https origins (helpers.CheckHTTPSOrigin): every signature would
+// then name a Signature-Agent each verifier refuses, so the service refuses to
+// start instead.
 func New(cfg Config) (*Resolver, error) {
 	if cfg.Keys == nil {
 		return nil, errors.New("agentsign: Config.Keys is required")
 	}
-	scheme := cfg.Scheme
-	if scheme == "" {
-		scheme = "https"
+	if err := helpers.CheckHTTPSOrigin("https://" + cfg.BaseDomain); err != nil {
+		return nil, fmt.Errorf("agentsign: agent origins under zone %q are not https origins: %w", cfg.BaseDomain, err)
 	}
-	return &Resolver{keys: cfg.Keys, scheme: scheme}, nil
+	return &Resolver{keys: cfg.Keys}, nil
 }
 
 // DirectoryOrigin is an agent's FORA identity: the origin its Web Bot Auth
@@ -116,18 +119,18 @@ func New(cfg Config) (*Resolver, error) {
 // Signature-Agent header.
 //
 // It is exported, and this package owns it, because the same string is needed in
-// two places that MUST agree byte-for-byte: the signer puts it in
-// Signature-Agent, and the MCP adapter puts it in requester.id. The Broker and
-// the Exchange authorize a call by comparing those two, so two spellings of this
-// value is two chances for every peer to refuse the call with an error that names
-// neither side. One construction, one owner.
+// two places: the signer puts it in Signature-Agent, and the MCP adapter also
+// sends it as requester.id and as the Broker's agent_id. Signature-Agent is the
+// one that authorizes — the Broker and the Exchange derive the caller's identity
+// from that header. requester.id is a free label that no peer compares; keeping
+// it equal to the directory origin only makes evidence rows name the signer.
+// One construction, one owner, so the two cannot drift.
 //
-// A METHOD rather than a package function taking a scheme, deliberately: the
-// scheme is the Resolver's, already reconciled with the scheme the agent's
-// directory is actually served on. A scheme-taking variant would let a caller
-// supply a different one, which is the drift this method exists to remove.
+// The origin is always https: a Signature-Agent member is an https origin and
+// nothing else, and a key directory is only ever fetched over https, so no
+// deployment setting chooses the scheme here.
 func (r *Resolver) DirectoryOrigin(subdomain string) string {
-	return r.scheme + "://" + subdomain
+	return "https://" + subdomain
 }
 
 // KeyFor returns the key subdomain's agent should sign with right now, addressed
@@ -159,10 +162,10 @@ func (r *Resolver) KeyFor(ctx context.Context, subdomain string) (forahttpsig.Ag
 	}, nil
 }
 
-// Source adapts the Resolver to the outbound transport's KeySource: it reads the
-// authenticated agent off the request context and resolves that agent's key.
-// Wire it with forahttpsig.WithKeySource and one transport signs correctly for
-// every agent it carries.
+// Source adapts the Resolver to forahttpsig.KeySource: it reads the authenticated
+// agent off the request context and resolves that agent's key. The identity
+// service passes it as forasdk.Config.Keys, and every outbound leg calls it once
+// per call.
 func (r *Resolver) Source() forahttpsig.KeySource {
 	return func(ctx context.Context) (forahttpsig.AgentKey, error) {
 		subdomain := SubdomainFromContext(ctx)

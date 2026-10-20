@@ -1,6 +1,6 @@
 # FirstInstance provisioning Zitadel runs under `start-from-init`: it creates the
 # instance, the `fora` org, a human admin, and the `fora-bootstrap` machine user
-# whose PAT scripts/zitadel-bootstrap.sh then authenticates with.
+# whose PAT deploy/zitadel/bootstrap/bootstrap.sh then authenticates with.
 #
 # The PAT lands in /bootstrap — a named volume shared with the zitadel-init
 # one-shot, which is how the bootstrap reads it. (The `zitadel` test tier writes

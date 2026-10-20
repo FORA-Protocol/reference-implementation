@@ -9,11 +9,9 @@ import (
 )
 
 // The outbound legs arrive through a port each rather than through one
-// interface, because they are served by different things and no single type
-// satisfies all of them. Discovery, the usage report and the content fetch are
-// the protocol SDK's. The purchase is still this repository's, because it goes
-// to the Broker's relay route rather than to the ExchangeService RPC the SDK's
-// Execute calls. Splitting them is what makes that division visible at the seam.
+// interface, one per operation a tool performs. Every one of them is the
+// protocol SDK's today, served by forasdk, but each tool depends only on the
+// operation it calls, so a test double stands in for exactly one leg.
 //
 // The account workflow crosses no port in this file. Opening an account and
 // asking after one are exchacct's, reached as that service rather than through a
@@ -23,19 +21,18 @@ import (
 // declares the outbound port those two RPCs travel on, next to the workflow that
 // uses it.
 
-// foraCaller is the part of the outbound leg this package still calls directly:
-// the purchase, which goes to the Broker's relay route rather than to the
-// ExchangeService RPC the SDK's Execute calls.
+// purchaser buys offers through the Broker (BrokerService.ExecuteTransaction).
 //
-// It is one method because the account RPCs left. They are sent by exchacct now,
-// through a port of its own, and a seam that still declared them here would
-// widen this one past anything the tools reach for.
+// req carries the requester, each item's offer and the idempotency key; the
+// implementation signs the acceptances with the calling agent's key, so the
+// tool never handles key material. The answer is the Broker's combined
+// response: one result per offer, including the items an Exchange refused as a
+// whole, which carry an UpstreamRefusal instead of an error.
 //
-// Declared here rather than imported as *foraclient.Client because the consumer
-// is the one that knows how narrow the seam really is, and because a concrete
-// struct in the field type makes the two packages inseparable for no benefit.
-type foraCaller interface {
-	Execute(ctx context.Context, req *forav1.TransactionRequest) (*forav1.TransactionResponse, error)
+// Declared here rather than imported as *forasdk.Client because the consumer is
+// the one that knows how narrow the seam really is.
+type purchaser interface {
+	Execute(ctx context.Context, req *forav1.TransactionRequest) (*forav1.BrokerTransactionResponse, error)
 }
 
 // discoverer resolves offers through the Broker.

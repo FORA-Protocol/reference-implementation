@@ -5,7 +5,8 @@ package keystore_test
 import (
 	"context"
 	"errors"
-	"fmt"
+	"net/http"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -131,22 +132,15 @@ func TestAMountThatDoesNotExistFailsLoudly(t *testing.T) {
 // Production will not hand this service a root token. It will hand it a token whose
 // policy reaches exactly the paths the store needs and nothing else — and if the
 // store needs a capability nobody wrote down, that is discovered in an outage.
-// So the least-privilege policy is spelled out here and every operation is driven
-// through it: this test IS the policy document, and it fails the day the store
-// starts needing more.
+// So every KeyStore operation is driven through the policy production writes, read
+// from the same template file, and the test fails the day the store needs more than
+// that file grants.
 func TestTheStoreWorksUnderALeastPrivilegePolicy(t *testing.T) {
 	store, _ := newStore(t)
 	ctx := t.Context()
 
-	policy := fmt.Sprintf(`
-path "%[1]s/data/agents/*" {
-  capabilities = ["create", "update", "read"]
-}
-path "%[1]s/metadata/agents/*" {
-  capabilities = ["list", "read"]
-}`, sharedVault.Mount)
-
-	scoped := newStoreWith(t, clientWithToken(t, tokenForPolicy(t, "identity-service", policy)), sharedVault.Mount)
+	scopedClient := sharedVault.IdentityServiceClient(t)
+	scoped := newStoreWith(t, scopedClient, sharedVault.Mount)
 
 	key, err := scoped.Create(ctx, agent, liveWindow())
 	if err != nil {
@@ -170,6 +164,93 @@ path "%[1]s/metadata/agents/*" {
 	if _, err := store.Signer(ctx, key.Ref); err != nil {
 		t.Errorf("the key the scoped token minted is not readable by the service: %v", err)
 	}
+
+	subdomains, err := scoped.ListSubdomains(ctx)
+	if err != nil {
+		t.Errorf("list subdomains under the least-privilege policy: %v", err)
+	} else if !slices.Contains(subdomains, agent) {
+		t.Errorf("list subdomains under the least-privilege policy = %v, want %q in it", subdomains, agent)
+	}
+
+	assertDestroyErasesEveryVersion(t, scoped, key)
+	assertScopedTokenIsRefusedOutsideItsPaths(t, scopedClient)
+}
+
+// assertDestroyErasesEveryVersion gives key several versions through Expire, then
+// destroys it under the scoped store and checks that no version and no metadata is
+// left. The version history is not visible through the KeyStore, so the check reads
+// Vault with the root client: a key that is gone from the latest version but still
+// readable in an older one is exactly the leak Destroy exists to close.
+func assertDestroyErasesEveryVersion(t *testing.T, scoped keystore.KeyStore, key keystore.Key) {
+	t.Helper()
+	ctx := t.Context()
+	kv := sharedVault.Client.KVv2(sharedVault.Mount)
+	secretPath := secretPathOf(key.Ref)
+
+	for _, days := range []int{20, 10} {
+		if err := scoped.Expire(ctx, key.Ref, anchor.Add(time.Duration(days)*24*time.Hour)); err != nil {
+			t.Fatalf("expire under the least-privilege policy: %v", err)
+		}
+	}
+	meta, err := kv.GetMetadata(ctx, secretPath)
+	if err != nil {
+		t.Fatalf("read the key's metadata before destroy: %v", err)
+	}
+	if meta.CurrentVersion < 3 {
+		t.Fatalf("the key has %d versions before destroy, want at least 3", meta.CurrentVersion)
+	}
+
+	if err := scoped.Destroy(ctx, key.Ref); err != nil {
+		t.Fatalf("destroy under the least-privilege policy: %v — without delete on the "+
+			"metadata path a revoked key stays readable in Vault", err)
+	}
+
+	if _, err := kv.GetMetadata(ctx, secretPath); !errors.Is(err, vaultapi.ErrSecretNotFound) {
+		t.Errorf("metadata after destroy = %v, want ErrSecretNotFound", err)
+	}
+	for version := 1; version <= meta.CurrentVersion; version++ {
+		if _, err := kv.GetVersion(ctx, secretPath, version); !errors.Is(err, vaultapi.ErrSecretNotFound) {
+			t.Errorf("version %d after destroy = %v, want ErrSecretNotFound", version, err)
+		}
+	}
+}
+
+// assertScopedTokenIsRefusedOutsideItsPaths checks what the scoped token must NOT
+// do. Each refusal must be a permission denial: a secret the token cannot find is
+// not proof that the token cannot read it, so the secret outside agents/ is first
+// shown to exist with the root client.
+func assertScopedTokenIsRefusedOutsideItsPaths(t *testing.T, scopedClient *vaultapi.Client) {
+	t.Helper()
+	ctx := t.Context()
+	const outside = "outside-agents/secret"
+
+	rootKV := sharedVault.Client.KVv2(sharedVault.Mount)
+	if _, err := rootKV.Put(ctx, outside, map[string]any{"value": "not for the identity service"}); err != nil {
+		t.Fatalf("write the secret outside agents/: %v", err)
+	}
+	if _, err := rootKV.Get(ctx, outside); err != nil {
+		t.Fatalf("the secret outside agents/ is not readable with the root token: %v", err)
+	}
+
+	_, err := scopedClient.KVv2(sharedVault.Mount).Get(ctx, outside)
+	requirePermissionDenied(t, "read a secret outside agents/", err)
+
+	err = scopedClient.Sys().PutPolicyWithContext(ctx, "escalate", `path "*" { capabilities = ["sudo", "read"] }`)
+	requirePermissionDenied(t, "write a policy", err)
+
+	err = scopedClient.Sys().MountWithContext(ctx, "rogue-kv", &vaultapi.MountInput{Type: "kv"})
+	requirePermissionDenied(t, "enable a mount", err)
+}
+
+// requirePermissionDenied fails unless err is Vault's 403 answer. Any other error —
+// a missing path, an unreachable Vault — would let the check pass without proving
+// that the policy refused anything.
+func requirePermissionDenied(t *testing.T, action string, err error) {
+	t.Helper()
+	var respErr *vaultapi.ResponseError
+	if !errors.As(err, &respErr) || respErr.StatusCode != http.StatusForbidden {
+		t.Errorf("%s with the scoped token = %v, want permission denied (403)", action, err)
+	}
 }
 
 // A token whose policy does not reach the store's paths must be refused, and the
@@ -186,8 +267,8 @@ func TestATokenWithoutPermissionIsRefusedNotTreatedAsAMiss(t *testing.T) {
 	}
 
 	// A policy that grants nothing on the store's paths.
-	powerless := tokenForPolicy(t, "no-keys", `path "sys/health" { capabilities = ["read"] }`)
-	denied := newStoreWith(t, clientWithToken(t, powerless), sharedVault.Mount)
+	powerless := sharedVault.ScopedClient(t, "no-keys", `path "sys/health" { capabilities = ["read"] }`)
+	denied := newStoreWith(t, powerless, sharedVault.Mount)
 
 	signer, err := denied.Signer(ctx, key.Ref)
 	if !errors.Is(err, keystore.ErrPermissionDenied) {
@@ -383,25 +464,4 @@ func deadVaultClient(tb testing.TB) *vaultapi.Client {
 	}
 	client.SetToken("irrelevant-nobody-is-listening")
 	return client
-}
-
-// tokenForPolicy writes a Vault policy and returns a fresh token carrying it (and
-// nothing else — the "default" policy is excluded so the test really measures what
-// the named policy grants).
-func tokenForPolicy(tb testing.TB, name, rules string) string {
-	tb.Helper()
-	ctx := tb.Context()
-
-	if err := sharedVault.Client.Sys().PutPolicyWithContext(ctx, name, rules); err != nil {
-		tb.Fatalf("write policy %q: %v", name, err)
-	}
-	secret, err := sharedVault.Client.Auth().Token().CreateWithContext(ctx, &vaultapi.TokenCreateRequest{
-		Policies:        []string{name},
-		NoDefaultPolicy: true,
-		TTL:             "10m",
-	})
-	if err != nil {
-		tb.Fatalf("create token for policy %q: %v", name, err)
-	}
-	return secret.Auth.ClientToken
 }

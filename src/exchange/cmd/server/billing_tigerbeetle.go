@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/runhttp"
@@ -25,8 +27,11 @@ const billingURLTTL = 5 * time.Minute
 //
 // Environment variables (all under the EXCHANGE_BILLING_ prefix — one adapter,
 // one convention):
-//   - EXCHANGE_BILLING_LEDGER: ISO 4217 numeric currency (e.g. 978 = EUR); the
-//     TigerBeetle ledger id and the source for the adapter's alpha Currency.
+//   - EXCHANGE_BILLING_LEDGER: one ISO 4217 numeric currency (e.g. 978 = EUR),
+//     or several separated by commas (e.g. "978,840"). Each is a TigerBeetle
+//     ledger the deployment bills on, and the FIRST one is the currency the
+//     well-known document advertises as base_currency — see
+//     billingLedgerCurrencies.
 //   - EXCHANGE_BILLING_TB_ADDRESS: TigerBeetle IP:port (hostnames are rejected).
 //   - EXCHANGE_BILLING_TB_CLUSTER_ID: cluster id (default 0).
 //   - EXCHANGE_BILLING_HOLD_GRACE: hold-timeout grace over the URL TTL (default 1m).
@@ -35,88 +40,104 @@ const billingURLTTL = 5 * time.Minute
 //     blocking on an unreachable cluster.
 func newTigerBeetleBillingAdapter(
 	ctx context.Context, logger *slog.Logger,
-) (billing.Adapter, string, func(), error) {
-	ledger, currency, err := billingLedgerCurrency()
+) (billing.Adapter, []string, func(), error) {
+	currencies, err := billingLedgerCurrencies()
 	if err != nil {
-		return nil, "", nil, err
+		return nil, nil, nil, err
 	}
 	addr := runhttp.EnvOr("EXCHANGE_BILLING_TB_ADDRESS", "")
 	if addr == "" {
-		return nil, "", nil, fmt.Errorf(
+		return nil, nil, nil, fmt.Errorf(
 			"billing: EXCHANGE_BILLING_TB_ADDRESS is required for FORA_BILLING_ADAPTER=tigerbeetle")
 	}
 	cluster, err := strconv.ParseUint(runhttp.EnvOr("EXCHANGE_BILLING_TB_CLUSTER_ID", "0"), 10, 64)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("billing: invalid EXCHANGE_BILLING_TB_CLUSTER_ID: %w", err)
+		return nil, nil, nil, fmt.Errorf("billing: invalid EXCHANGE_BILLING_TB_CLUSTER_ID: %w", err)
 	}
 	grace, err := time.ParseDuration(runhttp.EnvOr("EXCHANGE_BILLING_HOLD_GRACE", "1m"))
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("billing: invalid EXCHANGE_BILLING_HOLD_GRACE: %w", err)
+		return nil, nil, nil, fmt.Errorf("billing: invalid EXCHANGE_BILLING_HOLD_GRACE: %w", err)
 	}
 	var clientOpts []tigerbeetle.Option
 	if raw := runhttp.EnvOr("EXCHANGE_BILLING_TB_OP_TIMEOUT", ""); raw != "" {
 		opTimeout, pErr := time.ParseDuration(raw)
 		if pErr != nil {
-			return nil, "", nil, fmt.Errorf("billing: invalid EXCHANGE_BILLING_TB_OP_TIMEOUT: %w", pErr)
+			return nil, nil, nil, fmt.Errorf("billing: invalid EXCHANGE_BILLING_TB_OP_TIMEOUT: %w", pErr)
 		}
 		clientOpts = append(clientOpts, tigerbeetle.WithOpTimeout(opTimeout))
 	}
 
 	client, err := tigerbeetle.NewClient(cluster, []string{addr}, logger, clientOpts...)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("billing: connect TigerBeetle at %s: %w", addr, err)
+		return nil, nil, nil, fmt.Errorf("billing: connect TigerBeetle at %s: %w", addr, err)
 	}
 	if err := client.Health(ctx); err != nil {
 		client.Close()
-		return nil, "", nil, fmt.Errorf("billing: TigerBeetle health check: %w", err)
+		return nil, nil, nil, fmt.Errorf("billing: TigerBeetle health check: %w", err)
 	}
 
-	adapter := billing.NewTigerBeetleAdapter(billing.TigerBeetleOptions{
+	adapter, err := billing.NewTigerBeetleAdapter(billing.TigerBeetleOptions{
 		Client:      client,
-		Ledger:      ledger,
-		Currency:    currency,
+		Currencies:  currencies,
 		HoldTimeout: billingURLTTL + grace,
 		// IDNamespace deliberately empty: production hashing stays unsalted.
 	})
+	if err != nil {
+		client.Close()
+		return nil, nil, nil, err
+	}
 	// Boot-path logs use free-text messages by convention (see keys.go /
 	// keyresolver.go); dotted event names (exchange.*) are the request/lifecycle path.
+	//
+	// base_currency is logged separately from the list because it is a decision
+	// the list's ORDER makes silently: an operator who reorders the variable
+	// changes what this Exchange advertises, and this line is where that shows up.
 	logger.Info("billing adapter: tigerbeetle",
-		"ledger", ledger, "currency", currency, "address", addr,
-		"hold_timeout", billingURLTTL+grace)
-	return adapter, currency, client.Close, nil
+		"currencies", strings.Join(currencies, ","), "base_currency", currencies[0],
+		"address", addr, "hold_timeout", billingURLTTL+grace)
+	return adapter, currencies, client.Close, nil
 }
 
-// billingLedgerCurrency reads EXCHANGE_BILLING_LEDGER (ISO 4217 numeric) and
-// maps it to the ledger id plus its ISO 4217 alpha code. Phase 1 is
-// single-currency, so only the deployed set is supported; an unknown numeric is
-// a hard error rather than a silent default.
-func billingLedgerCurrency() (uint32, string, error) {
+// billingLedgerCurrencies reads EXCHANGE_BILLING_LEDGER — one ISO 4217 numeric
+// code, or several separated by commas — and returns their ISO 4217 alpha codes
+// IN THE ORDER THEY WERE LISTED. The deployment bills in every currency it
+// returns, one TigerBeetle ledger each.
+//
+// The order is load-bearing, not cosmetic: the FIRST entry is the currency this
+// Exchange advertises as base_currency in its well-known document, because that
+// field holds a single value. Listing "978,840" advertises EUR; listing
+// "840,978" advertises USD. Reordering the list is therefore a deliberate change
+// to what other parties are told our prices are denominated in, and never a side
+// effect of adding a currency — add new currencies at the END to leave the
+// advertised value alone. The boot log line prints the resolved list and the
+// advertised currency so the running value is visible without reading config.
+//
+// An empty value, an unparseable entry, a repeated entry, and a numeric with no
+// ledger are all hard errors: the process refuses to start rather than bill in a
+// set the operator did not mean.
+func billingLedgerCurrencies() ([]string, error) {
 	raw := runhttp.EnvOr("EXCHANGE_BILLING_LEDGER", "")
 	if raw == "" {
-		return 0, "", fmt.Errorf("billing: EXCHANGE_BILLING_LEDGER is required for FORA_BILLING_ADAPTER=tigerbeetle")
+		return nil, fmt.Errorf("billing: EXCHANGE_BILLING_LEDGER is required for FORA_BILLING_ADAPTER=tigerbeetle")
 	}
-	numeric, err := strconv.ParseUint(raw, 10, 32)
-	if err != nil {
-		return 0, "", fmt.Errorf("billing: invalid EXCHANGE_BILLING_LEDGER %q: %w", raw, err)
+	fields := strings.Split(raw, ",")
+	currencies := make([]string, 0, len(fields))
+	for _, field := range fields {
+		entry := strings.TrimSpace(field)
+		numeric, err := strconv.ParseUint(entry, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("billing: invalid EXCHANGE_BILLING_LEDGER entry %q: %w", entry, err)
+		}
+		currency, ok := tigerbeetle.CurrencyForLedger(uint32(numeric))
+		if !ok {
+			return nil, fmt.Errorf("billing: unsupported EXCHANGE_BILLING_LEDGER entry %d (supported: %s)",
+				numeric, tigerbeetle.SupportedLedgers())
+		}
+		if slices.Contains(currencies, currency) {
+			return nil, fmt.Errorf("billing: EXCHANGE_BILLING_LEDGER lists %d (%s) more than once",
+				numeric, currency)
+		}
+		currencies = append(currencies, currency)
 	}
-	currency, ok := currencyForLedger(uint32(numeric))
-	if !ok {
-		return 0, "", fmt.Errorf("billing: unsupported EXCHANGE_BILLING_LEDGER %d (supported: 978=EUR, 840=USD)", numeric)
-	}
-	return uint32(numeric), currency, nil
-}
-
-// currencyForLedger maps an ISO 4217 numeric code to its alpha code for the
-// currencies the Exchange operates in. Extend this table when a new deployment
-// currency is added (and, for multi-currency, fold the ledger into the account
-// id derivation — see the design doc).
-func currencyForLedger(numeric uint32) (string, bool) {
-	switch numeric {
-	case 978:
-		return "EUR", true
-	case 840:
-		return "USD", true
-	default:
-		return "", false
-	}
+	return currencies, nil
 }

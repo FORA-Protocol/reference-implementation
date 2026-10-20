@@ -7,12 +7,14 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"errors"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,11 +29,13 @@ import (
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
+	wkserver "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/server"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/testutil"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/agentreg"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo/repotest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/service"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/signing"
 )
@@ -126,26 +130,32 @@ func (o *publisherOrigin) serveVersion(ver string) {
 	o.mu.Unlock()
 }
 
-// pushAgentOrigin serves /.well-known/fora.json for lazy-signup tests. The
-// mutually-exclusive failure toggles drive the registry's fetch down each
-// mapLazyRegisterError branch: missing → 404 (Unauthenticated), unavailable →
-// 503 (Unavailable/retryable), malformed → schema-invalid body
-// (Unauthenticated), expired → a manifest whose only key is outside its
-// validity window (no-valid-key → Unauthenticated).
+// pushAgentOrigin serves the agent's key directory for lazy-signup tests. The
+// mutually-exclusive failure toggles drive the registry's read down each answer
+// first-contact self-signup can give: missing → 404 (Unauthenticated: the caller
+// publishes no directory), unavailable → 503 (Unavailable: retry), malformed →
+// a signed body that is JSON but not a key directory (Unavailable: the read
+// states it as an unavailable document), expired → a directory whose only key
+// is outside its validity window (Unauthenticated: no currently valid key).
 type pushAgentOrigin struct {
 	server      *httptest.Server
 	agentID     string
-	pub         ed25519.PublicKey
+	priv        ed25519.PrivateKey
 	mu          sync.Mutex
 	missing     bool
 	unavailable bool
 	malformed   bool
 	expired     bool
+	// hits counts the directory requests the origin received.
+	hits atomic.Int64
 }
 
-func newPushAgentOrigin(t *testing.T, agentID string, pub ed25519.PublicKey) *pushAgentOrigin {
+// hitCount reports how many directory requests the origin received.
+func (o *pushAgentOrigin) hitCount() int64 { return o.hits.Load() }
+
+func newPushAgentOrigin(t *testing.T, agentID string, priv ed25519.PrivateKey) *pushAgentOrigin {
 	t.Helper()
-	o := &pushAgentOrigin{agentID: agentID, pub: pub}
+	o := &pushAgentOrigin{agentID: agentID, priv: priv}
 	o.server = httptest.NewServer(http.HandlerFunc(o.handle))
 	t.Cleanup(o.server.Close)
 	return o
@@ -159,6 +169,7 @@ func (o *pushAgentOrigin) handle(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	o.hits.Add(1)
 	o.mu.Lock()
 	missing, unavailable, malformed, expired := o.missing, o.unavailable, o.malformed, o.expired
 	o.mu.Unlock()
@@ -170,16 +181,43 @@ func (o *pushAgentOrigin) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	case malformed:
-		w.Header().Set("Content-Type", "application/jwk-set+json")
-		_, _ = w.Write([]byte("{not valid jwk set"))
+		serveSignedDirectory(w, r, []byte(`{"keys":"x"}`), o.priv)
+		return
+	}
+	if o.priv == nil {
+		http.NotFound(w, r) // an origin built with no key publishes no directory
 		return
 	}
 	from, until := agentKeyValidFrom(), agentKeyValidUntil()
 	if expired {
 		from, until = time.Now().Add(-48*time.Hour), time.Now().Add(-time.Hour)
 	}
-	w.Header().Set("Content-Type", "application/jwk-set+json")
-	_, _ = w.Write(agentWBABytes(o.pub, from, until))
+	serveSignedDirectory(w, r, agentWBABytes(o.priv.Public().(ed25519.PublicKey), from, until), o.priv)
+}
+
+// serveSignedDirectory answers r with body as a key directory signed by privs:
+// the directory media type and one response signature per key over the
+// authority the request named — the agent's own host, which the harness's host
+// rewriting keeps in the Host header. The signatures span 2001 to 2096, so the
+// Exchange accepts them whatever clock a harness runs it on.
+func serveSignedDirectory(w http.ResponseWriter, r *http.Request, body []byte, privs ...ed25519.PrivateKey) {
+	signers := make([]helpers.Signer, 0, len(privs))
+	for _, p := range privs {
+		signers = append(signers, testutil.DirectorySigner(p))
+	}
+	authority, err := wkserver.RequestAuthority(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	sig, err := helpers.SignDirectoryResponse(r.Context(), authority, body, signers, 1_000_000_000, 4_000_000_000)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sig.Apply(w.Header())
+	w.Header().Set("Content-Type", forawellknown.WBAMediaType)
+	_, _ = w.Write(body)
 }
 
 // agentWBABytes renders a WBA directory (fora.v1.WBAFile, protojson/snake_case)
@@ -219,9 +257,13 @@ func (t *rewritingTransport) RoundTrip(req *http.Request) (*http.Response, error
 	if req.URL.RawQuery != "" {
 		u.RawQuery = req.URL.RawQuery
 	}
+	// The Host header keeps the host the request named, as DNS would: only the
+	// dialled address moves. A key directory signs its response over the
+	// authority it was fetched under, so a rewritten Host would sign for the
+	// loopback address instead of the agent's own host.
 	r2 := req.Clone(req.Context())
 	r2.URL = u
-	r2.Host = u.Host
+	r2.Host = req.URL.Host
 	return t.base.RoundTrip(r2)
 }
 
@@ -271,6 +313,11 @@ type pushHarness struct {
 	// rsaPub is the CloudFront RSA verify key the fixture minted. Onboarding
 	// tests read it here (FORA v1 no longer publishes it at a well-known route).
 	rsaPub *rsa.PublicKey
+	// deliveryPub is the public half of the seat's Ed25519 URL-signing key: the
+	// key an edge worker verifies a delivery URL with for any site registered on
+	// the ED25519 scheme. It is the seat's, not a site's — the seat holds the
+	// private keys and the site only chooses which scheme is used.
+	deliveryPub ed25519.PublicKey
 	// logs captures the server's structured log output (JSON lines), so tests
 	// can assert a rejection produced its correlated audit line.
 	logs *safeBuffer
@@ -293,18 +340,16 @@ func newPushHarness(t *testing.T) *pushHarness {
 }
 
 // pushHarnessOptions is the deployment shape newPushHarnessWith wires:
-// trustProxyHeaders selects the proxied topology (forwarded-header rewrite in
-// WrapPublicSurface — see proxy_trust_integration_test.go); billing selects the
-// billing adapter (nil → the FreeAdapter, whose flows never assert money
-// movement; the default-credit e2e passes a balance-bearing InMemoryAdapter);
-// publisherDomain names the default publisher tenant the harness seeds and
-// serves a manifest for (empty → a fresh random .example host, so sibling
-// tests never collide on tenants.domain; a test that must host a specific
-// name, such as a corpus vector's domain, sets it).
+//   - trustProxyHeaders: the proxied topology (see proxy_trust_integration_test.go).
+//   - billing: the adapter; nil is the FreeAdapter, which moves no money.
+//   - publisherDomain: the seeded default publisher; empty is a fresh random
+//     .example host, so sibling tests never collide on tenants.domain.
+//   - defaultAgentCredits: the welcome credit granted at Register; nil grants none.
 type pushHarnessOptions struct {
-	trustProxyHeaders bool
-	billing           billing.Adapter
-	publisherDomain   string
+	trustProxyHeaders   bool
+	billing             billing.Adapter
+	publisherDomain     string
+	defaultAgentCredits map[string]*big.Rat
 }
 
 // newPushHarnessWith is newPushHarness with explicit options, following the
@@ -327,7 +372,21 @@ func newPushHarnessWith(t *testing.T, opts pushHarnessOptions) *pushHarness {
 	if publisherDomain == "" {
 		publisherDomain = "pub-" + uuid.NewString() + ".example"
 	}
-	tenantID, pubOfferPub, pubOfferPriv := seedPublisherTenant(t, ctx, queries, keystore, publisherDomain)
+	// The seat and its offer-signing key come from the fixture; this registers
+	// the site the harness's own publisher origin serves and lists it active on
+	// that seat, so a push for the domain is accepted.
+	tenantID, pubOfferPub, pubOfferPriv := fx.tenantID, fx.seatPub, fx.seatPriv
+	repotest.SeedSite(t, ctx, pool, repotest.Site{
+		SeatTenantID: tenantID,
+		Domain:       publisherDomain,
+		PublisherID:  harnessResourceOwner,
+	})
+	// Broker relay is a seller setting and sits on the seat. Every publisher the
+	// harness serves is reached through this one seat, so it is enabled once
+	// here rather than per site.
+	if _, err := repo.NewTenantRelayPolicyRepo(queries).SetAllowBrokerRelay(ctx, tenantID, true); err != nil {
+		t.Fatalf("enable broker relay on the seat: %v", err)
+	}
 
 	publisher := newPublisherOrigin(t, publisherDomain)
 
@@ -352,13 +411,13 @@ func newPushHarnessWith(t *testing.T, opts pushHarnessOptions) *pushHarness {
 		t.Fatalf("offer signer: %v", err)
 	}
 
-	// Discover-side signer: the global httpsig gate now applies to every
-	// /fora.v1.ExchangeService/* call (post-1rnxh). Each pushHarness owns
-	// one pre-registered keypair that the harness's `exchange` client signs
-	// outbound DiscoverResources/ExecuteTransaction/ReportUsage with. The
-	// keyID matches the requester.id used in tests (agent-discover) so the
-	// signature's kid lines up with the agent the assertions reference.
-	const discoverKeyID = "agent-discover"
+	// Discover-side signer: the global httpsig gate applies to every
+	// /fora.v1.ExchangeService/* call. Each pushHarness owns one pre-registered
+	// keypair its `exchange` client signs outbound Discover/Execute/Report with.
+	// It signs as the harness's configured BROKER directory, because these flows
+	// sign for an agent named elsewhere in the request — the relay shape — and the
+	// Exchange recognises a relay by that directory host (ExchangeConfig.BrokerHost).
+	const discoverKeyID = harnessBrokerHost
 	discoverPub, discoverPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("discover ed25519: %v", err)
@@ -378,18 +437,18 @@ func newPushHarnessWith(t *testing.T, opts pushHarnessOptions) *pushHarness {
 		// activation policy from, so agents can billing-register before a paid
 		// transaction. billingRefGen stays nil → uuid: these flows use
 		// the FreeAdapter and never assert on the ref value.
-		defaultTenantDomain: publisherDomain,
+		defaultTenantDomain: harnessExchangeDomain,
+		defaultAgentCredits: opts.defaultAgentCredits,
 		trustProxyHeaders:   trustProxyHeaders,
 	})
 	if err := srv.catalogSvc.Bootstrap(ctx); err != nil {
 		t.Fatalf("catalog bootstrap: %v", err)
 	}
-	// Register the discover-side signer as a BROKER agent. The self-signup
-	// and onboarding e2e flows sign Execute/Report calls with this key
-	// while naming a freshly-registered AGENT in requester.id — the
-	// broker-on-behalf shape the new caller-identity authorization
-	// supports. Every publisher tenant the harness seeds carries
-	// allow_broker_relay=true (seedPublisherTenant) so the broker is accepted.
+	// The agents row for the discover-side signer. ExecuteTransaction no longer
+	// needs it — a relay is recognised by the configured Broker directory host —
+	// but ReportUsage still classifies its caller on requester_type, so this BROKER
+	// row is what lets the client report usage for the agents it relays for. Every
+	// publisher tenant the harness seeds carries allow_broker_relay=true.
 	seedAgentAs(t, ctx, queries, discoverKeyID, discoverPub, string(sqlc.ForaRequesterTypeBROKER))
 
 	signedFactory := func(id string, priv ed25519.PrivateKey) foraconnect.CatalogServiceClient {
@@ -419,6 +478,7 @@ func newPushHarnessWith(t *testing.T, opts pushHarnessOptions) *pushHarness {
 		discoverKeyID: discoverKeyID,
 		discoverPriv:  discoverPriv,
 		rsaPub:        srv.rsaPub,
+		deliveryPub:   fx.seatPub,
 		logs:          logBuf,
 	}
 }
@@ -442,8 +502,8 @@ func (h *pushHarness) registerForBilling(t *testing.T, agentID string, pub ed255
 	registerCaller(t, h.ctx, h.selfActingExchangeClient(agentID, priv))
 }
 
-func (h *pushHarness) publishAgent(t *testing.T, agentID string, pub ed25519.PublicKey) *pushAgentOrigin {
-	return publishAgentOrigin(t, h.registerHost, agentID, pub)
+func (h *pushHarness) publishAgent(t *testing.T, agentID string, priv ed25519.PrivateKey) *pushAgentOrigin {
+	return publishAgentOrigin(t, h.registerHost, agentID, priv)
 }
 
 func (h *pushHarness) publishPublisher(t *testing.T, domain string, contributors ...string) *publisherOrigin {
@@ -454,75 +514,91 @@ func (h *pushHarness) publishPublisher(t *testing.T, domain string, contributors
 }
 
 // hostedPublisher is a publisher the harness serves beyond its default one: the
-// tenant its domain resolves to, and the origin serving its manifest.
+// seat its entries are stored under, and the origin serving its manifest.
 type hostedPublisher struct {
 	tenantID string
 	origin   *publisherOrigin
 }
 
-// addPublisher hosts a second publisher under domain: it seeds the tenant row
-// exactly as the constructor seeds the default publisher (seedPublisherTenant)
-// and serves the domain's manifest, listing contributors, from a fresh origin
-// the rewriting transport routes the domain's well-known fetch to. The domain
-// is taken verbatim, so a host:port such as "edge:8787" is served under that
-// authority: ManifestURL keeps a port the host carries, and the rewrite keys on
-// the request URL's host, which keeps it too.
+// addPublisher hosts a second publisher under domain: it registers the site and
+// lists it active on the harness's seat, exactly as the constructor does for the
+// default publisher, and serves the domain's manifest, listing contributors,
+// from a fresh origin the rewriting transport routes the domain's well-known
+// fetch to. The domain is taken verbatim, so a host:port such as "edge:8787" is
+// served under that authority: ManifestURL keeps a port the host carries, and
+// the rewrite keys on the request URL's host, which keeps it too.
 func (h *pushHarness) addPublisher(t *testing.T, domain string, contributors ...string) hostedPublisher {
 	t.Helper()
-	tenantID, _, _ := seedPublisherTenant(t, h.ctx, h.queries, h.keystore, domain)
+	tenantID := seedSiteForDomain(t, h, domain)
 	return hostedPublisher{tenantID: tenantID, origin: h.publishPublisher(t, domain, contributors...)}
 }
 
 // TestPushResources_UnsignedRequestRejected proves Gate 1 rejects a push that
-// lacks the RFC 9421 signature headers.
+// lacks the request signature headers, and answers it as the SDK's verify seam
+// answers every FORA RPC: with the Accept-Signature value naming what a
+// signature here must cover (helpers.AcceptSignature). A refused form never
+// reaches the caller's directory, so nothing is fetched to self-sign it up.
 func TestPushResources_UnsignedRequestRejected(t *testing.T) {
 	h := newPushHarness(t)
 	h.publisher.setContributors("caller.example")
+	origin := h.publishAgent(t, "caller.example", nil)
 
 	_, err := h.unsignedCat.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, "caller.example", []*forav1.ResourceEntry{{Domain: h.publisherDom, Path: "/articles/one"}})))
 	assertConnectCode(t, err, connect.CodeUnauthenticated)
+	var cerr *connect.Error
+	if !errors.As(err, &cerr) {
+		t.Fatalf("refusal %v is not a Connect error", err)
+	}
+	if got, want := cerr.Meta().Get(helpers.AcceptSignatureHeader), helpers.AcceptSignature(false); got != want {
+		t.Errorf("%s = %q, want %q", helpers.AcceptSignatureHeader, got, want)
+	}
+	if hits := origin.hitCount(); hits != 0 {
+		t.Errorf("an unsigned push fetched the caller's directory %d times", hits)
+	}
 }
 
-// TestPushResources_UnknownCallerManifestMissing proves Gate 1 rejects when
-// the caller's manifest origin returns 404 (no lazy-signup possible).
-func TestPushResources_UnknownCallerManifestMissing(t *testing.T) {
-	h := newPushHarness(t)
-	h.publisher.setContributors("caller.example")
+// TestPushResources_UnknownCallerDirectoryFailures drives Gate 1's first-contact
+// self-signup through each answer a caller's key directory can give it. A
+// directory the caller does not publish, or whose only key's window has ended,
+// is the caller's to repair (Unauthenticated). A 503, or a body that is JSON
+// but not a key directory, establishes nothing about the caller's keys and may
+// clear on the next attempt (Unavailable). Either way no agent row is written.
+func TestPushResources_UnknownCallerDirectoryFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(o *pushAgentOrigin)
+		want connect.Code
+	}{
+		{"the caller publishes no directory", func(o *pushAgentOrigin) { o.missing = true }, connect.CodeUnauthenticated},
+		{"every key's window has ended", func(o *pushAgentOrigin) { o.expired = true }, connect.CodeUnauthenticated},
+		{"the directory host answers 503", func(o *pushAgentOrigin) { o.unavailable = true }, connect.CodeUnavailable},
+		{"the directory is JSON but not a key directory", func(o *pushAgentOrigin) { o.malformed = true }, connect.CodeUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPushHarness(t)
+			h.publisher.setContributors("caller.example")
 
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("gen: %v", err)
+			_, priv, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatalf("gen: %v", err)
+			}
+			origin := h.publishAgent(t, "caller.example", priv)
+			origin.mu.Lock()
+			tc.set(origin)
+			origin.mu.Unlock()
+
+			client := h.signedCat("caller.example", priv)
+			_, err = client.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, "caller.example",
+				[]*forav1.ResourceEntry{{Domain: h.publisherDom, Path: "/articles/one"}})))
+			assertConnectCode(t, err, tc.want)
+			// Through the production repository, not a raw query: no public read
+			// says whether a caller was registered, so this reads the repository
+			// the registry writes through.
+			if _, err := repo.NewAgentRepo(h.queries).ByID(h.ctx, "caller.example"); !errors.Is(err, repo.ErrAgentNotFound) {
+				t.Fatalf("a row was stored for a caller whose directory could not be used: ByID = %v", err)
+			}
+		})
 	}
-	origin := h.publishAgent(t, "caller.example", nil)
-	origin.mu.Lock()
-	origin.missing = true
-	origin.mu.Unlock()
-
-	client := h.signedCat("caller.example", priv)
-	_, err = client.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, "caller.example", []*forav1.ResourceEntry{{Domain: h.publisherDom, Path: "/articles/one"}})))
-	assertConnectCode(t, err, connect.CodeUnauthenticated)
-}
-
-// TestPushResources_UnknownCallerManifestUnavailable proves the catalog
-// self-signup handler classifies a TRANSIENT manifest-fetch failure (origin
-// 503) as Unavailable/retryable, not as a permanent Unauthenticated — matching
-// the service lazy-registration path (agentreg.IsCallerFault).
-func TestPushResources_UnknownCallerManifestUnavailable(t *testing.T) {
-	h := newPushHarness(t)
-	h.publisher.setContributors("caller.example")
-
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("gen: %v", err)
-	}
-	origin := h.publishAgent(t, "caller.example", nil)
-	origin.mu.Lock()
-	origin.unavailable = true
-	origin.mu.Unlock()
-
-	client := h.signedCat("caller.example", priv)
-	_, err = client.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, "caller.example", []*forav1.ResourceEntry{{Domain: h.publisherDom, Path: "/articles/one"}})))
-	assertConnectCode(t, err, connect.CodeUnavailable)
 }
 
 // TestPushResources_UnknownCallerAutoRegisteredAndAdmitted proves the lazy
@@ -534,11 +610,11 @@ func TestPushResources_UnknownCallerAutoRegisteredAndAdmitted(t *testing.T) {
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 
 	client := h.signedCat(callerID, priv)
 	resp, err := client.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, callerID, []*forav1.ResourceEntry{{Domain: h.publisherDom, Path: "/articles/one"}})))
@@ -558,11 +634,11 @@ func TestPushResources_ContributorAdmittedSnapshotRebuilt(t *testing.T) {
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 
 	client := h.signedCat(callerID, priv)
 	if _, err := client.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, callerID, []*forav1.ResourceEntry{{
@@ -579,151 +655,6 @@ func TestPushResources_ContributorAdmittedSnapshotRebuilt(t *testing.T) {
 	}
 }
 
-// TestPushResources_SchemedCallerIDAuthorizesAsItsHost closes the gap between the
-// two gates a push passes through. Gate 1 resolves the caller's key through
-// agentreg, which canonicalizes; Gate 2 compares caller_id against the manifest's
-// contributor domains verbatim. A publisher spelling its own caller_id as a full
-// origin therefore AUTHENTICATED as pub.example and was then refused with
-// caller_not_in_catalog_contributors — a rejection naming a condition it
-// satisfies, and one no error message could have explained.
-//
-// The manifest lists the bare host, as a publisher writes it; only the caller
-// side folds. The push must be accepted and the entry must become discoverable,
-// which is what separates "both gates passed" from "the request died quietly
-// somewhere else".
-func TestPushResources_SchemedCallerIDAuthorizesAsItsHost(t *testing.T) {
-	h := newPushHarness(t)
-	const callerHost = "caller.example"
-	// The publisher authorizes the bare host — the spelling a manifest carries.
-	h.publisher.setContributors(callerHost)
-
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("gen: %v", err)
-	}
-	h.publishAgent(t, callerHost, pub)
-
-	// The caller spells itself as a full origin, on the wire and in the message.
-	const callerAsSpelled = "https://" + callerHost
-	client := h.signedCat(callerAsSpelled, priv)
-	if _, err := client.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, callerAsSpelled, []*forav1.ResourceEntry{{
-		Domain: h.publisherDom, Path: "/articles/schemed",
-		Terms: []*forav1.LicenseTerm{seedPricedTerm()},
-	}}))); err != nil {
-		t.Fatalf("push with caller_id %q: %v — the caller authenticates as %q, so it must "+
-			"also authorize as %q", callerAsSpelled, err, callerHost, callerHost)
-	}
-	if got := discoverOfferCount(t, h, "https://"+h.publisherDom+"/articles/schemed"); got != 1 {
-		t.Fatalf("offers = %d, want 1 — the push was accepted but the entry did not land", got)
-	}
-}
-
-// TestPushResources_ManifestSpellingsAuthorizeOneContributor drives the mirror of
-// the test above: the CALLER sends the bare host and the PUBLISHER writes the
-// contributor entry however it likes.
-//
-// This is the direction that was broken and untested. Canonicalizing only the
-// caller made the comparison asymmetric — folded on one side, raw on the other —
-// so a publisher that had written "https://caller.example" in its own manifest,
-// or used mixed case, a trailing dot, or an explicit :443, had every push refused
-// after the change. Silently, too: contributor rejection is per-entry, so the RPC
-// still answers 200 and only the entry count betrays it.
-//
-// Every other fixture in this file writes bare hosts on both sides, which is why
-// the whole suite stayed green with the regression in place.
-func TestPushResources_ManifestSpellingsAuthorizeOneContributor(t *testing.T) {
-	const callerHost = "mirror-caller.example"
-	for _, manifestSpelling := range []string{
-		"https://" + callerHost,
-		"Mirror-Caller.Example",
-		callerHost + ".",
-		callerHost + ":443",
-	} {
-		t.Run(manifestSpelling, func(t *testing.T) {
-			h := newPushHarness(t)
-			// The publisher authorizes the contributor in ITS spelling.
-			h.publisher.setContributors(manifestSpelling)
-
-			pub, priv, err := ed25519.GenerateKey(rand.Reader)
-			if err != nil {
-				t.Fatalf("gen: %v", err)
-			}
-			h.publishAgent(t, callerHost, pub)
-
-			// The caller sends the bare host, as the transport canonicalizes it.
-			client := h.signedCat(callerHost, priv)
-			if _, err := client.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, callerHost, []*forav1.ResourceEntry{{
-				Domain: h.publisherDom, Path: "/articles/mirror",
-				Terms: []*forav1.LicenseTerm{seedPricedTerm()},
-			}}))); err != nil {
-				t.Fatalf("push: %v", err)
-			}
-			// The RPC answers 200 whether or not the entry was authorized, so the
-			// offer count is what proves the contributor gate admitted it.
-			if got := discoverOfferCount(t, h, "https://"+h.publisherDom+"/articles/mirror"); got != 1 {
-				t.Fatalf("offers = %d, want 1 — the publisher spelled its contributor %q and "+
-					"the caller resolves to %q; both name one party",
-					got, manifestSpelling, callerHost)
-			}
-		})
-	}
-}
-
-// TestPushResources_CallerIDNamingNoHostIsInvalidArgument is the negative path
-// for the canonicalization above: a caller_id that names no host cannot be an
-// identity, so the push is refused before the contributor gate is consulted.
-//
-// The value is the sf-dictionary form, which nothing in the stack unwraps — the
-// same choice the sibling Broker and Execute tests make, so the refusal is pinned
-// rather than a parsing gap a later change would close.
-//
-// Without this the refusal is unpinned: a regression letting it fall through to
-// verifyCallerSignature (a different code) or return nil would leave the suite
-// green, because the only caller_id coverage is the positive path.
-func TestPushResources_CallerIDNamingNoHostIsInvalidArgument(t *testing.T) {
-	h := newPushHarness(t)
-	const callerHost = "nohost-caller.example"
-	h.publisher.setContributors(callerHost)
-
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("gen: %v", err)
-	}
-	h.publishAgent(t, callerHost, pub)
-
-	// Authenticates as the host; sends a caller_id that names none.
-	client := h.signedCat(callerHost, priv)
-	_, err = client.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, `agent2="https://`+callerHost+`"`, []*forav1.ResourceEntry{{
-		Domain: h.publisherDom, Path: "/articles/nohost",
-		Terms: []*forav1.LicenseTerm{seedPricedTerm()},
-	}})))
-	if err == nil {
-		t.Fatal("push accepted a caller_id that names no host; want InvalidArgument")
-	}
-	// InvalidArgument, matching the Broker's agent_id and /agents/register: the
-	// caller sent a field that is not a host, which is a malformed argument rather
-	// than a failure to authenticate.
-	if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
-		t.Fatalf("code = %v, want InvalidArgument (err=%v)", got, err)
-	}
-	// The code alone proves nothing, and that is the trap this assertion exists to
-	// avoid: delete the canonicalization refusal and the raw caller_id travels on
-	// to the signature gate, which also refuses it and also writes nothing. The
-	// field metadata is what separates them — only the canonicalization branch
-	// names caller_id — and it reaches the wire only because the catalog surface
-	// now stamps an ErrorDetail envelope like every other FORA fault.
-	assertCatalogRejectionField(t, err, "caller_id")
-	// The curated message stands alone: the parser chain that produced it is
-	// logged, not returned to an unauthenticated caller.
-	if msg := err.Error(); strings.Contains(msg, "forawellknown") || strings.Contains(msg, "parse ") {
-		t.Errorf("internal wrapping reached the caller: %q", msg)
-	}
-	// And the refusal precedes the catalog write rather than merely accompanying it.
-	if got := discoverOfferCount(t, h, "https://"+h.publisherDom+"/articles/nohost"); got != 0 {
-		t.Fatalf("offers = %d, want 0 — the entry landed despite a refused caller_id", got)
-	}
-}
-
 // TestPushResources_CallerNotInContributorsRejectedPerEntry proves Gate 2
 // rejects per-entry (not per-request) when the caller is authenticated but is
 // not a contributor for the entry's provider. Accepted entries coexist with
@@ -736,11 +667,11 @@ func TestPushResources_CallerNotInContributorsRejectedPerEntry(t *testing.T) {
 	deniedDomain := "denied-" + h.publisherDom
 	h.publishPublisher(t, deniedDomain, "some-other.example")
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 
 	client := h.signedCat(callerID, priv)
 	resp, err := client.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, callerID, []*forav1.ResourceEntry{

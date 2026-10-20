@@ -5,16 +5,22 @@ SELECT * FROM fora.tenants WHERE domain = $1;
 SELECT * FROM fora.tenants WHERE tenant_id = $1;
 
 -- name: InsertTenant :one
+-- Creates one Exchange seat. `domain` is the hostname the seat answers on --
+-- the value EXCHANGE_DOMAIN carries -- not a publisher's site. The signing
+-- scheme and the CloudFront key-pair id are NOT here: those describe one site
+-- and live on fora.publisher_domains. What the seat holds is the private-key
+-- side, ed25519_key_ref and rsa_key_ref.
 INSERT INTO fora.tenants (
-    tenant_id, domain, ed25519_key_ref, reporting_policy,
-    signing_scheme, rsa_key_ref, cloudfront_key_pair_id
-) VALUES ($1, $2, $3, $4, $5, $6, $7)
+    tenant_id, domain, ed25519_key_ref, reporting_policy, rsa_key_ref
+) VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
--- name: SetTenantAllowBrokerRelay :exec
+-- name: SetTenantAllowBrokerRelay :execrows
 -- Flips the broker-relay opt-in for a tenant. Admin / fixture path; the
 -- column defaults to FALSE on insert so this is only needed when a tenant
 -- explicitly opts into broker-on-behalf reporting.
+-- Returns rows-affected so a call for a missing tenant is a detectable no-op
+-- rather than a silent success.
 UPDATE fora.tenants
    SET allow_broker_relay = $2
  WHERE tenant_id = $1;
@@ -38,17 +44,6 @@ UPDATE fora.tenants
 -- rather than a silent success.
 UPDATE fora.tenants
    SET activate_new_agents_by_default = $2
- WHERE tenant_id = $1;
-
--- name: SetTenantDefaultAgentCredit :execrows
--- Replaces the per-tenant default credit granted to a newly registered agent
--- (deployment ledger currency; 0 disables the grant). Written by the boot-time
--- env seeding (EXCHANGE_DEFAULT_AGENT_CREDIT); otherwise set out of band like
--- activate_new_agents_by_default — there is no admin RPC.
--- Returns rows-affected so a call for a missing tenant is a detectable no-op
--- rather than a silent success.
-UPDATE fora.tenants
-   SET default_agent_credit = $2
  WHERE tenant_id = $1;
 
 -- name: SetTenantFeeRateBps :execrows

@@ -26,15 +26,7 @@ func TestRegisterAndStatus_AgreeOnAConfirmedAccount(t *testing.T) {
 	t.Parallel()
 	at := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
 	notes := &recordingNotes{}
-	svc, err := exchacct.New(exchacct.Config{
-		Requirements: publishingNothing{},
-		Caller:       &countingCaller{},
-		Notes:        notes,
-		Clock:        stoppedClock{at: at},
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	svc := newService(t, exchacct.Config{Notes: notes, Clock: stoppedClock{at: at}})
 
 	registered, err := svc.Register(context.Background(), "agent", "exchange.example", nil)
 	if err != nil {
@@ -96,15 +88,7 @@ func TestConfirmed_StampsTheNoteAndTheAnswerWithOneInstant(t *testing.T) {
 	t.Parallel()
 	clk := &tickingClock{base: time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)}
 	notes := &recordingNotes{}
-	svc, err := exchacct.New(exchacct.Config{
-		Requirements: publishingNothing{},
-		Caller:       &countingCaller{},
-		Notes:        notes,
-		Clock:        clk,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	svc := newService(t, exchacct.Config{Notes: notes, Clock: clk})
 
 	got, err := svc.Register(context.Background(), "agent", "exchange.example", nil)
 	if err != nil {

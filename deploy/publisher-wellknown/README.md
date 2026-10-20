@@ -10,7 +10,7 @@ are explained the first time they appear.
 | Address | File here | What it is |
 |---|---|---|
 | `/.well-known/fora.json` | [`fora.json.example`](fora.json.example) | The commercial document. An AI bot that gets a `403` reads it to learn who sells access to this content and where to negotiate. The Exchange reads it to learn which account gets paid, and who is allowed to add content on the publisher's behalf. |
-| `/.well-known/http-message-signatures-directory` | [`http-message-signatures-directory.example`](http-message-signatures-directory.example) | The publisher's key directory: its own public signing keys as a JWK Set (a JSON list of public keys, RFC 7517). |
+| `/.well-known/http-message-signatures-directory` | [`http-message-signatures-directory.example`](http-message-signatures-directory.example) | The publisher's key directory: its own public signing keys (a JSON list of public keys, RFC 7517), served as a Web Bot Auth key directory. |
 
 ---
 
@@ -219,6 +219,37 @@ already invalid.
 
 ---
 
+## Signing the key directory
+
+A verifier that follows the Web Bot Auth profile takes a key from this directory
+only when the response carries a signature by that key, made for the host it
+fetched the directory from. The Worker holds no private key, so it cannot sign
+the response itself. You sign it once, offline, where the private half lives,
+and give the Worker the result as `WBA_SIGNED_DIRECTORY_JSON`. Without it the
+Worker serves the directory unsigned, and such a verifier takes no key from it.
+
+```bash
+# 1. The private half in the form the signing tool reads: {"d": seed, "x": public}.
+D=$(openssl pkey -in publisher-signing-key.pem -outform DER \
+  | tail -c 32 | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+printf '{"d":"%s","x":"%s"}\n' "$D" "<the 43 characters of x>" > signing-key.json
+
+# 2. Sign the directory for the host the Worker answers under, from src/edge
+#    after `npm ci`. It prints the WBA_SIGNED_DIRECTORY_JSON value.
+node scripts/sign-wba-directory.mjs --authority www.publisher.example \
+  --keys "$WBA_KEYS_JSON" --signing-key signing-key.json --valid-days 30
+```
+
+The last 32 bytes of the DER private key are the Ed25519 seed. Delete
+`signing-key.json` afterwards; it is the private half again.
+
+Three things make a signed directory stop working, and none of them shows in the
+Worker: a change to `WBA_KEYS_JSON` (the Worker refuses to start when the signed
+body lists other keys), a host other than the one it was signed for, and the end
+of the signature window. Sign again for each.
+
+---
+
 ## Two publisher setups, and why a `404` can be correct
 
 Which one applies is a per-deployment decision. **The two example files show the
@@ -345,7 +376,9 @@ Compare the whole document field by field against
 curl -s -D - https://<host>/.well-known/http-message-signatures-directory
 # Expect, for a publisher that issues keys:
 #   HTTP/2 200
-#   content-type: application/jwk-set+json
+#   content-type: application/http-message-signatures-directory+json
+#   content-digest, signature-input and signature headers, when the Worker is
+#   given WBA_SIGNED_DIRECTORY_JSON (see "Signing the key directory" below)
 #   a "keys" array whose entry has "kty":"OKP", "crv":"Ed25519", a 43-character
 #   "x", and no "kid".
 #

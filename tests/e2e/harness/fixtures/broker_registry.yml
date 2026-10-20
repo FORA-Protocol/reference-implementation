@@ -1,0 +1,58 @@
+# The Broker's exchange registry for the e2e stack, read at boot through
+# BROKER_REGISTRY_FILE. The Broker upserts every entry into its registry on
+# each start, so this file, not the test harness, is where the stack's routing
+# rows come from.
+#
+# One entry per Exchange the stack runs. `domain` is that Exchange's identity
+# (its EXCHANGE_DOMAIN) and `endpoint` is its EXCHANGE_PUBLIC_ORIGIN: the
+# Broker's relay compares the endpoint an Exchange's well-known advertises
+# against this value before it dials. exchange-d is routable like the others:
+# what refuses the relay there is exchange-d's own seat, so the Broker has to
+# reach exchange-d for the refusal to come from it.
+#
+# The last two entries are not Exchanges the stack sells through. They are
+# identities of the misbehaving-exchange service, the impostor the Broker's
+# fault-path suites buy through (harness/misbehaving_exchange.py):
+# misbehaving-exchange is VERIFIED, so the Broker sends it purchases, and
+# unapproved-exchange is only DISCOVERED, so the Broker may not pay it. The
+# impostor's third identity, unlisted-exchange, is deliberately absent.
+#
+# test_guards_exchange_identity.py fails when this file and the compose file
+# disagree about any Exchange or impostor identity.
+exchanges:
+  - id: ex-demo
+    domain: "exchange:8081"
+    endpoint: "http://exchange:8081"
+    trust_level: VERIFIED
+    priority: 10
+    supported_profiles: [fora-news-v1, fora-comp-v1, fora-music-v1]
+  - id: ex-demo-b
+    domain: "exchange-b:8081"
+    endpoint: "http://exchange-b:8081"
+    trust_level: VERIFIED
+    priority: 10
+    supported_profiles: [fora-news-v1, fora-comp-v1, fora-music-v1]
+  - id: ex-demo-c
+    domain: "exchange-c:8081"
+    endpoint: "http://exchange-c:8081"
+    trust_level: VERIFIED
+    priority: 10
+    supported_profiles: [fora-news-v1, fora-comp-v1, fora-music-v1]
+  - id: ex-demo-d
+    domain: "exchange-d:8081"
+    endpoint: "http://exchange-d:8081"
+    trust_level: VERIFIED
+    priority: 10
+    supported_profiles: [fora-news-v1, fora-comp-v1, fora-music-v1]
+  - id: ex-misbehaving
+    domain: "misbehaving-exchange:8081"
+    endpoint: "http://misbehaving-exchange:8081"
+    trust_level: VERIFIED
+    priority: 10
+    supported_profiles: [fora-news-v1]
+  - id: ex-unapproved
+    domain: "unapproved-exchange:8081"
+    endpoint: "http://unapproved-exchange:8081"
+    trust_level: DISCOVERED
+    priority: 10
+    supported_profiles: [fora-news-v1]

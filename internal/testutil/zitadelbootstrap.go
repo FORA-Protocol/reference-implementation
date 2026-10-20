@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,9 +33,10 @@ type zitadelCreds struct {
 // (base/host = the resolved daemon host, matching ExternalDomain) Zitadel routes
 // instances by.
 //
-// scripts/zitadel-bootstrap.sh is a SECOND implementation of this, for the local
-// dev stack. A change here does not reach it, and vice versa. Three deliberate
-// divergences, each for its own reason:
+// deploy/zitadel/bootstrap/bootstrap.sh is a SECOND implementation of this, for
+// the laptop and e2e stacks and the deployed ones. A change here does not reach
+// it, and vice versa. The deliberate divergences include these, each for its own
+// reason:
 //   - app name: cosmetic drift rather than a decision. Nothing reads the name;
 //     the test-tier value predates a change the dev stack followed and this
 //     did not.
@@ -44,6 +46,13 @@ type zitadelCreds struct {
 //   - Google federation: configured by the dev stack when credentials are
 //     present, never here — the headless helper scrapes Zitadel's login HTML,
 //     which a Google redirect would take it away from.
+//   - existing apps and Development mode: the script updates an app that
+//     already exists to the addresses it is given, and turns Development mode
+//     off when they are all https. This tier provisions a fresh container
+//     once, so it only creates, and its loopback addresses need the mode on.
+//   - roles: the script provisions one of two instances per run (developers
+//     or publishers, with the publisher instance's console client, admin and
+//     look); this tier has one instance and only the developer side's client.
 func bootstrapZitadel(ctx context.Context, base, host, pat string) (zitadelCreds, error) {
 	a := &zitadelAdmin{base: base, host: host, pat: pat, http: &http.Client{Timeout: 15 * time.Second}}
 	if err := a.waitReady(ctx); err != nil {
@@ -106,16 +115,19 @@ func (a *zitadelAdmin) do(ctx context.Context, method, path string, body any) (i
 // waitReady polls the management API until it answers, tolerating the window
 // after the port listens but before the instance is fully queryable.
 func (a *zitadelAdmin) waitReady(ctx context.Context) error {
-	deadline := time.Now().Add(60 * time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
 	for {
 		status, _, err := a.do(ctx, http.MethodGet, "/management/v1/orgs/me", nil)
 		if err == nil && status == http.StatusOK {
 			return nil
 		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("zitadel management API never became reachable (last status %d, err %v)", status, err)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("zitadel management API never became reachable (last status %d): %w",
+				status, errors.Join(err, ctx.Err()))
+		case <-time.After(time.Second):
 		}
-		time.Sleep(time.Second)
 	}
 }
 
@@ -186,6 +198,10 @@ func (a *zitadelAdmin) setLoginPolicy(ctx context.Context) error {
 		status, head(body), ustatus, head(ubody))
 }
 
+// zitadelJWTFormat is the Zitadel enum value that makes the client's access
+// tokens JWTs. It names a token format; it is not a credential.
+const zitadelJWTFormat = "OIDC_TOKEN_TYPE_JWT"
+
 // createApp registers the confidential `fora-mcp` OIDC client. Zitadel returns
 // the generated secret only on the create response, which is exactly what a
 // fresh container yields.
@@ -199,7 +215,7 @@ func (a *zitadelAdmin) createApp(ctx context.Context, projectID string) (zitadel
 		"authMethodType":           "OIDC_AUTH_METHOD_TYPE_BASIC",
 		"version":                  "OIDC_VERSION_1_0",
 		"devMode":                  true,
-		"accessTokenType":          "OIDC_TOKEN_TYPE_JWT",
+		"accessTokenType":          zitadelJWTFormat,
 		"accessTokenRoleAssertion": true,
 		"idTokenRoleAssertion":     true,
 		"idTokenUserinfoAssertion": true,
@@ -212,7 +228,8 @@ func (a *zitadelAdmin) createApp(ctx context.Context, projectID string) (zitadel
 	id := jsonField(body, "clientId")
 	secret := jsonField(body, "clientSecret")
 	if id == "" || secret == "" {
-		return zitadelCreds{}, fmt.Errorf("zitadel: app create returned no client credentials (status %d: %s)", status, head(body))
+		return zitadelCreds{}, fmt.Errorf("zitadel: app create returned no client credentials (status %d: %s)",
+			status, head(body))
 	}
 	return zitadelCreds{clientID: id, clientSecret: secret}, nil
 }

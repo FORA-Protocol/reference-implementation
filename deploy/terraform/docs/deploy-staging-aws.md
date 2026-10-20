@@ -109,7 +109,7 @@ environment variables, if you prefer.
 ## Step 1 — generate keys
 
 ```bash
-STAGING_DOMAIN=<your tfvars 'domain'> deploy/terraform/scripts/gen-staging-keys.sh
+STAGING_DOMAIN=<your tfvars 'domain'> deploy/terraform/scripts/gen-keys.sh staging-aws
 ```
 
 `STAGING_DOMAIN` is needed on the first run only, and must equal `domain`
@@ -123,10 +123,17 @@ scripts check the ids against the applied stack before signing anything.
 Writes `deploy/terraform/stacks/staging-aws/keys/` (gitignored):
 signing PEMs for the Exchange, keypairs for the Broker relay, the smoke
 agent, and the catalog contributor, the Broker's identity key, and the two
-public JWK Set documents (`smoke-agent-wba.json`,
+public key directories (`smoke-agent-wba.json`,
 `catalog-contributor-wba.json`) the stack serves for the smoke identities.
+Each directory is signed for its identity's hostname by that identity's key,
+because a verifier takes a key only from a directory response the key signed
+for the host it fetched from; the script builds `src/exchange/cmd/fora-sign-directory`
+with `go` to do it. The signatures, like the keys' validity window, last 90
+days: re-run the script and apply again before they end.
 Re-running never rotates existing keys. There is no shared public-key
 registry file: services learn verification keys via well-known discovery.
+The contributor keypair also ships to the VM, under `/opt/fora/keys/importer`,
+for the automatic catalog importer alone; the smoke agent's stays local.
 
 A `keys/` directory generated before the ids were hostname-shaped (kid
 `agent-staging` rather than `smoke-agent.<domain>`) fails the id check in
@@ -227,8 +234,9 @@ keys, and starts the stack.
 
 With `deploy_edge = false` only the worker (and the `demo.` hostname) is
 skipped — the backend and the demo origin still run in full. Use that mode to
-front a client hostname with a separately applied `stacks/edge` instead: see
-"Deploying on top of the staging stack" in `deploy-edge-standalone.md`.
+front another publisher's hostname with a separately applied `stacks/edge`
+instead: see "Deploying on top of the staging stack" in
+`deploy-edge-standalone.md`.
 
 Watch out: the word "publisher" appears with two meanings. The `publisher:`
 Compose service on the VM is the demo ORIGIN backend (reached via
@@ -301,14 +309,23 @@ Zitadel has been provisioned — expected on a fresh stack, not a failure.
 
 The script waits for Zitadel to answer OIDC discovery over public HTTPS first,
 so a fresh apply may sit here for a few minutes while Caddy issues the
-certificate. It prints the password of the local sign-in user it creates
-(`alice@acme.local`); record it, or reset it later from the Zitadel console.
-The console admin is `zadmin`, whose password comes from
+certificate. The run that creates the local sign-in user (`alice@acme.local`)
+prints its password; record it, or reset it later from the Zitadel console. A
+later run leaves that password alone and does not print it. The console admin
+is `zadmin`, whose password comes from
 `terraform output -raw zitadel_admin_password`.
 
-Re-running is safe — it stops before provisioning when the client already
-exists. `FORCE=1` re-provisions, which mints a **new** client secret and
-restarts the service onto it.
+Re-running is safe, and it is how settings change: each run brings Zitadel to
+what the scripts describe and changes nothing that already matches. The client
+keeps its secret while Zitadel accepts it, and the Identity Service is recreated
+only when its client's files changed. `ROTATE=developers` mints a **new** client
+secret on purpose and recreates the service onto it. `FORCE=1` is retired, and
+the script refuses it.
+
+The run also gives the sign-in pages and emails the developers' look —
+"FORA Developers" in the page titles and the email subjects, the FORA mark,
+English only — and removes the `fora-console` client earlier runs created, which
+nothing on this stack uses.
 
 ### Self-registration needs a confirmation email (SMTP)
 
@@ -370,24 +387,13 @@ provider in Zitadel and puts the Google button on the sign-in page:
        deploy/terraform/scripts/bootstrap-identity.sh
    ```
 
-Timing matters, because of the re-run guard described above:
+The same command works on a fresh stack and on one already bootstrapped: a run
+always reconciles, so adding Google later is a plain re-run with the two
+variables, and the Identity Service keeps its client secret.
 
-- **Fresh stack** (this step not run yet): pass the two variables on the
-  normal run, as shown. Everything is provisioned in one go.
-- **Already bootstrapped**: a plain re-run stops early ("already
-  provisioned") and never reaches the Google part. Add `FORCE=1`:
-
-  ```bash
-  FORCE=1 GOOGLE_CLIENT_ID=<id> GOOGLE_CLIENT_SECRET=<secret> \
-      deploy/terraform/scripts/bootstrap-identity.sh
-  ```
-
-  As noted above, `FORCE=1` also mints a new OIDC client secret for the
-  Identity Service. That is fine — the script restarts the service onto the
-  new secret itself.
-- **Rotating the Google secret later**: the same `FORCE=1` run with the new
-  values. The provisioning updates the existing Google entry in place, so
-  re-runs never stack a second Google button on the sign-in page.
+- **Rotating the Google secret later**: the same run with the new values. The
+  provisioning updates the existing Google entry in place, so re-runs never
+  stack a second Google button on the sign-in page.
 
 A Google account is matched to an existing Zitadel user by email address; a
 developer signing in with Google for the first time gets a Zitadel user
@@ -402,11 +408,18 @@ deploy/terraform/scripts/seed-staging.sh
 ```
 
 Registers the demo tenant, the three signing identities, and the Broker's
-exchange row, then ingests the demo philosophy feed through the production
-ingest binary over public HTTPS. The registration SQL is printed in full
-before it runs — it is a documented one-time step over SSH, kept as SQL only
-because no registration RPC exists yet (the admin plane covers fee rate and
-reporting policy only).
+exchange row, then ingests the three demo feeds (Stoa Press, Harmonia
+Records, FoleyWorks) as one submission through the production ingest binary
+over public HTTPS. The feeds are demo brands, not publishers: the script
+rewrites every record's host, `music.demo.` and `sfx.demo.` prefixes
+included, to the stack's publisher domain, so the Exchange registers one
+tenant and one resource owner serving all three catalogs, and the landing
+page's links under that one domain all resolve to an offer. Set `FEED=<file>`
+to push exactly one feed file instead. The registration SQL is printed in full
+before it runs — it is a documented one-time step over SSH. A real publisher
+registers themselves through the publisher console instead; the staging seed
+writes the rows directly because the stack it builds has no console and no
+person to sign in as.
 
 Last, it opens the smoke agent's **billing account** by calling the Register
 RPC, signed with the agent's own key, and prints the `billing_ref` it gets

@@ -17,11 +17,12 @@ import (
 // meaningful failure mode is driven through the
 // SAME public Connect-Go surface that owns it and asserted back through that
 // surface (Testing Doctrine §10: correct connect.Code AND absence of side
-// effect). The guards under test all live in the service layer; protovalidate
-// owns none of THESE messages (its buf.validate rules cover Pricing and
-// restriction-token format — exercised in catalog_protovalidate_e2e_test.go —
-// not the requester/uri/offer presence checks here), so the textual field
-// detail is stable and pinned via assertConnectError.
+// effect). Two of the requester checks here are wire rules at the pinned
+// protocol: a ResourceQuery must carry a requester, and Requester.id is 1 to 255
+// characters. The validate interceptor refuses those before the handler runs, so
+// their cases assert the wire violation and carry no ErrorDetail. The uri and
+// offer presence checks are the service layer's own guards, so their textual
+// field detail is stable and pinned via assertConnectError.
 
 // negOfferCanonicalURL is the catalog binding the negative-case offers carry. It
 // names a resource none of these cases seeds, so it clears the presence check
@@ -58,6 +59,9 @@ func execTxNegReq(id, offerID, sig string, requester *forav1.Requester) *forav1.
 				OfferId:   offerID,
 				Exchange:  harnessExchangeDomain,
 				Signature: sig,
+				// The term an offer carries is unpriced: the offer states its
+				// price once, in Offer.pricing (offer.terms.pricing_unset).
+				Terms: []*forav1.LicenseTerm{{Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED}},
 				Identity: &forav1.ResourceIdentity{
 					CanonicalUrl: &negOfferCanonicalURL,
 					// The proto requires a mutability other than UNSPECIFIED on any
@@ -81,27 +85,37 @@ func setNegItemAcceptance(req *forav1.TransactionRequest, acc *forav1.AgentAccep
 	req.GetItems()[0].AgentAcceptance = acc
 }
 
-func agentRequester(id string) *forav1.Requester {
-	return newRequester(id, "agent.example")
+// testAgentID is the caller every agentRequester names. No test here tells two
+// agents apart, so one id is the whole cast.
+const testAgentID = "agent-test"
+
+// agentRequester is the requester for the test agent.
+func agentRequester() *forav1.Requester {
+	return newRequester(testAgentID, "agent.example")
 }
 
 // ── DiscoverResources input validation (service/exchange.go:137-145) ──────────
 
+// At the pinned protocol a ResourceQuery must carry a requester (a wire rule), so
+// the validate interceptor refuses a query with none before the handler's own
+// guard runs: InvalidArgument with a violation on requester under required. The
+// refusal carries no ErrorDetail, so it has no domain stamp to assert.
 func TestDiscoverResources_NilRequesterRejected(t *testing.T) {
 	h := newTestHarness(t)
 	_, err := h.exchangeClient.DiscoverResources(h.ctx, connect.NewRequest(newResourceQuery(nil, nil)))
-	assertConnectError(t, err, connect.CodeInvalidArgument, "requester required")
-	// Every DiscoverResources fault carries the ExchangeService domain
-	// stamp (ADR-019 §1), read through the public Connect error envelope.
-	assertErrorDomain(t, err, exchangeServiceDomainLiteral)
+	assertConnectCode(t, err, connect.CodeInvalidArgument)
+	assertWireViolation(t, err, "requester", "required")
 }
 
+// At the pinned protocol Requester.id is a wire rule (1 to 255 characters), so
+// the validate interceptor refuses an empty requester.id before the handler's own
+// guard runs: InvalidArgument with a violation on requester.id under
+// string.min_len.
 func TestDiscoverResources_EmptyRequesterIDRejected(t *testing.T) {
 	h := newTestHarness(t)
-	_, err := h.exchangeClient.DiscoverResources(h.ctx, connect.NewRequest(newResourceQuery(newRequester("", "agent.example"), []string{"https://" + h.tenantDomain + "/articles/hello"})))
-	assertConnectError(t, err, connect.CodeInvalidArgument, "requester.id required")
-	// Every DiscoverResources fault carries the ExchangeService domain stamp.
-	assertErrorDomain(t, err, exchangeServiceDomainLiteral)
+	_, err := h.exchangeClient.DiscoverResources(h.ctx, connect.NewRequest(newResourceQuery(newRequester("", "agent.example"), []string{"https://" + h.siteDomain + "/articles/hello"})))
+	assertConnectCode(t, err, connect.CodeInvalidArgument)
+	assertWireViolation(t, err, "requester.id", "string.min_len")
 }
 
 func TestDiscoverResources_NoURIsRejected(t *testing.T) {
@@ -109,7 +123,7 @@ func TestDiscoverResources_NoURIsRejected(t *testing.T) {
 	_, err := h.exchangeClient.DiscoverResources(h.ctx, connect.NewRequest(newResourceQuery(newRequester("agent-test", "agent.example"), nil)))
 	assertConnectError(t, err, connect.CodeInvalidArgument, "at least one uri required")
 	// Every DiscoverResources fault carries the ExchangeService domain stamp.
-	assertErrorDomain(t, err, exchangeServiceDomainLiteral)
+	assertErrorDomain(t, err)
 }
 
 // ── ExecuteTransaction validation + not-found (validateTxRequest / resolveOfferForTx) ──
@@ -125,13 +139,13 @@ func TestExecuteTransaction_EmptyOfferSignatureRejected(t *testing.T) {
 	// Empty offer signature → validateBatchRequest per-item envelope guard
 	// (KindInvalidRequest, not in the denial map) → CodeInvalidArgument abort.
 	_, err := h.exchangeClient.ExecuteTransaction(h.ctx, connect.NewRequest(
-		execTxNegReq("tx-empty-sig", "some-offer", "", agentRequester("agent-test")),
+		execTxNegReq("tx-empty-sig", "some-offer", "", agentRequester()),
 	))
 	assertConnectError(t, err, connect.CodeInvalidArgument, "offer signature required")
 	// A non-denial ExecuteTransaction fault (the txDenialReason ok=false
 	// branch — invalid-argument, NOT a typed denial) also carries the
 	// ExchangeService domain stamp (ADR-019 §1), read at the Connect boundary.
-	assertErrorDomain(t, err, exchangeServiceDomainLiteral)
+	assertErrorDomain(t, err)
 }
 
 // A malformed (non-hex) offer signature is a per-item denial, not a batch abort.
@@ -149,7 +163,7 @@ func TestExecuteTransaction_MalformedSignatureRejected(t *testing.T) {
 	// A valid body acceptance over the malformed offer clears the envelope
 	// presence checks so the denial comes from the offer-signature verification
 	// (verify presented offer), not the agent_acceptance presence guard.
-	req := execTxNegReq(txID, "some-offer", "not-hex", agentRequester("agent-test"))
+	req := execTxNegReq(txID, "some-offer", "not-hex", agentRequester())
 	setNegItemAcceptance(req, h.defaultAcceptance(t, negItemOffer(req), txID))
 	resp, err := h.exchangeClient.ExecuteTransaction(h.ctx, connect.NewRequest(req))
 	assertItemDenied(t, resp, err, forav1.DenialReason_DENIAL_REASON_SIGNATURE_INVALID)
@@ -180,7 +194,7 @@ func TestExecuteTransaction_UnknownOfferRejectedBeforeLookup(t *testing.T) {
 	// not the agent_acceptance presence guard. A decodable-but-wrong signature is
 	// KindSignatureInvalid, a denial-map kind → in-body per-item denial after the
 	// C4 collapse (Flag #1).
-	req := execTxNegReq(txID, "offer-does-not-exist", "00", agentRequester("agent-test"))
+	req := execTxNegReq(txID, "offer-does-not-exist", "00", agentRequester())
 	setNegItemAcceptance(req, h.defaultAcceptance(t, negItemOffer(req), txID))
 	resp, err := h.exchangeClient.ExecuteTransaction(h.ctx, connect.NewRequest(req))
 	assertItemDenied(t, resp, err, forav1.DenialReason_DENIAL_REASON_SIGNATURE_INVALID)

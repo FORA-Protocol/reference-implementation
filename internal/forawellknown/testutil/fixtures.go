@@ -9,11 +9,13 @@ import (
 	"crypto/ed25519"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -65,6 +67,16 @@ func Manifest(role forawellknown.Role, domain string) *forawellknown.Manifest {
 // comment went on claiming they matched.
 func ExchangeManifest(domain, endpoint string) []byte {
 	return ExchangeManifestWithRegistration(domain, endpoint, Registration{})
+}
+
+// ExchangeManifestWithHealth is ExchangeManifest naming health as the
+// manifest's health_endpoint, the URL a Broker probes to decide whether the
+// Exchange is answering. health is published exactly as given, so a test can
+// name an absolute URL or a relative one.
+func ExchangeManifestWithHealth(domain, endpoint, health string) []byte {
+	m := exchangeManifest(domain, endpoint, Registration{})
+	m.HealthEndpoint = &health
+	return MarshalManifest(m)
 }
 
 // ExchangeManifestAtVersion is ExchangeManifest with the document version the
@@ -187,9 +199,23 @@ type endpoint struct {
 	cacheControl atomic.Pointer[string]
 	gate         atomic.Pointer[chan struct{}]
 	hits         atomic.Int64
+	// signers, when set, sign the response the way a key directory's is signed:
+	// once per signer, covering the authority the request named and the body's
+	// digest (helpers.SignDirectoryResponse).
+	signers atomic.Pointer[[]helpers.Signer]
+	// mediaType, when set, replaces contentType.
+	mediaType atomic.Pointer[string]
 }
 
-func (e *endpoint) serve(w http.ResponseWriter, _ *http.Request) {
+// directorySignedFrom and directorySignedUntil bound the fixture's directory
+// response signatures: 2001 to 2096, so a reader on a deterministic clock
+// anywhere in between accepts them.
+const (
+	directorySignedFrom  = 1_000_000_000
+	directorySignedUntil = 4_000_000_000
+)
+
+func (e *endpoint) serve(w http.ResponseWriter, r *http.Request) {
 	if g := e.gate.Load(); g != nil {
 		<-*g
 	}
@@ -201,10 +227,27 @@ func (e *endpoint) serve(w http.ResponseWriter, _ *http.Request) {
 	if cc := e.cacheControl.Load(); cc != nil {
 		w.Header().Set("Cache-Control", *cc)
 	}
-	w.Header().Set("Content-Type", e.contentType)
+	var body []byte
 	if p := e.doc.Load(); p != nil {
-		_, _ = w.Write(*p)
+		body = *p
 	}
+	if s := e.signers.Load(); s != nil {
+		// A window wide enough for any clock a test injects, real or
+		// deterministic: the reader judges the signature against its own clock.
+		sig, err := helpers.SignDirectoryResponse(r.Context(), strings.ToLower(r.Host), body, *s,
+			directorySignedFrom, directorySignedUntil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		sig.Apply(w.Header())
+	}
+	ct := e.contentType
+	if mt := e.mediaType.Load(); mt != nil {
+		ct = *mt
+	}
+	w.Header().Set("Content-Type", ct)
+	_, _ = w.Write(body)
 }
 
 func (e *endpoint) block() (release func()) {
@@ -225,7 +268,9 @@ func (e *endpoint) block() (release func()) {
 // RevocationPath. Every document is swappable mid-test; the manifest and WBA
 // endpoints can force a status code (Set*Status), the manifest endpoint can emit
 // a Cache-Control header (SetCacheControl), count requests (Hits), and be gated
-// (Block) to force concurrent callers to overlap inside one in-flight fetch.
+// (Block) to force concurrent callers to overlap inside one in-flight fetch. The
+// WBA endpoint can be gated too (BlockWBA), so a reader's time limit can be
+// driven against a directory that never answers.
 type Origin struct {
 	*httptest.Server
 	manifest   *endpoint
@@ -237,20 +282,86 @@ type Origin struct {
 // the production constant so fixtures and producers share one source.
 const RevocationPath = forawellknown.RevocationPath
 
-// NewOrigin starts an Origin serving the given initial manifest bytes. The WBA
-// and revocation documents start empty; set them with SetWBA / SetRevocation.
+// NewOrigin starts an Origin serving the given initial manifest bytes over plain
+// http. The WBA and revocation documents start empty; set them with SetWBA /
+// SetRevocation. A key directory is only ever fetched over https, so a test
+// that reads the directory uses NewTLSOrigin.
 func NewOrigin(manifest []byte) *Origin {
+	o := newOrigin(manifest)
+	o.Server = httptest.NewServer(o.mux())
+	return o
+}
+
+// NewTLSOrigin is NewOrigin over https, the only scheme a key directory is
+// fetched over. Its URL is https://127.0.0.1:<port>; HTTPClient returns a client
+// that trusts the origin's certificate.
+func NewTLSOrigin(manifest []byte) *Origin {
+	o := newOrigin(manifest)
+	o.Server = httptest.NewTLSServer(o.mux())
+	return o
+}
+
+func newOrigin(manifest []byte) *Origin {
 	o := &Origin{
 		manifest: &endpoint{contentType: "application/json"},
-		wba:      &endpoint{contentType: "application/jwk-set+json"},
+		wba:      &endpoint{contentType: forawellknown.WBAMediaType},
 	}
 	o.SetManifest(manifest)
+	return o
+}
+
+func (o *Origin) mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc(forawellknown.Path, o.manifest.serve)
 	mux.HandleFunc(forawellknown.WBAPath, o.wba.serve)
 	mux.HandleFunc(RevocationPath, o.serveRevocation)
-	o.Server = httptest.NewServer(mux)
-	return o
+	return mux
+}
+
+// HTTPClient returns a client for this origin: for a TLS origin one that trusts
+// its certificate, with keep-alives disabled for the reason Client gives.
+func (o *Origin) HTTPClient() *http.Client {
+	if o.TLS == nil {
+		return Client()
+	}
+	tr := o.Server.Client().Transport.(*http.Transport).Clone()
+	tr.DisableKeepAlives = true
+	return &http.Client{Transport: tr}
+}
+
+// DirectoryOrigin is the origin as a Signature-Agent member names it:
+// https://127.0.0.1:<port> for a TLS origin.
+func (o *Origin) DirectoryOrigin() string { return o.URL }
+
+// SetWBASigners makes the WBA directory's response carry one response
+// signature per key, as every key directory's must. Each key signs under its
+// RFC 7638 thumbprint. With none set, the directory is served unsigned, which a
+// reader refuses.
+func (o *Origin) SetWBASigners(privs ...ed25519.PrivateKey) {
+	if len(privs) == 0 {
+		o.wba.signers.Store(nil)
+		return
+	}
+	signers := make([]helpers.Signer, 0, len(privs))
+	for _, priv := range privs {
+		signers = append(signers, DirectorySigner(priv))
+	}
+	o.wba.signers.Store(&signers)
+}
+
+// SetWBAContentType swaps the media type the WBA directory is served under, so a
+// test can drive the refusal of a directory served as anything but the
+// directory media type.
+func (o *Origin) SetWBAContentType(mediaType string) { o.wba.mediaType.Store(&mediaType) }
+
+// DirectorySigner is priv as the signer of a key directory response: keyid the
+// RFC 7638 thumbprint of its public half.
+func DirectorySigner(priv ed25519.PrivateKey) helpers.Signer {
+	signer, err := helpers.NewEd25519Signer(MustThumbprintPriv(priv), priv)
+	if err != nil {
+		panic("forawellknown/testutil: directory signer: " + err.Error())
+	}
+	return signer
 }
 
 // SetManifest swaps the served overlay manifest document.
@@ -292,6 +403,14 @@ func (o *Origin) WBAHits() int64 { return o.wba.hits.Load() }
 // release is called, so concurrent callers provably overlap inside a single
 // in-flight fetch (single-flight). release is idempotent.
 func (o *Origin) Block() (release func()) { return o.manifest.block() }
+
+// BlockWBA arms the WBA directory gate: every directory request blocks until the
+// returned release is called, so a reader's time limit fires against a directory
+// that never answers. The gate ignores the request's context, and Close waits
+// for in-flight handlers, so a test registers t.Cleanup(release) after
+// t.Cleanup(o.Close): cleanups run last-in first-out, and release must run
+// first. release is idempotent.
+func (o *Origin) BlockWBA() (release func()) { return o.wba.block() }
 
 // RevocationURL is the absolute URL clients poll for the revocation list.
 func (o *Origin) RevocationURL() string { return o.URL + RevocationPath }

@@ -1,10 +1,4 @@
-"""Obligation 03, happy-0: browse offers on a single URI.
-
-Scenario (verbatim — the first happy-path bullet):
-
-> An agent asks the platform for offers on a single resource URI. The
-> platform returns all applicable offers — per-request, subscription,
-> any bundled options — with their prices and terms.
+"""Obligation BROWSE-001: discovery for one URI returns its offers with prices and terms.
 
 R1 scope: subscription offers and bundles are deferred; "all applicable
 offers" means the per-request Offer the Exchange materialises for the
@@ -19,55 +13,44 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-import httpx
 import pytest
 
-from ..exchanges import recipient_of
-from ..discovery import discover_body
-from ..conftest import StackURLs
-from ..seed import DEMO_PHILOSOPHY_DOMAIN, USD_AGENT_ID, SeededFixture
-from ..signing import sign_post
+from ..broker_purchase import discover_group
+from ..constants import requester
+from ..exchanges import EXCHANGE_A_DOMAIN
+from ..fresh_agent import FreshAgent
+from ..seed import DEMO_PHILOSOPHY_DOMAIN
+from ..obligation_registry import Obligation, obligation
 
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
-_OBLIGATION_TEXT = (
-    "An agent asks the platform for offers on a single resource URI. "
-    "The platform returns all applicable offers — per-request, "
-    "subscription, any bundled options — with their prices and terms."
-)
 
-_DISCOVER_PATH = "/fora.v1.ExchangeService/DiscoverResources"
 _RESOURCE_URI = f"http://{DEMO_PHILOSOPHY_DOMAIN}/articles/philosophers/epicurus.txt"
 
 
-def test_single_uri_browse_returns_offers_with_prices_and_terms(
-    compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: seed ingests the demo catalog
-) -> None:
-    """DiscoverResources on a single demo URI returns one Offer with full terms."""
-    resp = sign_post(
-        f"{compose_stack.exchange}{_DISCOVER_PATH}",
-        body=discover_body(
-            agent_id=USD_AGENT_ID,
-            uris=[_RESOURCE_URI],
-            exchange=recipient_of(compose_stack.exchange),
-            domain=DEMO_PHILOSOPHY_DOMAIN,
-            user_type="individual",
-            geography="US",
-        ),
+@obligation(Obligation.BROWSE_001)
+def test_single_uri_browse_returns_offers_with_prices_and_terms(fresh_agent: FreshAgent) -> None:
+    """DiscoverResources on a single demo URI returns its offer with full terms.
+
+    (a) is the SDK client's own guarantee: it returns only a successful answer that
+    passed the strict response schema, and every offer it returns as verified
+    carries a signature that checked out against the Exchange's published key.
+    """
+    group = discover_group(
+        fresh_agent.exchange(EXCHANGE_A_DOMAIN),
+        EXCHANGE_A_DOMAIN,
+        _RESOURCE_URI,
+        "single-URI browse",
+        requester=requester(fresh_agent.agent_id, user_type="individual", geography="US"),
     )
-    # (a)
-    assert resp.status_code == httpx.codes.OK, (
-        f"DiscoverResources on a demo URI must return 200; got {resp.status_code}: {resp.text[:512]}"
-    )
-    payload = cast(dict[str, Any], resp.json())
+    offers = [verified.offer for verified in group.result.verified]
     # (b)
-    offers = cast(list[dict[str, Any]], payload.get("offers") or [])
-    assert offers, f"DiscoverResources must return at least one offer; body={resp.text[:512]}"
+    assert offers, f"DiscoverResources must return at least one offer; got {group}"
 
     # (c) each surfaced Offer carries pricing.rate (number), pricing.currency
     # (ISO 4217), and a non-empty Exchange-minted signature.
     for offer in offers:
+        offer = cast(dict[str, Any], offer)
         offer_id = offer.get("offer_id")
         pricing = cast(dict[str, Any], offer.get("pricing") or {})
         rate = pricing.get("rate")

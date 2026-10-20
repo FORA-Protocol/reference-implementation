@@ -27,7 +27,7 @@ Each store has three documents, in the same shape as every other component:
 | `RUNBOOK.md` | It is live and something happened — now what |
 
 One file here is not documentation: `postgres/10-create-exchange-dbs.sql` creates the
-databases the automated test stack needs, which runs three Exchanges at once. **Do
+databases the automated test stack needs, which runs four Exchanges at once. **Do
 not run it against a deployment** — [`postgres/CONFIGURATION.md`](postgres/CONFIGURATION.md)
 §3 lists the databases a real deployment does need.
 
@@ -39,9 +39,10 @@ Four facts decide how much work each store is, and they are not obvious:
 
 - **PostgreSQL is infrastructure you already run.** Its documents are operating
   guidance for a database you own, not an install story. The one genuinely
-  non-obvious constraint is that `fora.transaction_evidence` refuses `UPDATE`,
-  `DELETE` and `TRUNCATE` at the trigger level, which changes how a restore has to
-  be performed. See [`postgres/RUNBOOK.md`](postgres/RUNBOOK.md) §5.
+  non-obvious constraint is that `fora.transaction_evidence` and
+  `fora.transaction_events` refuse `UPDATE`, `DELETE` and `TRUNCATE` at the trigger
+  level, which changes how a restore has to be performed. See
+  [`postgres/RUNBOOK.md`](postgres/RUNBOOK.md) §5.
 
 - **Redis needs no backup, and the development compose file disagrees.** That file
   enables persistence and mounts a volume, implying a durability obligation that

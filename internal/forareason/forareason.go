@@ -2,11 +2,15 @@
 // stable token a caller branches on.
 //
 // It sits in shared internal code because the answer belongs to the protocol
-// rather than to any one client. Two of this service's outbound legs need it —
-// the SDK's Connect errors and the relay's own — and a third caller is the MCP
-// adapter, which reads the reason enums a discovery result carries. None of them
-// is the natural owner, and while it lived inside the registration client every
-// new use added a dependency on a package scheduled for deletion.
+// rather than to any one client. Two of the identity service's outbound legs
+// need it — the SDK's Connect errors and the relay's own — and a third caller is
+// the MCP adapter, which reads the reason enums a discovery result carries. None
+// of them is the natural owner, and while it lived inside the registration
+// client every new use added a dependency on a package scheduled for deletion.
+//
+// The Exchange names the denial reasons it journals and reports to publishers
+// through EnumName, so a publisher reads the same token the refused agent
+// received.
 package forareason
 
 import (
@@ -42,7 +46,8 @@ func Name(detail *forav1.ErrorDetail) string {
 }
 
 // EnumName renders a protobuf enum value by its declared name. The zero value
-// means "unset" in every FORA reason enum and reports nothing rather than a name.
+// means "unset" in every FORA reason enum and reports nothing rather than a name,
+// and so does a number the enum does not declare.
 func EnumName(v protoreflect.Enum) string {
 	if v.Number() == 0 {
 		return ""

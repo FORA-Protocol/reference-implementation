@@ -53,7 +53,7 @@ pytestmark = guard_marks(skip_when=not GATE.is_file())
 @pytest.fixture
 def tree(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
-    build_tree(root, branch="main", committer="image version guard")
+    build_tree(root, branch="main")
     return root
 
 

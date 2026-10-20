@@ -9,8 +9,8 @@ import (
 	"os"
 	"testing"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/oidcup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/oidcup"
 )
 
 // zitadelRedirectURI is the identity service's own /callback as registered in
@@ -22,9 +22,9 @@ const zitadelRedirectURI = "http://127.0.0.1:53217/callback"
 var sharedZitadel *testutil.SharedZitadel
 
 // maybeStartZitadel brings up the shared real Zitadel for the `zitadel` tier,
-// once per package. On failure (Docker unavailable, image pull failure, or host
-// port 8080 busy) it logs and leaves sharedZitadel nil so the tier's tests skip
-// rather than fail the whole package.
+// once per package. On failure (Docker unavailable, an image pull failure, or a
+// Zitadel that never becomes ready) it logs and leaves sharedZitadel nil, and
+// requireZitadel then fails each of the tier's tests.
 func maybeStartZitadel(ctx context.Context, logger *slog.Logger) func() {
 	z, cleanup, err := testutil.StartSharedZitadel(ctx, logger)
 	if err != nil {
@@ -33,7 +33,7 @@ func maybeStartZitadel(ctx context.Context, logger *slog.Logger) func() {
 		// "unavailable". Print the actual error to stderr so the job trace shows
 		// WHY Zitadel did not come up (e.g. a port-wait timeout under dind).
 		fmt.Fprintf(os.Stderr, "StartSharedZitadel failed: %v\n", err)
-		logger.Warn("start shared zitadel; real-zitadel tests will skip", "err", err)
+		logger.Warn("start shared zitadel; each real-zitadel test will fail", "err", err)
 		return func() {}
 	}
 	sharedZitadel = z
@@ -45,9 +45,9 @@ func requireZitadel(t *testing.T) *testutil.SharedZitadel {
 	if sharedZitadel == nil {
 		// The real-Zitadel tier runs unconditionally: selecting the `zitadel`
 		// build tag is an explicit request to exercise the real upstream, so a
-		// Zitadel that will not boot (Docker down, image unpullable, or host port
-		// 8080 busy) is a failure, never a silent skip.
-		t.Fatal("shared Zitadel unavailable (Docker down, image unpullable, or host port 8080 busy)")
+		// Zitadel that will not boot (Docker down, image unpullable, or never
+		// ready) is a failure, never a silent skip.
+		t.Fatal("shared Zitadel unavailable (Docker down, image unpullable, or never ready)")
 	}
 	return sharedZitadel
 }

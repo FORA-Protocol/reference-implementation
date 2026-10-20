@@ -8,9 +8,11 @@ import (
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 // executeInput licenses one or more discovered offers. A single offer is not
@@ -33,20 +35,65 @@ type executeInput struct {
 	// impossible to write. A caller that retries MUST pass the original key —
 	// omitting it on a retry is a second purchase, and it will be charged as one.
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	// EmbedContent chooses whether this service fetches the content and returns
+	// it inside the result. The schema default is true (see executeInputSchema),
+	// and the SDK applies it before validation, so an absent value arrives here as
+	// true and a false here always means the caller sent false.
+	EmbedContent bool `json:"embed_content,omitempty"`
 }
 
-// executeOutput is the TransactionResponse projection.
+// embedContentDescription is the embed_content parameter's description. It
+// states both limits of false, because the agent decides with nothing else in
+// front of it.
+const embedContentDescription = "Default true: the content is fetched and returned inside " +
+	"the result. Set false to skip the fetch and get only each item's delivery URL. " +
+	"The URL is a bearer credential: it stays visible in the chat and in logs until it " +
+	"expires, about 5 minutes after the purchase. The URL alone works only when the edge " +
+	"does not enforce the key binding, as on the demo deployment; where the binding is " +
+	"enforced, only this service can fetch it, so keep the default."
+
+// executeInputSchema is the inferred schema for executeInput with one change:
+// embed_content gets an explicit default of true.
+//
+// The field is a plain bool rather than *bool on purpose. The inferred schema of
+// a pointer allows null, and null is not a choice the caller can mean. With a
+// plain bool the schema is {"type": "boolean"}, so null, "false" and 0 are all
+// refused by the SDK before the handler runs, and therefore before anything is
+// bought. The default is what makes an absent value true: the pinned SDK applies
+// schema defaults before it validates the arguments.
+func executeInputSchema() *jsonschema.Schema {
+	schema, err := jsonschema.For[executeInput](nil)
+	if err != nil {
+		// A static type that does not infer is a programming error, and AddTool
+		// panics on the same condition.
+		panic(fmt.Sprintf("fora_execute input schema: %v", err))
+	}
+	embed := schema.Properties["embed_content"]
+	embed.Default = json.RawMessage("true")
+	embed.Description = embedContentDescription
+	return schema
+}
+
+// executeOutput is the BrokerTransactionResponse projection.
 type executeOutput struct {
-	// AgentIdentityHash is the RFC 7638 thumbprint every item's delivery URL is
-	// bound to — the caller's own key. Shared across the batch.
-	AgentIdentityHash string `json:"agent_identity_hash,omitempty"`
 	// Items holds one result per offer, in the order they were submitted, each the
 	// protocol's own TransactionResultItem encoding. There is deliberately no
 	// per-item "licensed" boolean: an item is the protocol's own object and adding
 	// a field of ours to it would corrupt an encoding the agent may hand back. Read
-	// it as: a DELIVERED item carries retrieval_endpoint (and expires_at); a
-	// REFUSED item carries denial_reason. Exactly one of the two is always present.
+	// it as: a DELIVERED item carries retrieval_endpoint (and expires_at); an item
+	// the Exchange DENIED carries denial_reason; an item whose Exchange refused the
+	// Broker's whole sub-request, or did not answer it, carries refusal — the
+	// Exchange, the code it answered with and its typed reason. Exactly one of the
+	// three is always present.
 	Items []map[string]any `json:"items"`
+	// Exchanges holds one entry per Exchange the Broker contacted, the protocol's
+	// ExchangeOutcome encoding: the offers sent there and the agent_identity_hash
+	// each of that Exchange's delivery URLs is bound to — the caller's own key.
+	Exchanges []map[string]any `json:"exchanges,omitempty"`
+	// Totals holds the charged totals, one per currency, in the protocol's Cost
+	// encoding. An item is charged when it carries neither denial_reason nor
+	// refusal. Absent when nothing was charged.
+	Totals []map[string]any `json:"totals,omitempty"`
 	// DeliveryFailures reports the delivered items whose content this service could
 	// not fetch. An entry appears ONLY for a failure — a success is evident from the
 	// embedded resource carrying the bytes — and it sits outside items[] for the
@@ -60,12 +107,14 @@ type executeOutput struct {
 	RequestID string `json:"request_id,omitempty"`
 }
 
-// handleExecute licenses the offers through the Broker's execute relay.
+// handleExecute licenses the offers through the Broker's ExecuteTransaction.
 //
-// The relay is the one FORA call that is not a Connect route. The agent's binding
-// travels as a detached acceptance per item — signed with the caller's custodied
-// key inside the FORA client — so the Exchange verifies the agent independently of
-// however many hops relayed the request.
+// The agent's binding travels as a detached acceptance per item — signed with
+// the caller's custodied key inside the SDK client — so each Exchange verifies
+// the agent although the Broker re-packages the request and signs the copy it
+// sends. An Exchange that refuses its whole share comes back as a refusal on
+// those items, not as a failed call: the other Exchanges' items were still
+// bought.
 //
 // It returns the signed delivery URL per item AND the content itself: the URL is
 // bound to the caller's custodied key, which lives in Vault and never reaches the
@@ -73,6 +122,9 @@ type executeOutput struct {
 // proof-of-possession check (ADR-023). The bytes ride back as embedded resources
 // on the tool result; nothing is stored, because the fetch happens inside the
 // call that pays for it.
+//
+// With embed_content false the fetch is skipped entirely: the result is the same
+// structured output with the delivery URLs, and the edge is never contacted.
 func (t *toolset) handleExecute(
 	ctx context.Context, req *mcpsdk.CallToolRequest, in executeInput,
 ) (*mcpsdk.CallToolResult, executeOutput, error) {
@@ -87,7 +139,7 @@ func (t *toolset) handleExecute(
 	if err != nil {
 		return nil, executeOutput{}, err
 	}
-	resp, err := t.fora.Execute(t.callCtx(ctx, who), rpc)
+	resp, err := t.purchases.Execute(ctx, rpc)
 	if err != nil {
 		return nil, executeOutput{}, t.failed(ctx, who, "fora_execute", err)
 	}
@@ -96,11 +148,16 @@ func (t *toolset) handleExecute(
 		return nil, executeOutput{}, err
 	}
 	out.RequestID = who.requestID
-	log := t.logger(ctx, who)
-	blocks := t.deliver(t.callCtx(ctx, who), log, who, in, &out)
+	log := t.logger(ctx)
+	var blocks []mcpsdk.Content
+	if in.EmbedContent {
+		blocks = t.deliver(ctx, log, who, in, &out)
+	} else {
+		blocks = structuredFallback(out)
+	}
 	log.InfoContext(ctx, "identity.mcp.execute",
 		"subdomain", who.subdomain, "offers", len(in.Offers), "items", len(out.Items),
-		"delivery_failures", len(out.DeliveryFailures))
+		"embed_content", in.EmbedContent, "delivery_failures", len(out.DeliveryFailures))
 	return &mcpsdk.CallToolResult{Content: blocks}, out, nil
 }
 
@@ -147,21 +204,35 @@ func mapToOffer(raw map[string]any) (*forav1.Offer, error) {
 	return &offer, nil
 }
 
-// projectTransaction renders the response for the agent, carrying each result
-// item across as the protocol's own encoding rather than a hand-written mirror
-// that would have to track every field change.
-func projectTransaction(resp *forav1.TransactionResponse) (executeOutput, error) {
-	items := make([]map[string]any, 0, len(resp.GetItems()))
-	for _, item := range resp.GetItems() {
-		obj, err := protoToMap(item)
-		if err != nil {
-			return executeOutput{}, fmt.Errorf("fora_execute: render result item %q: %w",
-				item.GetOfferId(), err)
-		}
-		items = append(items, obj)
+// projectTransaction renders the Broker's answer for the agent, carrying each
+// result item, Exchange outcome and total across as the protocol's own encoding
+// rather than a hand-written mirror that would have to track every field change.
+func projectTransaction(resp *forav1.BrokerTransactionResponse) (executeOutput, error) {
+	items, err := protoMaps(resp.GetItems(), "result item")
+	if err != nil {
+		return executeOutput{}, err
 	}
-	return executeOutput{
-		AgentIdentityHash: resp.GetAgentIdentityHash(),
-		Items:             items,
-	}, nil
+	exchanges, err := protoMaps(resp.GetExchanges(), "exchange outcome")
+	if err != nil {
+		return executeOutput{}, err
+	}
+	totals, err := protoMaps(resp.GetTotals(), "total")
+	if err != nil {
+		return executeOutput{}, err
+	}
+	return executeOutput{Items: items, Exchanges: exchanges, Totals: totals}, nil
+}
+
+// protoMaps renders each message as the protocol's own JSON object. what names
+// the kind of message for an error.
+func protoMaps[M proto.Message](msgs []M, what string) ([]map[string]any, error) {
+	out := make([]map[string]any, 0, len(msgs))
+	for i, msg := range msgs {
+		obj, err := protoToMap(msg)
+		if err != nil {
+			return nil, fmt.Errorf("fora_execute: render %s %d: %w", what, i, err)
+		}
+		out = append(out, obj)
+	}
+	return out, nil
 }

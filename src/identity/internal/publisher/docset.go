@@ -1,6 +1,14 @@
 package publisher
 
-import "time"
+import (
+	"sync"
+	"time"
+
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+
+	wkserver "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/server"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/keystore"
+)
 
 // docSet holds one agent's four built documents. Any of them may be nil: an agent can
 // hold keys before its card is written, or hold an account row before either exists —
@@ -23,6 +31,15 @@ type docSet struct {
 	cardUnavail     bool
 	revUnavail      bool
 	manifestUnavail bool
+
+	// wbaKeys are the keys the directory lists, whose custodied private halves
+	// sign its response. The signers are resolved from custody on the first
+	// signed answer and kept for the life of this docSet, and signatures caches
+	// one response signature per authority the directory is fetched under.
+	wbaKeys    []keystore.Key
+	signerMu   sync.Mutex
+	signers    []helpers.Signer
+	signatures *wkserver.SignatureCache
 }
 
 // empty reports whether the agent is absent from every source — no directory, no

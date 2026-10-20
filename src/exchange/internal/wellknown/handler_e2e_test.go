@@ -17,11 +17,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	"github.com/FORA-Protocol/protocol/sdk/go/resolvers"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/server"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/testutil"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/wellknown"
 )
 
@@ -57,8 +59,12 @@ const exchangeTestDomain = "exchange.example"
 // starts from, on a deterministic clock. A test that pins one field adjusts the
 // returned value rather than restating the whole thing, so the shared shape
 // moves in one place.
-func exchangeConfig(offerKey ed25519.PublicKey) wellknown.Config {
+func exchangeConfig(offerKey ed25519.PrivateKey) wellknown.Config {
 	hops := int32(4)
+	signer, err := helpers.NewEd25519Signer(testutil.MustThumbprintPriv(offerKey), offerKey)
+	if err != nil {
+		panic(err)
+	}
 	return wellknown.Config{
 		Domain:              exchangeTestDomain,
 		Endpoint:            "https://" + exchangeTestDomain,
@@ -66,7 +72,8 @@ func exchangeConfig(offerKey ed25519.PublicKey) wellknown.Config {
 		BaseCurrency:        "USD",
 		SupportedProfiles:   []string{"fora-news-v1"},
 		MaxIntermediaryHops: &hops,
-		OfferKey:            offerKey,
+		OfferKey:            offerKey.Public().(ed25519.PublicKey),
+		OfferSigner:         signer,
 		Clock:               clock.NewDeterministic(keyNotBefore),
 		KeyLifetime:         274 * 24 * time.Hour,
 	}
@@ -101,8 +108,8 @@ func newKeyPair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 
 func newTestServer(t *testing.T) (*httptest.Server, ed25519.PrivateKey) {
 	t.Helper()
-	edPub, edPriv := newKeyPair(t)
-	srv, _ := serveConfig(t, exchangeConfig(edPub))
+	_, edPriv := newKeyPair(t)
+	srv, _ := serveConfig(t, exchangeConfig(edPriv))
 	return srv, edPriv
 }
 
@@ -115,8 +122,8 @@ func fetchWBAKey(t *testing.T, srv *httptest.Server) (ed25519.PublicKey, bool) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("WBA status = %d, want 200", resp.StatusCode)
 	}
-	if got := resp.Header.Get("Content-Type"); got != "application/jwk-set+json" {
-		t.Fatalf("WBA Content-Type = %q, want application/jwk-set+json", got)
+	if got := resp.Header.Get("Content-Type"); got != server.DirectoryMediaType {
+		t.Fatalf("WBA Content-Type = %q, want %s", got, server.DirectoryMediaType)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	f, err := forawellknown.ParseWBA(body)
@@ -151,6 +158,29 @@ func TestForaManifest_ShapeAndRole(t *testing.T) {
 	// The offer key lives in the WBA directory, never in the overlay manifest.
 	if _, ok := fetchWBAKey(t, srv); !ok {
 		t.Errorf("offer key absent from WBA directory")
+	}
+}
+
+// TestForaWBA_DirectoryResponseIsSignedByTheOfferKey pins that the Exchange's
+// key directory answers as every key directory must: under the directory media
+// type, with a response signature by the offer key it lists, covering the
+// authority the request named. A reader hands out only keys that signed, so an
+// unsigned directory would leave every offer this Exchange signs unverifiable.
+func TestForaWBA_DirectoryResponseIsSignedByTheOfferKey(t *testing.T) {
+	_, priv := newKeyPair(t)
+	srv, _ := serveConfig(t, exchangeConfig(priv))
+	resp := httpGet(t, srv.URL+forawellknown.WBAPath)
+	defer closeResponse(t, resp)
+	body, _ := io.ReadAll(resp.Body)
+	if ct := resp.Header.Get("Content-Type"); ct != server.DirectoryMediaType {
+		t.Fatalf("Content-Type = %q, want %s", ct, server.DirectoryMediaType)
+	}
+	pub := priv.Public().(ed25519.PublicKey)
+	authority := srv.Listener.Addr().String()
+	verified, err := helpers.VerifyDirectoryResponse(authority, resp.Header, body,
+		[]ed25519.PublicKey{pub}, keyNotBefore.Add(time.Minute))
+	if err != nil || !verified[testutil.MustThumbprintPriv(priv)] {
+		t.Fatalf("directory response not signed by the offer key: verified=%v err=%v", verified, err)
 	}
 }
 
@@ -220,9 +250,9 @@ func servedOfferWindow(t *testing.T, baseURL string) (time.Time, time.Time) {
 func TestForaWBA_RefresherKeepsWindowFresh(t *testing.T) {
 	buildTime := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	clk := clock.NewDeterministic(buildTime)
-	edPub, _ := newKeyPair(t)
+	_, edPriv := newKeyPair(t)
 	const lifetime = 10 * 365 * 24 * time.Hour
-	cfg := exchangeConfig(edPub)
+	cfg := exchangeConfig(edPriv)
 	cfg.Clock, cfg.KeyLifetime = clk, lifetime
 	srv, h := serveConfig(t, cfg)
 

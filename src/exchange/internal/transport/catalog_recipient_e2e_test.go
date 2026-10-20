@@ -33,11 +33,11 @@ func TestPushResources_NamesAnotherExchange_RefusedWithNothingWritten(t *testing
 	const callerID = "caller.example"
 	h.publisher.setContributors(callerID)
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 
 	const uriPath = "/articles/misaddressed"
 	client := h.signedCat(callerID, priv)

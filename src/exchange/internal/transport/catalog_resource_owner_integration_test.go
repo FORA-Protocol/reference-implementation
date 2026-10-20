@@ -9,11 +9,10 @@ import (
 
 	connect "connectrpc.com/connect"
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
-	"github.com/jackc/pgx/v5/pgtype"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo/repotest"
 )
 
 // contributorOnlyManifests authorizes the caller as a catalog contributor for any
@@ -49,7 +48,7 @@ func readCatalog(t *testing.T, h *testHarness) []repo.CatalogEntry {
 // on the catalog entry. The default harness manifest stub attests harnessResourceOwner.
 func TestPushResources_PersistsResourceOwnerID(t *testing.T) {
 	h := newTestHarness(t)
-	resp, err := h.catalogClient.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, "agent-test", []*forav1.ResourceEntry{{Domain: h.tenantDomain, Path: "/article-1"}})))
+	resp, err := h.catalogClient.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, "agent-test", []*forav1.ResourceEntry{{Domain: h.siteDomain, Path: "/article-1"}})))
 	if err != nil {
 		t.Fatalf("PushResources: %v", err)
 	}
@@ -72,8 +71,8 @@ func TestPushResources_PersistsResourceOwnerID(t *testing.T) {
 func TestPushResources_RejectsMissingResourceOwner(t *testing.T) {
 	h := newTestHarnessWith(t, harnessOptions{manifests: contributorOnlyManifests{caller: "agent-test"}})
 	_, err := h.catalogClient.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, "agent-test", []*forav1.ResourceEntry{
-		{Domain: h.tenantDomain, Path: "/a"},
-		{Domain: h.tenantDomain, Path: "/b"},
+		{Domain: h.siteDomain, Path: "/a"},
+		{Domain: h.siteDomain, Path: "/b"},
 	})))
 	if err == nil {
 		t.Fatal("expected PushResources to be rejected for missing resource_owner_id")
@@ -89,40 +88,34 @@ func TestPushResources_RejectsMissingResourceOwner(t *testing.T) {
 	}
 }
 
-// TestPushResources_ResourceOwnerGroupsDomains proves the grouping property: an owner
-// that attests the same resource_owner_id across two domains (here the harness stub
-// attests harnessResourceOwner for every domain) settles both into one payee, even
-// though the domains map to different tenants.
+// TestPushResources_ResourceOwnerGroupsDomains proves the grouping property: an
+// owner that attests the same resource_owner_id across two SITES (here the
+// harness stub attests harnessResourceOwner for every domain) settles both into
+// one payee. Both sites are registered under that payee and listed on the same
+// seat, which is what the grouping exists for — one payee, many sites.
 func TestPushResources_ResourceOwnerGroupsDomains(t *testing.T) {
 	h := newTestHarness(t)
-	// Second tenant for a sibling domain. Seeded via the sqlc InsertTenant query —
-	// the same documented corner every Exchange test uses, since there is no public
-	// tenant-provisioning RPC yet (TenantReadRepo exposes only ByID/ByDomain).
 	const (
 		domain2 = "sibling.example"
-		tenant2 = "t_sibling"
 		path1   = "/x"
 		path2   = "/y"
 	)
-	if _, err := h.queries.InsertTenant(h.ctx, sqlc.InsertTenantParams{
-		TenantID:        tenant2,
-		Domain:          domain2,
-		Ed25519KeyRef:   "unused",
-		ReportingPolicy: []byte(`{}`),
-		SigningScheme:   sqlc.ForaSigningSchemeED25519,
-		RsaKeyRef:       pgtype.Text{},
-	}); err != nil {
-		t.Fatalf("seed sibling tenant: %v", err)
-	}
+	// A second site under the SAME payee. NewPublisher stays false because the
+	// harness bring-up already registered harnessResourceOwner.
+	repotest.SeedSite(t, h.ctx, h.pool, repotest.Site{
+		SeatTenantID: h.tenantID,
+		Domain:       domain2,
+		PublisherID:  harnessResourceOwner,
+	})
 
-	push := func(tenantID, domain, path string) {
+	push := func(domain, path string) {
 		t.Helper()
-		if _, err := h.catalogClient.PushResources(h.ctx, connect.NewRequest(newPushRequest(tenantID, "agent-test", []*forav1.ResourceEntry{{Domain: domain, Path: path}}))); err != nil {
+		if _, err := h.catalogClient.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, "agent-test", []*forav1.ResourceEntry{{Domain: domain, Path: path}}))); err != nil {
 			t.Fatalf("push %s: %v", domain, err)
 		}
 	}
-	push(h.tenantID, h.tenantDomain, path1)
-	push(tenant2, domain2, path2)
+	push(h.siteDomain, path1)
+	push(domain2, path2)
 
 	rows := readCatalog(t, h)
 	if len(rows) != 2 {

@@ -66,11 +66,11 @@ func TestComp_ResourceMetadataProjection(t *testing.T) {
 	h := newPushHarness(t)
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 
 	const metaPath = "/articles/comp-resource-metadata"
 	entry := &forav1.ResourceEntry{
@@ -117,26 +117,7 @@ func TestComp_ResourceMetadataProjection(t *testing.T) {
 // no FORA taxonomy keys appear; comptest.Validate accepts the Package.
 func assertCompResourceMetadataProjection(t *testing.T, o *forav1.Offer) {
 	t.Helper()
-	comp := o.GetExt().GetFields()["comp"].GetStructValue()
-	if comp == nil {
-		t.Fatalf("offer.ext has no comp Struct under fora-comp-v1: ext=%v", o.GetExt())
-	}
-
-	scope := comp.GetFields()["scope"].GetStructValue()
-	if scope == nil {
-		t.Fatalf("comp.scope missing or not a Struct: %v", comp.GetFields()["scope"])
-	}
-
-	// scope.text is a 1-element array (one offer = one media object, Q7).
-	textList := scope.GetFields()["text"].GetListValue()
-	if textList == nil || len(textList.GetValues()) != 1 {
-		t.Fatalf("comp.scope.text = %v, want a 1-element array", scope.GetFields()["text"])
-	}
-	text := textList.GetValues()[0].GetStructValue()
-	if text == nil {
-		t.Fatalf("comp.scope.text[0] is not a Struct: %v", textList.GetValues()[0])
-	}
-	tf := text.GetFields()
+	comp, tf := compTextMedia(t, o)
 
 	// CoMP-homed canonical fields.
 	gotWC := numberList(tf["wordcount"])
@@ -185,6 +166,33 @@ func assertCompResourceMetadataProjection(t *testing.T, o *forav1.Offer) {
 	if err := comptest.Validate(comp); err != nil {
 		t.Errorf("comptest.Validate(offer.ext[comp]) = %v, want nil", err)
 	}
+}
+
+// compTextMedia returns the comp Struct an offer carries under fora-comp-v1
+// and the fields of its single Text media object, failing the test unless
+// both are present in that shape.
+func compTextMedia(t *testing.T, o *forav1.Offer) (*structpb.Struct, map[string]*structpb.Value) {
+	t.Helper()
+	comp := o.GetExt().GetFields()["comp"].GetStructValue()
+	if comp == nil {
+		t.Fatalf("offer.ext has no comp Struct under fora-comp-v1: ext=%v", o.GetExt())
+	}
+
+	scope := comp.GetFields()["scope"].GetStructValue()
+	if scope == nil {
+		t.Fatalf("comp.scope missing or not a Struct: %v", comp.GetFields()["scope"])
+	}
+
+	// scope.text is a 1-element array (one offer = one media object, Q7).
+	textList := scope.GetFields()["text"].GetListValue()
+	if textList == nil || len(textList.GetValues()) != 1 {
+		t.Fatalf("comp.scope.text = %v, want a 1-element array", scope.GetFields()["text"])
+	}
+	text := textList.GetValues()[0].GetStructValue()
+	if text == nil {
+		t.Fatalf("comp.scope.text[0] is not a Struct: %v", textList.GetValues()[0])
+	}
+	return comp, text.GetFields()
 }
 
 // assertCompEmptyMediaGuard verifies R1: an offer whose metadata is PRESENT but

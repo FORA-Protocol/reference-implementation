@@ -195,7 +195,7 @@ func (a *InMemoryAdapter) EnsureAgentAccount(_ context.Context, billingRef strin
 func (a *InMemoryAdapter) Credit(
 	_ context.Context, billingRef string, amount Amount, idempotencyKey string,
 ) error {
-	if err := validateCreditArgs(billingRef, amount, idempotencyKey, DemoCurrency); err != nil {
+	if err := validateCreditArgs(billingRef, amount, idempotencyKey, demoCurrencies); err != nil {
 		return err
 	}
 	a.mu.Lock()
@@ -278,30 +278,6 @@ func (a *InMemoryAdapter) Authorize(_ context.Context, req AuthorizeRequest) (Au
 	}
 
 	return a.reserve(req, charge), nil
-}
-
-// checkCurrencyAndBalance enforces the money gate for a non-zero charge: the
-// agent's balance currency must match the term's currency, and the available
-// balance (actual minus same-currency pending reservations) must cover the
-// charge. Returns (denial, false) on refusal, (zero, true) on pass. Caller holds
-// a.mu. Only reached for non-zero charges (the zero-cost path skips it).
-func (a *InMemoryAdapter) checkCurrencyAndBalance(
-	req AuthorizeRequest, bal Amount, charge *big.Rat,
-) (AuthorizeResult, bool) {
-	if bal.Currency != req.UnitCost.Currency {
-		return AuthorizeResult{Approved: false, Reason: "currency mismatch"}, false
-	}
-	totalReserved := new(big.Rat)
-	for _, r := range a.reserved {
-		if r.BillingRef == req.BillingRef && r.EstAmt.Currency == bal.Currency {
-			totalReserved.Add(totalReserved, r.EstAmt.Value)
-		}
-	}
-	available := new(big.Rat).Sub(new(big.Rat).Set(bal.Value), totalReserved)
-	if available.Cmp(charge) < 0 {
-		return AuthorizeResult{Approved: false, Reason: "insufficient balance"}, false
-	}
-	return AuthorizeResult{}, true
 }
 
 // consumeQuota enforces and decrements the unit-count quota cap. It applies to
@@ -471,19 +447,6 @@ func (a *InMemoryAdapter) RefundLog(billingID string) []RefundEntry {
 	out := make([]RefundEntry, len(src))
 	copy(out, src)
 	return out
-}
-
-// GetBalance returns the actual settled balance for an account. Pending
-// reservations are not included (they represent authorised but not yet
-// consumed funds).
-func (a *InMemoryAdapter) GetBalance(_ context.Context, billingRef string) (Amount, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	bal, ok := a.balances[billingRef]
-	if !ok {
-		return Amount{}, fmt.Errorf("billing: unknown account %q", billingRef)
-	}
-	return Amount{Value: new(big.Rat).Set(bal.Value), Currency: bal.Currency}, nil
 }
 
 // GetQuota returns the remaining quota for an account. Zero when the account

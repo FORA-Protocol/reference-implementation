@@ -42,31 +42,18 @@
 # It asserts AGREEMENT and never a particular version, so it stays correct across
 # every future release without being edited.
 #
-# `--root <dir>` scans a tree other than this checkout; the guard's own tests use
-# it to drive synthetic trees. It is an ARGUMENT and not an environment variable
-# on purpose: an ambient variable that selects what a gate reads can redirect it
-# while it still reports PASS.
+# `--root <dir>` scans a tree other than this checkout. The argument, and why it
+# is an argument, are described once in scripts/gate-args.sh.
 #
 # Exits 0 when clean, 1 otherwise.
 
 set -euo pipefail
 
-die() { printf 'FAIL  %s\n' "$*" >&2; exit 1; }
-
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root=""
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --root)
-      [ $# -ge 2 ] || die "--root requires a directory"
-      repo_root="$(cd "$2" && pwd)" || die "--root: no such directory: $2"
-      shift 2
-      ;;
-    *) die "unknown argument: $1" ;;
-  esac
-done
-[ -n "${repo_root}" ] || repo_root="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=scripts/gate-args.sh
+source "${script_dir}/gate-args.sh"
+parse_gate_args "$@"
 
 cd "${repo_root}"
 

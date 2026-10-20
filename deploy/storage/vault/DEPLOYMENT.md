@@ -71,21 +71,14 @@ Note the path you chose — it becomes `IDENTITY_KV_MOUNT`.
 
 ## 4. Step 2 — write the policy
 
-The Identity Service needs four operations on one prefix and nothing else. Replace
-`fora-agents` and `agents` with your own mount and prefix if they differ.
+The Identity Service needs four operations on one prefix and nothing else. The rules are
+in [`identity-policy.hcl`](identity-policy.hcl), the same file the e2e stack and the
+tests use, and the one a deployment's own bootstrap should render. Render it with your mount name in place of `fora-agents`. If you set
+`IDENTITY_KV_PREFIX` to something other than `agents`, change `agents` in both paths of
+the rendered file too.
 
 ```bash
-cat > fora-identity.hcl <<'EOF'
-# Read, create and update one agent key.
-path "fora-agents/data/agents/*" {
-  capabilities = ["create", "update", "read"]
-}
-
-# List the agents, list one agent's keys, and erase a key completely.
-path "fora-agents/metadata/agents/*" {
-  capabilities = ["read", "list", "delete"]
-}
-EOF
+sed 's/${KV_MOUNT}/fora-agents/g' deploy/storage/vault/identity-policy.hcl > fora-identity.hcl
 
 vault policy write fora-identity fora-identity.hcl
 # Expect: Success! Uploaded policy: fora-identity
@@ -158,13 +151,60 @@ vault kv list fora-agents/agents
 
 ## 7. Step 5 — point the Identity Service at it
 
-Set these three on the Identity Service and restart it:
+There are two ways to connect the Identity Service. `VAULT_ADDR` is set in both;
+`VAULT_TOKEN` is set in exactly one of them. Pick one, set its variables on the service
+and restart it.
+
+**A. The service holds the token itself.**
 
 ```
 VAULT_ADDR=https://vault.internal:8200
 VAULT_TOKEN=<the token from §5>
 IDENTITY_KV_MOUNT=fora-agents
 ```
+
+**B. A Vault Proxy holds the token.** The Proxy logs in to Vault with a method of its
+own and adds its token to every request it forwards. The service only needs the
+Proxy's listener, which can be a Unix socket. The compose bundle's server mode runs this
+way; what the host provides for it is in
+[Server mode in the compose bundle](#server-mode-in-the-compose-bundle-what-the-host-provides)
+below.
+
+```
+VAULT_ADDR=unix:///vault-proxy/proxy.sock
+IDENTITY_KV_MOUNT=fora-agents
+```
+
+No `VAULT_TOKEN` in B: with a token set, the client would send that token instead of
+letting the Proxy add its own. In B, §5 creates no token at all, and §4's policy is
+attached to the Proxy's login role instead.
+
+### Server mode in the compose bundle: what the host provides
+
+`deploy/terraform/modules/compose-stack` runs shape B when its `vault_mode` input is
+`"server"`: a Vault server and a Vault Proxy, both on the host network, with the Identity
+Service on the Proxy's socket. The module renders the two containers and mounts three
+host directories into them read-only. It does not write those directories: the stack that
+turns server mode on writes them before the bundle starts.
+
+| Host directory | Mounted at | Mounted by | What it must hold |
+|---|---|---|---|
+| `/opt/fora/vault/server` | `/vault/config` | the Vault server | The server configuration; the image loads every file in the directory. A `listener "tcp"` on `127.0.0.1:8200` with the certificate and key from `/vault/tls`, `storage "raft"` with `path = "/vault/file"` (the bundle's `vaultdata` volume), `api_addr` and `cluster_addr` on the loopback, and the `seal` stanza of the deployment's auto-unseal, if it has one. |
+| `/opt/fora/vault/proxy` | `/vault/proxy` | the Vault Proxy | `proxy.hcl`, the file the Proxy is started with: a `vault` stanza for `https://127.0.0.1:8200` with `ca_cert = "/vault/tls/vault.crt"`, an `auto_auth` method of the deployment's choice, `api_proxy { use_auto_auth_token = true }`, and a `listener "unix"` at `/vault-proxy/proxy.sock` with `tls_disable = true`, `socket_mode = "0660"`, `socket_user = "100"` and `socket_group = "65532"`. It has a directory of its own because the server loads the whole of its directory and refuses a proxy stanza. |
+| `/opt/fora/vault/tls` | `/vault/tls` | both | `vault.crt` and `vault.key` for the server's listener. The Proxy and the server container's healthcheck verify the server against `vault.crt`. |
+
+Host networking makes `127.0.0.1` in these files the host's loopback, so only the Proxy and
+an operator on the host reach the server. The Proxy runs as uid 100 with gid 65532, and the
+Identity Service as uid and gid 65532; that is why the socket is group-owned by 65532 and
+opened `0660`. Vault Proxy 1.20 applies a Unix socket's permissions only when all three
+`socket_*` fields are set. The bundle gives the Identity Service
+`VAULT_ADDR=unix:///vault-proxy/proxy.sock` and no `VAULT_TOKEN`, as B above says, and it
+mounts a `vaultlogs` volume at `/vault/logs` for a file audit device to write to.
+
+On first start the server is uninitialised and sealed, and the bundle's healthcheck counts
+that as healthy, because the container answers. Initialising it, and enabling the auth
+method and role the Proxy logs in with, the KV v2 mount `vault_kv_mount` names (§3) and the
+`fora-identity` policy (§4), is the deployment's own bootstrap, done once.
 
 **There will be no confirmation in the logs.** The Identity Service does not contact
 Vault at start-up, so a wrong address or a bad token produces a service that boots

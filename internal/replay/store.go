@@ -48,7 +48,7 @@ type Store interface {
 
 // RedisStore implements Store via SETNX + EX. Keys are namespaced under the
 // configured prefix so the same Redis instance can host multiple replay stores
-// without collision (e.g. Broker execute relay and Broker discover relay).
+// without collision (e.g. the Broker's and an Exchange's verify seams).
 type RedisStore struct {
 	client *redis.Client
 	prefix string

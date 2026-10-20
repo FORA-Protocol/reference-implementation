@@ -1,305 +1,295 @@
-"""E2E: Exchange idempotency-replay conformance against the REAL Exchange.
+"""E2E: idempotency keys on ExecuteTransaction, against the real Exchanges.
 
-Closes the ONE residual drift risk the mock-Exchange disposition kept open:
-the broker-side
-mock proves the broker relays a resent ``idempotency_key`` without dedup, but it
-FAKES the Exchange's half by deriving ``tx_id`` deterministically from the key.
-This suite proves the real half — ``fora.proto`` conformance: *a replay returns
-the original result rather than re-executing* (``exchange_batch.go``
-``replayBatchResponse``: durable probe on the derived per-item key
-``idempotency_key:offer_id`` over persisted ``transaction_log`` rows).
+The rule is stated once in the file header of ``fora.proto`` in the pinned module
+``github.com/FORA-Protocol/protocol`` ("Idempotency"):
 
-Round-trip honesty
-------------------
-The happy leg drives the FULL chain — agent → Broker relay (sig1 verify,
-re-package, sig2) → real Exchange — twice with one ``idempotency_key``, and
-asserts through the same public surface: both relays return 200 and the SAME
-``transaction_id`` / ``retrieval_endpoint`` (the verbatim original response).
-The no-double-charge half reads the ledger row count directly: a BLACK-BOX e2e
-exception — the transaction ledger has NO protocol read surface BY
-DESIGN, so observing the deployment's datastore is the only way to assert the
-absent side effect (no second row, no second charge) end-to-end.
+* a key is scoped to the agent, meaning its key directory, whatever the route:
+  the request signature authenticates the agent on a request it signed, and its
+  acceptances on a purchase the Broker re-packaged. A key another agent used is a
+  different key in a different scope, never a collision and never answered from
+  another scope's stored result;
+* within one scope, the same key with the same request is a replay, answered
+  with the stored result, and executes nothing again;
+* within one scope, the same key with a different request (different items, or
+  the same items in another order) is refused with ``already_exists``, carrying
+  an ``ErrorDetail`` with no typed reason. Nothing is executed and the stored
+  result is unchanged.
 
-Foreign-agent negative (Doctrine #10)
--------------------------------------
-The replay ownership gate lives in the EXCHANGE (``replayBatchResponse``: the
-stored result is served only to a caller that proves possession of the agent
-key the rows are bound to; a foreign principal gets PermissionDenied, never the
-URL). It is asserted agent-direct on ``ExchangeService/ExecuteTransaction``
-because that is the surface that owns the refusal — the Broker relay folds ANY
-upstream whole-call error into a synthesized per-item CONTENT_UNAVAILABLE
-denial (``relay/batch.go`` ``collectGroupDenials``), which cannot distinguish
-the ownership refusal from plain unavailability. Same surface-selection
-rationale as ``test_offer_redemption`` (tampering is only expressible where the
-test holds the offer).
+Every purchase goes through the SDK's own clients as the test's own agents
+(``fresh_agent``), and every charge is read through ``GetAccountStatus``. The
+resources are flat-priced (``harness.money_path``).
 """
 
 from __future__ import annotations
 
-import time
 import uuid
-from typing import Any, cast
 
-import httpx
-import psycopg
+from collections.abc import Callable
+
 import pytest
+from fora_sdk.client import CallError
+from wire.models import TransactionResultItem
 
-from fora_sdk.core import sign_offer_acceptance_jcs
-from fora_sdk import ProtocolVersion
+from .defects import FOREIGN_IDEMPOTENCY_KEY_REFUSED, RETRY_ON_ANOTHER_ROUTE_REFUSED
+from .exchanges import EXCHANGE_A_DOMAIN, EXCHANGE_B_DOMAIN, EXCHANGE_C_DOMAIN
+from .fresh_agent import AgentFactory, FreshAgent
+from .money_path import (
+    ARISTOTLE,
+    PAPER_SATELLITES,
+    SCI_FI_DOOR,
+    THALES,
+    assert_bought,
+    assert_moved,
+    charged,
+    discover_offer,
+    only_item,
+    resolve_offers,
+    spent_per_exchange,
+    typed_reasons,
+)
+from .obligation_registry import Obligation, obligation
 
-from .broker_client import resolve
-from .conftest import COMPOSE_FILE, StackURLs
-from .httpsig_signer import load_keypair
-from .relay import relay_execute
-from .resolve_carriers import first_item_of, retrieval_endpoint_of
-from .seed import DEMO_PHILOSOPHY_DOMAIN, SeededFixture, _resolve_pg_dsn
-from .signing import USD_AGENT_KEY_PATH, sign_post
-
-# ADR-008 D5 — declare stack-isolation contract.
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
-_EXECUTE_PATH = "/fora.v1.ExchangeService/ExecuteTransaction"
 
-# 10,000.00 USD: above any plausible demo cost → the budget pre-flight always
-# passes; this suite is about execute-time idempotency, not the budget gate.
-_BUDGET_AMPLE = 1_000_000
-
-# epicurus: PER_UNIT 0.0001/characters USD — a PAID resource on the PRIMARY
-# exchange (`exchange`, catalog DB `fora`), so the ledger reads below target the
-# same DB the demo flow tests use. The sfx/music resources live on exchange-c/b
-# with their own DBs (`fora_c`/`fora_b`) — using one of those here would route
-# the relay to a different exchange than the ledger read (the first version of
-# this suite made exactly that mistake).
-_RESOURCE_URI = f"http://{DEMO_PHILOSOPHY_DOMAIN}/articles/philosophers/epicurus.txt"
+def _key(label: str) -> str:
+    return f"idem-{label}-{uuid.uuid4().hex}"
 
 
-def _discover_priced_offer(compose_stack: StackURLs, *, agent_id: str) -> dict[str, Any]:
-    """Broker-Resolve the paid epicurus resource as its USD buyer; return the winning offer."""
-    resp = resolve(
-        compose_stack,
-        {
-            "agent_id": agent_id,
-            "uri": _RESOURCE_URI,
-            "intended_use": "ai-input",
-            "budget_minor": _BUDGET_AMPLE,
-            "currency": "USD",
-        },
-        key_path=USD_AGENT_KEY_PATH,
-    )
-    assert resp.status_code == httpx.codes.OK, resp.text
-    payload = cast(dict[str, Any], resp.json())
-    groups = cast(list[dict[str, Any]], payload.get("offer_groups") or [])
-    offers = [o for g in groups for o in cast(list[dict[str, Any]], g.get("offers") or [])]
-    assert offers, f"Resolve surfaced no offer to execute: {payload}"
-    return offers[0]
+@obligation(Obligation.RELAY_013)
+def test_a_broker_purchase_retried_with_its_key_is_answered_from_each_exchanges_stored_result(
+    fresh_agent: FreshAgent,
+) -> None:
+    """Two Broker purchases across two Exchanges under ONE key: one transaction per item.
 
-
-def _ledger_rows_for_derived_key(derived_key: str) -> list[tuple[str, str]]:
-    """(transaction_id, idempotency_key) rows for the derived per-item key.
-
-    BLACK-BOX e2e exception: the ledger has no protocol read surface
-    by design, so the no-double-charge side effect is observable only on the
-    deployment's datastore — not an in-process layer bypass.
+    The retry must return the ORIGINAL result from each Exchange (same
+    transaction_id, same signed retrieval_endpoint, same billing_id) rather than
+    re-executing, and each Exchange must charge once: each balance drops by its
+    item's cost on the first purchase and stays put on the retry.
     """
-    dsn = _resolve_pg_dsn(str(COMPOSE_FILE))
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT transaction_id, idempotency_key
-            FROM fora.transaction_log
-            WHERE idempotency_key = %s
-            """,
-            (derived_key,),
+    uris = [SCI_FI_DOOR, PAPER_SATELLITES]
+    exchanges = [EXCHANGE_C_DOMAIN, EXCHANGE_B_DOMAIN]
+    fresh_agent.fund(*exchanges)
+    offers = resolve_offers(fresh_agent, uris)
+    idem = _key("relay-replay")
+
+    before = fresh_agent.balances(*exchanges)
+    # No pause between the two: every SDK request signature carries a fresh
+    # nonce, so the retry is a new signature over the same body, as a real
+    # retrying agent's would be.
+    first = fresh_agent.broker.execute(offers, idempotency_key=idem).items or []
+    after_first = fresh_agent.balances(*exchanges)
+    second = fresh_agent.broker.execute(offers, idempotency_key=idem).items or []
+    after_second = fresh_agent.balances(*exchanges)
+
+    for uri, one, two in zip(uris, first, second, strict=True):
+        assert_bought(one, f"first purchase of {uri}")
+        assert (two.transaction_id, two.retrieval_endpoint, two.billing_id) == (
+            one.transaction_id,
+            one.retrieval_endpoint,
+            one.billing_id,
+        ), f"{uri}: the retry was executed again instead of replayed: {one} then {two}"
+    assert_moved(before, after_first, spent_per_exchange(uris, first))
+    assert after_second == after_first, (
+        f"the retry moved money: {after_first} -> {after_second}; it must charge nothing"
+    )
+
+
+@obligation(Obligation.MONEY_008, negative=True)
+def test_a_direct_replay_is_answered_once_and_a_reused_key_with_other_items_is_refused(
+    fresh_agent: FreshAgent,
+) -> None:
+    """The same key and items replay the purchase; the same key with another offer is refused.
+
+    The agent buys Aristotle under key K, and buys it again under K: the second
+    answer is the first transaction, charged once. It then sends Thales under the
+    same K, a different request in the same scope: refused already_exists, with
+    an ErrorDetail carrying no typed reason, and nothing is charged. A last replay
+    of the Aristotle purchase under K still answers the first transaction, so the
+    refused request left the stored result unchanged.
+    """
+    fresh_agent.fund(EXCHANGE_A_DOMAIN)
+    exchange = fresh_agent.exchange(EXCHANGE_A_DOMAIN)
+    aristotle, thales = discover_offer(fresh_agent, ARISTOTLE), discover_offer(fresh_agent, THALES)
+    idem = _key("direct")
+
+    before = fresh_agent.balances(EXCHANGE_A_DOMAIN)
+    first = only_item(exchange.execute(aristotle, idempotency_key=idem), "first purchase")
+    assert_bought(first, "first purchase")
+    replay = only_item(exchange.execute(aristotle, idempotency_key=idem), "replay")
+    assert replay.transaction_id == first.transaction_id, f"replay executed again: {replay}"
+    after_replay = fresh_agent.balances(EXCHANGE_A_DOMAIN)
+    currency, cost = charged(first)
+    assert_moved(before, after_replay, {EXCHANGE_A_DOMAIN: {currency: cost}})
+
+    try:
+        answered = exchange.execute(thales, idempotency_key=idem)
+    except CallError as refused:
+        assert refused.code == "already_exists", f"refused as {refused.code!r}: {refused}"
+        assert refused.detail is not None, f"the refusal carries no ErrorDetail: {refused}"
+        assert not typed_reasons(refused), (
+            f"the refusal carries a typed reason, and the protocol gives it none: {refused.detail}"
         )
-        return [(str(r[0]), str(r[1])) for r in cur.fetchall()]
+    else:
+        raise AssertionError(f"the reused key with another offer was answered: {answered}")
+    assert fresh_agent.balances(EXCHANGE_A_DOMAIN) == after_replay, "the refused reuse moved money"
 
-
-def _execute_direct_with_key(
-    exchange_url: str,
-    offer: dict[str, Any],
-    *,
-    agent_id: str,
-    domain: str,
-    key_path: Any,
-    idempotency_key: str,
-) -> httpx.Response:
-    """Agent-direct ExecuteTransaction presenting ``offer`` under a CALLER-CHOSEN key.
-
-    Mirrors ``obligations/flow.execute_offer`` but takes ``idempotency_key``
-    explicitly — the replay legs need the SAME key across calls (flow.py mints a
-    fresh one per call). The acceptance is detached-signed with THIS caller's
-    key over the presented offer signature + requester + the shared key, so a
-    foreign caller presents a VALID acceptance of its own — the refusal under
-    test is the replay ownership gate (bound-agent mismatch), never a malformed
-    acceptance.
-    """
-    offer_signature = offer.get("signature")
-    assert offer_signature, f"discovered offer carries no signature: {offer!r}"
-    _, priv = load_keypair(key_path)
-    acceptance_sig, acceptance_alg = sign_offer_acceptance_jcs(
-        seed=priv.private_bytes_raw(),
-        offer_sig=str(offer_signature),
-        requester_id=agent_id,
-        requester_domain=domain,
-        idempotency_key=idempotency_key,
+    last = only_item(exchange.execute(aristotle, idempotency_key=idem), "replay after the reuse")
+    assert last.transaction_id == first.transaction_id, (
+        f"the stored result under the key changed: {first.transaction_id} -> {last.transaction_id}"
     )
-    return sign_post(
-        f"{exchange_url}{_EXECUTE_PATH}",
-        body={
-            "ver": ProtocolVersion,
-            "idempotency_key": idempotency_key,
-            "requester": {
-                "id": agent_id,
-                "domain": domain,
-                "type": "REQUESTER_TYPE_AGENT",
-            },
-            "items": [
-                {
-                    "offer": offer,
-                    "agent_acceptance": {
-                        "signature": acceptance_sig,
-                        "signature_algorithm": acceptance_alg,
-                    },
-                }
-            ],
+
+
+@obligation(Obligation.MONEY_009)
+@FOREIGN_IDEMPOTENCY_KEY_REFUSED.mark
+def test_another_agents_key_is_a_different_key_and_buys_as_its_own(
+    fresh_agent_factory: AgentFactory,
+) -> None:
+    """Agent B uses the key agent A already bought under: B's purchase is its own.
+
+    A buys Aristotle directly under key K. B, funded at the same Exchange, buys
+    the same offer directly under the same K, with its own acceptance. Keys are
+    scoped to the agent, so B's request is not a replay of A's: B gets a transaction
+    of its own and a delivery URL that is not A's, B is charged the cost, and A's
+    balance does not move.
+    """
+    owner, other = fresh_agent_factory(), fresh_agent_factory()
+    owner.fund(EXCHANGE_A_DOMAIN)
+    other.fund(EXCHANGE_A_DOMAIN)
+    offer = discover_offer(owner, ARISTOTLE)
+    idem = _key("per-agent")
+
+    first = only_item(owner.exchange(EXCHANGE_A_DOMAIN).execute(offer, idempotency_key=idem), "A")
+    assert_bought(first, "A's purchase")
+    owner_before = owner.balances(EXCHANGE_A_DOMAIN)
+    other_before = other.balances(EXCHANGE_A_DOMAIN)
+
+    try:
+        answer = other.exchange(EXCHANGE_A_DOMAIN).execute(offer, idempotency_key=idem)
+    except CallError as refused:
+        FOREIGN_IDEMPOTENCY_KEY_REFUSED.check(
+            refused.code != "permission_denied", f"B's purchase was refused: {refused}"
+        )
+        raise
+    second = only_item(answer, "B's purchase under A's key")
+    assert_bought(second, "B's purchase under A's key")
+    assert second.transaction_id != first.transaction_id, "B was answered from A's stored result"
+    assert second.retrieval_endpoint != first.retrieval_endpoint, "B received A's delivery URL"
+    currency, cost = charged(second)
+    assert_moved(
+        {"A": owner_before[EXCHANGE_A_DOMAIN], "B": other_before[EXCHANGE_A_DOMAIN]},
+        {
+            "A": owner.balances(EXCHANGE_A_DOMAIN)[EXCHANGE_A_DOMAIN],
+            "B": other.balances(EXCHANGE_A_DOMAIN)[EXCHANGE_A_DOMAIN],
         },
-        key_path=key_path,
+        {"B": {currency: cost}},
     )
 
 
-def test_relay_replay_same_key_returns_original_transaction_no_double_charge(
-    compose_stack: StackURLs,
-    seeded: SeededFixture,
+@obligation(Obligation.RELAY_014)
+@FOREIGN_IDEMPOTENCY_KEY_REFUSED.mark
+def test_two_agents_behind_the_broker_with_one_key_each_buy_as_themselves(
+    fresh_agent_factory: AgentFactory,
 ) -> None:
-    """Two broker-relayed executes under ONE idempotency_key → one transaction.
+    """Two agents relay through the one Broker under the same key: each buys as itself.
 
-    The second relay must return the ORIGINAL result (same transaction_id, same
-    signed retrieval_endpoint) rather than re-executing, and the ledger must
-    hold exactly ONE row under the derived per-item key — no double charge.
+    The Broker is the verified signer of both sub-requests, but the Exchange
+    scopes each key to the agent the sub-request's acceptances authenticate,
+    whatever the route. A buys Sci-Fi Door through the Broker under K, then B buys
+    the same offer through the Broker under K: B's item is its own transaction with
+    its own delivery URL, and B is charged.
     """
-    agent_id = seeded.usd_agent_id
-    offer = _discover_priced_offer(compose_stack, agent_id=agent_id)
-    idem = f"idem-replay-{uuid.uuid4().hex}"
+    owner, other = fresh_agent_factory(), fresh_agent_factory()
+    owner.fund(EXCHANGE_C_DOMAIN)
+    other.fund(EXCHANGE_C_DOMAIN)
+    offers = resolve_offers(owner, [SCI_FI_DOOR])
+    idem = _key("relay-per-agent")
 
-    first = relay_execute(
-        compose_stack.broker,
-        offer,
-        agent_id=agent_id,
-        domain=DEMO_PHILOSOPHY_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
-        idempotency_key=idem,
+    first = only_item(owner.broker.execute(offers, idempotency_key=idem), "A through the Broker")
+    assert_bought(first, "A through the Broker")
+    other_before = other.balances(EXCHANGE_C_DOMAIN)
+    second = only_item(other.broker.execute(offers, idempotency_key=idem), "B through the Broker")
+    FOREIGN_IDEMPOTENCY_KEY_REFUSED.check(
+        second.refusal is None or second.refusal.code != "permission_denied",
+        f"B's relayed purchase was refused: {second.refusal}",
     )
-    assert first.status_code == httpx.codes.OK, first.text
-    first_item = first_item_of(cast(dict[str, Any], first.json()))
-    assert first_item is not None, f"first execute carried no items[0]: {first.text}"
-    first_tx = first_item.get("transaction_id")
-    first_url = retrieval_endpoint_of(first_item)
-    assert first_tx, f"transaction_id missing from first execute: {first_item}"
-    assert first_url, f"retrieval_endpoint missing from first execute: {first_item}"
-
-    # The relay body is byte-identical on a replay (same offer, same requester,
-    # same idempotency_key → the SAME deterministic Ed25519 acceptance), and
-    # sig1's base covers `created` in whole seconds — two relays inside one
-    # second would carry an IDENTICAL sig1, which the broker's anti-replay
-    # store (keyID+signature) rightly refuses. Cross the second boundary so the
-    # replay is a fresh signature over the same body, as a real retrying agent's
-    # would be.
-    time.sleep(1.1)
-
-    second = relay_execute(
-        compose_stack.broker,
-        offer,
-        agent_id=agent_id,
-        domain=DEMO_PHILOSOPHY_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
-        idempotency_key=idem,
-    )
-    assert second.status_code == httpx.codes.OK, (
-        f"replayed idempotency_key must return the original result, got "
-        f"{second.status_code}: {second.text[:512]}"
-    )
-    second_item = first_item_of(cast(dict[str, Any], second.json()))
-    assert second_item is not None, f"replay carried no items[0]: {second.text}"
-
-    # Conformance core: the replay IS the original result — same transaction,
-    # same agent-bound signed URL (reconstructed verbatim from the persisted
-    # row), never a second mint.
-    assert second_item.get("transaction_id") == first_tx, (
-        f"replay minted a NEW transaction: first={first_tx!r} "
-        f"second={second_item.get('transaction_id')!r}"
-    )
-    assert retrieval_endpoint_of(second_item) == first_url, (
-        "replay must return the ORIGINAL signed retrieval_endpoint verbatim"
-    )
-    assert second_item.get("billing_id") == first_item.get("billing_id"), (
-        "replay must echo the original billing_id, not open a new billing leg"
-    )
-
-    # No double charge: exactly ONE ledger row under the derived per-item key,
-    # and it is the first transaction (black-box datastore read — see helper).
-    rows = _ledger_rows_for_derived_key(f"{idem}:{offer.get('offer_id')}")
-    assert len(rows) == 1, f"expected exactly one ledger row for the replayed key, got {rows!r}"
-    assert rows[0][0] == first_tx, (
-        f"ledger row {rows[0][0]!r} does not match the returned transaction {first_tx!r}"
+    assert_bought(second, "B through the Broker under A's key")
+    assert second.transaction_id != first.transaction_id, "B was answered from A's stored result"
+    assert second.retrieval_endpoint != first.retrieval_endpoint, "B received A's delivery URL"
+    currency, cost = charged(second)
+    assert_moved(
+        other_before,
+        other.balances(EXCHANGE_C_DOMAIN),
+        {EXCHANGE_C_DOMAIN: {currency: cost}},
     )
 
 
-def test_foreign_agent_replay_of_same_key_is_refused_without_leaking_url(
-    compose_stack: StackURLs,
-    seeded: SeededFixture,
+@obligation(Obligation.RELAY_014, Obligation.RELAY_009)
+@RETRY_ON_ANOTHER_ROUTE_REFUSED.mark
+@pytest.mark.parametrize(
+    "broker_first", [True, False], ids=["broker-then-direct", "direct-then-broker"]
+)
+def test_a_purchase_retried_on_another_route_is_answered_from_the_stored_result(
+    fresh_agent: FreshAgent, broker_first: bool
 ) -> None:
-    """A FOREIGN agent replaying someone else's idempotency_key+offer is refused.
+    """The same key and item from the same agent name one purchase, whichever route carries them.
 
-    The stored result carries a signed URL bound to the ORIGINAL agent; the
-    derived probe key is a client-chosen token, not a bearer secret. The
-    Exchange's ownership gate must refuse the foreign principal
-    (PermissionDenied) and never hand back the stored result — and the refusal
-    must leave the ledger untouched (still exactly one row).
+    The agent buys the Sci-Fi Door (exchange-c) and Paper Satellites (exchange-b) in
+    one Broker purchase under key K, and Paper Satellites directly at exchange-b under
+    K, in either order. Both times exchange-b sees the same item under the same key
+    from the same agent, so the second answer is the first: the same transaction_id,
+    delivery URL and billing_id, and exchange-b charges once.
+
+    The charge is checked first: exchange-b charging once holds today, when the retry
+    is refused, and after the fix alike. The defect check is keyed on the refusal
+    itself, already_exists, so a retry that was sold a second time fails the test
+    outright instead of passing as the known defect.
     """
-    agent_id = seeded.usd_agent_id
-    offer = _discover_priced_offer(compose_stack, agent_id=agent_id)
-    idem = f"idem-foreign-{uuid.uuid4().hex}"
+    uris = [SCI_FI_DOOR, PAPER_SATELLITES]
+    fresh_agent.fund(EXCHANGE_C_DOMAIN, EXCHANGE_B_DOMAIN)
+    offers = resolve_offers(fresh_agent, uris)
+    idem = _key("cross-route")
 
-    # Original execute by the rightful buyer (broker relay, full chain).
-    first = relay_execute(
-        compose_stack.broker,
-        offer,
-        agent_id=agent_id,
-        domain=DEMO_PHILOSOPHY_DOMAIN,
-        key_path=USD_AGENT_KEY_PATH,
-        idempotency_key=idem,
-    )
-    assert first.status_code == httpx.codes.OK, first.text
-    first_item = first_item_of(cast(dict[str, Any], first.json()))
-    assert first_item is not None and first_item.get("transaction_id"), first.text
-    first_url = retrieval_endpoint_of(first_item)
-    assert first_url, f"precondition: the original execute must mint a URL: {first_item}"
+    def through_broker() -> TransactionResultItem | CallError:
+        items = fresh_agent.broker.execute(offers, idempotency_key=idem).items or []
+        assert len(items) == len(uris), f"one purchase of {len(uris)} offers answered {items}"
+        return items[uris.index(PAPER_SATELLITES)]
 
-    # Foreign registered agent presents the SAME key + SAME offer with a valid
-    # acceptance of its OWN — agent-direct on the PRIMARY Exchange (the exchange
-    # that issued this offer and persisted the rows), the surface that owns the
-    # ownership refusal (the broker folds upstream errors into an
-    # undifferentiated CONTENT_UNAVAILABLE denial; see module docstring).
-    foreign = _execute_direct_with_key(
-        compose_stack.exchange,
-        offer,
-        agent_id=seeded.nobilling_agent_id,
-        domain=DEMO_PHILOSOPHY_DOMAIN,
-        key_path=seeded.nobilling_agent_key_path,
-        idempotency_key=idem,
-    )
-    assert foreign.status_code == httpx.codes.FORBIDDEN, (
-        f"foreign replay must be PermissionDenied, got {foreign.status_code}: {foreign.text[:512]}"
-    )
-    # The stored result (the original agent's bound URL) must never leak on the
-    # refusal body.
-    assert first_url not in foreign.text, (
-        "foreign replay refusal leaked the original agent's signed URL"
-    )
+    def direct() -> TransactionResultItem | CallError:
+        exchange = fresh_agent.exchange(EXCHANGE_B_DOMAIN)
+        try:
+            answer = exchange.execute(offers[uris.index(PAPER_SATELLITES)], idempotency_key=idem)
+        except CallError as refused:
+            return refused
+        return only_item(answer, "the direct purchase")
 
-    # Refusal left no ledger side effect: still exactly one row, the original's.
-    rows = _ledger_rows_for_derived_key(f"{idem}:{offer.get('offer_id')}")
-    assert len(rows) == 1, f"foreign replay must not add/remove ledger rows; got {rows!r}"
-    assert rows[0][0] == first_item.get("transaction_id"), (
-        "surviving ledger row must remain the ORIGINAL transaction"
+    routes: list[Callable[[], TransactionResultItem | CallError]] = [through_broker, direct]
+    first_route, second_route = routes if broker_first else routes[::-1]
+    first = first_route()
+    assert isinstance(first, TransactionResultItem), f"the first purchase was refused: {first}"
+    assert_bought(first, "the first purchase of Paper Satellites")
+    after_first = fresh_agent.balances(EXCHANGE_B_DOMAIN)
+
+    second = second_route()
+    assert fresh_agent.balances(EXCHANGE_B_DOMAIN) == after_first, (
+        "the retry charged exchange-b again"
     )
+    RETRY_ON_ANOTHER_ROUTE_REFUSED.check(
+        not _refused_already_exists(second),
+        f"the retry on the other route came back as {second!r}",
+    )
+    assert isinstance(second, TransactionResultItem) and second.refusal is None, (
+        f"the retry on the other route was refused: {second!r}"
+    )
+    assert (second.transaction_id, second.retrieval_endpoint, second.billing_id) == (
+        first.transaction_id,
+        first.retrieval_endpoint,
+        first.billing_id,
+    ), f"the retry was not answered from the stored result: {second!r}"
+
+
+def _refused_already_exists(answer: TransactionResultItem | CallError) -> bool:
+    """Whether a retry was refused already_exists: directly, or as the Broker's per-item refusal."""
+    if isinstance(answer, CallError):
+        return answer.code == "already_exists"
+    return answer.refusal is not None and answer.refusal.code == "already_exists"

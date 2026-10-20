@@ -4,23 +4,15 @@ package db_test
 
 import (
 	"context"
-	"errors"
 	"testing"
-
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	sharedb "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/db"
 )
 
-// raiseExceptionSQLState is what a plpgsql RAISE EXCEPTION without an explicit
-// SQLSTATE reports.
-const raiseExceptionSQLState = "P0001"
-
 // TestTransactionEvidenceSchema covers what migration 000024 guarantees about
-// fora.transaction_evidence: it is append-once (the only triggers in the exchange
-// schema, and the branch's headline integrity control), its columns refuse values
-// that could never have been verified, and it reverses cleanly.
+// fora.transaction_evidence: it is append-once (one of the two tables the shared
+// refusal function guards, with fora.transaction_events), its columns refuse
+// values that could never have been verified, and it reverses cleanly.
 //
 // It lives at the infra layer rather than beside the RPC tests because every
 // property here is a DDL one: EvidenceRepo deliberately exposes no mutation and
@@ -49,8 +41,10 @@ func TestTransactionEvidenceSchema(t *testing.T) {
 		t.Fatal("after up: fora.transaction_evidence is missing")
 	}
 
-	assertTruncateRejected(t, ctx, dsn)
-	assertRowMutationTriggerCovers(t, ctx, dsn)
+	// At head the triggers call the shared refusal function, which 000044 renamed
+	// from prevent_evidence_mutation. The message is the one 000024 raised.
+	assertTruncateRefused(t, ctx, dsn, evidenceGuard(refusalFunction))
+	assertRowMutationTriggerCovers(t, ctx, dsn, evidenceGuard(refusalFunction))
 	assertEvidenceBoundToTransactionLog(t, ctx, dsn)
 	assertCorrelationKeyIndexed(t, ctx, dsn)
 	assertColumnShape(t, ctx, dsn)
@@ -67,54 +61,8 @@ func TestTransactionEvidenceSchema(t *testing.T) {
 	if schemaProbe.HasFunction(t, ctx, dsn, "prevent_evidence_mutation") {
 		t.Fatal("after down 000024: fora.prevent_evidence_mutation() was left behind")
 	}
-}
-
-// assertTruncateRejected proves the guard function raises. A BEFORE TRUNCATE
-// statement trigger fires regardless of row count, so this needs no fixture.
-func assertTruncateRejected(t *testing.T, ctx context.Context, dsn string) {
-	t.Helper()
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("pool: %v", err)
-	}
-	defer pool.Close()
-
-	_, err = pool.Exec(ctx, "TRUNCATE fora.transaction_evidence")
-	if err == nil {
-		t.Fatal("TRUNCATE fora.transaction_evidence succeeded; the append-once trigger did not fire")
-	}
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != raiseExceptionSQLState {
-		t.Fatalf("TRUNCATE rejected with %v, want SQLSTATE %s from the append-once guard", err, raiseExceptionSQLState)
-	}
-}
-
-// assertRowMutationTriggerCovers pins the row trigger to BOTH operations AND to
-// the guard function. The pg_trigger.tgtype bits are ROW=1, BEFORE=2, INSERT=4,
-// DELETE=8, UPDATE=16.
-//
-// tgfoid is the load-bearing predicate, not a detail: a trigger correctly wired
-// to BEFORE/ROW/UPDATE/DELETE but pointing at a permissive function — one that
-// returns NEW instead of raising — satisfies every operation-set assertion while
-// silently allowing evidence to be rewritten. Without it this probe proves the
-// trigger is shaped right, not that it refuses anything.
-func assertRowMutationTriggerCovers(t *testing.T, ctx context.Context, dsn string) {
-	t.Helper()
-	const q = `
-		SELECT EXISTS (
-			SELECT 1 FROM pg_trigger
-			WHERE tgrelid = 'fora.transaction_evidence'::regclass
-			  AND tgname = 'trg_transaction_evidence_no_row_mutation'
-			  AND NOT tgisinternal
-			  AND (tgtype & 16) = 16   -- UPDATE
-			  AND (tgtype & 8)  = 8    -- DELETE
-			  AND (tgtype & 1)  = 1    -- FOR EACH ROW
-			  AND (tgtype & 2)  = 2    -- BEFORE
-			  AND tgfoid = 'fora.prevent_evidence_mutation()'::regprocedure
-		)`
-	if !schemaProbe.Exists(t, ctx, dsn, q) {
-		t.Fatal("trg_transaction_evidence_no_row_mutation is not a BEFORE UPDATE OR DELETE row " +
-			"trigger bound to fora.prevent_evidence_mutation()")
+	if schemaProbe.HasFunction(t, ctx, dsn, refusalFunction) {
+		t.Fatalf("after down 000024: fora.%s() was left behind", refusalFunction)
 	}
 }
 

@@ -3,7 +3,7 @@
 The key-gen scripts (``scripts/gen-e2e-keys.sh``,
 ``scripts/gen-examplenews-publisher-key.sh``,
 ``scripts/gen-buyer-delegation-key.sh``, and
-``deploy/terraform/scripts/gen-staging-keys.sh``) embed ``python3`` heredocs
+``deploy/terraform/scripts/gen-keys.sh``) embed ``python3`` heredocs
 that mint Ed25519 keypairs and, for the identity scripts, emit public Web Bot
 Auth directory entries. The keypair mint and the WBA entry shape each used to
 live in several byte-identical copies; they live here once. Each script keeps
@@ -29,6 +29,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -39,6 +40,45 @@ from cryptography.hazmat.primitives.serialization import (
     PrivateFormat,
     PublicFormat,
 )
+
+
+def _sibling_temp(target: Path, text: str, mode: int) -> Path:
+    """Write ``text`` to a fresh temporary file beside ``target``, with ``mode``; return its path."""
+    fd, name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    with os.fdopen(fd, "w") as handle:
+        handle.write(text)
+    os.chmod(name, mode)
+    return Path(name)
+
+
+def write_text_atomic(path, text: str, mode: int) -> None:
+    """Replace ``path`` with ``text`` so a concurrent reader sees the old file or the new one.
+
+    Several e2e stacks of one checkout can come up at once, and each runs the
+    key-gen scripts before compose reads what they wrote. A plain write truncates
+    the file first, so a reader that lands in between gets an empty or partial
+    file. The text goes to a sibling temporary file, which then takes the name in
+    one rename.
+    """
+    target = Path(path)
+    os.replace(_sibling_temp(target, text, mode), target)
+
+
+def create_text_exclusive(path, text: str, mode: int) -> bool:
+    """Create ``path`` holding ``text`` unless it exists; return whether this call created it.
+
+    The file appears complete or not at all, and when two callers race to create
+    it, exactly one wins: the other finds the winner's file and keeps it.
+    """
+    target = Path(path)
+    tmp = _sibling_temp(target, text, mode)
+    try:
+        os.link(tmp, target)
+    except FileExistsError:
+        return False
+    finally:
+        tmp.unlink()
+    return True
 
 
 def b64u(b: bytes) -> str:
@@ -114,29 +154,26 @@ def materialize_keypair(path, kid: str, mode: int = 0o600) -> str:
     read-only into distroless/nonroot containers across a UID boundary.
     """
     fixture = Path(path)
-    if fixture.exists():
-        spec = json.loads(fixture.read_text())
-        pub_b64 = spec["public_key"]
-        if "issuer" not in spec:
-            spec["issuer"] = kid
-            fixture.write_text(json.dumps(spec, indent=2) + "\n")
-    else:
+    if not fixture.exists():
         seed_b64, pub_b64 = generate_seed_pub_b64()
-        fixture.write_text(
-            json.dumps(
-                {
-                    "kid": kid,
-                    "issuer": kid,
-                    "kty": "OKP",
-                    "crv": "Ed25519",
-                    "alg": "EdDSA",
-                    "private_key": seed_b64,
-                    "public_key": pub_b64,
-                },
-                indent=2,
-            )
-            + "\n"
-        )
+        spec = {
+            "kid": kid,
+            "issuer": kid,
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "alg": "EdDSA",
+            "private_key": seed_b64,
+            "public_key": pub_b64,
+        }
+        # Exclusive: a concurrent run that created the fixture first wins, and
+        # its key is the one read back below, so every file derived from the
+        # fixture in either run names the same key.
+        create_text_exclusive(fixture, json.dumps(spec, indent=2) + "\n", mode)
+    spec = json.loads(fixture.read_text())
+    pub_b64 = spec["public_key"]
+    if "issuer" not in spec:
+        spec["issuer"] = kid
+        write_text_atomic(fixture, json.dumps(spec, indent=2) + "\n", mode)
     os.chmod(fixture, mode)
     return pub_b64
 

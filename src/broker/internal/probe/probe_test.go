@@ -142,3 +142,69 @@ func TestProbe_RefusedVersionReturnsErrManifestVersionRefused(t *testing.T) {
 		})
 	}
 }
+
+// TestProbe_BrokenDocumentReturnsErrManifestUnusable pins the fourth outcome the
+// prober tells apart, and the reason it is not the outage one.
+//
+// A manifest that arrived and broke a document rule has answered as finally as a
+// refused version has: the origin serves those bytes, and the next fetch returns
+// them again. Folded into ErrProbeFailed it reaches an agent as
+// TEMPORARILY_UNAVAILABLE, so the Broker re-probes a publisher whose manifest
+// names the wrong role for as long as it stays wrong. The siblings are named in
+// the assertions because the defect is not "no error" but "the wrong one of four".
+func TestProbe_BrokenDocumentReturnsErrManifestUnusable(t *testing.T) {
+	for name, body := range map[string]string{
+		// Reads cleanly and is refused only on the role it declares.
+		"wrong role": `{"ver":"1.0","role":"ROLE_EXCHANGE","domain":"mp.example"}`,
+		// Valid JSON at an accepted version, refused on the wire shape.
+		"broken shape": `{"ver":"1.0","role":"ROLE_PUBLISHER","domain":"acme.example",` +
+			`"exchanges":[{"domain":"mp.example","endpoint":"not-a-url","relationship":"nonsense"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			origin := testutil.NewOrigin([]byte(body))
+			defer origin.Close()
+
+			p := probe.New(&rewritingClient{base: origin.URL}, sharedtest.DiscardLogger(),
+				probe.Options{Scheme: "http", TTL: time.Minute})
+
+			_, err := p.Probe(context.Background(), "acme.example")
+			if !errors.Is(err, probe.ErrManifestUnusable) {
+				t.Fatalf("Probe err = %v, want ErrManifestUnusable", err)
+			}
+			if errors.Is(err, probe.ErrProbeFailed) {
+				t.Error("a broken document must not surface as ErrProbeFailed — an agent would retry it")
+			}
+			if errors.Is(err, probe.ErrManifestMissing) {
+				t.Error("a broken document must not surface as ErrManifestMissing — the document exists")
+			}
+			if errors.Is(err, probe.ErrManifestVersionRefused) {
+				t.Error("a broken document must not surface as ErrManifestVersionRefused — " +
+					"the version was accepted and the refusal is about the rest of the document")
+			}
+		})
+	}
+}
+
+// TestProbe_UnparsableBodyStaysAnOutage is the other half of the split above, and
+// the one that keeps ErrManifestUnusable honest.
+//
+// A body that never parsed says nothing about what the publisher serves: a proxy
+// answering 200 with an error page produces exactly this, and the next fetch may
+// return the real document. Classifying it as a verdict would refuse the
+// publisher permanently on someone else's hiccup.
+func TestProbe_UnparsableBodyStaysAnOutage(t *testing.T) {
+	origin := testutil.NewOrigin([]byte("<html><body>502 Bad Gateway</body></html>"))
+	defer origin.Close()
+
+	p := probe.New(&rewritingClient{base: origin.URL}, sharedtest.DiscardLogger(),
+		probe.Options{Scheme: "http", TTL: time.Minute})
+
+	_, err := p.Probe(context.Background(), "acme.example")
+	if !errors.Is(err, probe.ErrProbeFailed) {
+		t.Fatalf("Probe err = %v, want ErrProbeFailed", err)
+	}
+	if errors.Is(err, probe.ErrManifestUnusable) {
+		t.Error("an unparsable body must not surface as ErrManifestUnusable — " +
+			"the publisher would be refused permanently for a proxy's error page")
+	}
+}

@@ -2,6 +2,11 @@
 
 Operated by the Exchange Operator, on infrastructure you provide.
 
+On a managed PostgreSQL service such as RDS, connections, backup/PITR,
+maintenance and credentials follow that service's own procedures. The
+local-container administration below applies to self-hosted deployments;
+application schema and migration semantics apply to both.
+
 **Escalation.** If §3 does not resolve it, contact Postindustria over the
 existing communication channel. Send the failing service's log lines around the
 migration output, the output of the diagnostics in §3.2, and your PostgreSQL
@@ -43,6 +48,12 @@ on its own schedule — restoring one without the other leaves the keys and the 
 that describe them no longer matching each other
 ([`../vault/RUNBOOK.md`](../vault/RUNBOOK.md) §5.3).
 
+If you run the publisher console, its one table, `console.accounts`, is in a database
+of its own (`CONSOLE_DSN`). The table records who has signed in to the console and
+holds nothing a publisher owns: publishers, sites and their terms are in the
+Exchange's database. The console writes a person's row each time they sign in, so a
+lost row comes back at that person's next sign-in.
+
 **If PostgreSQL is unavailable, the platform stops.** Agents cannot discover or buy,
 and no service can start. Download links already issued keep working — they are
 verified at the edge, which never touches the database — and visitors reading the
@@ -59,12 +70,12 @@ Two things do fail. An Exchange that **restarts** during the outage will not boo
 it applies the SoR migrations at start-up. And a clear "no such account" answer, as
 opposed to a database it cannot reach, denies the transaction.
 
-**One table behaves unlike the others.** `fora.transaction_evidence` carries triggers
-that refuse `UPDATE`, `DELETE` and `TRUNCATE` outright, for every role including the
-database owner. It is the one thing here that will surprise you, and it limits
-how you restore a backup — §5.
+**Two tables behave unlike the others.** `fora.transaction_evidence` and
+`fora.transaction_events` carry triggers that refuse `UPDATE`, `DELETE` and `TRUNCATE`
+outright, for every role including the database owner. They are the one thing here
+that will surprise you, and they limit how you restore a backup — §5.
 
-It is also the **only** table so protected. `fora.audit_log` and
+They are also the **only** tables so protected. `fora.audit_log` and
 `broker.selection_log` are append-only by convention — the code never updates or
 deletes a row — but nothing in the database enforces that, so a stray `DELETE`
 against either succeeds silently.
@@ -108,7 +119,7 @@ Both services log JSON, one object per line, to standard output.
 |---|---|---|
 | Migration outcome | Once per migration sequence, per start. The Broker has one sequence, the Exchange two. | `{"level":"INFO","msg":"migrations applied","version":25,"dirty":false,"table":"schema_migrations_fora"}` then `{"level":"INFO","msg":"migrations applied","version":1,"dirty":false,"table":"schema_migrations_sor"}` |
 | SoR adapter ready | Once per Exchange start, after both migration lines | `{"level":"INFO","msg":"sor adapter: postgres","cache_ttl":30000000000}` — `cache_ttl` is in nanoseconds, so this is 30 seconds |
-| Failed query | On every query error | `{"level":"ERROR","msg":"Query","sql":"...","args":[...],"err":"..."}` |
+| Failed query | On every query error, except one the caller abandoned: a statement that failed because its context ended (the client went away, or its deadline passed, or the service is shutting down) is logged at `DEBUG`, with an `err` naming `context canceled` or `context deadline exceeded`, since the code that issued it records its own outcome | `{"level":"ERROR","msg":"Query","sql":"...","args":[...],"err":"..."}` |
 | SoR unreachable during a transaction | Each time the account check fails on a transient error. The transaction proceeds. | `{"level":"WARN","msg":"exchange.execute_transaction","event":"sor_active_check_failed","err":"..."}` |
 | Boot aborted | When a migration or an adapter fails | `{"level":"ERROR","msg":"exchange.exit","err":"migrate up: ..."}`, or `broker.exit` |
 
@@ -164,7 +175,7 @@ database metric, so each has to be wired into the monitoring you already run.
 | An agent is refused with `no billing account found for this agent: contact the operator` | The agent's row carries a `billing_ref`, but the SoR has no account under it. The SoR database was restored from an older backup, or points somewhere new. | Check `$EXCHANGE_SOR_DSN` first. If the row is genuinely gone, escalate — see §5.2. |
 | An agent is refused with `account is switched off: contact the operator to turn it back on` | Its SoR account has `active = false`. | Expected if someone switched it off. Change it in `sor.agent_accounts`; the Exchange picks the change up within 30 seconds. |
 | `duplicate key value violates unique constraint "catalog_uri_key"` | A catalog URL is unique **globally**, not per tenant; another row already claims it. | Expected, not a fault — [`CONFIGURATION.md`](CONFIGURATION.md) §4.1. |
-| `fora.transaction_evidence is append-once: UPDATE is prohibited` (or `DELETE`, `TRUNCATE`) | The append-once triggers, which fire for every role. | Expected. If it happened during a restore, read §5.1. |
+| `fora.transaction_evidence is append-once: UPDATE is prohibited` (or `DELETE`, `TRUNCATE`; or the same message naming `fora.transaction_events`) | The append-once triggers, which fire for every role. | Expected. If it happened during a restore, read §5.1. |
 | A table dropped by hand did not come back after a restart | Migrations only run forward from the recorded version, so the migration that created it is never re-applied. | Escalate. Restore instead (§5). |
 
 ### 3.2 Diagnostics
@@ -196,7 +207,8 @@ SELECT schemaname AS schema, relname AS table_name,
  WHERE schemaname IN ('fora','broker')
  ORDER BY pg_total_relation_size(relid) DESC"
 # Expect: transaction_log and transaction_evidence at the top on any live
-# system, both only ever growing. Nothing removes old rows (§5.3).
+# system, both only ever growing. transaction_events only ever grows too, one
+# row per refused purchase it records. Nothing removes old rows (§5.3).
 
 psql "$EXCHANGE_DSN" -c "SELECT pg_size_pretty(pg_database_size(current_database())) AS db_size"
 # Expect: one row, one value, e.g. `8351 kB`.
@@ -246,12 +258,29 @@ that reads them — so **SQL is the documented way to read them**:
 
 ```bash
 psql "$EXCHANGE_DSN" -c "
-SELECT tenant_id, domain, signing_scheme, fee_rate_bps, allow_broker_relay,
+SELECT tenant_id, domain, fee_rate_bps, allow_broker_relay,
        activate_new_agents_by_default
   FROM fora.tenants ORDER BY tenant_id"
-# Expect: one row per tenant you have onboarded, e.g.
-#   t1 | example.test | ED25519 | 0 | f | t
+# Expect: one row — the seat this deployment sells from, keyed on the Exchange's
+# own hostname, e.g.
+#   t1 | exchange.example | 0 | f | t
 # Add reporting_policy to the column list to read the usage-reporting rules.
+```
+
+A tenant row is the **seat**: one Exchange identity that sells here. The
+publishers it sells for are separate rows — `fora.publishers` (the payee),
+`fora.publisher_domains` (one site, carrying that site's `signing_scheme` and
+CloudFront key-pair id) and `fora.publisher_domain_listings` (one site offered on
+one seat, carrying the state, the content path scope and the terms preset):
+
+```bash
+psql "$EXCHANGE_DSN" -c "
+SELECT l.tenant_id, l.domain, l.state, d.publisher_id, d.signing_scheme
+  FROM fora.publisher_domain_listings l
+  JOIN fora.publisher_domains d USING (domain)
+ ORDER BY l.tenant_id, l.domain"
+# Expect: one row per site you have onboarded, e.g.
+#   t1 | www.publisher.example | ACTIVE | pub-1 | ED25519
 ```
 
 `activate_new_agents_by_default` decides whether an agent that registers starts
@@ -336,25 +365,44 @@ overwrite each other's state nor block each other at boot.
 
 ### 4.2 Onboarding and configuration by SQL
 
-Bringing a tenant live has an Exchange half (keys, catalog ingest, edge
-configuration) and a database half. **The database half is: insert one
-`fora.tenants` row** — no API creates a tenant. The full procedure, and the value each
-column must carry, is in the Exchange's runbook, `src/exchange/RUNBOOK.md`, and is not
-repeated here. What this document adds is the constraints that will reject the write:
+Bringing a deployment live has an Exchange half (keys, catalog ingest, edge
+configuration) and a database half. **The database half is the seat row.**
+Publishers and their sites are registered by the publishers themselves, through
+the publisher console; you write those rows only when there is no console yet,
+or when recovering one registration that went wrong. The full procedure,
+and the value each column must carry, is in the Exchange's runbook,
+`src/exchange/RUNBOOK.md`, and is not repeated here. What this document adds is
+the constraints that will reject the write:
 
-- `domain` is globally unique. Two tenants cannot share a domain.
-- `signing_scheme` is `ED25519` or `AWS_CLOUDFRONT_RSA`. The latter **requires** both
-  `rsa_key_ref` and `cloudfront_key_pair_id`; a check constraint rejects the row
-  otherwise.
+- `fora.tenants.domain` is globally unique and is the Exchange's OWN hostname.
+  One seat per deployment; a second seat is a second deployment.
+- `fora.publisher_domains.signing_scheme` is `ED25519` or `AWS_CLOUDFRONT_RSA`,
+  and describes how the CDN in front of that site checks a delivery address.
+  Every integration a publisher can register is `ED25519`, verified inside an
+  edge function; the RSA scheme is for a site built by hand against
+  CloudFront's own check. A CloudFront key-pair id may be
+  filled in later — the publisher uploads the public key and then enters what
+  CloudFront gave back — but it may not be an empty string.
+- `fora.publisher_domain_listings.terms` is the licensing document the seat
+  sells the site under, as JSONB. It has no default. It is NULL while the
+  publisher has not chosen terms yet, which only a `PENDING_MANIFEST` listing
+  may be: the `publisher_domain_listings_active_has_terms` CHECK refuses an
+  `ACTIVE` listing whose terms are not a JSON object. Where terms are stored, a
+  second CHECK refuses a `pricing_model` that is not a string and a
+  `permitted_functions` that is not an array. It does not require either to be
+  present, so a hand-written row needs both. The state starts
+  `PENDING_MANIFEST`; catalog push refuses an entry whose site has no `ACTIVE`
+  listing on the seat.
 - `fee_rate_bps` is the commission, in whole basis points. One basis point is
   0.01%, so `0` is no commission, `100` is 1%, `250` is 2.5% and `1000` is 10%.
   The allowed range is `0 <= bps < 10000`: the largest value is `9999`, which is
   99.99%, and `10000` (100%) is rejected. The Exchange keeps
   `floor(gross × bps / 10000)`.
-- Catalog rows reference the tenant, so the tenant row must exist first.
+- Catalog rows reference both the seat and the payee, so the `fora.tenants` and
+  `fora.publishers` rows must exist first.
 
 ```bash
-psql "$EXCHANGE_DSN" -c "SELECT tenant_id, domain, signing_scheme FROM fora.tenants WHERE domain = '<tenant-domain>'"
+psql "$EXCHANGE_DSN" -c "SELECT tenant_id, domain FROM fora.tenants WHERE domain = '<exchange-hostname>'"
 # Expect: exactly one row
 ```
 
@@ -372,16 +420,19 @@ at the new version's first boot. Start one instance, confirm the `migrations app
 line shows the expected version with `dirty` false, then start the rest.
 
 **Rolling a release back.** The schema stays where the newer version left it — the
-services never migrate backwards (§4.4). Whether the older image can run against it
-depends on what the release's migrations did, so check before you do it:
+services never migrate backwards (§4.4). A rollback needs confirmed compatibility of
+the older image with the newer schema, so read the release's migrations before you
+do it:
 
 | The migration | Effect on the older image | Verdict |
 |---|---|---|
-| **Added** a table, a column or an enum value | The older code never mentions the new object | **Safe.** Roll the tag back |
-| **Renamed or dropped** a column | The older code still queries the old name, which is gone | **Not safe.** Fix forward, or restore (§5.1) |
+| **Added** a table, or a nullable column, or a column with a default | The older code never mentions the new object | **Usually compatible.** Confirm, then roll the tag back |
+| **Added** a `NOT NULL` column without a default | The older code's inserts omit it and are refused | **Not compatible.** Fix forward, or restore (§5.1) |
+| **Added** an enum value | Rows carrying it reach older code that does not know it | **Check the code paths that read the enum** before rolling back |
+| **Renamed or dropped** a column | The older code still queries the old name, which is gone | **Not compatible.** Fix forward, or restore (§5.1) |
 
 The failure is loud — at boot or on that first query — not silent corruption. If you
-cannot tell which kind a release contained, treat it as the second.
+cannot tell what a release's migrations did, treat it as incompatible.
 
 ### 4.4 Rolling back a migration
 
@@ -399,18 +450,19 @@ they are compiled into every image. They are real SQL, and they are still used:
 - The migration library pairs up and down by convention and reads the directory as a
   set; the code generator reads the same directory for the schema.
 - **The tests run them.** Some of the Exchange's migrations are applied and then
-  reverted under `make test-integration` — including the one that creates
-  `fora.transaction_evidence`, which asserts that reverting leaves no orphaned
-  trigger function behind.
+  reverted under `make test-integration` — including the ones that create
+  `fora.transaction_evidence` and `fora.transaction_events`, which assert that
+  reverting leaves no orphaned trigger function behind.
 - They are the written record of how a change would be reversed, for whoever ends up
   doing it by hand.
 
 **Why nothing runs them: a down migration deletes, it does not undo.** Going back
-far enough removes `fora.transaction_evidence` — the signed offer and both parties'
-signatures, your only proof of what was agreed — then `fora.audit_log`, the sole
-record of who changed a fee rate, and finally `fora.transaction_log`, the billing
-record, taking the catalog, the agents, the tenants and the whole `fora` schema with
-it. All three are marked **not reconstructible** in §5.2.
+far enough removes `fora.transaction_events` — the record of refused purchases —
+then `fora.transaction_evidence` — the signed offer and both parties' signatures,
+your only proof of what was agreed — then `fora.audit_log`, the sole record of who
+changed a fee rate, and finally `fora.transaction_log`, the billing record, taking
+the catalog, the agents, the tenants and the whole `fora` schema with it. All four
+are marked **not reconstructible** in §5.2.
 
 Going back a version does not restore yesterday's data; it discards today's. Forward
 is always recoverable, because another migration can be written. Backward is not.
@@ -442,15 +494,16 @@ this agent` (§3.1) until you match them up again by hand.
 
 ### 5.1 Restoring past the append-once triggers
 
-`fora.transaction_evidence` refuses `UPDATE`, `DELETE` and `TRUNCATE` for every role,
-the database owner included. That limits how you can restore:
+`fora.transaction_evidence` and `fora.transaction_events` refuse `UPDATE`, `DELETE`
+and `TRUNCATE` for every role, the database owner included. That limits how you can
+restore:
 
 | Restore shape | Result |
 |---|---|
-| Into a **fresh, empty database** | **Works.** The dump loads the table, then the rows, then re-creates the triggers. This is the supported path. |
+| Into a **fresh, empty database** | **Works.** The dump loads each table, then the rows, then re-creates the triggers. This is the supported path. |
 | `pg_restore --clean` over an existing database | Works. `--clean` issues `DROP`, which changes the table definition, not its content. |
 | `pg_restore --data-only` into a populated database | **Fails**, on duplicate keys. |
-| Clearing the table first, then loading data | **Impossible.** `TRUNCATE` and `DELETE` are both refused; `DROP TABLE` is the only statement that removes a row, and dropping it does not bring it back, because migrations only run forward (§3.1). |
+| Clearing either table first, then loading data | **Impossible.** `TRUNCATE` and `DELETE` are both refused; `DROP TABLE` is the only statement that removes a row, and dropping it does not bring it back, because migrations only run forward (§3.1). |
 
 Always restore into a fresh database, then point the services at it:
 
@@ -471,28 +524,36 @@ pg_restore -h db.internal.example.net -U fora -d fora_sor_restored /backups/fora
 ```
 
 Verify the triggers came back — a restore that silently lost them would leave the
-evidence table open to changes:
+two tables open to changes:
 
 ```bash
-# pg_trigger is PostgreSQL's own list of triggers. Casting the table name with
-# ::regclass keeps only the triggers on that one table, and NOT tgisinternal drops
+# pg_trigger is PostgreSQL's own list of triggers. Casting the table names with
+# ::regclass keeps only the triggers on those two tables, and NOT tgisinternal drops
 # the ones PostgreSQL creates by itself behind constraints such as foreign keys, so
-# what is left is the two the migration declared. tgenabled says whether a trigger
+# what is left is the two each migration declared. tgenabled says whether a trigger
 # fires; O is the normal enabled state.
 psql -h db.internal.example.net -U fora -d fora_restored -c "
-SELECT tgname, tgenabled FROM pg_trigger
- WHERE tgrelid = 'fora.transaction_evidence'::regclass AND NOT tgisinternal"
-# Expect: two rows, tgenabled = O (enabled) —
-#   trg_transaction_evidence_no_row_mutation | O
-#   trg_transaction_evidence_no_truncate     | O
+SELECT c.relname AS table_name, t.tgname, t.tgenabled FROM pg_trigger t
+  JOIN pg_class c ON c.oid = t.tgrelid
+ WHERE t.tgrelid IN ('fora.transaction_evidence'::regclass, 'fora.transaction_events'::regclass)
+   AND NOT t.tgisinternal
+ ORDER BY c.relname, t.tgname"
+# Expect: four rows, tgenabled = O (enabled) —
+#   transaction_events   | trg_transaction_events_no_row_mutation   | O
+#   transaction_events   | trg_transaction_events_no_truncate       | O
+#   transaction_evidence | trg_transaction_evidence_no_row_mutation | O
+#   transaction_evidence | trg_transaction_evidence_no_truncate     | O
 
 psql -h db.internal.example.net -U fora -d fora_restored -c "UPDATE fora.transaction_evidence SET offer_id='x'"
 # Expect: ERROR:  fora.transaction_evidence is append-once: UPDATE is prohibited
+
+psql -h db.internal.example.net -U fora -d fora_restored -c "UPDATE fora.transaction_events SET offer_id='x'"
+# Expect: ERROR:  fora.transaction_events is append-once: UPDATE is prohibited
 ```
 
-The error is the pass condition. `UPDATE 0` means the table is empty — re-run against
-a restore that contains rows. Anything else means the triggers did not survive;
-escalate.
+The errors are the pass condition. `UPDATE 0` means that table is empty — re-run
+against a restore that contains rows. Anything else means the triggers did not
+survive; escalate.
 
 ### 5.2 What a loss costs, per table
 
@@ -501,9 +562,10 @@ escalate.
 | `fora.catalog` | **Reconstructible** — re-ingest the publisher's feed through the Exchange. |
 | `fora.agents` | **Reconstructible** — agents re-register on their next call, or re-insert by SQL (§4.1). |
 | `broker.exchanges` | **Reconstructible** — re-created from the Broker's registry file at its next start. |
-| `fora.tenants`, `fora.tenant_resource_owner_fee` | Reconstructible **only from your own records** — no API creates these rows (§4.2). |
+| `fora.tenants`, `fora.publishers`, `fora.publisher_domains`, `fora.publisher_domain_listings`, `fora.publisher_grants`, `fora.tenant_resource_owner_fee` | Reconstructible **only from your own records** — no API creates these rows (§4.2). |
 | `fora.transaction_log` | **Not reconstructible.** One row per delivered resource; the billing record. Loss is unbillable revenue. |
 | `fora.transaction_evidence` | **Not reconstructible, and the costliest.** The signed offer plus both parties' signatures — the only proof of what was agreed, and it can be checked without any service running. Losing it removes your ability to answer a billing dispute. |
+| `fora.transaction_events` | Not reconstructible. The record of refused purchases that the publisher console's revenue totals count; losing it empties those counts for the period lost. No financial impact. |
 | `fora.reporting_obligations`, `fora.audit_log`, `broker.selection_log` | Not reconstructible. Expected usage reports, and two audit trails; no functional impact, nothing reads them at runtime. |
 | `sor.agent_accounts` (other database) | **Not reconstructible, and it carries money.** See below. |
 
@@ -541,17 +603,20 @@ The intent recorded in the schema is that **financial records are kept for at le
 way: nothing deletes a row at 13 months, and nothing stops one being deleted
 earlier except the append-once triggers. The schema states it outright for the
 evidence table: *"NO MECHANISM FOR REMOVING THEM EXISTS TODAY […] the only statement
-that removes a row is DROP TABLE."*
+that removes a row is DROP TABLE."* It says the same for `fora.transaction_events`.
 
 So the database only ever grows with traffic, forever. Two rows are written per
 delivered resource — one in `fora.transaction_log`, one in
 `fora.transaction_evidence`. The evidence row is much the bigger of the two, because
 it keeps the whole signed offer twice: once as JSON you can read and query, and once
-as the exact bytes the signature was made over. Nothing in this repository states a
-target size or a growth rate, so **sizing has to be measured, not looked up**: read
-`pg_total_relation_size` on both tables (§3.2) through your first week of production,
-work out how many bytes each transaction costs you, and size the disk from that.
-Alert on free disk space, not on row count.
+as the exact bytes the signature was made over. A refused purchase that the Exchange
+can attribute to a publisher writes one small row in `fora.transaction_events`.
+Refusals have no upper bound: an agent that repeats a refused purchase under a new
+idempotency key adds a row each time. Nothing in this repository states a target
+size or a growth rate, so **sizing has to be measured, not looked up**: read
+`pg_total_relation_size` on all three tables (§3.2) through your first week of
+production, work out how many bytes each transaction costs you, and size the disk
+from that. Alert on free disk space, not on row count.
 
 ---
 
@@ -561,7 +626,7 @@ Alert on free disk space, not on row count.
 |---|---|
 | **Nothing removes old rows.** Nothing deletes a row from any table, ever; the database only ever grows with traffic. | §5.3 |
 | **No per-table retention.** The 13-month intent is recorded in the schema and enforced by nothing. Partitioning, the planned way to remove old rows, is not implemented yet. | §5.3 |
-| **The append-once triggers limit every restore.** `fora.transaction_evidence` cannot be cleared by any statement but `DROP TABLE`, so a data-only restore into a populated database is impossible. | §5.1 |
+| **The append-once triggers limit every restore.** `fora.transaction_evidence` and `fora.transaction_events` cannot be cleared by any statement but `DROP TABLE`, so a data-only restore into a populated database is impossible. | §5.1 |
 | **Nothing in the platform tunes the connection pool.** No FORA variable sets pool size; the library defaults apply unless you override them through the DSN. | [`CONFIGURATION.md`](CONFIGURATION.md) §5 |
 | **No service produces a database metric**, and a full connection pool is invisible in the logs. | §2.2, §2.3 |
 | **Nothing keeps the two Exchange databases in step.** `fora.agents.billing_ref` names a row in another database, and PostgreSQL cannot enforce that across databases. Back them up together; restore them together. | §5, §5.2 |

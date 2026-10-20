@@ -28,10 +28,10 @@ func twoAccounts(t *testing.T, c *tigerbeetle.Client) (debit, credit tigerbeetle
 	ctx := context.Background()
 	salt := sharedTB.Salt(t)
 	var err error
-	if debit, err = tigerbeetle.AccountID(tigerbeetle.PrefixOwner, salt+"-d"); err != nil {
+	if debit, err = tigerbeetle.AccountID(tigerbeetle.PrefixOwner, testCurrency, salt+"-d"); err != nil {
 		t.Fatalf("AccountID debit: %v", err)
 	}
-	if credit, err = tigerbeetle.AccountID(tigerbeetle.PrefixOwner, salt+"-c"); err != nil {
+	if credit, err = tigerbeetle.AccountID(tigerbeetle.PrefixOwner, testCurrency, salt+"-c"); err != nil {
 		t.Fatalf("AccountID credit: %v", err)
 	}
 	flags := tigerbeetle.DefaultFlagsForCode(tigerbeetle.CodeOwner)
@@ -125,7 +125,7 @@ func TestCreatePending_ExceedsCredits(t *testing.T) {
 	ctx := context.Background()
 	c := newTestClient(t)
 	salt := sharedTB.Salt(t)
-	agent, err := tigerbeetle.AccountID(tigerbeetle.PrefixAgent, salt+"-agent")
+	agent, err := tigerbeetle.AccountID(tigerbeetle.PrefixAgent, testCurrency, salt+"-agent")
 	if err != nil {
 		t.Fatalf("AccountID: %v", err)
 	}

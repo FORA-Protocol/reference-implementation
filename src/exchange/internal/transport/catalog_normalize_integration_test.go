@@ -25,7 +25,7 @@ func TestPushResources_NormalizeRoundTrip(t *testing.T) {
 
 	// Every pushed term carries valid Pricing so it clears Validate
 	// and reaches the catalog; the assertion is purely about token form.
-	priced := &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.02", Currency: "USD", Unit: proto.String("accesses")}
+	priced := &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.02", Currency: "USD", Unit: proto.String("accesses"), EstimatedQuantity: proto.Int32(1)}
 
 	cases := []struct {
 		name           string
@@ -119,7 +119,7 @@ func TestPushResources_NormalizeIdempotentRepush(t *testing.T) {
 
 	const path = "/normalize/repush"
 	uri := "https://" + h.publisherDom + path
-	priced := &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.02", Currency: "USD", Unit: proto.String("accesses")}
+	priced := &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.02", Currency: "USD", Unit: proto.String("accesses"), EstimatedQuantity: proto.Int32(1)}
 	mkTerm := func(permitted []string) *forav1.LicenseTerm {
 		return &forav1.LicenseTerm{
 			Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
@@ -164,11 +164,7 @@ func pushOneTerm(t *testing.T, h *pushHarness, client foraconnect.CatalogService
 // which persisted, canonicalized terms become observable.
 func discoverTerms(t *testing.T, h *pushHarness, uri string) []*forav1.LicenseTerm {
 	t.Helper()
-	offers := discoverOffers(t, h, uri)
-	if len(offers) != 1 {
-		t.Fatalf("discover %s: offers = %d, want 1", uri, len(offers))
-	}
-	return offers[0].GetTerms()
+	return offerTerms(t, uri, discoverOffers(t, h, uri))
 }
 
 // assertStrs compares two string slices order-sensitively with a readable diff.

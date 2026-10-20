@@ -16,8 +16,10 @@ import (
 	"github.com/FORA-Protocol/protocol/sdk/go/connectserver"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/catalogfeed"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/ingest"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/ingest/ingesttest"
 )
 
 // TestRun_EmptyFeedIsRefusedBeforeDialling pins that a feed with no entries is
@@ -30,11 +32,11 @@ func TestRun_EmptyFeedIsRefusedBeforeDialling(t *testing.T) {
 	_, err := ingest.Run(context.Background(), ingest.Options{
 		ExchangeURL: srv.URL,
 		TenantID:    "tenant-empty",
-		KeyPath:     writeContributorKey(t),
+		KeyPath:     ingesttest.WriteContributorKeyFile(t, "publisher.example"),
 		Feed:        strings.NewReader("\n\n"),
 		Clk:         clock.System{},
 	})
-	if !errors.Is(err, ingest.ErrEmptyFeed) {
+	if !errors.Is(err, catalogfeed.ErrEmptyFeed) {
 		t.Fatalf("Run over an empty feed returned %v; want ErrEmptyFeed", err)
 	}
 	if rec.req != nil {
@@ -103,7 +105,7 @@ func TestRun_ShortAcceptedCountStopsTheRunWithoutAVerdict(t *testing.T) {
 			report, err := ingest.Run(context.Background(), ingest.Options{
 				ExchangeURL: srv.URL,
 				TenantID:    "tenant-short",
-				KeyPath:     writeContributorKey(t),
+				KeyPath:     ingesttest.WriteContributorKeyFile(t, "publisher.example"),
 				Feed:        strings.NewReader(feedLine),
 				Clk:         clock.System{},
 			})
@@ -142,7 +144,7 @@ func TestRun_FullAcceptedCountIsStored(t *testing.T) {
 	report, err := ingest.Run(context.Background(), ingest.Options{
 		ExchangeURL: srv.URL,
 		TenantID:    "tenant-full",
-		KeyPath:     writeContributorKey(t),
+		KeyPath:     ingesttest.WriteContributorKeyFile(t, "publisher.example"),
 		Feed:        strings.NewReader(feedLine),
 		Clk:         clock.System{},
 	})
@@ -286,11 +288,15 @@ func pushOneEntry(
 	t *testing.T, ctx context.Context, exchangeURL string, entry *forav1.ResourceEntry,
 ) (ingest.PushReport, error) {
 	t.Helper()
-	kid, priv, err := ingest.LoadContributorKey(writeContributorKey(t))
+	kid, priv, err := ingest.LoadContributorKey(ingesttest.WriteContributorKeyFile(t, "publisher.example"))
 	if err != nil {
 		t.Fatalf("load contributor key: %v", err)
 	}
-	client, err := ingest.NewCatalogClient(exchangeURL, kid, priv, clock.System{})
+	signatureAgent, err := ingest.SignatureAgentFor(kid)
+	if err != nil {
+		t.Fatalf("signature agent: %v", err)
+	}
+	client, err := ingest.NewCatalogClient(exchangeURL, signatureAgent, priv, clock.System{})
 	if err != nil {
 		t.Fatalf("build catalog client: %v", err)
 	}

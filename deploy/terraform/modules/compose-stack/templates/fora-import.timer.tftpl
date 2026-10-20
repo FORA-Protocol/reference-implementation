@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the FORA catalog importer on a schedule
+
+[Timer]
+OnCalendar=${importer_schedule}
+# A run missed while the host was down is made up at the next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

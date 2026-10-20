@@ -1,0 +1,23 @@
+{
+  "name": "@fora/console-js",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Lint and tests for the publisher console's browser scripts, which are served as they are from ../internal/web/static.",
+  "type": "module",
+  "scripts": {
+    "fmt": "biome format --write . ../internal/web/static",
+    "fmt:check": "biome format . ../internal/web/static",
+    "lint": "biome check --error-on-warnings . ../internal/web/static && npm run lint:promises && npm run cycles",
+    "lint:promises": "cd .. && oxlint -A all --type-aware -D no-floating-promises internal/web/static js/tests",
+    "cycles": "madge --circular ../internal/web/static",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.9.4",
+    "happy-dom": "20.14.5",
+    "madge": "8.0.0",
+    "oxlint": "1.74.0",
+    "oxlint-tsgolint": "0.25.0",
+    "vitest": "4.1.10"
+  }
+}

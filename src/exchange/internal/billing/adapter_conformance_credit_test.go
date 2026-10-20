@@ -20,7 +20,7 @@ func confCreditFundsSpendable(t *testing.T, f adapterFactory) {
 	if err := a.EnsureAgentAccount(ctx, "ag"); err != nil {
 		t.Fatalf("ensure account: %v", err)
 	}
-	if err := a.Credit(ctx, "ag", mustAmount(t, "1.00", "USD"), billing.WelcomeCreditKey("ag")); err != nil {
+	if err := a.Credit(ctx, "ag", mustAmount(t, "1.00", "USD"), billing.WelcomeCreditKey("ag", confCurrency)); err != nil {
 		t.Fatalf("credit: %v", err)
 	}
 	assertBalance(t, a, "1.00")

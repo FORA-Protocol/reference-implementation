@@ -150,8 +150,12 @@ func (r *recordingAdapter) Refund(ctx context.Context, billingID string, amount 
 	return r.inner.Refund(ctx, billingID, amount, reason, key)
 }
 
-func (r *recordingAdapter) GetBalance(ctx context.Context, agentID string) (billing.Amount, error) {
-	return r.inner.GetBalance(ctx, agentID)
+func (r *recordingAdapter) GetBalance(ctx context.Context, agentID, currency string) (billing.Amount, error) {
+	return r.inner.GetBalance(ctx, agentID, currency)
+}
+
+func (r *recordingAdapter) AvailableBalance(ctx context.Context, agentID, currency string) (billing.Amount, error) {
+	return r.inner.AvailableBalance(ctx, agentID, currency)
 }
 
 func (r *recordingAdapter) GetQuota(ctx context.Context, agentID string) (int64, error) {
@@ -299,7 +303,7 @@ func TestExecuteTransaction_RecordsOnExecute(t *testing.T) {
 	// account the agent registered under (AC 1). A charge that landed on
 	// the old agent-id-keyed account would leave h.billingRef's balance untouched
 	// and fail the decrease check.
-	before, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	before, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance before: %v", err)
 	}
@@ -322,7 +326,7 @@ func TestExecuteTransaction_RecordsOnExecute(t *testing.T) {
 
 	// The ref-keyed account decreased by 0.05 × 100 = 5.00 (default fixture unit
 	// cost is 0.05/USD): settlement landed on h.billingRef, and 10.00 − 5.00 = 5.00.
-	bal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	bal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after: %v", err)
 	}
@@ -449,11 +453,13 @@ func TestReportUsage_ConcurrentSecondGetsFailedPrecondition(t *testing.T) {
 	}
 }
 
-// TestExecuteTransaction_ZeroEstimateChargesOneUnit verifies end-to-end:
-// an offer with estimated_quantity=0 settles the reserved amount
-// (unitCost × clamped-1), NOT unitCost × 0. Pre-fix, Record recomputed the
-// charge from the raw 0 and debited nothing — the agent got a billable URL for
-// free.
+// TestExecuteTransaction_ZeroEstimateChargesOneUnit verifies end-to-end that a
+// metered offer stating no estimate (executeTransactionFor with 0 states none)
+// charges one unit at purchase. The pinned protocol (fora.proto Pricing): "A
+// metered purchase charges E × R, or one unit, 1 × R, when the offer states no
+// estimate. That is the amount TransactionResultItem.cost carries for the
+// item, and the charge is final." Before a fix, Record recomputed the charge
+// from the raw 0 and debited nothing — the agent got a billable URL for free.
 func TestExecuteTransaction_ZeroEstimateChargesOneUnit(t *testing.T) {
 	h, rec := newRecordingHarness(t)
 	executeTransactionFor(t, h, 0) // zero-estimate offer
@@ -463,7 +469,7 @@ func TestExecuteTransaction_ZeroEstimateChargesOneUnit(t *testing.T) {
 	}
 	// Default fixture unit cost is 0.05/USD; the zero estimate clamps to 1
 	// unit at Authorize, so the settled charge is 0.05: 10.00 - 0.05 = 9.95.
-	bal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	bal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}
@@ -477,8 +483,9 @@ func TestExecuteTransaction_ZeroEstimateChargesOneUnit(t *testing.T) {
 // assertBillingLifecycle asserts the three billing-lifecycle observations a
 // free/paid execute test cares about: whether Authorize ran, and the Record and
 // Release call counts. Extracted so the free-path suite states the trio once
-// instead of hand-writing the same three checks per test.
-func assertBillingLifecycle(t *testing.T, rec *recordingAdapter, wantAuthorized bool, wantRecord, wantRelease int) {
+// instead of hand-writing the same three checks per test. None of those paths
+// releases a hold, so Release is always expected to be uncalled.
+func assertBillingLifecycle(t *testing.T, rec *recordingAdapter, wantAuthorized bool, wantRecord int) {
 	t.Helper()
 	if _, ok := rec.lastAuthorizeKey(); ok != wantAuthorized {
 		t.Errorf("Authorize called = %v, want %v", ok, wantAuthorized)
@@ -486,8 +493,8 @@ func assertBillingLifecycle(t *testing.T, rec *recordingAdapter, wantAuthorized 
 	if n := rec.recordCallCount(); n != wantRecord {
 		t.Errorf("Record called %d time(s); want %d", n, wantRecord)
 	}
-	if n := rec.releaseCallCount(); n != wantRelease {
-		t.Errorf("Release called %d time(s); want %d", n, wantRelease)
+	if n := rec.releaseCallCount(); n != 0 {
+		t.Errorf("Release called %d time(s); want 0", n)
 	}
 }
 
@@ -534,7 +541,7 @@ func assertReleasedOnExecuteFailure(t *testing.T, h *testHarness, rec *recording
 	if !ok || rel.Key == "" || rel.Key != authKey {
 		t.Errorf("Release key = %q, want non-empty and == Authorize key %q", rel.Key, authKey)
 	}
-	bal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	bal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}
@@ -552,7 +559,9 @@ func TestExecuteTransaction_ReleaseOnPersistFailure(t *testing.T) {
 	runner := &failTxRunner{}
 	h, rec := newRecordingHarnessWith(t, harnessOptions{txRunnerWrap: runner.wrap})
 	runner.arm()
-	assertReleasedOnExecuteFailure(t, h, rec, "persist")
+	// The persist failure carries no refusal code to check; the release is the
+	// whole assertion, so the returned error is not needed here.
+	_ = assertReleasedOnExecuteFailure(t, h, rec, "persist")
 }
 
 // TestExecuteTransaction_ReleaseOnURLSignFailure forces mintSignedURL to fail

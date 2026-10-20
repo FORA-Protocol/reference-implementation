@@ -6,7 +6,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync/atomic"
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
@@ -16,7 +15,6 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/db"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/agentreg"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/exchange"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
@@ -93,13 +91,17 @@ type ManifestCache interface {
 type CatalogService struct {
 	repo      repo.CatalogRepo
 	tenants   repo.TenantReadRepo
+	sites     repo.PublisherDomainReadRepo
+	listings  repo.PublisherListingReadRepo
 	registry  agentreg.Registry
 	manifests ManifestCache
 	tx        db.TxRunner
-	// exchangeDomain is this Exchange's own canonical domain (EXCHANGE_DOMAIN). It
-	// selects the AuthorizedExchange entry in an owner's manifest from which the
-	// resource_owner_id payee is read at push. Required: an empty value matches no
-	// entry, so every push would be rejected for a missing payee attestation.
+	// exchangeDomain is this Exchange's own canonical domain (EXCHANGE_DOMAIN).
+	// It does two things at push. It selects the AuthorizedExchange entry in a
+	// site's manifest from which the resource_owner_id payee is read, and it
+	// names the SEAT this deployment sells as — the fora.tenants row every
+	// pushed entry is stored under. Required: an empty value matches no manifest
+	// entry and no seat, so every push would be refused.
 	exchangeDomain string
 	snapshot       atomic.Pointer[CatalogSnapshot]
 	// clk drives any time-dependent CatalogService state. Defaults to
@@ -113,25 +115,42 @@ type CatalogService struct {
 	supportedProfiles []string
 }
 
-// NewCatalogService constructs the service. registry and manifests enforce
-// caller-signature auth (Gate 1) and per-entry contributor authorization (Gate
-// 2); tenants resolves each entry's owning tenant_id server-side from its
-// publisher domain (tenant isolation, Arch rule 4). exchangeDomain is this
-// Exchange's own canonical domain (EXCHANGE_DOMAIN), used to read the
-// resource_owner_id payee from an owner's manifest. Callers must supply real
-// implementations — zero values are a programmer error.
-func NewCatalogService(
-	r repo.CatalogRepo, tenants repo.TenantReadRepo,
-	registry agentreg.Registry, manifests ManifestCache, tx db.TxRunner,
-	exchangeDomain string,
-) *CatalogService {
+// CatalogDeps bundles the CatalogService wiring dependencies. Every field is
+// required; a zero value is a programmer error, not a supported mode.
+type CatalogDeps struct {
+	// Catalog persists the accepted entries.
+	Catalog repo.CatalogRepo
+	// Tenants resolves this deployment's single seat from ExchangeDomain.
+	Tenants repo.TenantReadRepo
+	// Sites resolves a pushed entry's domain to the registered site, which names
+	// the publisher the entry settles to (per ADR-026 D1).
+	Sites repo.PublisherDomainReadRepo
+	// Listings answers whether the seat actually sells that site: a push is
+	// accepted only for a listing in the ACTIVE state.
+	Listings repo.PublisherListingReadRepo
+	// Registry enforces caller-signature auth (Gate 1).
+	Registry agentreg.Registry
+	// Manifests serves each site's own /.well-known/fora.json, which carries the
+	// contributor list (Gate 2) and the attested payee.
+	Manifests ManifestCache
+	// TxRunner opens the transaction the accepted batch commits in.
+	TxRunner db.TxRunner
+	// ExchangeDomain is this Exchange's own canonical domain (EXCHANGE_DOMAIN):
+	// the seat's hostname and the manifest entry the payee is read from.
+	ExchangeDomain string
+}
+
+// NewCatalogService constructs the service from its wiring dependencies.
+func NewCatalogService(d CatalogDeps) *CatalogService {
 	return &CatalogService{
-		repo:           r,
-		tenants:        tenants,
-		registry:       registry,
-		manifests:      manifests,
-		tx:             tx,
-		exchangeDomain: exchangeDomain,
+		repo:           d.Catalog,
+		tenants:        d.Tenants,
+		sites:          d.Sites,
+		listings:       d.Listings,
+		registry:       d.Registry,
+		manifests:      d.Manifests,
+		tx:             d.TxRunner,
+		exchangeDomain: d.ExchangeDomain,
 		clk:            clock.System{},
 	}
 }
@@ -171,10 +190,13 @@ func (s *CatalogService) Snapshot() *CatalogSnapshot {
 
 // PushResources upserts the entries and swaps the in-memory snapshot. Gate 1
 // (caller-signature) is enforced by the transport layer before invocation;
-// this method enforces Gate 2 (contributor authorization) per entry.
+// this method enforces Gate 2 (contributor authorization) per entry. source is
+// which client made the push, as the transport read it; every row the push
+// stores records it.
 func (s *CatalogService) PushResources(
 	ctx context.Context,
 	req *forav1.PushResourcesRequest,
+	source PushSource,
 ) (*forav1.PushResourcesResponse, error) {
 	if req == nil {
 		return nil, exchange.Newf(exchange.KindInvalidRequest, "nil request")
@@ -200,9 +222,9 @@ func (s *CatalogService) PushResources(
 	// tiers before this point: the wire tier (the protovalidate interceptor —
 	// term shape and cross-field rules, refused before this method runs) and
 	// the ingest tier (the SDK helpers, in classifyEntry, over canonicalized
-	// terms). The gates the Exchange owns — tenant derivation, contributor
-	// authorization, resource-owner attestation, URI ownership — run in the
-	// same per-entry chain, and this refusal of the whole set is the
+	// terms). The gates the Exchange owns — contributor authorization,
+	// resource-owner attestation, site and listing registration, URI ownership —
+	// run in the same per-entry chain, and this refusal of the whole set is the
 	// Exchange's.
 	if len(rejections) > 0 {
 		return nil, exchange.Newf(exchange.KindInvalidRequest,
@@ -212,6 +234,7 @@ func (s *CatalogService) PushResources(
 	// whole batch back rather than leaving the catalog half-written (Arch rule 7).
 	// The snapshot rebuild reads committed state, so it runs after the commit.
 	if len(accepted) > 0 {
+		stampSource(accepted, source)
 		if err := s.persistAccepted(ctx, accepted); err != nil {
 			return nil, err
 		}
@@ -259,11 +282,15 @@ func (s *CatalogService) partitionByContributor(
 	ctx context.Context,
 	req *forav1.PushResourcesRequest,
 ) ([]repo.CatalogEntry, []CatalogPushRejection, []string, error) {
+	seat, err := s.resolveSeat(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	accepted := make([]repo.CatalogEntry, 0, len(req.GetEntries()))
 	rejections := make([]CatalogPushRejection, 0)
 	var warnings []string
 	for _, e := range req.GetEntries() {
-		entry, rej, entryWarnings, err := s.classifyEntry(ctx, req, e)
+		entry, rej, entryWarnings, err := s.classifyEntry(ctx, seat, req, e)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -288,18 +315,64 @@ func (s *CatalogService) partitionByContributor(
 	return accepted, rejections, warnings, nil
 }
 
+// resolveSeat reads the one Exchange seat this deployment sells as: the
+// fora.tenants row whose domain is EXCHANGE_DOMAIN. Every entry of every push
+// is stored under it (per ADR-026 D1).
+//
+// It is read once per push, not once per entry, because the seat does not
+// depend on the entry. Resolving the seat from the request Host — which is what
+// a deployment running a second seat would need — is deliberately not done: one
+// deployment sells as exactly one seat, and a second seat is a second
+// deployment.
+//
+// A missing seat row is an operator-fixable deployment state, not a caller
+// mistake, so it surfaces as FailedPrecondition for the whole push rather than
+// as a per-entry rejection. No entry could succeed under it, and reporting it
+// per entry would tell a publisher to fix their feed.
+func (s *CatalogService) resolveSeat(ctx context.Context) (repo.Tenant, error) {
+	seat, err := s.tenants.ByDomain(ctx, s.exchangeDomain)
+	if err != nil {
+		if errors.Is(err, repo.ErrTenantNotFound) {
+			return repo.Tenant{}, exchange.Newf(exchange.KindFailedPrecondition,
+				"this Exchange has no seat registered for its own domain %q; "+
+					"seed it before accepting catalog pushes", s.exchangeDomain)
+		}
+		return repo.Tenant{}, exchange.Wrap(exchange.KindInternal, err, "resolve exchange seat")
+	}
+	return seat, nil
+}
+
 // classifyEntry runs the full per-entry gate chain and returns exactly one of:
 // an accepted entry (rej == nil) or a rejection (zero entry, rej != nil). A
 // non-nil error is an infrastructure failure that aborts the whole batch.
 //
 // Chain order: token canonicalization (the SDK's NormalizeResourceEntry, in
-// place); server-side tenant derivation (tenant_id comes from the publisher
-// domain, never the wire); proto→repo conversion with a tenant-scoped
-// resource_id; contributor authorization (Gate 2) and resource-owner
-// attestation, both read off the owner manifest; the SDK's ingest-tier term
+// place); the seat check against any caller-supplied tenant_id; proto→repo
+// conversion with a seat-scoped resource_id; the site lookup, which refuses an
+// unregistered domain; contributor authorization (Gate 2) and resource-owner
+// attestation, both read off the site's manifest; the remaining registration
+// gates, which check that the attested payee is the one the site is registered
+// under and that this seat lists the site as active; the SDK's ingest-tier term
 // checks (validateEntryTerms).
+//
+// Two ordering decisions, and they pull in opposite directions.
+//
+// The site lookup runs FIRST, before the manifest fetch, because the fetch goes
+// to the host the entry names. Without a database precondition ahead of it, any
+// caller who clears signature authorization can make the Exchange issue an
+// outbound request per entry to a host of their choosing. The cost is that the
+// refusal for an unregistered domain is visible to a caller who is not a
+// contributor anywhere — the same bit the pre-registration deriveTenantID
+// refused on, so this discloses nothing that was hidden before.
+//
+// Contributor authorization still runs BEFORE the payee comparison and the
+// listing check. A caller outside the site's catalog_contributors[] is refused
+// as an unauthorized contributor whether or not the payee and the listing check
+// out, so a stranger pushing at a REGISTERED site learns nothing about who that
+// site settles to or whether this seat sells it.
 func (s *CatalogService) classifyEntry(
 	ctx context.Context,
+	seat repo.Tenant,
 	req *forav1.PushResourcesRequest,
 	e *forav1.ResourceEntry,
 ) (repo.CatalogEntry, *CatalogPushRejection, []string, error) {
@@ -312,24 +385,48 @@ func (s *CatalogService) classifyEntry(
 	// persisted row and the DiscoverResources→Offer.terms projection carry
 	// canonical tokens and the ingest-tier checks compare canonical values.
 	helpers.NormalizeResourceEntry(e)
-	tenantID, rej, err := s.deriveTenantID(ctx, req, e)
-	if err != nil || rej != nil {
-		return repo.CatalogEntry{}, rej, nil, err
+	// A caller-supplied tenant_id that disagrees with this deployment's seat is
+	// rejected rather than honoured: the seat is server-side and authoritative.
+	if req.GetTenantId() != "" && req.GetTenantId() != seat.ID {
+		return repo.CatalogEntry{}, reject(uriFromEntry(e), RejectionReasonTenantMismatch), nil, nil
 	}
-	entry, err := entryFromProto(tenantID, e)
+	entry, err := entryFromProto(seat.ID, e)
 	if err != nil {
 		// A malformed entry drops as a per-entry rejection, not a batch abort.
 		rej := reject(uriFromEntry(e), RejectionReasonInvalidEntry)
 		return repo.CatalogEntry{}, rej, nil, nil //nolint:nilerr // err->rejection
 	}
+	// The site comes from the URI that was just materialized, through the same
+	// siteDomainFromURI the delivery path uses, so push and delivery cannot
+	// disagree about which site a stored row belongs to. The row stores the
+	// registered domain it matched, which every read that narrows the catalog
+	// by domain compares.
+	domain, err := siteDomainFromURI(entry.URI)
+	if err != nil {
+		rej := reject(uriFromEntry(e), RejectionReasonInvalidEntry)
+		return repo.CatalogEntry{}, rej, nil, nil //nolint:nilerr // err->rejection
+	}
+	// The site lookup precedes the manifest fetch, so an unregistered domain is
+	// refused without any outbound request. See resolveSite.
+	site, rej, err := s.resolveSite(ctx, domain, entry.URI)
+	if err != nil || rej != nil {
+		return repo.CatalogEntry{}, rej, nil, err
+	}
 	// Contributor authorization (Gate 2) and resource-owner attestation both read
-	// the owner manifest; resolveManifestGates fetches it once and runs both. A
+	// the site's manifest; resolveManifestGates fetches it once and runs both. A
 	// missing manifest, unlisted caller, or un-attested payee drops the entry.
-	ownerID, rej, err := s.resolveManifestGates(ctx, e, req.GetCallerId(), entry.URI)
+	ownerID, rej, err := s.resolveManifestGates(ctx, domain, req.GetCallerId(), entry.URI)
+	if err != nil || rej != nil {
+		return repo.CatalogEntry{}, rej, nil, err
+	}
+	rej, err = s.checkRegistration(ctx, registrationCheck{
+		seatID: seat.ID, site: site, attestedOwnerID: ownerID, uri: entry.URI,
+	})
 	if err != nil || rej != nil {
 		return repo.CatalogEntry{}, rej, nil, err
 	}
 	entry.ResourceOwnerID = ownerID
+	entry.Domain = site.Domain
 	// One term failing the SDK's ingest-tier checks drops the whole entry, with
 	// the SDK's message as the rejection detail; lint warnings on accepted
 	// terms surface in PushResourcesResponse.warnings[].
@@ -340,105 +437,16 @@ func (s *CatalogService) classifyEntry(
 	return entry, nil, entryWarnings, nil
 }
 
-// deriveTenantID resolves the entry's owning tenant_id server-side from its
-// publisher domain via the UNIQUE tenants.domain mapping. A domain with
-// no tenant is rejected; a caller-supplied req.tenant_id that disagrees with the
-// derived tenant is rejected rather than honoured. The returned tenant_id —
-// never req.GetTenantId() — is authoritative.
-func (s *CatalogService) deriveTenantID(
-	ctx context.Context,
-	req *forav1.PushResourcesRequest,
-	e *forav1.ResourceEntry,
-) (string, *CatalogPushRejection, error) {
-	tenant, err := s.tenants.ByDomain(ctx, e.GetDomain())
-	if err != nil {
-		if errors.Is(err, repo.ErrTenantNotFound) {
-			return "", reject(uriFromEntry(e), RejectionReasonUnknownPublisherDomain), nil //nolint:nilerr // err->rejection
-		}
-		return "", nil, exchange.Wrap(exchange.KindInternal, err, "derive tenant from domain")
-	}
-	if req.GetTenantId() != "" && req.GetTenantId() != tenant.ID {
-		return "", reject(uriFromEntry(e), RejectionReasonTenantMismatch), nil
-	}
-	return tenant.ID, nil, nil
-}
-
-// validateEntryTerms runs the SDK's ingest-tier checks
-// (helpers.ValidateLicenseTerm) over every term on the entry. It returns either
-// the accumulated lint warnings — each RuleWarning.Message verbatim, in term
-// order and, within a term, in the SDK's order, the strings that become
-// PushResourcesResponse.warnings[] — or, on the first hard violation, the
-// RejectionReasonInvalidTerms rejection that drops the whole entry, carrying
-// the SDK's message as its Detail. The terms were canonicalized in place by
-// helpers.NormalizeResourceEntry at the top of classifyEntry, so the checks see
-// canonical tokens.
-//
-// The per-term face is deliberate: the Exchange never calls
-// helpers.ValidateResourceEntry, for three reasons. That face re-runs
-// protovalidate over the whole entry, which the validate interceptor already
-// did once per request. It normalizes a proto.Clone and returns a verdict,
-// while the Exchange must persist canonical tokens and so needs the in-place
-// face. And it reports every violation, for a publisher fixing a feed, whereas
-// the Exchange stops at the first hard violation per entry (all-or-nothing),
-// which is ValidateLicenseTerm's contract.
-//
-// A refusal is logged at Warn with the entry URI and the violation's rule,
-// path and token, so an operator can name the offending value without the
-// publisher's feed. The path is made entry-relative ("terms[i].<path>"), the
-// form the SDK's entry verdict reports.
-//
-// This is the SECOND line a term refusal produces, and it is deliberate. Every
-// refused entry, whatever refused it, gets one line from logRejections carrying
-// the URI and the machine-readable reason. That vocabulary has no place for a
-// rule id, a field path or a token, and those three are what an operator names
-// the bad value from — so the gate that holds them writes them here, one level
-// deeper, rather than widening the shape every refusal shares.
-func validateEntryTerms(
-	ctx context.Context, uri string, e *forav1.ResourceEntry,
-) ([]string, *CatalogPushRejection) {
-	var warnings []string
-	for i, term := range e.GetTerms() {
-		termWarnings, err := helpers.ValidateLicenseTerm(term)
-		if err != nil {
-			violation := asRuleViolation(err)
-			reqctx.FromContext(ctx).WarnContext(
-				ctx, "license term refused at ingest",
-				"uri", uri,
-				"rule", violation.Rule,
-				"path", fmt.Sprintf("terms[%d].%s", i, violation.Path),
-				"token", violation.Token,
-			)
-			rej := reject(uri, RejectionReasonInvalidTerms)
-			rej.Detail = violation.Message
-			return nil, rej
-		}
-		for _, w := range termWarnings {
-			warnings = append(warnings, w.Message)
-		}
-	}
-	return warnings, nil
-}
-
-// asRuleViolation unwraps the error helpers.ValidateLicenseTerm returns into the
-// *helpers.RuleViolation it documents. Any other error type is still a refusal
-// — the entry must not persist — carried with its message alone.
-func asRuleViolation(err error) *helpers.RuleViolation {
-	var violation *helpers.RuleViolation
-	if errors.As(err, &violation) {
-		return violation
-	}
-	return &helpers.RuleViolation{Message: err.Error()}
-}
-
 // rebuild reloads the WHOLE catalog (all tenants) into the in-memory radix trie.
 //
 // admin:cross_tenant — the ListAll read is DELIBERATELY un-tenant-filtered
 // and carries the explicit cross-tenant marker. Discovery spans every
 // publisher, so the trie is a single global index. Isolation is preserved at the
-// WRITE boundary: tenant_id is derived server-side from the publisher domain
-// and a URI belongs to exactly one row (UNIQUE(uri)), so the
-// global read cannot surface a cross-tenant shadowing. Lookup() inherits this —
-// it returns the single owning row, never another tenant's.
+// WRITE boundary: tenant_id is the seat resolved server-side from
+// EXCHANGE_DOMAIN, never a caller-supplied value, and a URI belongs to exactly
+// one row (UNIQUE(uri)), so the global read cannot surface a cross-tenant
+// shadowing. Lookup() inherits this — it returns the single owning row, never
+// another tenant's.
 func (s *CatalogService) rebuild(ctx context.Context) error {
 	rows, err := s.repo.ListAll(ctx) // admin:cross_tenant — intentional global read; see doc above
 	if err != nil {

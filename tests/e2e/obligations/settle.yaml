@@ -1,0 +1,214 @@
+# Balances, totals across currencies, the publisher's fee, disputes and the
+# billing export. Registry entries (ADR-028 D1); the tests that prove them say so
+# on themselves.
+#
+# Sources: fora.proto, admin.proto and the website docs of the pinned protocol
+# module github.com/FORA-Protocol/protocol (the version in the root go.mod).
+#
+# The fee formula at a non-zero rate is PUB-013; SETTLE-005 holds the zero rate
+# and the upper bound. Disputing the excess a metered report holds back defines no
+# DisputeReason in this version, by the protocol author's decision, so no entry
+# tests it.
+#
+# A "# harness:" comment above an entry says why the e2e harness cannot drive it
+# through a public surface yet, and what it would need.
+#
+# A "negative:" case is a refusal with a typed error response (ADR-028 D1). What
+# an answer that refuses nothing must leave out is a "must not" in "positive:".
+
+- id: SETTLE-001
+  title: The reported balance is what the account can spend, per currency, never negative
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      The amount the account can spend now, one entry per currency. Holds for pending
+      transactions are already subtracted. Each amount is an exact decimal string and is
+      never negative.
+  positive: >-
+    After a purchase, GetAccountStatus reports the balance in the item's currency lower
+    by exactly the item's cost and the other currencies unchanged.
+  negative:
+    - code: ok
+      reason: DENIAL_REASON_INSUFFICIENT_BALANCE
+      side_effect: >-
+        a purchase costing more than the balance is denied and the balance stays at its
+        amount, never below "0"
+
+- id: SETTLE-002
+  title: An empty balance list means balances are not reported, and a zero balance is sent as "0"
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      An empty list means the Exchange does not report balances. It does NOT mean a zero
+      balance.
+  positive: >-
+    An Exchange that reports balances sends one entry per billed currency, with amount
+    "0" for a currency the account holds nothing in.
+  negative: []
+
+- id: SETTLE-003
+  title: Every money amount is an exact decimal string in its own currency
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Exact decimal string (not a float), e.g. "19.99". Denominated in `currency`.
+  positive: >-
+    Every cost, total and balance a purchase returns parses as an exact decimal, and
+    its currency is a three-letter ISO 4217 code.
+  negative: []
+
+- id: SETTLE-004
+  title: A direct purchase whose items span currencies leaves total_cost unset
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      UNSET when the purchased items span more than one currency: amounts are never
+      summed across currencies, and currency conversion is out of scope for this
+      version.
+  positive: >-
+    A direct purchase of two items in one currency answers total_cost as their exact
+    sum, with no unit_cost. A direct purchase of one EUR item and one USD item at
+    one Exchange answers no total_cost, and each balance drops in its own currency by
+    its own item.
+  negative: []
+
+# harness: the zero-rate half needs a sale the publisher reads through the
+# console, which only the publisher journey (PUB-013) makes. That journey is a
+# strict xfail on the metered-offer defect today, because the console registers
+# its per-unit preset with no estimate; extend it with a zero-rate sale once it
+# passes. The refusal half needs a read of the rate in force, which the admin
+# plane does not offer.
+- id: SETTLE-005
+  title: A fee rate of zero takes no fee, and a rate of ten thousand basis points or more is refused
+  level: MUST
+  actor: exchange
+  surface: console
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/admin/v1/admin.proto
+    quote: >-
+      0 is a legitimate explicit value ("no fee"), not an unset sentinel.
+  positive: >-
+    With SetTenantFeeRate at 0 basis points, a sale's fee on the publisher's income is
+    zero and its net equals its gross.
+  negative:
+    - code: invalid_argument
+      reason: none
+      side_effect: >-
+        SetTenantFeeRate at 10000 basis points is refused and the rate in force is
+        unchanged
+
+- id: SETTLE-006
+  title: A dispute without a prior accepted usage report is refused REPORT_NOT_FILED
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      No accepted usage report precedes the dispute: report_id is empty, unknown, or
+      names a report for another transaction.
+  positive: >-
+    A dispute naming the transaction and its accepted report_id is accepted with a
+    dispute_id and a status.
+  negative:
+    - code: non-OK; the protocol names the reason and states no code
+      reason: DISPUTE_FAILURE_REASON_REPORT_NOT_FILED
+      side_effect: no dispute case is opened for the transaction
+
+- id: SETTLE-007
+  title: A replayed dispute filing opens no second case, and a second filing for the same transaction is refused DUPLICATE
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A dispute was already filed for this transaction. A retry of the same filing under
+      the same idempotency_key is not a duplicate: it is a replay, answered with the
+      original DisputeResponse.
+  positive: >-
+    The same DisputeRequest sent twice with one idempotency_key answers the same
+    dispute_id both times.
+  negative:
+    - code: non-OK; the protocol names the reason and states no code
+      reason: DISPUTE_FAILURE_REASON_DUPLICATE
+      side_effect: >-
+        a second filing for the same transaction under a new key opens no second case
+
+- id: SETTLE-008
+  title: A dispute for a transaction the Exchange did not execute for the caller is refused TRANSACTION_NOT_FOUND
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A filing it refuses is a non-OK error carrying ErrorDetail.dispute_failure, whose
+      DisputeFailureReason names the one check the filing failed.
+  positive: A dispute filed for the caller's own transaction, after its report, is accepted.
+  negative:
+    - code: non-OK; the protocol names the reason and states no code
+      reason: DISPUTE_FAILURE_REASON_TRANSACTION_NOT_FOUND
+      side_effect: no dispute case exists for the unknown transaction
+
+- id: SETTLE-009
+  title: A dispute addressed to another Exchange is refused before any lookup
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      so verifying one means a database lookup, while the recipient check must run before
+      any lookup happens.
+  positive: The dispute naming the issuing Exchange is accepted.
+  negative:
+    - code: invalid_argument
+      reason: none
+      side_effect: no dispute case is opened
+
+# harness: the identity service files no disputes, so this holds vacuously for the
+# custodial path; it binds an agent that disputes, which the e2e harness does not
+# run.
+- id: SETTLE-010
+  title: An agent does not auto-dispute a hash mismatch on a dynamic resource
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/dispute-resolution.mdx
+    quote: Agent MUST NOT auto-dispute hash mismatch
+  positive: >-
+    Fetching a DYNAMIC resource whose content differs from the offer-time hash files no
+    DisputeTransaction.
+  negative: []
+
+# harness: the publisher's income export is a console download, and the console
+# reader in the harness reads its pages but not that export yet.
+- id: SETTLE-011
+  title: The billing export never carries the delivery URL
+  level: MUST
+  actor: exchange
+  surface: console
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/transaction-log/reconciliation.mdx
+    quote: >-
+      The export never includes the signed URL itself (security), the raw agent IP
+      (privacy), or the full offer details (irrelevant to billing).
+  positive: >-
+    The publisher's income export lists the sale's transaction, gross, fee and net,
+    and no part of the export contains the sale's retrieval_endpoint or its
+    signature.
+  negative: []

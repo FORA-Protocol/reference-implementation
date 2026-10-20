@@ -1,53 +1,46 @@
-"""Obligation 00 — failure 07: tampered signed URL is refused at delivery.
-
-Scenario (verbatim — fourth failure-mode bullet):
-
-> The URL delivered after acceptance is tampered with by the caller.
-> The content is not served; the caller sees the delivery refused.
+"""Obligation PAID-008: a tampered signed URL is refused at delivery.
 
 Drives the scenario against the demo ``paper-satellites`` resource (FLAT USD, no
 user-type restriction so it resolves via the facet-less canonical
 DiscoveryRequest) as the USD demo buyer:
 
-1. Acceptance — the relay execute returns ``licensed=true`` + a signed URL
+1. Acceptance — the Broker purchase returns a signed URL
    pointing at the music demo domain (→ Fastly edge).
 2. Tamper — flip a base64url byte inside the ``sig=`` query parameter.
-3. Refusal — the edge answers 403 and serves no publisher payload.
+3. Refusal — the edge answers 403 with its ``signature_mismatch`` refusal and
+   serves no publisher payload.
 
-The refusal leg is a bespoke GET rather than the shared ``fetch_signed`` helper:
-that helper asserts 200 and is for content delivery, while this asserts the
-delivery does NOT happen. Proof-of-possession headers are still presented, so a
-403 here means the tampered signature was refused — not that the fetch was
-rejected for lacking a binding proof it could have supplied.
+The refusal leg is the SDK's own content fetch, as the buyer, rather than the
+shared ``fetch_signed`` helper: that helper asserts 200 and is for content
+delivery, while this asserts the delivery does NOT happen. The SDK presents the
+buyer's proof of possession, so a 403 here means the tampered signature was
+refused, not that the fetch was rejected for lacking a binding proof it could
+have supplied. The SDK returns content only for a successful answer; a refusal
+comes back as its typed error carrying the edge's refusal token, which the edge
+writes as a small JSON body in place of the publisher's bytes.
 """
 
 from __future__ import annotations
 
 import re
+from contextlib import closing
 
-import httpx
 import pytest
+from fora_sdk.client import CallError
 
-from ..broker_client import execute_first_offer
+from ..broker_purchase import buy_through_broker
 from ..conftest import StackURLs
-from ..edge_fetch import edge_fetch_target
-from ..resolve_carriers import first_item_of, licensed_of, retrieval_endpoint_of
+from ..exchanges import EXCHANGE_A_DOMAIN
+from ..sdk_client import sdk_exchange_client, stack_offer_verifier
 from ..seed import SeededFixture
-from ..signing import build_pop_headers
+from ..obligation_registry import Obligation, obligation
 
 # ADR-008 D5 — declare stack-isolation contract.
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
-_OBLIGATION_TEXT = (
-    "The URL delivered after acceptance is tampered with by the caller. "
-    "The content is not served; the caller sees the delivery refused."
-)
 
-
-# The paper-satellites body the edge must NOT serve when it refuses. Same marker
-# the happy-path capstone asserts IS present (test_full_stack.py), used here for
-# the opposite property.
-_PUBLISHER_MARKER = "Paper Satellites"
+# The edge's refusal token for a signed URL whose signature does not verify.
+_SIGNATURE_MISMATCH = "signature_mismatch"
 
 
 def _tamper_sig(signed_url: str) -> tuple[str, str]:
@@ -62,6 +55,7 @@ def _tamper_sig(signed_url: str) -> tuple[str, str]:
     return signed_url.replace(f"sig={sig_val}", f"sig={tampered_sig}"), sig_val
 
 
+@obligation(Obligation.PAID_008, negative=True)
 def test_tampered_signed_url_refused_no_content_served(
     compose_stack: StackURLs,
     seeded: SeededFixture,
@@ -73,54 +67,43 @@ def test_tampered_signed_url_refused_no_content_served(
     monkeypatch.setenv("FORA_AGENT_ID", res.buyer_agent_id)
     monkeypatch.setenv("FORA_AGENT_KEY_FILE", str(res.buyer_key_path))
 
-    # (1) Acceptance — the two-phase flow: Broker discover (discovery-only, R7)
-    # then relay-execute the winning Offer (agent sig1 + Broker sig2 +
-    # offer-acceptance). The signed URL the EXECUTE (TransactionResponse) hands
-    # back is the delivery surface the obligation refers to. intended_use
-    # ``ai-input`` is the real function paper-satellites permits; the per-call
-    # nonce keeps the signed body unique for the replay store.
-    exec_resp = execute_first_offer(
-        compose_stack,
-        {
-            "agent_id": res.buyer_agent_id,
-            "uri": res.uri,
-            "intended_use": "ai-input",
-        },
-        agent_id=res.buyer_agent_id,
-        domain=res.domain,
-        key_path=res.buyer_key_path,
+    # (1) Acceptance — resolve at the Broker, then buy the winning offer through
+    # the Broker. The signed URL the purchase hands back is the delivery surface
+    # the obligation refers to. intended_use ``ai-input`` is the real function
+    # paper-satellites permits.
+    _, item = buy_through_broker(
+        compose_stack, res.uri, agent_id=res.buyer_agent_id, key_path=res.buyer_key_path
     )
-    assert exec_resp.status_code == 200, exec_resp.text
-    # The EXECUTE response is an items[] envelope — read the
-    # per-result fields from items[0]; licensed is derived from its presence.
-    payload = exec_resp.json()
-    item = first_item_of(payload)
-    assert item is not None, f"relay response carried no items[0]: {payload}"
-    assert licensed_of(item) is True, (
-        f"prerequisite — the agent must first receive a delivered URL — failed: {payload}"
-    )
-    signed_url = retrieval_endpoint_of(item)
+    signed_url = item.retrieval_endpoint
     assert signed_url, (
-        f"execute returned licensed=true but no items[0].retrievalEndpoint: {payload}"
+        f"prerequisite — the agent must first receive a delivered URL — failed: {item}"
     )
 
     # (2) Tamper — flip a sig byte. (3) The edge refuses it with 403 and serves
     # nothing.
     tampered_url, original_sig = _tamper_sig(signed_url)
-    url, headers = edge_fetch_target(tampered_url, compose_stack)
-    if "agent_id=" in url:
-        headers = {**headers, **build_pop_headers(url=url, key_path=res.buyer_key_path)}
-    resp = httpx.get(url, headers=headers, follow_redirects=True, timeout=30.0)
+    # A content fetch dials the URL it is given, so the Exchange this client is
+    # addressed at plays no part; it is the buyer's own signer that matters.
+    buyer = sdk_exchange_client(
+        compose_stack,
+        EXCHANGE_A_DOMAIN,
+        stack_offer_verifier(),
+        agent_id=res.buyer_agent_id,
+        key_path=res.buyer_key_path,
+    )
+    with closing(buyer), pytest.raises(CallError) as caught:
+        buyer.fetch(tampered_url)
 
-    assert resp.status_code == httpx.codes.FORBIDDEN, (
-        f"obligation 00 failure-7: a tampered signature must be refused with 403, "
-        f"got {resp.status_code}: {resp.text[:512]}; original sig={original_sig!r}; "
-        f"tampered url={tampered_url!r}"
+    refusal = caught.value
+    assert refusal.status == 403, (
+        f"PAID-008: a tampered signature must be refused with 403, got {refusal}; "
+        f"original sig={original_sig!r}; tampered url={tampered_url!r}"
     )
     # The obligation is "the content is NOT SERVED", which the status alone does
     # not establish: an edge answering 403 while still writing the publisher body
-    # would satisfy a status-only assertion and violate the obligation.
-    assert _PUBLISHER_MARKER not in resp.text, (
-        "obligation 00 failure-7: the edge refused with 403 but still served the "
-        f"publisher payload: {resp.text[:512]}"
+    # would satisfy a status-only assertion and violate the obligation. The edge's
+    # refusal token is read from the body, so it is there only when the body is
+    # the edge's refusal rather than the publisher's bytes.
+    assert refusal.reason == _SIGNATURE_MISMATCH, (
+        f"PAID-008: the edge's refusal must name {_SIGNATURE_MISMATCH!r}, got {refusal}"
     )

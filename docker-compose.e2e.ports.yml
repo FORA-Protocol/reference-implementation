@@ -1,0 +1,50 @@
+# Opt-in host access to the e2e stack, for a developer debugging from the host.
+#
+#   make e2e-up E2E_HOST_PORTS=1
+#   scripts/e2e-stack.sh compose <project> -f docker-compose.e2e.ports.yml port exchange 8081
+#
+# docker-compose.e2e.yml publishes no host port: its runner is a container on the
+# stack's own network, so nothing about a run touches the host and any number of
+# stacks share one Docker daemon. No gate loads this file (not `make test-e2e`,
+# not CI), and nothing that grades a change may.
+#
+# Every port is ephemeral and bound to the loopback interface: Docker picks a
+# free host port, and `docker compose port` names it. The harness's host-run path
+# (tests/e2e/harness/conftest.py without FORA_E2E_IN_NETWORK) and
+# tests/e2e/demo_proof.py find each container by its compose labels, in the
+# stack's own project, and read the port from that container's port binding.
+#
+# A host run also writes the Broker's revocation file from the host, so the
+# Broker's revocation directory is bound back to the harness tree here; in the
+# base file it is a volume only the stack's own containers mount.
+services:
+  postgres:
+    ports: ["127.0.0.1::5432"]
+  exchange:
+    ports: ["127.0.0.1::8081"]
+  exchange-b:
+    ports: ["127.0.0.1::8081"]
+  exchange-c:
+    ports: ["127.0.0.1::8081"]
+  exchange-d:
+    ports: ["127.0.0.1::8081"]
+  broker:
+    ports: ["127.0.0.1::8082"]
+    volumes:
+      - ./tests/e2e/harness/revocations:/revocations
+  edge:
+    ports: ["127.0.0.1::80"]
+  fastly-edge:
+    ports: ["127.0.0.1::80"]
+  aws-edge:
+    ports: ["127.0.0.1::80"]
+  lambda-edge:
+    ports: ["127.0.0.1::8080"]
+  lambda-edge-no-wba:
+    ports: ["127.0.0.1::8080"]
+  console:
+    ports: ["127.0.0.1::8085"]
+  # So a host run can register its per-test agents too. The Exchanges and the
+  # Broker reach this host by its wildcard names, never by this port.
+  agent-directory:
+    ports: ["127.0.0.1::80"]

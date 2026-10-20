@@ -7,7 +7,7 @@
   "absolute": false,
   "gitignore": true,
   "format": ["go", "typescript", "javascript", "python"],
-  "path": ["src", "internal"],
+  "path": ["src", "internal", "tests/e2e/harness"],
   "ignore": [
     "**/node_modules/**",
     "**/gen/**",

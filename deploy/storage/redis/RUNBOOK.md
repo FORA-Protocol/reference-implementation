@@ -22,7 +22,7 @@ Redis holds one class of data that matters: **RFC 9421 replay nonces** — a mar
 per accepted request signature, recording that the signature has been used. "RFC
 9421" is the HTTP Message Signatures standard; the markers are what stop the same
 signed request being sent twice. Every marker expires after five minutes. Both
-the Exchange and the Broker write them, under five namespaces that never overlap
+the Exchange and the Broker write them, under three namespaces that never overlap
 (§4.1), which is why one instance and one database serve both.
 
 **Almost every operator instinct about Redis is wrong here.** There is nothing to
@@ -98,14 +98,14 @@ into whatever monitoring you already run.
 
 ### 3.2 Diagnostics
 
-**Inspect the five key namespaces**, and confirm keys really expire — the guard
+**Inspect the three key namespaces**, and confirm keys really expire — the guard
 against memory growing forever. Run within five minutes of live traffic, or the
 keys will already have gone:
 
 ```bash
 redis-cli -u "$REDIS_URL" --scan --pattern 'httpsig:*' | cut -d: -f1-4 | sort | uniq -c
-# Expect: counts under the prefixes carrying traffic — httpsig:exchange:replay,
-# httpsig:broker:replay, httpsig:broker:relay:execute, httpsig:broker:relay:discover
+# Expect: counts under the prefixes carrying traffic — httpsig:exchange:replay
+# and httpsig:broker:replay
 
 redis-cli -u "$REDIS_URL" --scan --pattern 'budget:*' | wc -l
 # Expect: 0 — those keys are never written (§6)
@@ -143,15 +143,14 @@ docker compose logs exchange | grep -c exchange.httpsig.replay_store_ready
 
 ### 4.1 Routine operations
 
-**The five key namespaces, and why one database serves both services.** Four
-replay prefixes — `httpsig:exchange:replay:` from the Exchange, and
-`httpsig:broker:replay:`, `httpsig:broker:relay:execute:` and
-`httpsig:broker:relay:discover:` from the Broker — plus `budget:<agent-id>:<YYYY-MM>`.
+**The three key namespaces, and why one database serves both services.** Two
+replay prefixes — `httpsig:exchange:replay:` from the Exchange and
+`httpsig:broker:replay:` from the Broker — plus `budget:<agent-id>:<YYYY-MM>`.
 They never overlap, so no two parts of the platform can produce the same key and
 the Exchange and every Broker replica share one database safely. Full table in
 [`CONFIGURATION.md`](CONFIGURATION.md) §3.
 
-**All five lifetimes are hardcoded in the service binaries — five minutes for
+**All three lifetimes are hardcoded in the service binaries — five minutes for
 every replay prefix, 35 days for `budget:`. There is nothing to tune:** no
 environment variable, no config file, no runtime setting.
 

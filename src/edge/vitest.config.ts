@@ -1,7 +1,10 @@
 import { cloudflareTest } from '@cloudflare/vitest-pool-workers';
 import { defineConfig } from 'vitest/config';
 
-// One config, four projects (vitest `test.projects`) — each project's
+import { signWbaDirectory } from './scripts/sign-wba-directory.mjs';
+import { WORKERS_COMPAT } from './scripts/workers-compat.mjs';
+
+// One config, six projects (vitest `test.projects`) — each project's
 // membership is its test DIRECTORY, so there are no hand-mirrored
 // include/exclude lists to keep in sync:
 //
@@ -13,16 +16,18 @@ import { defineConfig } from 'vitest/config';
 //   tests/wellknown-keyless/  same runtime, the publisher that issues no signing
 //                             keys: the discovery surface with WBA_KEYS_JSON
 //                             deliberately unset
+//   tests/licensed-scope/     same runtime, a publisher that licenses only
+//                             /article/: the bot gate applies there alone
+//   tests/wellknown-signed/   same runtime, a publisher whose key directory is
+//                             served pre-signed (WBA_SIGNED_DIRECTORY_JSON)
 //   tests/node/               plain Node: fs-reading parity/schema guards, the
 //                             console-spy log suites, and the programmatic AWS
 //                             Lambda / Fastly harnesses (no CLI dependencies)
 //
 // Run one project with `vitest run --project <name>`.
 
-const WORKERS_COMPAT = {
-  compatibilityDate: '2026-07-01',
-  compatibilityFlags: ['nodejs_compat'],
-};
+// WORKERS_COMPAT is the runtime every generated wrangler.toml carries; see
+// scripts/workers-compat.mjs.
 
 // Bindings shared by every Workers-runtime posture. Origin-mode note: the
 // Cloudflare entry refuses to run without ORIGIN_URL or SAME_ZONE_ORIGIN;
@@ -62,7 +67,38 @@ function workersProject(name: string, bindings: Record<string, string>) {
   };
 }
 
-export default defineConfig({
+// The pre-signed directory the wellknown-signed project serves, made the way a
+// deployment makes it: a publisher key, and the production signing tool run
+// with its private half for the host the suites fetch from (PUB_ORIGIN's).
+// The private key lives only in this process.
+async function signedDirectoryBindings(): Promise<Record<string, string>> {
+  const pair = (await crypto.subtle.generateKey({ name: 'Ed25519' }, false, [
+    'sign',
+    'verify',
+  ])) as CryptoKeyPair;
+  const x = Buffer.from(await crypto.subtle.exportKey('raw', pair.publicKey)).toString('base64url');
+  const keys = [
+    {
+      kty: 'OKP' as const,
+      crv: 'Ed25519' as const,
+      use: 'sig' as const,
+      alg: 'EdDSA' as const,
+      x,
+      not_before: '2020-01-01T00:00:00Z',
+      not_after: '2100-01-01T00:00:00Z',
+    },
+  ];
+  const signed = await signWbaDirectory({
+    authority: 'pub.example.com',
+    keys,
+    signers: [{ x, privKey: pair.privateKey }],
+    validDays: 1,
+    now: Math.floor(Date.now() / 1000),
+  });
+  return { WBA_KEYS_JSON: JSON.stringify(keys), WBA_SIGNED_DIRECTORY_JSON: JSON.stringify(signed) };
+}
+
+export default defineConfig(async () => ({
   test: {
     projects: [
       // No project sets FORA_ENFORCE_BINDING, deliberately: leaving it unset is
@@ -76,6 +112,18 @@ export default defineConfig({
       // is correct. Adding WBA_KEYS_JSON to BASE_BINDINGS would turn that 404
       // into a 200 and break this project.
       workersProject('wellknown-keyless', BASE_BINDINGS),
+      // A publisher that licenses part of its site: the bot gate applies under
+      // /article/ only, and the rest passes to the origin.
+      workersProject('licensed-scope', {
+        ...BASE_BINDINGS,
+        LICENSED_PATHS_JSON: JSON.stringify(['/article/']),
+      }),
+      // A publisher whose directory is served pre-signed, the posture the Web
+      // Bot Auth profile requires of a directory a reader takes keys from.
+      workersProject('wellknown-signed', {
+        ...BASE_BINDINGS,
+        ...(await signedDirectoryBindings()),
+      }),
       {
         test: {
           name: 'node',
@@ -85,4 +133,4 @@ export default defineConfig({
       },
     ],
   },
-});
+}));

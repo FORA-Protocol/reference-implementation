@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"time"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 )
 
 func main() {
@@ -30,6 +33,7 @@ type Config struct {
 	EdgeSkew      time.Duration
 	Timeout       time.Duration
 	AWS           AWSRunner
+	Output        Output
 }
 
 // defaultEdgeRegions are the points of presence swept for a delivery record
@@ -56,7 +60,7 @@ func run(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return Render(stdout, BuildLedger(sources))
+	return emit(ctx, stdout, cfg.Output, BuildLedger(sources))
 }
 
 func parseConfig(args []string) (Config, error) {
@@ -85,6 +89,10 @@ func parseConfig(args []string) (Config, error) {
 	skew := fs.Duration("edge-skew", 5*time.Minute,
 		"clock-skew margin applied before the transaction when searching edge logs")
 	timeout := fs.Duration("timeout", 2*time.Minute, "overall deadline for the whole run")
+	format := fs.String("format", formatText, "output format: text (to stdout) or html (to a file)")
+	output := fs.String("output", "",
+		"html only: where to write the report; defaults to ledger-<tx>-<UTC stamp>.html in the current directory")
+	open := fs.Bool("open", true, "html only: open the saved report in the default browser")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -94,6 +102,10 @@ func parseConfig(args []string) (Config, error) {
 		BrokerDBURL: *brokerDB, BrokerWindow: *window,
 		EdgeLogGroup: *logGroup, EdgeRegions: splitRegions(*regions), EdgeSkew: *skew,
 		Timeout: *timeout, AWS: CLIRunner{},
+		Output: Output{
+			Format: *format, Path: *output, Open: *open,
+			openBrowser: openBrowser, now: clock.System{}.Now,
+		},
 	}
 	return cfg, validate(cfg)
 }
@@ -111,6 +123,15 @@ func validate(cfg Config) error {
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required settings: %s", strings.Join(missing, ", "))
+	}
+	switch cfg.Output.Format {
+	case formatText:
+		if cfg.Output.Path != "" {
+			return errors.New("-output applies to -format html only")
+		}
+	case formatHTML:
+	default:
+		return fmt.Errorf("-format must be %s or %s, got %q", formatText, formatHTML, cfg.Output.Format)
 	}
 	return nil
 }
@@ -146,5 +167,9 @@ deployment only, so both are normally addressed through a tunnel. The edge leg
 shells out to the aws CLI and uses whatever credentials it already resolves.
 
   fora-ledger -tx <transaction-id>
+  fora-ledger -tx <transaction-id> -format html [-output report.html] [-open=false]
+
+Text goes to stdout. HTML is written to a self-contained file, its absolute
+path is printed, and the default browser is opened on it unless -open=false.
 
 `

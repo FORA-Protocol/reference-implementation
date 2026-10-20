@@ -72,7 +72,7 @@ func exchangeStub(tb testing.TB, kid string, pub ed25519.PublicKey) *httptest.Se
 // the test on construction error so the http.Client literal stays a one-liner.
 func mustSigningTransport(t *testing.T, key *xclient.RelayKey) http.RoundTripper {
 	t.Helper()
-	rt, err := xclient.NewSigningTransport(http.DefaultTransport, key, "broker.test.local", 30*time.Second, nil)
+	rt, err := xclient.NewSigningTransport(http.DefaultTransport, key, "https://broker.test.local", 30*time.Second, nil)
 	if err != nil {
 		t.Fatalf("new signing transport: %v", err)
 	}

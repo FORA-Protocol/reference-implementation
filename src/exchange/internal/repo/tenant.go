@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/big"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -20,16 +19,23 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
 )
 
-// Tenant is the domain-layer view of a tenant row. Decouples the service from
-// sqlc-generated pgtype values so tests can construct fixtures without touching
-// the DB layer.
+// Tenant is the domain-layer view of a tenant row: one Exchange SEAT. Decouples
+// the service from sqlc-generated pgtype values so tests can construct fixtures
+// without touching the DB layer.
+//
+// Domain is the hostname the seat answers on -- the value EXCHANGE_DOMAIN
+// carries, and what a publisher's manifest names in exchanges[].domain. It is
+// NOT a publisher's site; that is PublisherDomain.Domain, a separate namespace.
+//
+// The seat holds the PRIVATE half of the URL-signing key material, one
+// reference per scheme. Which scheme a delivery URL is signed under, and the
+// CloudFront key-pair id that goes with it, are facts about the site being
+// delivered and are read from its PublisherDomain row (per ADR-026 D5).
 type Tenant struct {
-	ID                  string
-	Domain              string
-	Ed25519KeyRef       string
-	SigningScheme       string
-	RSAKeyRef           string
-	CloudFrontKeyPairID string
+	ID            string
+	Domain        string
+	Ed25519KeyRef string
+	RSAKeyRef     string
 	// ReportingPolicy carries the raw tenants.reporting_policy JSONB. The
 	// service decodes it (e.g. for default required_fields) close to the
 	// callsite that needs the shape; storing as []byte keeps this repo type
@@ -54,12 +60,6 @@ type Tenant struct {
 	// registered agent starts active in the billing system-of-record. TRUE by
 	// default; set out of band like the other tenant configuration columns.
 	ActivateNewAgentsByDefault bool
-	// DefaultAgentCredit is the one-time credit the Register flow grants a
-	// freshly registered agent, denominated in the deployment ledger currency.
-	// Zero (the column default) disables the grant. Never nil for a row read
-	// through this repo; representable exactly at ledger asset scale 8 (the
-	// write guard enforces it). Server-side commercial term, never on the wire.
-	DefaultAgentCredit *big.Rat
 }
 
 // TenantReadRepo is the read-only tenant contract the agent hot path depends on:
@@ -83,15 +83,6 @@ type TenantWriteRepo interface {
 	SetFeeRate(ctx context.Context, tx pgx.Tx, tenantID string, bps int, notes *string) (int64, error)
 	// SetReportingPolicy replaces the reporting_policy JSONB for a tenant.
 	SetReportingPolicy(ctx context.Context, tx pgx.Tx, tenantID string, policyJSON []byte) (int64, error)
-	// SetDefaultAgentCredit replaces the per-tenant default credit granted to a
-	// newly registered agent (deployment ledger currency; 0 disables the
-	// grant). Reached only through AdminService.SetDefaultAgentCredit — the
-	// boot-time env seeding (EXCHANGE_DEFAULT_AGENT_CREDIT) routes through the
-	// service so the write commits with its audit row; there is no admin RPC.
-	// Returns ErrDefaultCreditInvalid for a nil or negative amount, an amount
-	// finer than ledger asset scale 8, or one too large for the column — whether
-	// the Go-side guard catches it or the column's CHECK backstop rejects it.
-	SetDefaultAgentCredit(ctx context.Context, tx pgx.Tx, tenantID string, credit *big.Rat) (int64, error)
 	// SetActivateNewAgentsByDefault flips whether a newly registered agent
 	// starts active in the billing system-of-record. The column defaults to
 	// TRUE on insert, so this is only needed to opt a tenant out. No admin RPC
@@ -99,6 +90,19 @@ type TenantWriteRepo interface {
 	// the column.
 	SetActivateNewAgentsByDefault(ctx context.Context, tx pgx.Tx, tenantID string, active bool) (int64, error)
 }
+
+// TenantRelayPolicyRepo writes a tenant's broker-relay opt-in
+// (tenants.allow_broker_relay). No admin RPC writes it: the seat's deployment
+// sets it, and the e2e control service (ADR-028 D6) and the integration
+// harnesses set it through this port rather than through a raw query. It
+// returns rows-affected, so a call for a missing tenant is a detectable no-op.
+type TenantRelayPolicyRepo interface {
+	SetAllowBrokerRelay(ctx context.Context, tenantID string, allow bool) (int64, error)
+}
+
+// NewTenantRelayPolicyRepo composes the relay-policy write port over the fat
+// sqlc.Querier.
+func NewTenantRelayPolicyRepo(q sqlc.Querier) TenantRelayPolicyRepo { return &tenantRepo{q: q} }
 
 // NewTenantReadRepo composes the read-only tenant ports over the fat sqlc.Querier.
 func NewTenantReadRepo(q sqlc.Querier) TenantReadRepo { return &tenantRepo{q: q} }
@@ -121,7 +125,7 @@ func (r *tenantRepo) ByID(ctx context.Context, tenantID string) (Tenant, error) 
 		}
 		return Tenant{}, fmt.Errorf("get tenant by id: %w", err)
 	}
-	return tenantFromRow(row)
+	return tenantFromRow(row), nil
 }
 
 func (r *tenantRepo) ByDomain(ctx context.Context, domain string) (Tenant, error) {
@@ -132,7 +136,7 @@ func (r *tenantRepo) ByDomain(ctx context.Context, domain string) (Tenant, error
 		}
 		return Tenant{}, fmt.Errorf("get tenant by domain: %w", err)
 	}
-	return tenantFromRow(row)
+	return tenantFromRow(row), nil
 }
 
 func (r *tenantRepo) SetFeeRate(
@@ -148,20 +152,6 @@ func (r *tenantRepo) SetFeeRate(
 		FeeRateNotes: pgTextPtr(notes),
 	})
 	return n, mapCheckWriteErr(err, "set tenant fee rate", ErrFeeRateOutOfRange)
-}
-
-func (r *tenantRepo) SetDefaultAgentCredit(
-	ctx context.Context, tx pgx.Tx, tenantID string, credit *big.Rat,
-) (int64, error) {
-	v, err := guardDefaultAgentCredit(credit)
-	if err != nil {
-		return 0, err
-	}
-	n, err := sqlc.New(tx).SetTenantDefaultAgentCredit(ctx, sqlc.SetTenantDefaultAgentCreditParams{
-		TenantID:           tenantID,
-		DefaultAgentCredit: v,
-	})
-	return n, mapCheckWriteErr(err, "set tenant default agent credit", ErrDefaultCreditInvalid)
 }
 
 func (r *tenantRepo) SetReportingPolicy(
@@ -191,30 +181,29 @@ func (r *tenantRepo) SetActivateNewAgentsByDefault(
 	return n, nil
 }
 
-func tenantFromRow(row sqlc.ForaTenant) (Tenant, error) {
-	// Propagate the NUMERIC decode error rather than swallowing it: a money
-	// field must never be silently zeroed by a decode failure. The column's
-	// CHECK excludes negative and NaN values, but a decode failure here means
-	// the store and the reader disagree, and that must surface, not degrade
-	// to "grant disabled".
-	credit, err := ratFromNumeric(row.DefaultAgentCredit)
+func (r *tenantRepo) SetAllowBrokerRelay(ctx context.Context, tenantID string, allow bool) (int64, error) {
+	n, err := r.q.SetTenantAllowBrokerRelay(ctx, sqlc.SetTenantAllowBrokerRelayParams{
+		TenantID:         tenantID,
+		AllowBrokerRelay: allow,
+	})
 	if err != nil {
-		return Tenant{}, fmt.Errorf("decode default_agent_credit for tenant %q: %w", row.TenantID, err)
+		return 0, fmt.Errorf("set tenant allow_broker_relay: %w", err)
 	}
+	return n, nil
+}
+
+func tenantFromRow(row sqlc.ForaTenant) Tenant {
 	return Tenant{
 		ID:                         row.TenantID,
 		Domain:                     row.Domain,
 		Ed25519KeyRef:              row.Ed25519KeyRef,
-		SigningScheme:              string(row.SigningScheme),
 		RSAKeyRef:                  textOrEmpty(row.RsaKeyRef),
-		CloudFrontKeyPairID:        textOrEmpty(row.CloudfrontKeyPairID),
 		ReportingPolicy:            row.ReportingPolicy,
 		AllowBrokerRelay:           row.AllowBrokerRelay,
 		FeeRateBps:                 int(row.FeeRateBps),
 		FeeRateNotes:               textFromPG(row.FeeRateNotes),
 		ActivateNewAgentsByDefault: row.ActivateNewAgentsByDefault,
-		DefaultAgentCredit:         credit,
-	}, nil
+	}
 }
 
 func textOrEmpty(t pgtype.Text) string {

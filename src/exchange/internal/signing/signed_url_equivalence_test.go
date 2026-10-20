@@ -111,7 +111,7 @@ func TestEd25519SignedURL_DispatcherPathMatchesSDK(t *testing.T) {
 	pub := priv.Public().(ed25519.PublicKey)
 
 	sgn, err := signing.URLSignerFor(
-		signing.TenantKeys{Scheme: signing.SchemeEd25519, Ed25519Ref: "k"},
+		signing.URLSigningKeys{Scheme: signing.SchemeEd25519, Ed25519Ref: "k"},
 		&stubStore{pub: pub, priv: priv},
 	)
 	if err != nil {

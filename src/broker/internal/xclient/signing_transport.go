@@ -18,8 +18,7 @@ import (
 // RelayKey holds the Broker's outbound-relay Ed25519 keypair. After the WBA
 // split the relay's RFC 9421 keyid is the RFC 7638 thumbprint of its public key
 // (proof of key possession); its identity as a relay is the broker's directory
-// origin, carried in the covered Signature-Agent header, and the DB
-// requester_type discriminator — not a kid prefix.
+// origin, carried in the covered Signature-Agent member — not a kid prefix.
 type RelayKey struct {
 	// KeyID is the RFC 7638 thumbprint of Private's public key — the RFC 9421
 	// keyid the relay signs with.
@@ -62,24 +61,45 @@ func LoadRelayKey(path string) (*RelayKey, error) {
 	return &RelayKey{KeyID: keyid, Private: priv}, nil
 }
 
+// Signer returns the relay key as an SDK signer, keyid its RFC 7638
+// thumbprint. The Broker's key directory lists the relay key, so the
+// directory's response is signed by it too.
+func (k *RelayKey) Signer() (helpers.Signer, error) {
+	return helpers.NewEd25519Signer(k.KeyID, k.Private)
+}
+
 // NewSigningTransport wraps inner so every outbound Broker→Exchange /fora.*
-// request carries a Broker-relay RFC 9421 signature. It composes the SDK's
-// signing RoundTripper (sdk/go/core.NewSigningTransport) so the signed wire
-// bytes — covered components, content-digest, Signature-Input, and the
-// signature — are identical to every other FORA client the Exchange's verifier
-// mirrors. The relay is an always-append caller (WithAppendSigner): a
-// broker-originated call is signed as a plain sig1 and a relayed call appends a
-// chain-linked sigN+1 over the agent's existing signature. A MonotonicWindow
+// request carries the Broker's Web Bot Auth request signature. It composes the
+// SDK's signing RoundTripper (sdk/go/core.NewSigningTransport) so the signed
+// wire bytes — covered components, content-digest, the Signature-Agent
+// dictionary member, Signature-Input, and the signature — are identical to
+// every other FORA client the Exchange's verifier mirrors.
+//
+// The Broker signs alone. It never forwards an agent's request unchanged:
+// Resolve's fan-out queries are requests the Broker originates, and each
+// purchase sub-request is a re-packaged request the Broker authors, so there is
+// no earlier signature for the Broker's to cover. Each request therefore carries
+// one signature, sig1, covering the request and the Broker's own member only.
+// The agent's identity and consent on a relayed purchase travel in the body as
+// its AgentAcceptance, which the Exchange verifies against the agent's own
+// directory.
+//
+// The SDK transport puts a fresh nonce on every signature it generates, which
 // keeps identical back-to-back requests from colliding in the Exchange's replay
-// store. directory is the broker's own directory origin, published in the
-// covered Signature-Agent header (set only when the request does not already
-// carry one, so a relayed agent's Signature-Agent is preserved). ttl caps the
-// signature lifetime (recommended 30s); inner nil defaults to
-// http.DefaultTransport; clk is the time source (pass clock.System{} in
+// store; the window is the SDK's clock window over clk, so created is the
+// clock's now. origin is the Broker's own https origin (BROKER_PUBLIC_ORIGIN), the
+// Signature-Agent member every signature names and the origin whose directory
+// the Exchange resolves the relay key in; a value that is not an https origin
+// is refused here, before anything is signed. ttl caps the signature lifetime
+// (recommended 30s, at most the SDK's five-minute ceiling); inner nil defaults
+// to http.DefaultTransport; clk is the time source (pass clock.System{} in
 // production wiring, nil defaults to it).
 func NewSigningTransport(
-	inner http.RoundTripper, key *RelayKey, directory string, ttl time.Duration, clk clock.Clock,
+	inner http.RoundTripper, key *RelayKey, origin string, ttl time.Duration, clk clock.Clock,
 ) (http.RoundTripper, error) {
+	if err := helpers.CheckHTTPSOrigin(origin); err != nil {
+		return nil, fmt.Errorf("xclient: broker signing origin: %w", err)
+	}
 	if ttl <= 0 {
 		ttl = 30 * time.Second
 	}
@@ -92,8 +112,7 @@ func NewSigningTransport(
 	}
 	return core.NewSigningTransport(signer, inner,
 		core.WithSignPredicate(foraauth.IsFORAProcedure),
-		core.WithSignatureAgent(directory),
-		core.WithWindow(core.MonotonicWindow(clk.Now, ttl)),
-		core.WithAppendSigner(),
+		core.WithSignatureAgent(origin),
+		core.WithWindow(core.ClockWindow(clk.Now, ttl)),
 	), nil
 }

@@ -1,0 +1,49 @@
+Chrysippus
+
+Chrysippus of Soli (c. 279 - 206 BCE) was the third head of the Stoa and
+the thinker who gave Stoicism the shape it kept. The ancient verdict was
+blunt: had there been no Chrysippus, there would have been no Stoa. He is
+said to have written more than seven hundred books, and none of them
+survives whole. What we know of him comes through quotation, often by
+opponents, which is a measure of how much there was to oppose.
+
+Logic
+
+Chrysippus built the first system of propositional logic. Where Aristotle
+had analysed arguments by the terms inside sentences, Chrysippus took whole
+propositions as units and studied the connectives between them: if, and,
+or, not. He isolated five indemonstrable argument forms, among them what is
+now called modus ponens, and showed how other valid arguments reduce to
+them. He treated the conditional with care, asking under what conditions
+"if p then q" is true, and his answer, that the denial of q must conflict
+with p, anticipates later accounts of entailment.
+
+Physics and fate
+
+For Chrysippus the cosmos is a single living body, pervaded by a rational
+breath he called pneuma, and everything that happens in it happens by fate,
+the unbroken chain of causes. The obvious objection is that fate abolishes
+responsibility. His reply distinguishes kinds of cause. A cylinder pushed
+on a slope rolls because it was pushed, but it rolls the way it does
+because it is a cylinder. The push is the external, proximate cause; the
+shape is the principal cause in the thing itself. Our assent to an
+impression is likewise ours, from our own character, even though the
+impression came from outside. Fate works through us, not around us.
+
+Ethics
+
+The good is virtue alone, and virtue is knowledge of what is and is not up
+to us. Everything else, health, wealth, reputation, is indifferent, though
+some indifferents are preferred and may reasonably be pursued so long as
+they are not mistaken for the good. The passions are false judgements, not
+brute feelings: fear is the judgement that a coming evil is unbearable, and
+it is cured by correcting the judgement. The wise person is free because
+nothing that can be taken away was ever counted as theirs.
+
+Style
+
+He was known for arguing both sides of a question so thoroughly that his
+pupil Carneades, founder of the sceptical Academy, said he needed no other
+source for objections to Stoicism. Chrysippus is a philosopher one meets
+almost entirely through the people who tried to refute him, and who found
+they had to learn his logic first.

@@ -44,9 +44,9 @@ Promoting them back is worse: ``domain`` and ``reason`` are request fields too, 
 they sit on error details this harness reads back by the dozen. So a demoted name
 corroborates a marker already present and is never the first witness.
 
-Keys assigned afterwards count too. ``broker_client._canonical_resolve_body``
-opens with a literal that carries only ``requester`` and adds ``uris`` on the
-next statement; read the literal alone and the builder is invisible. So the
+Keys assigned afterwards count too. A builder that opens with a literal
+carrying only ``requester`` and adds ``uris`` on the next statement is invisible
+when the literal is read alone. So the
 literal's keys are unioned with every ``name["k"] = ...`` store on the name it
 was bound to. That union is module-wide rather than scope-aware, which can only
 ever add keys and so only ever widens what the guard looks at.
@@ -228,6 +228,34 @@ def _is_sdk_constant(value: ast.expr) -> bool:
     )
 
 
+#: The verbs that hand MCP tool arguments to the identity service, as
+#: ``verb(tool, {...})``: the MCP send seam's ``call`` and ``refused``
+#: (``mcp_client.py``) and the transport module's ``tool_call``
+#: (``mcp_transport.py``). Every MCP tool call goes through one of them.
+_MCP_TOOL_VERBS = frozenset({"call", "refused", "tool_call"})
+
+
+def _mcp_tool_arguments(tree: ast.AST) -> set[int]:
+    """Ids of the dict literals passed as MCP tool arguments, ``call(tool, {...})``.
+
+    Tool arguments are the agent's input to the MCP adapter, not a FORA body: the
+    adapter builds the DiscoveryRequest from them and stamps ver itself. A tool
+    argument can still carry a key that marks exactly one request model --
+    ``query`` is DiscoveryRequest's -- so the key test alone would report it.
+    """
+    out: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        if name not in _MCP_TOOL_VERBS:
+            continue
+        candidates = node.args[1:2] + [kw.value for kw in node.keywords if kw.arg == "arguments"]
+        out.update(id(arg) for arg in candidates if isinstance(arg, ast.Dict))
+    return out
+
+
 def _offences(tree: ast.AST) -> list[tuple[int, str]]:
     """Every request body in ``tree`` that omits ``ver`` or writes it by hand.
 
@@ -237,9 +265,10 @@ def _offences(tree: ast.AST) -> list[tuple[int, str]]:
     """
     later = _keys_assigned_later(tree)
     bound = _bound_name(tree)
+    tool_arguments = _mcp_tool_arguments(tree)
     hits: list[tuple[int, str]] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Dict):
+        if not isinstance(node, ast.Dict) or id(node) in tool_arguments:
             continue
         keys = dict_string_keys(node)
         name = bound.get(id(node))
@@ -362,10 +391,18 @@ payload = {
 }
 """
 
-# MCP tool arguments are not a FORA body. `uris` alone is carried by more than one
-# request model, so it cannot identify one on its own.
+# MCP tool arguments are not a FORA body, even when a key would mark one: `query`
+# belongs to DiscoveryRequest alone.
 _MCP_TOOL_ARGUMENTS = """
-result = call_tool("fora_discover", {"uris": [uri]})
+result = await mcp.call("fora_discover", {"uris": [uri]})
+result = await mcp.call("fora_discover", {"query": q})
+refusal = await mcp.refused("fora_discover", arguments={"uris": [u], "query": q})
+request = tool_call("fora_discover", {"query": q}, version=v, bearer=b)
+"""
+
+# The same keys in a dict that is NOT handed to an MCP tool verb are still a body.
+_QUERY_BODY_OUTSIDE_A_TOOL_CALL = """
+send(body={"query": q})
 """
 
 # A depicted body inside a STRING is source under discussion, not a sender. This
@@ -439,6 +476,11 @@ def test_guard_ignores_the_request_acceptance_payload() -> None:
 @pytest.mark.stack_isolation("shared-without-cleanup")
 def test_guard_ignores_mcp_tool_arguments() -> None:
     assert _hits(_MCP_TOOL_ARGUMENTS) == []
+
+
+@pytest.mark.stack_isolation("shared-without-cleanup")
+def test_guard_flags_a_query_body_outside_a_tool_call() -> None:
+    assert _hits(_QUERY_BODY_OUTSIDE_A_TOOL_CALL) == [(2, "no ver key")]
 
 
 @pytest.mark.stack_isolation("shared-without-cleanup")

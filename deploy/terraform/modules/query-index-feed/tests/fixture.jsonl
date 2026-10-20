@@ -1,0 +1,7 @@
+{"domain":"music.demo.fora-protocol.org","path":"/tracks/a.mp3","terms":[{"semantics":"reference_only"}],"ext":{"editorial_desk":"film","music.genre":"soundtrack","music.bpm":85}}
+{"domain":"sfx.demo.fora-protocol.org","path":"/sfx/b.wav","terms":[],"ext":{"music.mood":["calm"]}}
+{"domain":"demo.fora-protocol.org","path":"/c.mp3","terms":[],"ext":{"music.genre":"world"}}
+{"domain":"music.example","path":"/d.mp3","terms":[],"ext":{"music.genre":"jazz"}}
+{"domain":"music.demo.fora-protocol.org","path":"/lyrics/e.txt","terms":[]}
+
+{"domain":"music.demo.fora-protocol.org","path":"/tracks/f.json","terms":[],"ext":{"other":true}}

@@ -13,10 +13,9 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/testutil"
 )
 
-// ErrNoDocument deliberately names no document: this package fetches two — the
-// commercial overlay and the Web Bot Auth key directory — and one sentinel
-// covers both, so that a missing key directory is never reported as a missing
-// fora.json. That neutrality moves the whole diagnostic burden onto the URL.
+// ErrNoDocument deliberately names no document, so that a missing document is
+// never reported as a different one. That neutrality moves the whole diagnostic
+// burden onto the URL.
 //
 // Nothing tested it. Every existing assertion in this package uses errors.Is,
 // which passes on the bare sentinel, so the wrapping was free to disappear from
@@ -24,32 +23,21 @@ import (
 // read the message text on purpose. They are the reason the promise in the
 // ErrNoDocument comment can be believed.
 
-// TestNoDocument_NamesTheDocumentItCouldNotFind covers the two DIRECT fetches.
-// Both return the same sentinel, so the address is the only thing that tells the
-// two documents apart. The overlay case is checked against the WBA path, and the
-// directory case against the overlay path, because a wrapper that named a fixed
-// document would pass a same-document check.
+// TestNoDocument_NamesTheDocumentItCouldNotFind covers the DIRECT fetch. The
+// sentinel names no document, so the address is the only thing that says which
+// one was missing. The overlay case is checked against the WBA path too,
+// because a wrapper that named a fixed document would pass a same-document
+// check.
 func TestNoDocument_NamesTheDocumentItCouldNotFind(t *testing.T) {
 	t.Parallel()
 	origin := testutil.NewOrigin(nil)
 	defer origin.Close()
 	origin.SetManifestStatus(http.StatusNotFound)
-	origin.SetWBAStatus(http.StatusNotFound)
 	ctx := context.Background()
 	opts := forawellknown.FetchOptions{Client: testutil.Client(), Scheme: "http"}
 
-	// The subtests share one origin that the parent closes, so they run inline
-	// rather than in parallel: a parallel subtest starts after the parent returns,
-	// which is after the deferred Close.
-	t.Run("commercial overlay", func(t *testing.T) {
-		_, err := forawellknown.Fetch(ctx, origin.Host(), opts)
-		assertNamesPath(t, err, forawellknown.Path, forawellknown.WBAPath)
-	})
-
-	t.Run("key directory", func(t *testing.T) {
-		_, err := forawellknown.FetchWBA(ctx, origin.Host(), opts)
-		assertNamesPath(t, err, forawellknown.WBAPath, forawellknown.Path)
-	})
+	_, err := forawellknown.Fetch(ctx, origin.Host(), opts)
+	assertNamesPath(t, err, forawellknown.Path, forawellknown.WBAPath)
 }
 
 // TestNoDocument_CachedAbsenceSaysAsMuchAsTheFirstOne is the case that was

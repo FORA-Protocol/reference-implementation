@@ -1,4 +1,4 @@
-# Builds the three FORA service images and publishes them to the GitHub
+# Builds the FORA service images and publishes them to the GitHub
 # Container Registry.
 #
 # WHAT STARTS IT. A tag whose name begins with "v", pushed to this repository,
@@ -41,7 +41,7 @@ permissions:
 
 concurrency:
   # One publish per ref at a time, and never cancel a run that is under way. A
-  # half-finished release leaves some of the three images published and some
+  # half-finished release leaves some of the images published and some
   # not, which is worse than a slow queue.
   group: publish-images-${{ github.ref }}
   cancel-in-progress: false
@@ -50,7 +50,7 @@ jobs:
   publish:
     runs-on: ubuntu-24.04
     strategy:
-      # The three build independently. One failure must not hide the other two
+      # Each builds independently. One failure must not hide the other
       # results, which is exactly what you need when a release breaks.
       fail-fast: false
       matrix:
@@ -61,6 +61,15 @@ jobs:
             dockerfile: src/broker/Dockerfile
           - service: identity
             dockerfile: src/identity/Dockerfile
+          - service: console
+            dockerfile: src/console/Dockerfile
+            # The image keeps this as CONSOLE_EDGE_RELEASE_REF: the version of
+            # the edge packages the console tells every publisher to build
+            # from. It is the git tag's own name, leading "v" included, not the
+            # image tag the metadata step derives from it. A run on a ref that
+            # names no version stops before the build, at the refusal step
+            # below.
+            build-args: EDGE_RELEASE_REF=${{ github.ref_name }}
 
     steps:
       - name: Check out the source
@@ -104,7 +113,7 @@ jobs:
         # reject some characters — spaces, backslashes, control characters, and
         # the revision syntax it needs for itself, : ? * [ ~ ^ — but not one of
         # those omissions closes this hole. The job holds a token with
-        # packages: write for all three images.
+        # packages: write for every image.
         #
         # The message names no version. The tag is the only source of one, so an
         # example here would be a second place to edit at release time, and the
@@ -123,6 +132,9 @@ jobs:
           # the shared internal/ tree.
           context: .
           file: ${{ matrix.dockerfile }}
+          # Empty for every service except the console; its matrix entry says
+          # why it has one.
+          build-args: ${{ matrix.build-args }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -130,7 +142,7 @@ jobs:
           # rest — source, licenses, title, description — are baked into each
           # Dockerfile, and passing the metadata action's full label set here
           # would overwrite the per-service title and description with this
-          # repository's own name for all three images. There is no created
+          # repository's own name for every image. There is no created
           # label because the image config already records a creation time.
           labels: |
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
@@ -141,6 +153,6 @@ jobs:
           # published, so the tag should resolve straight to that one image.
           provenance: false
           # Without a cache every run recompiles Go from cold, several minutes
-          # per service. The scope keeps the three from evicting each other.
+          # per service. The scope keeps them from evicting each other.
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}

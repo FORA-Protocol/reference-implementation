@@ -4,28 +4,21 @@ import (
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 )
 
-// isCredentialsRestricted reports whether an OfferAbsenceReason indicates
-// the caller needs additional credentials to unlock an offer. The canonical
-// proto (W1 of the proto-rename wave) collapsed the scope-gate and subscription-gate
-// vocabularies onto a single SCOPE_INSUFFICIENT enum value; the broker
-// boundary continues to treat them uniformly.
-func isCredentialsRestricted(r forav1.OfferAbsenceReason) bool {
-	return r == forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_SCOPE_INSUFFICIENT
-}
-
 // probeOutcome accumulates the per-domain probe results so the
 // refusal-shape selector can map "no manifests at all" to the correct
 // canonical absence vocabulary. v1 publishers MUST host fora.json;
 // missing and refused → NOT_IN_CATALOG, transient → TEMPORARILY_UNAVAILABLE.
 type probeOutcome struct {
 	missing   int // ErrManifestMissing — publisher has no fora.json
-	refused   int // ErrManifestVersionRefused — manifest read, document version not accepted
+	refused   int // ErrManifestVersionRefused / ErrManifestUnusable — manifest read, refused on its content
 	transient int // ErrProbeFailed / unexpected error — upstream unreachable
 }
 
 // settled reports whether any probe reached a verdict about a publisher. There
 // are TWO such causes and both are counted here: the publisher hosts no manifest
-// (missing), and the publisher hosts one this Broker cannot read (refused). A
+// (missing), and the publisher hosts one this Broker refuses on its content
+// (refused) -- a document version this build does not accept, or a document that
+// broke a rule. A
 // verdict does not change on a retry, so one settled outcome makes the refusal
 // NOT_IN_CATALOG even when another publisher in the batch was merely
 // unreachable.
@@ -34,10 +27,6 @@ func (o probeOutcome) settled() bool { return o.missing > 0 || o.refused > 0 }
 // discoverFlags accumulates the per-exchange observations the
 // caller needs to map to a Response.AbsenceReason.
 type discoverFlags struct {
-	// scopeRestricted is true when any upstream OfferGroup carried the
-	// scope-insufficient or subscription-required vocabulary — the
-	// "credentials short" case.
-	scopeRestricted bool
 	// upstreamReason is the most recent non-UNSPECIFIED request-level
 	// absence reason an upstream Exchange surfaced. The broker
 	// preserves this signal when none of the exchanges returned an
@@ -95,9 +84,8 @@ func probeRefusalResponse(outcome probeOutcome) *Response {
 // noOffersResponse is the broker's structured-cause response when the
 // upstream exchanges all returned (without RPC errors) but produced
 // no offers — either because of an upstream reason that propagates
-// through, a credentials-restricted filter, or a generic empty-offers
-// outcome. AbsenceReason carries the ADR-008 D2 enum — the sole refusal-cause
-// surface (ADR-019).
+// through, or a generic empty-offers outcome. AbsenceReason carries the
+// ADR-008 D2 enum — the sole refusal-cause surface (ADR-019).
 func noOffersResponse(flags discoverFlags) *Response {
 	return &Response{
 		AbsenceReason: pickResolveAbsenceReason(flags),
@@ -127,27 +115,26 @@ func budgetExhaustedResponse() *Response {
 //     semantic on the canonical surface.
 //  2. upstreamReason set → propagate the upstream cause unchanged so
 //     the caller sees the same vocabulary across the proxy hop.
-//  3. scopeRestricted → SCOPE_INSUFFICIENT (caller's biscuit did not
-//     unlock any offer; collapses the prior GRANTS_DO_NOT_COVER value
-//     onto the canonical scope-gate vocabulary).
-//  4. namedExchangeDown → TEMPORARILY_UNAVAILABLE (transient: a
+//  3. namedExchangeDown → TEMPORARILY_UNAVAILABLE (transient: a
 //     manifest-named exchange was registered and trusted but not usable,
 //     so the router declined it before dialling). Ranked below the
 //     propagated upstream cause, because an exchange that DID answer said
 //     something specific about the request and that beats a sibling merely
 //     being down. Matches what noHealthyExchangeResponse gives the
 //     free-text query path for the same condition.
-//  5. Otherwise NOT_IN_CATALOG — generic empty-offers fallback,
-//     replacing the prior UNKNOWN_RESOURCE value.
+//  4. Otherwise NOT_IN_CATALOG — generic empty-offers fallback,
+//     replacing the prior UNKNOWN_RESOURCE value. An Exchange whose
+//     requester's scopes cover none of a resource's terms answers an empty
+//     group with no reason, so that case lands here too, the same answer as
+//     any resource with nothing to offer. The Broker adds no scope reason of
+//     its own: a resource outside the requester's scopes stays hidden (the
+//     Requester.scopes comment in the pinned protocol module).
 func pickResolveAbsenceReason(flags discoverFlags) forav1.OfferAbsenceReason {
 	if flags.allUpstreamFailed {
 		return forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_TEMPORARILY_UNAVAILABLE
 	}
 	if flags.upstreamReason != forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_UNSPECIFIED {
 		return flags.upstreamReason
-	}
-	if flags.scopeRestricted {
-		return forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_SCOPE_INSUFFICIENT
 	}
 	if flags.namedExchangeDown {
 		return forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_TEMPORARILY_UNAVAILABLE

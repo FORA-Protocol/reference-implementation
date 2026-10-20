@@ -39,7 +39,7 @@ func TestDiscoverResources_ServesCanonicalProtoNamesOnTheJSONWire(t *testing.T) 
 	resp, err := wire.exchange.DiscoverResources(h.ctx, connect.NewRequest(
 		newResourceQuery(
 			newRequester("agent-test", "agent.example"),
-			[]string{"https://" + h.tenantDomain + "/wire-names/discover"},
+			[]string{"https://" + h.siteDomain + "/wire-names/discover"},
 		),
 	))
 	if err != nil {
@@ -88,7 +88,7 @@ func seedOneArticle(
 	t.Helper()
 	resp, err := catalogClient.PushResources(h.ctx, connect.NewRequest(
 		newPushRequest(h.tenantID, "agent-test", []*forav1.ResourceEntry{{
-			Domain: h.tenantDomain,
+			Domain: h.siteDomain,
 			Path:   path,
 			Terms:  []*forav1.LicenseTerm{seedPricedTermEst(50)},
 		}}),

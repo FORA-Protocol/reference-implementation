@@ -6,10 +6,16 @@
 FROM golang:1.26-alpine AS builder
 WORKDIR /build
 
+ARG GOPROXY="https://proxy.golang.org|https://goproxy.io|direct"
+ARG GOSUMDB="sum.golang.org"
+ENV GOPROXY=${GOPROXY} \
+    GOSUMDB=${GOSUMDB}
+
 # There is no in-tree proto/ directory to copy. The protocol is consumed as the
 # published Go module github.com/FORA-Protocol/protocol, pinned in the root
 # go.mod, so `go mod download` below is what fetches it.
 COPY go.mod go.sum ./
+COPY scripts/go-mod-fetch.sh ./
 # Persist the Go module and build caches across builds.
 #
 # Without these every rebuild recompiles the whole dependency graph, because
@@ -22,17 +28,21 @@ COPY go.mod go.sum ./
 # build step below only reads it and takes the default shared mode: locking it
 # there serializes every Go image in the stack against every other, which
 # measured slower than having no cache at all.
+#
+# Module fetch with retry and proxy fallback. Single canonical definition
+# copied from scripts/go-mod-fetch.sh; run with sh (POSIX sh only, no bashisms).
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked --mount=type=cache,target=/root/.cache/go-build \
-    go mod download
+    sh go-mod-fetch.sh
 
 COPY internal/ ./internal/
 COPY src/broker/ ./src/broker/
 
+ARG GO_BUILD_P=3
 ENV CGO_ENABLED=0 GOOS=linux
 ARG TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     GOARCH=${TARGETARCH:-amd64} \
-    go build -trimpath -ldflags="-s -w" \
+    go build -p ${GO_BUILD_P} -trimpath -ldflags="-s -w" \
       -o /out/broker ./src/broker/cmd/server
 
 FROM gcr.io/distroless/static-debian12:nonroot

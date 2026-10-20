@@ -1,0 +1,51 @@
+{{define "content"}}
+{{with .Overview}}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+  <div>
+    <h1 class="h3 mb-0">Overview</h1>
+    <p class="text-body-secondary small mb-0">{{.Period.Label}}</p>
+  </div>
+  <form class="period d-flex flex-wrap align-items-end gap-2" method="get">
+    {{/* The period is all this form carries, so the picker's own Apply is
+         its only button. */}}
+    {{template "period-fields" .}}
+  </form>
+</div>
+
+{{if .Empty}}
+<div class="empty-state" role="status">
+  <p class="h5 mb-1">{{.Notice}}</p>
+  <p class="text-body-secondary mb-0">Choose another period, or come back once agents have bought from your domains.</p>
+</div>
+{{else}}
+<div class="stats">
+  <div class="stat"><span class="stat-label">Transactions</span><span class="stat-value">{{.Total.Count}}</span></div>
+  <div class="stat"><span class="stat-label">Gross</span><span class="stat-value">{{template "money" .Money .Total.Gross}}</span></div>
+  <div class="stat"><span class="stat-label">Exchange fee</span><span class="stat-value">{{template "money" .Money .Total.Fee}}</span></div>
+  <div class="stat"><span class="stat-label">Net</span><span class="stat-value">{{template "money" .Money .Total.Net}}</span></div>
+</div>
+{{if .Notice}}<div class="alert alert-warning mt-3" role="status">{{.Notice}}</div>{{end}}
+<p class="text-body-secondary small mt-2">Amounts are what the ledger settled for sales in this period, after the exchange's fee.</p>
+
+<h2 class="h6 mt-4">Transactions per day (UTC)</h2>
+{{with .Chart}}{{$c := .}}
+<svg class="chart" viewBox="0 0 {{.Width}} {{.Height}}" role="img" aria-label="Transactions per day, in UTC. The same figures are in the table below.">
+  {{range .Ticks}}
+  <line class="grid" x1="{{$c.PlotLeft}}" x2="{{$c.PlotRight}}" y1="{{.Y}}" y2="{{.Y}}"></line>
+  <text class="tick" x="{{$c.PlotLeft}}" y="{{.Y}}" dx="-6" dy="4">{{.Value}}</text>
+  {{end}}
+  {{range .Columns}}
+  <g class="day">
+    <title>{{.Day}} (UTC): {{.Count}} transactions</title>
+    <rect class="hit" x="{{.SlotX}}" y="0" width="{{.SlotW}}" height="{{$c.Baseline}}"></rect>
+    {{if .Path}}<path class="bar" d="{{.Path}}"></path>{{end}}
+    {{if .Label}}<text class="day-label" x="{{.LabelX}}" y="{{$c.Baseline}}" dy="24">{{.Label}}</text>{{end}}
+    {{if .SubLabel}}<text class="day-label" x="{{.LabelX}}" y="{{$c.Baseline}}" dy="44">{{.SubLabel}}</text>{{end}}
+  </g>
+  {{end}}
+  <line class="axis" x1="{{.PlotLeft}}" x2="{{.PlotRight}}" y1="{{.Baseline}}" y2="{{.Baseline}}"></line>
+</svg>
+{{end}}
+{{end}}
+{{end}}
+{{end}}

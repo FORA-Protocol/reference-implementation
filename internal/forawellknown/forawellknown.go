@@ -16,13 +16,16 @@
 // PROVIDER_RELATIONSHIP_DIRECT). See the embedded schemas under schema/.
 //
 // The library provides:
-//   - Fetch / FetchWBA: GET + schema-validate + protojson.Unmarshal a remote
-//     overlay manifest or WBA directory.
-//   - ActiveKeys / KeyByThumbprint / PublicKey: key-window selection and decoding
-//     over a WBAFile's key set.
+//   - Fetch / FetchDocument: GET + version gate + schema-validate +
+//     protojson.Unmarshal a remote overlay manifest.
 //   - Cache: TTL-bounded, single-flighted overlay-manifest cache keyed by domain.
-//   - Loader: a WBA-directory cache plus a revocation_url poller, exposing
-//     LookupKey (by thumbprint) with revoked/unknown/expired sentinels.
+//   - NewDirectoryFetcher: how this repository reads a WBA directory it does not
+//     serve, the SDK's directory fetcher over the caller's client, clock and
+//     time limit.
+//   - ParseWBA / ParseManifest / Validate*: the schema checks for documents a
+//     producer builds or a test round-trips.
+//   - NewKey / Thumbprint / PublicKey: key encoding and decoding over a
+//     WBAFile's key set.
 //   - server.Handler / server.WBAHandler (subpackage): builds + serves the
 //     overlay manifest and WBA directory for a role.
 package forawellknown
@@ -34,6 +37,7 @@ import (
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+	"github.com/FORA-Protocol/protocol/sdk/go/resolvers"
 )
 
 // Version is the manifest document version this library stamps on every
@@ -50,6 +54,10 @@ import (
 // unrecognised major, a value that is not MAJOR.MINOR, or no ver at all is
 // refused with ErrVersionRefused. See ValidateManifest.
 const Version = helpers.WellKnownManifestVersion
+
+// WBAMediaType is the media type a key directory is served under. A directory
+// served as anything else, the JWK Set type included, is refused.
+const WBAMediaType = resolvers.WBADirectoryMediaType
 
 // Path is the fixed request path every FORA participant serves the commercial
 // overlay manifest at.
@@ -100,16 +108,10 @@ func ManifestURL(host, scheme, port string) (string, error) {
 	return wellKnownURL(host, scheme, port, Path)
 }
 
-// WBAURL builds the absolute /.well-known/http-message-signatures-directory
-// (WBA directory) URL for a host. See wellKnownURL for the host-parsing contract.
-func WBAURL(host, scheme, port string) (string, error) {
-	return wellKnownURL(host, scheme, port, WBAPath)
-}
-
 // RevocationURL builds the absolute /.well-known/fora-key-revocations.json
 // (KeyRevocationList) URL for a host — the value a producer advertises in
-// WBAFile.revocation_url. A consumer (Loader) host-anchors the advertised URL to
-// the directory's own host and skips a cross-host one, so a producer serving a
+// WBAFile.revocation_url. A verifier (the SDK's WBAKeyResolver) host-anchors the
+// advertised URL to the directory's own host and skips a cross-host one, so a producer serving a
 // wildcard zone of per-agent hosts MUST derive this per host, not share one value.
 // See wellKnownURL for the host-parsing contract.
 func RevocationURL(host, scheme, port string) (string, error) {

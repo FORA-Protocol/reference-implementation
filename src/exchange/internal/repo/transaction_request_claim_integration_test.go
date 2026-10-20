@@ -67,9 +67,19 @@ func TestTransactionRequestClaim_LifecycleContract(t *testing.T) {
 		t.Fatalf("lost claim returned digest %q, want the first %q", stored, digest)
 	}
 
+	assertFinalizeWriteOnce(t, ctx, transactions, agentID, key)
+}
+
+// assertFinalizeWriteOnce finalizes an already-claimed request twice with
+// different payloads: the first finalize wins and reads back, the second loses
+// and leaves the stored payload unchanged.
+func assertFinalizeWriteOnce(
+	t *testing.T, ctx context.Context, transactions repo.TransactionRepo, agentID, key string,
+) {
+	t.Helper()
 	// First finalize wins; the response reads back.
 	payload := []byte("winner-response")
-	won, err = transactions.FinalizeRequest(ctx, agentID, key, payload)
+	won, err := transactions.FinalizeRequest(ctx, agentID, key, payload)
 	if err != nil || !won {
 		t.Fatalf("first FinalizeRequest: won=%v err=%v, want won=true", won, err)
 	}

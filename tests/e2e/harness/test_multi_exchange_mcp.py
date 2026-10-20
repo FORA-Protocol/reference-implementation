@@ -1,8 +1,8 @@
 """E2E: the MCP account tools across the three-exchange topology.
 
 An agent's account is per-Exchange. This suite drives that through the tools an
-agent actually has: a real ``fastmcp`` client speaks Streamable HTTP to the
-identity service's ``/mcp`` endpoint, and every call below is signed on the
+agent actually has: the MCP send seam (``mcp_client.py``), a real MCP client,
+speaks Streamable HTTP to the identity service's ``/mcp`` endpoint, and every call below is signed on the
 agent's behalf with a key the identity service custodies.
 
 EVERY TEST TAKES ``seeded`` AND NO BODY READS IT. The parameter is what runs the
@@ -42,22 +42,21 @@ WHAT THIS SUITE CANNOT SEE, said plainly rather than left to be assumed:
   exchange stores it, but no RPC returns it, so nothing here can read it back.
   The echo is asserted in the Go integration suite, which reads the stored value
   through the exchange's own repository.
-- A payload refused against exchange-b's schema is refused by the IDENTITY
-  ADAPTER's pre-check, not by exchange-b. The exchange enforces the same schema,
-  but the adapter checks first and never signs the call, so the request does not
-  reach the exchange — "the registration was refused" here is a claim about the
-  adapter and is written that way.
+- Which layer refused a payload that misses a published member. The identity
+  adapter pre-checks it against the exchange's schema and the exchange enforces
+  the same schema, but the service sends a tool error as text alone, so the two
+  refusals differ only in wording, which a test does not assert. "The
+  registration was refused" here is a claim that SOME layer refused it and no
+  account was opened, and is written that way.
 """
 
 from __future__ import annotations
 
-import httpx
 import pytest
-from fastmcp import Client
-from fastmcp.client.client import CallToolResult
-from fastmcp.exceptions import ToolError
 
 from .conftest import StackURLs
+from .mcp_client import McpSession, ToolResult, mcp_session
+from .protocol_documents import manifest_at
 from .seed import SeededFixture
 from .exchanges import (
     EXCHANGE_A_DOMAIN,
@@ -83,11 +82,10 @@ def _published_requirements(stack: StackURLs, domain: str) -> dict:
     it tells the agent to do. A copy of the schema here would still pass if the
     exchange stopped publishing one.
     """
-    manifest = httpx.get(f"{exchange_url(stack, domain)}/.well-known/fora.json", timeout=10.0)
-    manifest.raise_for_status()
-    block = manifest.json().get("account_registration") or {}
-    schema: dict = block.get("data_schema") or {}
-    assert schema, f"{domain} publishes no registration schema: {manifest.json()}"
+    manifest = manifest_at(exchange_url(stack, domain)).message
+    block = manifest.account_registration
+    schema: dict = (block.data_schema if block is not None else None) or {}
+    assert schema, f"{domain} publishes no registration schema: {manifest}"
     return schema
 
 
@@ -117,23 +115,22 @@ def _fields_for(schema: dict) -> dict[str, str]:
     return {member: values[member] for member in required}
 
 
-def _entries(result: CallToolResult) -> list[dict]:
+def _entries(result: ToolResult) -> list[dict]:
     """The account entries a fora_status result carries."""
-    payload = result.structured_content
-    assert payload is not None, "status returned no structured content"
+    payload = result.structured
     assert "accounts" in payload, f"status returned no account list: {payload}"
     accounts: list[dict] = payload["accounts"]
     return accounts
 
 
-async def _hint_domains(client: Client) -> set[str]:
+async def _hint_domains(mcp: McpSession) -> set[str]:
     """Every exchange the agent's own note list names.
 
     Extracted beside the other two readers rather than written per call site: the
     same set expression appeared four times in two layouts, so a grep for one
     spelling found half of them.
     """
-    return {entry["exchange"] for entry in _entries(await client.call_tool("fora_status", {}))}
+    return {entry["exchange"] for entry in _entries(await mcp.call("fora_status", {}))}
 
 
 def _entry_for(entries: list[dict], domain: str) -> dict:
@@ -155,16 +152,16 @@ async def test_register_and_status_across_three_exchanges(
     """
     schema = _published_requirements(compose_stack, EXCHANGE_B_DOMAIN)
 
-    async with Client(f"{compose_stack.identity}/mcp", auth=mcp_bearer) as client:
+    async with mcp_session(compose_stack, mcp_bearer) as mcp:
         # exchange-a publishes no schema, so it asks for nothing in particular and
         # takes the payload as it comes — the behaviour every exchange had before
         # the block existed.
-        registered_a = await client.call_tool(
+        registered_a = await mcp.call(
             "fora_register",
             {"exchange": EXCHANGE_A_DOMAIN, "fields": {"company_name": "Stoa Press"}},
         )
         # exchange-b does publish one, and the fields come from what it published.
-        registered_b = await client.call_tool(
+        registered_b = await mcp.call(
             "fora_register",
             {"exchange": EXCHANGE_B_DOMAIN, "fields": _fields_for(schema)},
         )
@@ -174,8 +171,7 @@ async def test_register_and_status_across_three_exchanges(
             (EXCHANGE_A_DOMAIN, registered_a),
             (EXCHANGE_B_DOMAIN, registered_b),
         ):
-            out = result.structured_content
-            assert out is not None, f"register at {domain} returned no structured content"
+            out = result.structured
             assert out.get("exchange") == domain, f"register at {domain} answered {out}"
             assert out.get("billing_ref"), f"register at {domain} minted no handle: {out}"
             handles[domain] = out["billing_ref"]
@@ -197,7 +193,7 @@ async def test_register_and_status_across_three_exchanges(
             (EXCHANGE_C_DOMAIN, False),
         ):
             entry = _entry_for(
-                _entries(await client.call_tool("fora_status", {"exchange": domain})), domain
+                _entries(await mcp.call("fora_status", {"exchange": domain})), domain
             )
             assert entry["source"] == _FROM_EXCHANGE, entry
             assert entry["registered"] is want_registered, (
@@ -208,7 +204,7 @@ async def test_register_and_status_across_three_exchanges(
         # Asked with no exchange, the answer is the local note of where this
         # adapter registered the agent — the two it did, and not the one it did
         # not.
-        hints = _entries(await client.call_tool("fora_status", {}))
+        hints = _entries(await mcp.call("fora_status", {}))
 
     named = {entry["exchange"] for entry in hints}
     # Presence and absence rather than an exact set: the agent is shared across
@@ -238,16 +234,16 @@ async def test_both_status_modes_carry_the_same_entry_shape(
     through a model, because a model quietly supplies a member one mode omitted,
     which is exactly the drift under test.
     """
-    async with Client(f"{compose_stack.identity}/mcp", auth=mcp_bearer) as client:
-        await client.call_tool(
+    async with mcp_session(compose_stack, mcp_bearer) as mcp:
+        await mcp.call(
             "fora_register",
             {"exchange": EXCHANGE_A_DOMAIN, "fields": {"company_name": "Stoa Press"}},
         )
         named = _entry_for(
-            _entries(await client.call_tool("fora_status", {"exchange": EXCHANGE_A_DOMAIN})),
+            _entries(await mcp.call("fora_status", {"exchange": EXCHANGE_A_DOMAIN})),
             EXCHANGE_A_DOMAIN,
         )
-        hint = _entry_for(_entries(await client.call_tool("fora_status", {})), EXCHANGE_A_DOMAIN)
+        hint = _entry_for(_entries(await mcp.call("fora_status", {})), EXCHANGE_A_DOMAIN)
 
     assert set(named) == set(hint), (
         f"the two modes carry different members:\n  exchange: {sorted(named)}\n  hint:     {sorted(hint)}"
@@ -283,28 +279,28 @@ async def test_an_exchange_domain_is_case_insensitive(
     upper = EXCHANGE_B_DOMAIN.upper()
     assert upper != EXCHANGE_B_DOMAIN, "the domain has no case to vary, so this proves nothing"
 
-    # Read before the session opens. _published_requirements calls httpx.get,
+    # Read before the session opens. _published_requirements reads over HTTP,
     # which is synchronous: inside the async block it blocks the event loop for
     # up to its ten-second timeout, so the client's own stream reader cannot run.
     # The two sibling call sites already read the manifest before opening a
     # session.
     fields = _fields_for(_published_requirements(compose_stack, EXCHANGE_B_DOMAIN))
 
-    async with Client(f"{compose_stack.identity}/mcp", auth=mcp_bearer) as client:
+    async with mcp_session(compose_stack, mcp_bearer) as mcp:
         # This test's own precondition. It used to depend on a sibling earlier in
         # the module having registered here, so running this test alone, or under
         # --lf after that sibling failed, failed at the assertion below while the
         # adapter was correct.
-        await client.call_tool("fora_register", {"exchange": EXCHANGE_B_DOMAIN, "fields": fields})
+        await mcp.call("fora_register", {"exchange": EXCHANGE_B_DOMAIN, "fields": fields})
 
-        before = await _hint_domains(client)
+        before = await _hint_domains(mcp)
         assert EXCHANGE_B_DOMAIN in before, (
             "the registration this test just made did not reach the hint list, so the "
             f"difference below would be measured against nothing: {before}"
         )
 
-        opened = await client.call_tool("fora_register", {"exchange": upper, "fields": fields})
-        echoed = (opened.structured_content or {}).get("exchange")
+        opened = await mcp.call("fora_register", {"exchange": upper, "fields": fields})
+        echoed = opened.structured.get("exchange")
         assert echoed == EXCHANGE_B_DOMAIN, (
             f"register echoed {echoed!r}; an agent comparing that against a hint would "
             f"see two exchanges where there is one"
@@ -312,10 +308,10 @@ async def test_an_exchange_domain_is_case_insensitive(
 
         # The other spelling still finds the same account.
         named = _entry_for(
-            _entries(await client.call_tool("fora_status", {"exchange": EXCHANGE_B_DOMAIN})),
+            _entries(await mcp.call("fora_status", {"exchange": EXCHANGE_B_DOMAIN})),
             EXCHANGE_B_DOMAIN,
         )
-        after = await _hint_domains(client)
+        after = await _hint_domains(mcp)
 
     assert named["registered"] is True, f"the account opened as {upper} was not found: {named}"
     assert after == before, (
@@ -328,29 +324,22 @@ async def test_register_is_refused_when_the_payload_misses_a_published_member(
     seeded: SeededFixture,
     mcp_bearer: str,
 ) -> None:
-    """The adapter's pre-check, against a schema a real exchange published.
+    """A payload missing what a real exchange's published schema requires is refused.
 
-    The refusal is the IDENTITY ADAPTER's. exchange-c enforces this schema too,
-    but the adapter pre-checks against it and never signs the call, so the
-    request does not reach the exchange and nothing here observes its gate. What
-    this does say is that an agent is told which members are wrong, and that no
-    account was opened as a result. The exchange-side gate is covered by the Go
-    integration suite, which drives it through the Connect surface.
+    The identity adapter pre-checks the payload against the schema and exchange-c
+    enforces it too. This test says that the call is refused and that no account
+    was opened as a result. The adapter's pre-check and the exchange-side gate are
+    each covered by a Go integration suite.
 
-    WHICH LAYER REFUSED IS ASSERTED, not inferred. Once the exchange enforces the
-    schema too, every other check here passes whether the adapter pre-checked or
-    not: the exchange refuses the same payload, the tool error is rendered
-    through the same field-list renderer over the exchange's own field errors,
-    both sides compile the same schema with the same validator so the named
-    members are identical, and no account is opened either way. Only one sentence
-    separates the two paths — the local refusal says the exchange "will not
-    accept these fields", and the remote one is built from the failed-call
-    wording instead. Asserting that sentence is what keeps this a test of the
-    adapter.
-
-    It is worth pinning because the pre-check can turn itself off: the identity
-    side compiles the published schema and is left with nothing to check when the
-    schema does not compile, and there is no branch for that case.
+    WHICH LAYER REFUSED IS NOT ASSERTED HERE, and the reason is the shape of the
+    answer. The identity service sends a tool error as text alone, with no
+    structured content, and the only thing that separates the adapter's refusal
+    from the exchange's is a sentence in that text. A test does not assert
+    message text (ADR-028 D4), so this test asserts that the call was refused and
+    that no account was opened, which holds whichever layer refused. Which members
+    the refusal names is wording too, and is not asserted for the same reason.
+    The adapter's pre-check is pinned by the Go integration suite, which reads its
+    result directly.
 
     IT RUNS AGAINST EXCHANGE-C, and the choice is the assertion. This suite's
     agent is shared, so at exchange-b it already holds an account by the time
@@ -371,9 +360,9 @@ async def test_register_is_refused_when_the_payload_misses_a_published_member(
     required = schema.get("required") or []
     assert required, f"exchange-c's schema requires nothing, so nothing can be missing: {schema}"
 
-    async with Client(f"{compose_stack.identity}/mcp", auth=mcp_bearer) as client:
+    async with mcp_session(compose_stack, mcp_bearer) as mcp:
         before = _entry_for(
-            _entries(await client.call_tool("fora_status", {"exchange": EXCHANGE_C_DOMAIN})),
+            _entries(await mcp.call("fora_status", {"exchange": EXCHANGE_C_DOMAIN})),
             EXCHANGE_C_DOMAIN,
         )
         assert before["registered"] is False, (
@@ -381,25 +370,14 @@ async def test_register_is_refused_when_the_payload_misses_a_published_member(
             f"registered at it, so this test cannot tell a refusal from a no-op: {before}"
         )
 
-        with pytest.raises(ToolError) as refusal:
-            await client.call_tool(
-                "fora_register",
-                # Everything the schema requires, left out.
-                {"exchange": EXCHANGE_C_DOMAIN, "fields": {"unrelated": "value"}},
-            )
-        message = str(refusal.value)
-        assert "will not accept these fields" in message, (
-            f"the refusal did not come from the adapter's local pre-check — only it "
-            f"renders that wording, so the payload was signed and sent and this is "
-            f"the exchange's own answer: {message}"
+        await mcp.refused(
+            "fora_register",
+            # Everything the schema requires, left out.
+            {"exchange": EXCHANGE_C_DOMAIN, "fields": {"unrelated": "value"}},
         )
-        for member in required:
-            assert member in message, (
-                f"the refusal does not name the missing member {member!r}: {message}"
-            )
 
         after = _entry_for(
-            _entries(await client.call_tool("fora_status", {"exchange": EXCHANGE_C_DOMAIN})),
+            _entries(await mcp.call("fora_status", {"exchange": EXCHANGE_C_DOMAIN})),
             EXCHANGE_C_DOMAIN,
         )
 
@@ -435,22 +413,23 @@ async def test_register_refuses_an_exchange_that_is_not_a_bare_domain(
     broken reservation — some earlier test registering at exchange-c — would
     otherwise surface here as an accusation against the adapter.
     """
-    async with Client(f"{compose_stack.identity}/mcp", auth=mcp_bearer) as client:
-        before = await _hint_domains(client)
+    async with mcp_session(compose_stack, mcp_bearer) as mcp:
+        before = await _hint_domains(mcp)
         assert EXCHANGE_C_DOMAIN not in before, (
             f"exchange-c is reserved as a never-registered target and something "
             f"registered at it, so this test cannot tell a refusal from a no-op: {before}"
         )
-        with pytest.raises(ToolError) as refusal:
-            await client.call_tool(
-                "fora_register",
-                {
-                    "exchange": f"http://{EXCHANGE_C_DOMAIN}/register",
-                    "fields": {"company_name": "Stoa Press"},
-                },
-            )
-        assert "bare domain" in str(refusal.value), str(refusal.value)
+        # A tool error is the whole of the refusal: the service sends it as text
+        # alone, with no structured content, so its wording is not asserted. The
+        # side effect is.
+        await mcp.refused(
+            "fora_register",
+            {
+                "exchange": f"http://{EXCHANGE_C_DOMAIN}/register",
+                "fields": {"company_name": "Stoa Press"},
+            },
+        )
 
-        after = await _hint_domains(client)
+        after = await _hint_domains(mcp)
 
     assert after == before, f"a refused call left a registration note: {after - before}"

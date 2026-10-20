@@ -13,19 +13,23 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/tcstart"
 )
 
 // runRedis starts a redis:7-alpine container and returns it with a connected
 // client. Shared by StartRedis (per-test) and StartSharedRedis (one per package)
 // so the run + connect boilerplate exists in exactly one place.
 func runRedis(ctx context.Context) (*tcredis.RedisContainer, *redis.Client, error) {
-	c, err := tcredis.Run(
-		ctx, "redis:7-alpine",
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("Ready to accept connections").
-				WithStartupTimeout(30*time.Second),
-		),
-	)
+	c, err := tcstart.Run(ctx, func(ctx context.Context) (*tcredis.RedisContainer, error) {
+		return tcredis.Run(
+			ctx, "redis:7-alpine",
+			testcontainers.WithWaitStrategy(
+				wait.ForLog("Ready to accept connections").
+					WithStartupTimeout(30*time.Second),
+			),
+		)
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("start redis: %w", err)
 	}

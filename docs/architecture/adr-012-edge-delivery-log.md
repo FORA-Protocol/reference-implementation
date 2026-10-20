@@ -11,7 +11,10 @@ fields. The domain-verification messages D3 builds on exist in the protocol but 
 site here. The delivery-log record contract (D1, D4, D5 onward) is unaffected and is what the
 Edge implements. Corrections are inline below; the reasoning is kept as a design record. · **The signed-URL claims in D1, D3 and
 D4 describe an HMAC scheme that was never implemented** — see the amendment at the end of
-`## Decision`.
+`## Decision`. · **D1's `signed_url_hash` is matched against `transaction_log`**, the
+Exchange's record of each issued URL. D1 first named `transaction_events`, the table the
+protocol's transaction-log documentation describes; in this Exchange that name belongs to
+the journal of denied items (ADR-027), which holds no signed URL.
 
 ---
 
@@ -36,7 +39,7 @@ edge_node_id         string                Edge identity (D3)
 edge_signing_kid     string                kid of the record-signing key (D2)
 transaction_id       string (UUID)         From signed URL's txn_id parameter
 signed_url_hash      hex(SHA-256)          Hash of full URL incl. query;
-                                           matches transaction_events.signed_url_hash
+                                           matches transaction_log.signed_url_hash
 agent_identity_hash  base64url             From URL's agent_id (RFC 7638 thumbprint)
 url_expires          RFC3339               From URL's expires parameter
 outcome              enum                  DELIVERY_OUTCOME_* (see below)
@@ -230,7 +233,7 @@ correction, so this amendment names it and leaves it open.
 - ADR-010 — publisher payout / inverse-posting policy.
 - ADR-011 — three-way reconciliation procedure.
 - `fora.proto` (module `github.com/FORA-Protocol/protocol`) — `ResourceIdentity.content_hash` and `ResourceIdentity.resource_mutability` (reached through `Offer.identity`), `DomainVerificationRequest/Confirmation/Result`, and `WBAFile.keys` / `JsonWebKey` (the sole message carrying inline JWKs).
-- [`src/edge/src/app.ts`](../../src/edge/src/app.ts) — current Edge implementation; its `/.well-known/fora-verify/:token` handler is the primitive D3 reuses. Signed-URL verification comes from `@fora-protocol/sdk-l1/verify`, which the edge imports rather than implementing.
+- [`src/edge/src/app.ts`](../../src/edge/src/app.ts) — current Edge implementation; its `/.well-known/fora-verify/:token` handler is the primitive D3 reuses. Signed-URL verification comes from `@fora-protocol/sdk/verify`, which the edge imports rather than implementing.
 - [`src/exchange/internal/signing/signed_url.go`](../../src/exchange/internal/signing/signed_url.go) — URL signers; distinct from record signing per D2.
 - Crosby & Wallach, "Efficient Data Structures for Tamper-Evident Logging", USENIX Security 2009 — Merkle-linked log reference.
 - Sigstore Rekor; Trillian-Tessera — transparency-log alternatives for the Merkle upgrade path.

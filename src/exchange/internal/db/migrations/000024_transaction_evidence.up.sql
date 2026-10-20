@@ -92,19 +92,29 @@
 -- than agent_id. What the row attests is what was signed, so this value is never
 -- rewritten; that property is the point of an evidence table.
 --
--- It NAMES the same agent as fora.agents.agent_id and transaction_log.agent_id
--- but is not byte-equal to them. Those two hold the agent's canonical identity —
--- its directory host, scheme dropped and spelling folded (internal/agentid) —
--- while a signer is free to write that host any way it likes, and the deployed
--- identity service in fact signs "scheme://host". So the forensic join is:
+-- It does NOT name the agent, and no join reaches transaction_log.agent_id
+-- through it. Requester.id is a free label the protocol lets the agent choose
+-- ("Unique requester identifier"), so it may be a campaign name, a probe tag or a
+-- URN, and two agents may pick the same string. The identity the Exchange
+-- attributes a transaction to comes from the transport instead: the canonical
+-- host of the covered Signature-Agent directory for a direct request, and
+-- Requester.domain for one a Broker re-packaged. Treat this column as the agent's
+-- own signed annotation and nothing more.
 --
---   agentid.FromDirectory(requester_id) = transaction_log.agent_id
+-- What ties an evidence row back to the ledger is the directory the verifying key
+-- was pinned from, recorded here as agent_discovery_url (its own paragraph
+-- below). So the forensic join is:
 --
--- and NOT a plain equality, which would silently return nothing for every row
--- whose signer spelled its directory as a URL. Stated here so the join does not
--- have to be rediscovered from source, and so a search for agent_id reaches this
--- table too. src/exchange/internal/transport has an integration test pinning the
--- relationship, so code and this comment cannot drift apart again.
+--   agentid.FromDirectory(agent_discovery_url) = transaction_log.agent_id
+--
+-- It reduces a full directory URL to the bare canonical host the ledger is keyed
+-- on, dropping the scheme and the well-known path and folding the spelling
+-- (internal/agentid), so it is NOT a plain equality. It returns nothing for a row
+-- whose agent carried no directory anchor, where agent_discovery_url is ''.
+-- Stated here so the join does not have to be rediscovered from source, and so a
+-- search for agent_id reaches this table too. src/exchange/internal/transport has
+-- an integration test pinning the relationship, so code and this comment cannot
+-- drift apart again.
 --
 -- request_idempotency_key is the REQUEST-level key the acceptance actually signs,
 -- NOT the derived per-item key (reqKey:offer_id) that transaction_log stores.

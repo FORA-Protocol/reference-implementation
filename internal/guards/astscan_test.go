@@ -139,6 +139,21 @@ func stringConstsIn(f *ast.File) map[string]string {
 	return consts
 }
 
+// resolvedString returns the string e settles to within its own file: a string
+// literal, or the name of a string constant declared in that file. Anything
+// else, such as a call, a field or a constant from another file, reports false,
+// so a guard that needs the value treats it as unknown instead of guessing.
+func resolvedString(e ast.Expr, consts map[string]string) (string, bool) {
+	if v, isLit := stringValue(e); isLit {
+		return v, true
+	}
+	if ident, isIdent := e.(*ast.Ident); isIdent {
+		v, declared := consts[ident.Name]
+		return v, declared
+	}
+	return "", false
+}
+
 // forEachAppFile parses every app source file and hands its path and AST to fn.
 func forEachAppFile(t *testing.T, fn func(rel string, f *ast.File)) {
 	t.Helper()

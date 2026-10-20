@@ -164,7 +164,7 @@ describe('operational error logs', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const app = makeApp({
       resolveKey: async () => {
-        throw new Error('wba directory fetch failed: 503');
+        throw new Error('wba directory refused: status 503');
       },
     });
     const url = await signUrl(PUB_ORIGIN, keypair.privateKey, {
@@ -179,7 +179,7 @@ describe('operational error logs', () => {
     const records = recordsFor(spy, 'edge.verify.unavailable');
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({
-      message: 'wba directory fetch failed: 503',
+      message: 'wba directory refused: status 503',
       path: '/artikel',
       request_id: 'req-io-1',
     });
@@ -187,18 +187,15 @@ describe('operational error logs', () => {
 
   it('key-directory load failure logs edge.keys.load_failed at error level', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const cache = createKeyCache<string, { x: string }>({
+    const cache = createKeyCache({
       wbaUrl: 'https://exchange.test/.well-known/http-message-signatures-directory',
-      keyId: async (j) => j.x,
-      importJwk: async (j) => j.x,
-      parseKeys: () => [],
       fetcher: (async () => new Response('down', { status: 503 })) as unknown as typeof fetch,
     });
     await expect(cache.resolve('some-kid')).rejects.toThrow();
     const records = recordsFor(spy, 'edge.keys.load_failed');
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({
-      message: 'wba directory fetch failed: 503',
+      message: 'wba directory refused: status 503',
       wba_url: 'https://exchange.test/.well-known/http-message-signatures-directory',
     });
   });

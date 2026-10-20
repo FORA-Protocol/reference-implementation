@@ -29,7 +29,7 @@ func TestExecuteTransaction_DuplicateOfferIDsRejected(t *testing.T) {
 	offer := discoverFirst(t, h)[0]
 
 	const reqKey = "tx-dup-offer"
-	requester := agentRequester("agent-test")
+	requester := agentRequester()
 	item := &forav1.TransactionItem{
 		Offer:           offer,
 		AgentAcceptance: signAcceptanceFor(t, h.callerPriv, offer, requester, reqKey),
@@ -46,7 +46,7 @@ func TestExecuteTransaction_DuplicateOfferIDsRejected(t *testing.T) {
 	assertRejectionMeta(t, err, "item_index", "1")
 
 	// Zero side effects: no billing lifecycle call ran and nothing persisted.
-	assertBillingLifecycle(t, rec, false, 0, 0)
+	assertBillingLifecycle(t, rec, false, 0)
 	assertNoTransaction(t, h, derivedTxKey(reqKey, offer))
 	assertBalanceUnchanged(t, h)
 }

@@ -17,14 +17,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/oidcup"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/session"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/app"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/keystore"
 	identitymcp "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/mcp"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/oidcup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/publisher"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/repo"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/session"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/signup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/token"
 )
@@ -165,8 +165,8 @@ func buildFixture(t *testing.T, mut func(*app.MCPConfig, peerSet)) (*fixture, er
 		// No Exchange is configured, and there is nowhere left to configure one.
 		// Each peer is reached by the domain a tool call names, resolved through
 		// the manifest that peer serves about itself — which is why every peer
-		// here publishes one.
-		WellKnownScheme: "http",
+		// here publishes one. Every peer is served over https.
+		WellKnownScheme: "https",
 	}
 	if mut != nil {
 		mut(mcpCfg, peerSet{broker: broker, exchange: exchange, issuer: issuer})
@@ -219,6 +219,7 @@ func newSignUp(
 	t.Helper()
 	svc, err := publisher.New(publisher.Config{
 		Keys:          store,
+		Signers:       store,
 		Cards:         repo.NewCardRepo(pool),
 		Revocations:   repo.NewRevocationRepo(pool),
 		Registrations: repo.NewDeveloperRepo(pool),
@@ -312,14 +313,23 @@ func (f *fixture) provision(t *testing.T, subject string) agent {
 // wire, not an in-process call to a handler.
 func (f *fixture) connect(t *testing.T, bearer string) *mcpsdk.ClientSession {
 	t.Helper()
+	return f.connectVia(t, bearerTransport{token: bearer}, "")
+}
+
+// connectVia is connect over a caller-supplied round tripper, for a test that
+// needs to set or observe headers on each HTTP request of the session, at the
+// given MCP protocol version. An empty version is the client's latest, which
+// opens with server/discover; a legacy version opens with initialize.
+func (f *fixture) connectVia(t *testing.T, rt http.RoundTripper, version string) *mcpsdk.ClientSession {
+	t.Helper()
 	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test-agent", Version: "1"}, nil)
 	transport := &mcpsdk.StreamableClientTransport{
 		Endpoint:   f.srv.URL + identitymcp.EndpointPath,
-		HTTPClient: &http.Client{Transport: bearerTransport{token: bearer}, Timeout: dialTimeout},
+		HTTPClient: &http.Client{Transport: rt, Timeout: dialTimeout},
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), dialTimeout)
 	t.Cleanup(cancel)
-	session, err := client.Connect(ctx, transport, nil)
+	session, err := client.Connect(ctx, transport, &mcpsdk.ClientSessionOptions{ProtocolVersion: version})
 	if err != nil {
 		t.Fatalf("connect as bearer: %v", err)
 	}

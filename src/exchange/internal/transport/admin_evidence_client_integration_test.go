@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/agentid"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/evidenceclient"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/transactionkey"
 )
@@ -100,6 +101,17 @@ func TestEvidenceClient_FetchesThroughTheRealAdminHandler(t *testing.T) {
 	}
 	if len(view.TransactionState.SignedURLHash) == 0 {
 		t.Error("signed URL hash came back empty; the delivery leg joins on it")
+	}
+	// The ledger correlates the Broker's selection on this value, so it must be
+	// the agent the Exchange attributed the transaction to: the canonical host
+	// of the caller's verified directory.
+	wantAgent, err := agentid.FromDirectory(h.callerID)
+	if err != nil {
+		t.Fatalf("canonical caller host: %v", err)
+	}
+	if got := view.TransactionState.AgentID; got != wantAgent {
+		t.Errorf("transaction agent_id = %q, want %q — the ledger could not correlate the Broker's selection",
+			got, wantAgent)
 	}
 }
 

@@ -48,7 +48,7 @@ func TestFreeAdapter_CreditNoOp(t *testing.T) {
 	a := billing.FreeAdapter{}
 	one := billing.Amount{Value: big.NewRat(1, 1), Currency: billing.DemoCurrency}
 	for i := 0; i < 2; i++ {
-		if err := a.Credit(context.Background(), "billing-ref-1", one, billing.WelcomeCreditKey("billing-ref-1")); err != nil {
+		if err := a.Credit(context.Background(), "billing-ref-1", one, billing.WelcomeCreditKey("billing-ref-1", billing.DemoCurrency)); err != nil {
 			t.Errorf("Credit call %d = %v, want nil", i+1, err)
 		}
 	}
@@ -165,7 +165,7 @@ func TestFreeAdapter_GetBalanceMaxInt64USD(t *testing.T) {
 	t.Parallel()
 	a := billing.FreeAdapter{}
 	for _, agentID := range []string{"", "ag-1", "never-seen"} {
-		bal, err := a.GetBalance(context.Background(), agentID)
+		bal, err := a.GetBalance(context.Background(), agentID, billing.DemoCurrency)
 		if err != nil {
 			t.Fatalf("GetBalance(%q): %v", agentID, err)
 		}

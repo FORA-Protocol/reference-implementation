@@ -1,6 +1,9 @@
 # ADR-008 — Testing Surface as a First-Class Subsystem
 
 **Status:** Accepted (2026-05-01)
+
+**Amended 2026-09-25.** On the publisher console surface, an absence reason is a JSON string, not a proto enum. See the [Amendment (2026-09-25)](#amendment-2026-09-25--absence-reasons-on-the-console-surface) section.
+
 **Refines:**
 - `docs/architecture/adr-002-entitlement-biscuit-model.md` — protocol-level TTL constants (≤10m attenuation, contract `valid_until`) are values; this ADR pins how those values are consulted at runtime so test-time and production-time read from the same port.
 - `docs/architecture/adr-004-protocol-layers.md` — "refusal is the product" demands a refusal vocabulary; this ADR makes the vocabulary structured and enumerable.
@@ -132,3 +135,33 @@ Each test declares its stack-isolation requirement explicitly. Three modes:
 - ADR-004 — protocol layers ("refusal is the product"; D2 makes the refusal vocabulary structured and enforceable).
 - ADR-005 — biscuit transport carriage and canonical-form binding (every gate Gate F composes with consults time, and benefits from D1).
 - ADR-006 — broker intermediation (D2's structured-vocabulary discipline is the same shape as ADR-006's `authorized_intermediaries` discipline applied to a different surface).
+
+---
+
+## Amendment (2026-09-25) — absence reasons on the console surface
+
+**Status of this amendment:** Accepted (2026-09-25).
+
+**What D2 says today.** Every empty result carries a `<Domain>AbsenceReason` enum, and
+the enum is defined in the wire format, which D2 names as proto.
+
+**What changes.** The Exchange's publisher console surface is plain JSON, not protobuf
+(ADR-026, amendment of 2026-09-21). On that surface the absence reason is a JSON string
+field, `absence_reason`. Its wire values are constants in the shared Go package that both
+the Exchange and the console import. The Exchange maps its own values onto those
+constants in the route handler, and answers an internal error for a value that has no
+mapping, so only one of those constants can reach the console. The first such field is
+on the revenue totals route: `NO_TRANSACTIONS_IN_PERIOD`, `UNSUPPORTED_CURRENCY` and
+`INTERNAL_ERROR`.
+
+**The paged lists carry no absence reason.** `transactions/list` and `catalog/list`
+answer an empty page with an empty list and an empty `next_cursor`. A list is complete
+as it stands: it holds what the period or the catalog holds. Whether a publisher sold
+anything in a period is the question the totals route answers, and that route carries
+the reason.
+
+**What does not change.** The rest of D2 holds for every route that answers with a
+summary rather than a list. The values are enumerated, cover every cause the route can
+produce, and include an internal-error value. Tests assert on the value, not on an empty
+list. The console surface is the only place the reason is a string; protocol surfaces
+keep proto enums.

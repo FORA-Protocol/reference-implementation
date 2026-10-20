@@ -14,20 +14,20 @@ open a hole in the bot gate at the root.
 from __future__ import annotations
 
 import re
-
-import httpx
+from http import HTTPStatus
 
 from .conftest import StackURLs
 from .constants import AI_BOT_UA, BROWSER_UA
+from .edge_fetch import browse
 
 
 def test_browser_at_site_root_gets_the_catalog_index(compose_stack: StackURLs) -> None:
     """A browser at / gets 200 HTML naming the three fictional publishers."""
-    resp = httpx.get(f"{compose_stack.edge}/", timeout=10.0, headers={"User-Agent": BROWSER_UA})
-    assert resp.status_code == httpx.codes.OK, resp.text[:300]
-    assert resp.headers.get("content-type", "").startswith("text/html"), resp.headers
+    page = browse(f"{compose_stack.edge}/", user_agent=BROWSER_UA)
+    assert page.status == HTTPStatus.OK, page.text[:300]
+    assert page.media_type == "text/html", page.media_type
     for publisher_name in ("Stoa Press", "Harmonia Records", "FoleyWorks"):
-        assert publisher_name in resp.text, f"landing page does not name {publisher_name}"
+        assert publisher_name in page.text, f"landing page does not name {publisher_name}"
 
 
 def test_every_landing_page_link_resolves_through_the_edge(compose_stack: StackURLs) -> None:
@@ -39,21 +39,18 @@ def test_every_landing_page_link_resolves_through_the_edge(compose_stack: StackU
     stakeholder. A page with no links at all also fails: that would mean the
     extraction went wrong, not that everything resolved.
     """
-    page = httpx.get(f"{compose_stack.edge}/", timeout=10.0, headers={"User-Agent": BROWSER_UA})
-    assert page.status_code == httpx.codes.OK, page.text[:300]
+    page = browse(f"{compose_stack.edge}/", user_agent=BROWSER_UA)
+    assert page.status == HTTPStatus.OK, page.text[:300]
     hrefs = re.findall(r'href="([^"]+)"', page.text)
     assert hrefs, "landing page carries no links — href extraction found nothing"
     for href in hrefs:
         assert href.startswith("/"), f"landing page link is not site-relative: {href}"
-        resp = httpx.get(
-            f"{compose_stack.edge}{href}", timeout=10.0, headers={"User-Agent": BROWSER_UA}
-        )
-        assert resp.status_code == httpx.codes.OK, f"{href}: {resp.status_code} {resp.text[:200]}"
+        linked = browse(f"{compose_stack.edge}{href}", user_agent=BROWSER_UA)
+        assert linked.status == HTTPStatus.OK, f"{href}: {linked.status} {linked.text[:200]}"
 
 
 def test_ai_bot_at_site_root_is_sent_to_negotiate(compose_stack: StackURLs) -> None:
     """An AI bot at / is refused (403) with the ai_bot negotiation reason."""
-    resp = httpx.get(f"{compose_stack.edge}/", timeout=10.0, headers={"User-Agent": AI_BOT_UA})
-    assert resp.status_code == httpx.codes.FORBIDDEN, resp.text[:300]
-    body = resp.json()
-    assert body.get("reason") == "ai_bot", body
+    page = browse(f"{compose_stack.edge}/", user_agent=AI_BOT_UA)
+    assert page.status == HTTPStatus.FORBIDDEN, page.text[:300]
+    assert page.reason == "ai_bot", page.text[:300]

@@ -6,17 +6,8 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// PricingDoc is the internal pricing shape the discovery and billing paths
-// operate on. It is no longer persisted as the source of truth: pricing is
-// derived per-request from the selected LicenseTerm via pricingDocFromTerm
-// . The catalog.pricing JSONB column still exists (NOT NULL) but holds
-// only legacyPricingSentinel.
-//
-// Money fields (Rate, UnitCost) are exact decimal.Decimal — never float64.
-// They are parsed from the canonical wire decimal string at the boundary
-// (pricingDocFromTerm via helpers.ParseMoney) and re-rendered to the wire
-// via helpers.FormatMoney. PricingDoc is internal-only and never
-// serialized, so it carries no json tags.
+// PricingDoc is the internal decimal pricing shape used for billing verified
+// offers. Discovery and preview wire pricing is projected by foraoffer.
 type PricingDoc struct {
 	Model    string
 	Rate     decimal.Decimal
@@ -60,29 +51,8 @@ func moneyOrZero(s string) (decimal.Decimal, error) {
 	return helpers.ParseMoney(s)
 }
 
-// pricingDocFromTerm projects a selected LicenseTerm's Pricing into the internal
-// PricingDoc used by discovery (Offer.pricing) and billing (the charge). It is
-// the single conversion from a real LicenseTerm to a price, so an offer's price
-// is always backed by a term (core invariant) — never the retired $0.05
-// default. UnitCost falls back to Rate when the term omits the normalized
-// unit_cost, preserving the prior billing semantics where unit_cost == rate.
-//
-// Rate and unit_cost cross the wire as canonical decimal strings; they are
-// parsed here once via helpers.ParseMoney so all downstream math is exact
-// decimal (never float).
-func pricingDocFromTerm(term *forav1.LicenseTerm) (PricingDoc, error) {
-	return pricingDocFromPricing(term.GetPricing())
-}
-
-// pricingDocFromPricing projects a wire Pricing message into the internal
-// PricingDoc. It is the single conversion from a Pricing block to a price,
-// shared by the term-derived discovery path (pricingDocFromTerm) and the
-// presented-offer billing path (resolveOfferForTx reads the VERIFIED offer's
-// signed Pricing — the agent is charged exactly what it signed, never a
-// recompute from a drifted catalog). UnitCost falls back to Rate when the block
-// omits the normalized unit_cost, preserving unit_cost == rate semantics. Rate
-// and unit_cost are parsed once via helpers.ParseMoney so all downstream
-// math is exact decimal.
+// pricingDocFromPricing reads the VERIFIED offer's signed price for billing.
+// Missing unit_cost falls back to rate, matching the wire pricing projection.
 func pricingDocFromPricing(p *forav1.Pricing) (PricingDoc, error) {
 	rate, err := moneyOrZero(p.GetRate())
 	if err != nil {

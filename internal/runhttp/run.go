@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -149,11 +150,22 @@ func Serve(name, addr string, handler http.Handler, logger *slog.Logger) {
 }
 
 // ServerSpec names one HTTP server for ServeGroup: a display name, a bind
-// address, and the handler to serve.
+// address, and the handler to serve. Listener, when set, is served in place of
+// a listener bound to Addr (Addr then only names it in the log): a caller that
+// accepts connections its own way, for example over TLS, hands that listener in.
 type ServerSpec struct {
-	Name    string
-	Addr    string
-	Handler http.Handler
+	Name     string
+	Addr     string
+	Handler  http.Handler
+	Listener net.Listener
+}
+
+// listen serves srv on ln, or on a listener bound to srv.Addr when ln is nil.
+func listen(srv *http.Server, ln net.Listener) error {
+	if ln != nil {
+		return srv.Serve(ln)
+	}
+	return srv.ListenAndServe()
 }
 
 // ServeGroup runs one HTTP server per spec under a single shutdown context and
@@ -180,10 +192,10 @@ func ServeGroup(ctx context.Context, logger *slog.Logger, specs ...ServerSpec) e
 		}
 		srvs[i] = srv
 		names[i] = s.Name
-		name, addr := s.Name, s.Addr
+		name, addr, ln := s.Name, s.Addr, s.Listener
 		g.Go(func() error {
 			logger.Info(name+" listening", "addr", addr)
-			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := listen(srv, ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				return fmt.Errorf("%s: %w", name, err)
 			}
 			return nil

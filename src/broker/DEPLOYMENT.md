@@ -65,7 +65,7 @@ this is the only place this document names one, and every command below reuses
 it:
 
 ```bash
-VERSION=1.0.0-rc.4
+VERSION=1.0.0-rc.5
 docker pull ghcr.io/fora-protocol/broker:$VERSION
 ```
 
@@ -202,6 +202,8 @@ services:
       - "8082:8082"
     environment:
       BROKER_DSN: "postgres://fora:${DB_PASSWORD}@db.internal:5432/fora?sslmode=require"
+      # Optional; unset means INFO. The start-up check below reads INFO lines.
+      BROKER_LOG_LEVEL: "INFO"
       REDIS_URL: "rediss://:${REDIS_PASSWORD}@cache.internal:6379/0"
       BROKER_ID: "broker-01"
       BROKER_DOMAIN: "broker.example"
@@ -254,6 +256,8 @@ exchanges:
     priority: 100
     supported_profiles:
       - fora-news-v1
+      - fora-comp-v1
+      - fora-music-v1
 ```
 
 `trust_level` is one of `DISCOVERED`, `VERIFIED`, `PREFERRED`, `BLOCKED`, and it

@@ -62,10 +62,17 @@ type SelectionLogRepo interface {
 	// week after the transaction it is being joined to, which is a different
 	// event wearing the same two identifiers.
 	//
-	// agentID is the Exchange's canonical agent identity — the directory host,
-	// not the directory URI a signer spelled. Callers holding a signed
-	// Requester.id must reduce it through agentid.FromDirectory first; the two
-	// name the same agent but are not byte-equal.
+	// agentID must be a verified agent identity: the canonical host of a
+	// Signature-Agent directory whose signature a service checked. The Broker
+	// records exactly that value, and on the Exchange side the matching value is
+	// the transaction's attributed agent (transaction_log.agent_id, exposed as
+	// TransactionState.AgentID). Pass it as it is; it is already canonical.
+	//
+	// Never derive agentID from a signed requester field. Requester.id is a free
+	// label that two agents may share. Requester.domain is bound to the caller
+	// only when the Broker's ExecuteTransaction carried the transaction; an agent that
+	// executes directly at the Exchange may send any domain, and a lookup keyed on
+	// it would return another agent's selection row.
 	LatestOfferingOffer(
 		ctx context.Context, agentID, offerID string, notAfter time.Time, window time.Duration,
 	) (*SelectionLogEntry, error)

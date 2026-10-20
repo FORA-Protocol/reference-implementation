@@ -147,7 +147,7 @@ func TestExecuteTransaction_DeactivatedAccountFreeSucceeds(t *testing.T) {
 	}
 	// The billing adapter saw nothing AND the SoR was never asked: the free
 	// bypass runs before the active-flag gate.
-	assertBillingLifecycle(t, rec, false, 0, 0)
+	assertBillingLifecycle(t, rec, false, 0)
 	if got := ctrl.callCount(); got != readsBefore {
 		t.Errorf("free path read the SoR %d time(s); want 0 (never reaches billing)", got-readsBefore)
 	}
@@ -237,7 +237,7 @@ func TestExecuteTransaction_SorErrorFailsOpen(t *testing.T) {
 		t.Error("no sor_active_check_failed warning logged; fail-open must be loud")
 	}
 	// The charge landed normally: the ledger balance check still ran.
-	bal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	bal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}

@@ -37,7 +37,7 @@ func TestResolve_RefusesADomainTheWireWouldNot(t *testing.T) {
 			t.Parallel()
 			domain := tc.Of(host)
 			dials := &countingTransport{}
-			r := New(Config{Client: &http.Client{Transport: dials}, Scheme: "http"})
+			r := New(Config{Client: &http.Client{Transport: dials}})
 
 			_, err := r.Resolve(context.Background(), domain)
 

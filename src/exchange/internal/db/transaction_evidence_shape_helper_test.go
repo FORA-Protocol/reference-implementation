@@ -27,33 +27,14 @@ const validEd25519SigHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123
 // requester_domain must fit the RFC 1035 octet bound, and request_id must travel
 // with its provenance flag.
 //
-// The rows go into a TEMP table declared LIKE the real one. INCLUDING
-// CONSTRAINTS copies the CHECK constraints — the properties under test — and
-// NOT NULL comes along unconditionally; INCLUDING DEFAULTS is needed for
-// created_at, whose NOT NULL is copied but whose DEFAULT NOW() would not be.
-// Postgres never copies foreign keys or triggers through LIKE, which is what
-// makes this work: no transaction_log or tenants parent row is needed, and a
-// rejected INSERT is unambiguously a CHECK firing rather than the append-once
-// guard. One pooled connection is held throughout because a TEMP table is
-// session-scoped.
+// The rows go into a TEMP table declared LIKE the real one (see openShapeTable),
+// so no transaction_log or tenants parent row is needed. INCLUDING DEFAULTS
+// matters here for created_at, whose NOT NULL is copied but whose DEFAULT NOW()
+// would not be.
 func assertColumnShape(t *testing.T, ctx context.Context, dsn string) {
 	t.Helper()
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("pool: %v", err)
-	}
-	defer pool.Close()
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx,
-		`CREATE TEMP TABLE evidence_shape (
-			LIKE fora.transaction_evidence INCLUDING CONSTRAINTS INCLUDING DEFAULTS
-		)`); err != nil {
-		t.Fatalf("create shape table: %v", err)
-	}
+	conn, done := openShapeTable(t, ctx, dsn, "evidence_shape", "transaction_evidence")
+	defer done()
 
 	t.Run("signature columns", func(t *testing.T) { assertSignatureShape(t, ctx, conn) })
 	t.Run("public key columns", func(t *testing.T) { assertPublicKeyShape(t, ctx, conn) })

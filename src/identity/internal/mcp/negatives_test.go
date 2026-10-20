@@ -4,6 +4,7 @@ package mcp_test
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -92,7 +93,7 @@ func TestBearer_ChallengeAdvertisesTheMetadataDocument(t *testing.T) {
 	f := newFixture(t)
 
 	resp := postMCP(t, f, "")
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
@@ -113,11 +114,16 @@ func TestBearer_ChallengeAdvertisesTheMetadataDocument(t *testing.T) {
 func TestProtectedResourceMetadata_IsPublicAndNamesTheIssuer(t *testing.T) {
 	f := newFixture(t)
 
-	resp, err := http.Get(f.srv.URL + identitymcp.ProtectedResourceMetadataPath)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet,
+		f.srv.URL+identitymcp.ProtectedResourceMetadataPath, http.NoBody)
+	if err != nil {
+		t.Fatalf("build metadata request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("fetch metadata: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200 without any bearer", resp.StatusCode)
 	}
@@ -186,6 +192,52 @@ func TestFORARefusal_FallsBackToTheTransportCode(t *testing.T) {
 	}
 	if !strings.Contains(msg, "not permitted to register") {
 		t.Errorf("tool error %q, want it to carry the Exchange's message", msg)
+	}
+}
+
+// TestFORARefusal_AnEmptyDetailDoesNotMaskTheRealOne pins the reader's choice
+// between the FIRST detail a peer attached and the first that names a reason.
+//
+// The two SDK-facing readers disagree by construction, and this is where that
+// bites. The SDK hands over the first ErrorDetail on the error whatever it
+// carries; the Connect reader this package uses walks past the empty ones. So a
+// peer attaching an empty detail ahead of a real one hides the real one from
+// every leg that routes through the SDK -- which is now both account calls -- and
+// from nothing else. Reading the SDK's detail only when it names a reason is what
+// keeps the two answers the same.
+//
+// The contract says a peer cannot emit this. ErrorDetail's reason is a oneof
+// under a defined-only, not-in-zero constraint, so an attached detail always
+// names one; a single carrier type was chosen precisely so a client has exactly
+// one thing to look for. What the contract does not say is what a client renders
+// when a peer breaks that rule, and a peer here is a third party. This is that
+// case.
+//
+// Asserted on the enum name rather than by matching the message, because the
+// message is developer-facing and non-authoritative and the reason is the part an
+// agent branches on.
+func TestFORARefusal_AnEmptyDetailDoesNotMaskTheRealOne(t *testing.T) {
+	f := newFixture(t)
+	refusal := connect.NewError(connect.CodePermissionDenied,
+		errStub("agent is not permitted to register"))
+	// Order is the whole test. The empty one first, so a reader taking the first
+	// detail it finds takes this one and reports no reason at all.
+	refusal.AddDetail(mustDetail(t, &forav1.ErrorDetail{}))
+	refusal.AddDetail(mustDetail(t, &forav1.ErrorDetail{
+		Reason: &forav1.ErrorDetail_RegistrationFailure{
+			RegistrationFailure: &forav1.RegistrationFailure{
+				Reason: forav1.RegistrationFailureReason_REGISTRATION_FAILURE_REASON_DOMAIN_NOT_VERIFIED,
+			},
+		},
+	}))
+	f.exchange.failWith(refusal)
+	a := f.provision(t, "dev-one")
+
+	msg := callToolErr(t, f.connect(t, a.Token), "fora_register", registerArgs(t, f))
+
+	if !strings.Contains(msg, "REGISTRATION_FAILURE_REASON_DOMAIN_NOT_VERIFIED") {
+		t.Errorf("tool error %q carries no typed reason, so the empty detail the peer "+
+			"attached first masked the one that named the cause", msg)
 	}
 }
 
@@ -292,7 +344,7 @@ func TestReport_RefusesAnExchangeThatIsNotABareDomain(t *testing.T) {
 func assertUnauthorized(t *testing.T, f *fixture, bearer string) {
 	t.Helper()
 	resp := postMCP(t, f, bearer)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
@@ -310,11 +362,21 @@ func assertUnauthorized(t *testing.T, f *fixture, bearer string) {
 // fail the connect instead, hiding the status and the challenge header.
 func postMCP(t *testing.T, f *fixture, bearer string) *http.Response {
 	t.Helper()
-	body := strings.NewReader(
-		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fora_status","arguments":{}}}`,
-	)
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
-		f.srv.URL+identitymcp.EndpointPath, body)
+	return sendMCP(t, f, http.MethodPost, bearer, nil,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fora_status","arguments":{}}}`)
+}
+
+// sendMCP sends one raw HTTP request to the endpoint with the headers a
+// Streamable HTTP client sends, plus any in header. An empty body sends none.
+func sendMCP(
+	t *testing.T, f *fixture, method, bearer string, header http.Header, body string,
+) *http.Response {
+	t.Helper()
+	var rd io.Reader
+	if body != "" {
+		rd = strings.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(t.Context(), method, f.srv.URL+identitymcp.EndpointPath, rd)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -323,9 +385,12 @@ func postMCP(t *testing.T, f *fixture, bearer string) *http.Response {
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
+	for k, v := range header {
+		req.Header[k] = v
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("post to the MCP endpoint: %v", err)
+		t.Fatalf("%s to the MCP endpoint: %v", method, err)
 	}
 	return resp
 }

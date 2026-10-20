@@ -30,8 +30,13 @@ output "broker_url" {
 }
 
 output "identity_url" {
-  description = "Public Identity Service URL. Its /mcp path is the endpoint agents point an MCP client at, and its root is where developers sign up."
+  description = "Public Identity Service URL: the OAuth issuer, and its root is where developers sign up. The MCP endpoint is under mcp_url, which is this URL unless mcp_subdomain splits them."
   value       = "https://${local.identity_fqdn}"
+}
+
+output "mcp_url" {
+  description = "Origin agents point an MCP client at; its /mcp path is the endpoint. smoke.sh checks that the endpoint advertises exactly this origin as its OAuth protected resource."
+  value       = "https://${local.mcp_fqdn}"
 }
 
 output "zitadel_url" {
@@ -73,15 +78,24 @@ output "catalog_contributor_hostname" {
 }
 
 output "default_tenant_domain" {
-  # The Exchange resolves its default tenant under this exact domain
-  # (EXCHANGE_DEFAULT_TENANT), and seed-staging.sh must create the tenant
+  # The Exchange resolves its seat under this exact domain
+  # (EXCHANGE_DEFAULT_TENANT), and seed-staging.sh must create the seat row
   # under the same string. Exporting the one derived value lets the seed
   # script read it back instead of deriving its own copy — with two
-  # independent derivations, a deploy_edge = false stack seeded the tenant
-  # under the client hostname while the Exchange kept looking under
-  # demo.<domain>, and every agent Register failed.
-  description = "Domain the Exchange resolves its default tenant under; seed-staging.sh creates the tenant under this exact domain."
+  # independent derivations the two were free to disagree, and a stack that
+  # seeded one domain while the Exchange looked under another had every agent
+  # Register refused.
+  description = "Domain the Exchange resolves its seat under; seed-staging.sh creates the seat row under this exact domain."
   value       = local.default_tenant_domain
+}
+
+output "resource_owner_id" {
+  # The publisher manifest this stack renders attests this id, and the seeding
+  # step registers a fora.publishers row under it. The two must be the same
+  # string: catalog push refuses an entry whose attested owner is not the
+  # registered one. Exporting the one value is what keeps them equal.
+  description = "Payee id the publisher manifest attests; seed-staging.sh registers the publisher under this exact id."
+  value       = var.resource_owner_id
 }
 
 output "origin_url" {

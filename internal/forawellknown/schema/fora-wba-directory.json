@@ -11,7 +11,7 @@
       "type": "array",
       "minItems": 1,
       "maxItems": 64,
-      "$comment": "Upper bound complements the 64 KiB body cap: a directory holds only a handful of keys (rotation overlaps a few), so a large keys[] is malformed. Bounds parse/thumbprint work by entry count, not just bytes.",
+      "$comment": "Applies to the directories this deployment serves, which its producers validate against this schema: a directory holds only a handful of keys (rotation overlaps a few), so a large keys[] is malformed. A directory this deployment reads is read the way the protocol SDK reads it, with the body capped at 1 MiB and only the keys that signed the response kept.",
       "items": { "$ref": "#/$defs/jwk" }
     },
     "revocation_url": { "type": "string", "minLength": 1 }

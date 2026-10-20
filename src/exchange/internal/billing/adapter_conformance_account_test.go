@@ -13,7 +13,7 @@ import (
 // the fresh account holds a zero balance. GetBalance and Authorize both key on
 // the billing_ref now (ADR-021 D5), so reading with the same ref sees the
 // account EnsureAgentAccount created (InMemory: the balances map key;
-// TigerBeetle: AccountID(PrefixAgent, ns+ref)).
+// TigerBeetle: AccountID(PrefixAgent, currency, ns+ref)).
 func confEnsureAgentAccount(t *testing.T, f adapterFactory) {
 	ctx := context.Background()
 	a := f.new(conformanceSeed{})
@@ -24,7 +24,7 @@ func confEnsureAgentAccount(t *testing.T, f adapterFactory) {
 	if err := a.EnsureAgentAccount(ctx, ref); err != nil {
 		t.Fatalf("repeat EnsureAgentAccount must be a no-op success, got %v", err)
 	}
-	bal, err := a.GetBalance(ctx, ref)
+	bal, err := a.GetBalance(ctx, ref, confCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance(%q): %v", ref, err)
 	}

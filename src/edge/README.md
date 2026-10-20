@@ -77,7 +77,7 @@ three today:
 | Platform | How it runs the app | How configuration reaches it |
 |---|---|---|
 | **Cloudflare Workers** (the default deployment target, deployed with Wrangler) | `cloudflare.ts` exports a `fetch` handler the runtime calls per request | The runtime hands over the whole settings object; the adapter passes it straight through. `SAME_ZONE_ORIGIN` works only here. |
-| **Fastly Compute** | `fastly.ts` registers a `fetch` listener | Fastly has no settings object you can list, so `fastly.ts` asks for each setting by name, one at a time. A missing name would silently lose that setting on Fastly only, so a parity test checks the list stays complete. |
+| **Fastly Compute** | `fastly.ts` registers a `fetch` listener | Fastly has no settings object you can list, so `fastly.ts` asks for each setting by name, one at a time. A missing name would silently lose that setting on Fastly only, so a parity test checks the list stays complete. Fastly's WebCrypto has no Ed25519, so `fastly.ts` hands `buildDeps` the `@noble/ed25519` primitive, and the key directory, the signed URL and the delivery proof are all checked through it. |
 | **AWS Lambda@Edge** | `aws-lambda.ts` wraps the app with `hono/lambda-edge` and exports a Lambda `handler` | The runtime provides settings as process environment; the adapter passes them straight through. |
 
 How each is tested:
@@ -165,10 +165,10 @@ For the full list of what a deployment must create (routes, variables,
 observability, verification checks) written for DevOps/Terraform work, see
 [DEPLOYMENT.md](DEPLOYMENT.md). In summary:
 
-1. **Exchange side**: provision the publisher's tenant with
-   `signing_scheme = 'ED25519'`. The Exchange then signs the catalog URI
-   itself — the delivery URL is the article URL plus the signature query
-   parameters; no URL mapping is introduced.
+1. **Exchange side**: register the publisher's site on the Exchange with
+   `signing_scheme = 'ED25519'` on its `fora.publisher_domains` row. The
+   Exchange then signs the catalog URI itself — the delivery URL is the article
+   URL plus the signature query parameters; no URL mapping is introduced.
 2. **Worker side**: fill in the `[env.staging]` block in `wrangler.toml`
    (routes for the article paths, plus the variables listed there; the
    comments mark what still needs publisher-specific input, e.g. `ORIGIN_URL`), then:
@@ -186,8 +186,9 @@ observability, verification checks) written for DevOps/Terraform work, see
 ## What to alert on
 
 The Worker writes one structured record per decision (visible in Workers
-Logs). Denials are logged as warnings and are normal traffic; the error level
-means something is broken:
+Logs). An authorized delivery is logged at info, denials are logged as warnings
+and are normal traffic, and the error level means something is broken. There is
+no log-level setting; [`CONFIGURATION.md`](CONFIGURATION.md) §1 explains why. The records to watch:
 
 - `edge.origin.fetch_failed` (error) — the origin is down or its address is
   wrong; visitors are getting 502s.
@@ -202,6 +203,9 @@ means something is broken:
 - `edge.deny.bot` / `edge.deny.binding` / `edge.deny.method` (warn) —
   expected: unpaid bots, leaked-URL attempts, and signed read URLs replayed
   with a write method.
+- `edge.deliver.authorized` (info) — not an alert: one per signed request the
+  Worker authorized and served, the record the evidence chain joins on by
+  `url_hash`.
 
 ## Scripts (`scripts/`)
 
@@ -233,10 +237,14 @@ bundles on its own), and the vitest suites do not use them either
 
 The third script **is** part of a deployment path:
 
-- `build-lambda-edge.mjs` — builds the AWS Lambda@Edge bundle. Lambda@Edge
-  has no environment variables, so this script bakes a per-deployment config
-  file into the bundle and smoke-invokes the result so a broken config fails
-  the build, not the deploy. The AWS deployment tooling
+- `build-lambda-edge.mjs` — builds the AWS Lambda@Edge package: the
+  release bundle `lambda-edge.mjs`, built exactly as `build-release.mjs`
+  builds it, and an `index.mjs` beside it that assigns a per-deployment
+  config file's values to `process.env` and re-exports the handler.
+  Lambda@Edge has no environment variables, so the settings travel in the
+  package. This is the same layout the console hands a publisher. The script
+  smoke-invokes the result so a broken config fails the build, not the
+  deploy. The AWS deployment tooling
   (`deploy/terraform/scripts/build-lambda-edge.sh`) and the E2E stack's
   `lambda-edge` service both call it.
 

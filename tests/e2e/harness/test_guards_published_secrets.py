@@ -42,7 +42,6 @@ there.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -54,6 +53,8 @@ from .guard_harness import (
     SECRET_SCAN_CONFIG,
     commit_all,
     guard_marks,
+    hold_back,
+    install_gate,
     init_scratch_repo,
     private_key_pem,
     run_gate,
@@ -88,7 +89,7 @@ def _build_repo(root: Path) -> None:
     as a failure rather than as nothing to scan — that is the behaviour the
     missing-root case asserts.
     """
-    init_scratch_repo(root, branch="main", committer="published secrets guard")
+    init_scratch_repo(root, branch="main")
 
     for directory in shared_array("ALLOW_DIRS"):
         (root / directory).mkdir(parents=True, exist_ok=True)
@@ -112,8 +113,9 @@ def _build_repo(root: Path) -> None:
         dest = root / script
         dest.parent.mkdir(parents=True, exist_ok=True)
         src = REPO_ROOT / script
-        # The gate and its shared definition are copied verbatim, because the
-        # subject under test is the shipped artifact. The rest only have to exist.
+        # Every allowlisted script that exists here is copied verbatim. The gate
+        # and its shared definition have to be the real ones, because the subject
+        # under test is the shipped artifact; the rest only have to exist.
         dest.write_bytes(src.read_bytes() if src.is_file() else b"")
 
     # The unexempted sibling directory. Without it, the case that plants a key
@@ -285,6 +287,27 @@ def test_a_key_in_an_unpublished_path_is_ignored(published_repo: Path) -> None:
     assert "PASS" in proc.stdout, proc.stdout
 
 
+def test_a_key_under_a_held_back_path_is_still_rejected(published_repo: Path) -> None:
+    """A path the publish holds back is scanned all the same.
+
+    Held-back paths sit under the published roots and never ship, so a key there
+    has not leaked yet. It is one edit of DENY_PATHS away from leaking, though,
+    and this gate is the only secret scan the tree gets, so it reads them on
+    purpose. The reference gate subtracts the same array; making this gate do the
+    same would look like tidying, and it would leave such a key unscanned
+    everywhere. This case is what makes that edit fail.
+    """
+    hold_back(published_repo / "scripts" / "published-paths.sh", "deploy/held-back-stack/")
+    commit_all(published_repo, "hold back a stack")
+    _plant(published_repo, "deploy/held-back-stack/planted.pem", commit=True)
+
+    proc = _run_gate(published_repo)
+
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode != 0, combined
+    assert "potential secrets in the published tree" in combined, combined
+
+
 def test_an_untracked_key_under_a_published_root_is_ignored(published_repo: Path) -> None:
     """The gate lists tracked files, so gitignored local output is out of scope.
 
@@ -441,9 +464,7 @@ def test_a_non_git_tree_is_refused(tmp_path: Path) -> None:
     """
     root = tmp_path / "plain"
     root.mkdir()
-    (root / "scripts").mkdir()
-    shutil.copy(_GATE, root / "scripts" / _GATE.name)
-    shutil.copy(REPO_ROOT / "scripts" / "published-paths.sh", root / "scripts")
+    install_gate(root, _GATE.name, "published-paths.sh")
 
     proc = _run_gate(root)
 

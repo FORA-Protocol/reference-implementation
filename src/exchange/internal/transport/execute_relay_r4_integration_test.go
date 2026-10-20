@@ -13,6 +13,8 @@ import (
 	foraconnect "github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
 
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
 )
@@ -63,14 +65,20 @@ func executeBrokerRelay(
 
 // executeBrokerRelayOffers is executeBrokerRelay for a batch: one item per
 // offer, each carrying its own acceptance over the SHARED requester +
-// idempotency key. Items-only contract after the C4 collapse; the relay multisig
-// chain rides on the transport (client).
+// idempotency key. Items-only contract after the C4 collapse; the relay chain
+// rides on the transport (client).
+//
+// The requester is h.relayRequester(): a free-label id and the agent's own
+// directory host in domain. It serves both relay shapes this helper is called
+// with — the forwarded chain, where the agent is read from its own preserved
+// Signature-Agent, and the Broker's single-signature re-package, where domain is
+// the only field that names the agent.
 func executeBrokerRelayOffers(
 	t *testing.T, h *testHarness, client foraconnect.ExchangeServiceClient,
 	txID string, offers ...*forav1.Offer,
 ) (*connect.Response[forav1.TransactionResponse], error) {
 	t.Helper()
-	requester := newRequester("agent-test", "agent.example")
+	requester := h.relayRequester()
 	items := make([]*forav1.TransactionItem, 0, len(offers))
 	for _, offer := range offers {
 		items = append(items, &forav1.TransactionItem{
@@ -122,7 +130,7 @@ func TestExecuteRelayR4_AgentDirectAcceptanceBindsAgent(t *testing.T) {
 
 	// Signed price charged (0.05 → balance 9.95) and a row persisted under the
 	// DERIVED per-item key (items-only path).
-	bal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	bal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}
@@ -241,7 +249,7 @@ func TestExecuteRelayR4_BrokerOnlyAcceptanceBindsAgent(t *testing.T) {
 	uri := seedResourceWithRate(t, h, "/articles/r4-broker-only-bind", "0.05")
 	offer := discoverOffer(t, h, uri)
 
-	brokerClient := h.brokerOnlyClient(t, "broker.only-bind-1.v1")
+	brokerClient := h.brokerOnlyClient(t)
 	const txID = "tx-r4-broker-only-bind"
 	resp, err := executeBrokerRelay(t, h, brokerClient, txID, offer)
 	if err != nil {
@@ -342,7 +350,7 @@ func TestExecuteRelayR4_BrokerOnlyNoAcceptanceRejected(t *testing.T) {
 	uri := seedResourceWithRate(t, h, "/articles/r4-broker-only", "0.05")
 	offer := discoverOffer(t, h, uri)
 
-	brokerClient := h.brokerOnlyClient(t, "broker.only-1.v1")
+	brokerClient := h.brokerOnlyClient(t)
 	const txID = "tx-r4-broker-only"
 	_, err := brokerClient.ExecuteTransaction(h.ctx, connect.NewRequest(&forav1.TransactionRequest{
 		Ver:            helpers.ProtocolVersion,
@@ -370,11 +378,28 @@ func TestExecuteRelayR4_BrokerRelayDeniedWhenDisabled(t *testing.T) {
 	relayClient := h.brokerRelayClient(t, "broker.denied-1.v1")
 	const txID = "tx-r4-relay-denied"
 	_, err := executeBrokerRelay(t, h, relayClient, txID, offer)
-	// KindPermissionDenied is NOT in the denial map → the batch aborts with
-	// CodePermissionDenied (Flag #1), not an in-body denial.
-	assertConnectCode(t, err, connect.CodePermissionDenied)
+	// The relay gate runs at admission, before any item, so the opt-out refuses
+	// the whole request rather than denying one item in the body.
+	assertRelayNotAccepted(t, err)
 	assertNoTransaction(t, h, derivedTxKey(txID, offer))
 	assertBalanceUnchanged(t, h)
+}
+
+// assertRelayNotAccepted checks a request refused by the tenant's relay opt-out:
+// PERMISSION_DENIED with a transaction_denial carrying the protocol's
+// DENIAL_REASON_RELAY_NOT_ACCEPTED and naming this Exchange, so the agent learns
+// the remedy — buy the offer directly here — rather than a bare permission
+// failure. The Broker passes this detail to the agent unchanged.
+func assertRelayNotAccepted(t *testing.T, err error) {
+	t.Helper()
+	assertConnectCode(t, err, connect.CodePermissionDenied)
+	denial := testutil.SingleErrorDetail(t, err).GetTransactionDenial()
+	if got := denial.GetReason(); got != forav1.DenialReason_DENIAL_REASON_RELAY_NOT_ACCEPTED {
+		t.Errorf("transaction_denial.reason = %v, want DENIAL_REASON_RELAY_NOT_ACCEPTED", got)
+	}
+	if got := denial.GetExchange(); got != harnessExchangeDomain {
+		t.Errorf("transaction_denial.exchange = %q, want this Exchange %q", got, harnessExchangeDomain)
+	}
 }
 
 // TestExecuteRelayR4_WrongKeyAcceptanceRejected pins that the acceptance must be

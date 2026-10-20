@@ -61,8 +61,8 @@ func TestRegister_SignsAsTheCallerAndSendsOnlyWhatTheAgentSupplied(t *testing.T)
 	if call.KeyID != a.Thumbprint {
 		t.Fatalf("signed with keyid %q, want the caller's own key %q", call.KeyID, a.Thumbprint)
 	}
-	if call.SignatureAgent != "http://"+a.Subdomain {
-		t.Fatalf("Signature-Agent %q, want the caller's own directory http://%s",
+	if call.SignatureAgent != "https://"+a.Subdomain {
+		t.Fatalf("Signature-Agent %q, want the caller's own directory https://%s",
 			call.SignatureAgent, a.Subdomain)
 	}
 	sent := f.exchange.LastRegistration()
@@ -323,6 +323,58 @@ func TestStatus_ReportsNoAccountAtAnExchangeThatHasNone(t *testing.T) {
 	}
 }
 
+// TestStatus_ReadsAConformantNoAccountAnswerAsNoAccount is the same answer from
+// a peer that follows the contract rather than this deployment.
+//
+// The protocol's no-account answer is an ORDINARY response carrying an empty
+// account handle — the field's own contract says so. The sibling test above
+// drives the NotFound this deployment's Exchange sends instead, and both have to
+// reach the agent as the same thing: an agent working out where it still needs
+// to register cannot be told a different story depending on whose Exchange it
+// asked.
+//
+// This case was read as an account until the branch that answers it was written.
+// Every non-error response was taken as confirmation, so a conformant peer's
+// "you have no account" became registered=true with a blank handle, and a local
+// hint was written claiming an account that does not exist.
+func TestStatus_ReadsAConformantNoAccountAnswerAsNoAccount(t *testing.T) {
+	f := newFixture(t)
+	// The peer's default answer already IS this shape — a response carrying only
+	// the protocol version — and it is staged explicitly so the test says what it
+	// drives rather than depending on a default that could change under it.
+	f.exchange.statusResp = &forav1.GetAccountStatusResponse{Ver: helpers.ProtocolVersion}
+	a := f.provision(t, "dev-one")
+	session := f.connect(t, a.Token)
+
+	out := callTool[statusResult](t, session, "fora_status", map[string]any{
+		"exchange": f.exchange.Domain(t),
+	})
+
+	if len(out.Accounts) != 1 {
+		t.Fatalf("status returned %d entries, want 1", len(out.Accounts))
+	}
+	entry := out.Accounts[0]
+	if entry.Registered {
+		t.Error("registered = true where the Exchange answered with an empty handle")
+	}
+	// Null rather than false, for the same reason as the NotFound case: nobody
+	// said the account is suspended, they said there is no account, and false
+	// renders as suspended.
+	if entry.Active != nil {
+		t.Errorf("active = %v, want null where there is no account to be active", *entry.Active)
+	}
+	if entry.BillingRef != "" {
+		t.Errorf("billing_ref = %q, want none", entry.BillingRef)
+	}
+
+	// And no hint was left behind. A note recorded here would have the
+	// no-argument mode keep naming an account the Exchange has just denied.
+	hints := callTool[statusResult](t, session, "fora_status", nil)
+	if len(hints.Accounts) != 0 {
+		t.Errorf("an answer of \"no account\" left %d hints: %+v", len(hints.Accounts), hints.Accounts)
+	}
+}
+
 // TestStatus_WithoutAnExchangeListsLocalHints drives the second mode. It reads
 // the local note and must make NO network call at all — which is asserted on the
 // peers' raw HTTP counters, not only their RPC counters, because a manifest read
@@ -466,6 +518,12 @@ func TestStatus_ForgetsAHintTheExchangeContradicts(t *testing.T) {
 // nothing about a confirmed one appearing.
 func TestStatus_RecordsAHintForARegistrationMadeElsewhere(t *testing.T) {
 	f := newFixture(t)
+	// The account this test is about. It has to be STAGED: an Exchange answering
+	// with an empty handle is saying the agent holds no account, so the default
+	// response is the opposite of the scenario named above.
+	f.exchange.statusResp = &forav1.GetAccountStatusResponse{
+		Ver: helpers.ProtocolVersion, BillingRef: "acct-elsewhere", Active: true,
+	}
 	a := f.provision(t, "dev-one")
 	session := f.connect(t, a.Token)
 
@@ -577,6 +635,12 @@ func TestStatus_WithoutAnExchangeFailsWhenTheNoteStoreCannotAnswer(t *testing.T)
 // write happens on the status path too.
 func TestRegister_SucceedsWhenTheNoteCannotBeRecorded(t *testing.T) {
 	f := newFixture(t)
+	// Staged for the status leg at the end, which asks about the account this
+	// test has just opened. The default answer carries an empty handle, which is
+	// the Exchange saying there is no account.
+	f.exchange.statusResp = &forav1.GetAccountStatusResponse{
+		Ver: helpers.ProtocolVersion, BillingRef: "acct-123", Active: true,
+	}
 	a := f.provision(t, "dev-one")
 	session := f.connect(t, a.Token)
 

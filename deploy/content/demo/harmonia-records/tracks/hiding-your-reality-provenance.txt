@@ -1,0 +1,33 @@
+Hiding Your Reality — Kevin MacLeod (incompetech.com)
+
+Catalog filename: hiding-your-reality.mp3
+ISRC: USUAN1700081
+Source: https://incompetech.com/music/royalty-free/index.html?isrc=USUAN1700081
+Library: https://incompetech.com/music/royalty-free/music.html
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+https://creativecommons.org/licenses/by/4.0/
+Retrieved: 2026-09-26
+
+The catalog file is a modified copy of the incompetech download.
+Modification: trimmed to the first 60 seconds and re-encoded at 96 kbps to
+reduce the file size; filename changed.
+SHA-256 of the catalog file: 14b9cb751487b807bcd3428f6d9af004a42b849cc16af09577fd0aabdde43350
+Size: 721,212 bytes
+Encoding: MP3, stereo, 44.1 kHz, 96 kbps; measured duration about 60.03 seconds.
+
+Suggested credit:
+“Hiding Your Reality” by Kevin MacLeod (incompetech.com).
+Source: https://incompetech.com/music/royalty-free/index.html?isrc=USUAN1700081
+Licensed under CC BY 4.0: https://creativecommons.org/licenses/by/4.0/
+Trimmed to 60 seconds and re-encoded.
+
+For an edited video, replace the final line with the actual changes, for example:
+“Excerpt trimmed, faded and mixed beneath dialogue.”
+Preserve attribution, source/license links and existing notices. Do not imply
+endorsement by the artist. Other footage or third-party materials retain their
+own licenses and attribution requirements.
+
+Harmonia Records is a fictional catalog presenter. Its three illustrative offers
+are demonstration inputs, not actual grants from the artist. They do not replace
+CC BY 4.0 or restrict its permissions, including permitted commercial reuse.
+No real royalty settlement, Content ID clearance or cue-sheet filing is claimed.

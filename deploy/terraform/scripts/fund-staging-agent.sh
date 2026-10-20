@@ -6,9 +6,9 @@
 # A freshly deployed stack starts with an EMPTY ledger. There is no API to add
 # money on purpose: per ADR-009 D2 balance is created by an operator's manual
 # credit into TigerBeetle, with ONE narrow exception (the ADR-009 amendment of
-# 2026-08-13): a tenant configured with default_agent_credit > 0 grants that
-# amount once, at Register, under the "service-welcome:" + billing_ref
-# transfer id.
+# 2026-08-13): an Exchange configured with a welcome credit in this currency
+# (EXCHANGE_DEFAULT_AGENT_CREDIT) grants that amount once, at Register, under the
+# "service-welcome:" + billing_ref + ":" + currency transfer id.
 # This script IS the manual credit for staging — the ledger analogue of
 # seed-staging.sh's documented one-time SQL. The commands are printed in full
 # before they run, never hidden.
@@ -35,24 +35,31 @@
 # new FUND_LABEL (e.g. FUND_LABEL=topup-2026-08-01).
 #
 # The label "service-welcome" is reserved: its transfer id is
-# "service-welcome:" + billing_ref (no amount in the derivation) — the SAME id
-# the Exchange's Register flow derives for the tenant-configured default
-# credit (billing.WelcomeCreditKey in src/exchange/internal/billing/welcome.go,
-# the Go owner of this derivation; a pinned-vector test there breaks when the
-# two sides drift). A service-welcome prefund and the service's grant therefore
-# occupy one ledger slot: whichever lands first wins and the other is a no-op,
-# so an agent is never double-credited. Every other label — including plain
-# "welcome" — keeps the amount-bearing derivation below and stacks
-# deliberately.
+# "service-welcome:" + billing_ref + ":" + currency (no amount in the
+# derivation) — the SAME id the Exchange's Register flow derives for the
+# tenant-configured welcome credit in that currency
+# (billing.WelcomeCreditKey in src/exchange/internal/billing/welcome.go, the Go
+# owner of this derivation; a pinned-vector test there breaks when the two sides
+# drift). A service-welcome prefund and the service's grant therefore occupy one
+# ledger slot per currency: whichever lands first wins and the other is a no-op,
+# so an agent is never double-credited. The currency is in the derivation because
+# a TigerBeetle transfer id is unique per cluster, not per ledger — without it,
+# the EUR and USD grants would share one slot and the second would silently do
+# nothing. Every other label — including plain "welcome" — keeps the
+# amount-bearing derivation below and stacks deliberately.
 #
 # Env (all optional):
 #   STACK_DIR    default deploy/terraform/stacks/staging-aws
 #   BILLING_REF  skip the Register lookup and fund this ref directly. For
 #                recovering a specific account; normally leave it unset.
-#   AMOUNT       euros to add, decimal string, default 100
+#   AMOUNT       amount to add, decimal string, default 100
+#   CURRENCY     ISO 4217 alpha code to fund, default EUR. Sets LEDGER, and is
+#                part of the derived account and transfer ids, so funding EUR
+#                and funding USD touch two separate accounts.
 #   FUND_LABEL   names this top-up, default "initial" — change it to top up again
-#   LEDGER       TigerBeetle ledger id, default 978 (EUR). MUST match the
-#                stack's billing_ledger tfvar (also 978 by default) — a
+#   LEDGER       TigerBeetle ledger id. Derived from CURRENCY by default; set it
+#                only to override. It MUST be the numeric code of CURRENCY and
+#                MUST be one of the stack's billing_ledger tfvar entries — a
 #                mismatch would create the account on the wrong ledger and
 #                break the Exchange's own account creation with a conflict.
 #
@@ -68,8 +75,21 @@ set -euo pipefail
 
 . "$(dirname "${BASH_SOURCE[0]}")/lib/staging-env.sh"
 AMOUNT="${AMOUNT:-100}"
+CURRENCY="${CURRENCY:-EUR}"
 FUND_LABEL="${FUND_LABEL:-initial}"
-LEDGER="${LEDGER:-978}"
+# The currency-to-ledger table, the same one the Exchange keeps in
+# src/exchange/internal/billing/tigerbeetle/currency.go. LEDGER may be set
+# explicitly to override, but it must still name CURRENCY's ledger.
+case "${CURRENCY}" in
+    EUR) DEFAULT_LEDGER=978 ;;
+    USD) DEFAULT_LEDGER=840 ;;
+    *)   echo "unsupported CURRENCY '${CURRENCY}' (supported: EUR, USD)" >&2; exit 2 ;;
+esac
+LEDGER="${LEDGER:-${DEFAULT_LEDGER}}"
+if [ "${LEDGER}" != "${DEFAULT_LEDGER}" ]; then
+    echo "LEDGER '${LEDGER}' is not the ledger for CURRENCY '${CURRENCY}' (${DEFAULT_LEDGER})" >&2
+    exit 2
+fi
 
 command -v terraform >/dev/null 2>&1 || { echo "missing: terraform" >&2; exit 2; }
 command -v python3 >/dev/null 2>&1 || { echo "missing: python3" >&2; exit 2; }
@@ -122,7 +142,7 @@ import hashlib
 import sys
 from decimal import Decimal, InvalidOperation
 
-billing_ref, amount, label = sys.argv[1:4]
+billing_ref, amount, label, currency = sys.argv[1:5]
 
 def tb_id(s: str) -> int:
     return int.from_bytes(hashlib.sha256(s.encode()).digest()[:16], "little")
@@ -134,20 +154,27 @@ except InvalidOperation:
 if minor != minor.to_integral_value() or minor <= 0:
     sys.exit(f"AMOUNT must be positive with at most 8 decimal places: {amount!r}")
 
-print(f"AGENT_ACC={tb_id('agent:' + billing_ref)}")
-print(f"LIQ_ACC={tb_id('platform:liquidity')}")
+# The currency is part of every account id, because a TigerBeetle id is unique
+# per cluster and not per ledger: without it an agent's EUR and USD accounts
+# would derive the same id and the second ledger could never create its
+# account. Same derivation as the Exchange's AccountID (ids.go):
+# sha256(prefix || currency || ":" || business_id).
+print(f"AGENT_ACC={tb_id(f'agent:{currency}:{billing_ref}')}")
+print(f"LIQ_ACC={tb_id(f'platform:{currency}:liquidity')}")
 # The reserved service-welcome label shares its transfer-id slot with the
-# Exchange's Register default credit (same derivation as the adapter:
-# sha256("service-welcome:" + ref) — billing.WelcomeCreditKey is the Go owner,
-# with a pinned-vector test), so a prefund and the service grant can never
-# both apply. Every other label keeps the amount-bearing staging derivation.
+# Exchange's Register welcome credit for this currency (same derivation as the
+# adapter: sha256("service-welcome:" + ref + ":" + currency) —
+# billing.WelcomeCreditKey is the Go owner, with a pinned-vector test), so a
+# prefund and the service grant can never both apply. Every other label keeps
+# the amount-bearing staging derivation, which also carries the currency so one
+# label can top up each currency separately.
 if label == "service-welcome":
-    print(f"TRANSFER={tb_id('service-welcome:' + billing_ref)}")
+    print(f"TRANSFER={tb_id(f'service-welcome:{billing_ref}:{currency}')}")
 else:
-    print(f"TRANSFER={tb_id(f'staging-fund:{billing_ref}:{amount}:{label}')}")
+    print(f"TRANSFER={tb_id(f'staging-fund:{billing_ref}:{currency}:{amount}:{label}')}")
 print(f"MINOR={int(minor)}")
 PY
-IDS="$(printf '%s' "${FUND_IDS_PY}" | python3 - "${BILLING_REF}" "${AMOUNT}" "${FUND_LABEL}")"
+IDS="$(printf '%s' "${FUND_IDS_PY}" | python3 - "${BILLING_REF}" "${AMOUNT}" "${FUND_LABEL}" "${CURRENCY}")"
 eval "${IDS}"
 
 # The four ledger commands, in order:
@@ -177,7 +204,7 @@ STMTS=(
     "lookup_accounts id=${AGENT_ACC};"
 )
 
-echo "== funding agent account (billing_ref ${BILLING_REF}) with ${AMOUNT} EUR (label: ${FUND_LABEL}) =="
+echo "== funding agent account (billing_ref ${BILLING_REF}) with ${AMOUNT} ${CURRENCY} (label: ${FUND_LABEL}) =="
 echo "== ledger commands (via ${SSH_CMD[*]}) =="
 printf '%s\n' "${STMTS[@]}"
 echo "=========================================================="
@@ -203,7 +230,7 @@ echo "${REPL_OUT}"
 # print the spendable balance so the operator knows how many smoke runs are
 # left. Exits non-zero if the account is missing or still empty. The output
 # is handed over via the environment — never spliced into the code.
-REPL_OUT="${REPL_OUT}" python3 - <<'PY'
+REPL_OUT="${REPL_OUT}" CURRENCY="${CURRENCY}" python3 - <<'PY'
 import os
 import re
 import sys
@@ -219,5 +246,5 @@ def field(name: str) -> Decimal:
 balance = (field("credits_posted") - field("debits_posted")).scaleb(-8)
 if field("credits_posted") <= 0:
     sys.exit("agent account still has no money — funding FAILED")
-print(f"agent balance is now {balance.normalize():f} EUR")
+print(f"agent balance is now {balance.normalize():f} {os.environ['CURRENCY']}")
 PY

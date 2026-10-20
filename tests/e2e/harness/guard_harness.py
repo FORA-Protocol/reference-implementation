@@ -34,8 +34,11 @@ from there and neither imports ``conftest`` at all. Test modules still import
 
 from __future__ import annotations
 
+import functools
+import os
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -46,6 +49,8 @@ from cryptography.hazmat.primitives.serialization import (
     PrivateFormat,
 )
 
+from ._compose import REPO_ROOT
+
 # Fixture git calls are small and local. A minute is generous for the slowest of
 # them and short enough that a hung call fails the suite rather than the job.
 GIT_TIMEOUT = 60
@@ -55,10 +60,22 @@ GIT_TIMEOUT = 60
 # real work over the whole tree.
 GATE_TIMEOUT = 120
 
-# One address for every scratch repository. The committer NAME varies per suite,
-# so a commit in a failure message names the fixture that made it; the address
-# does not need to, and .invalid can never resolve (RFC 6761).
+# One identity for every scratch repository, and .invalid can never resolve (RFC
+# 6761). It reaches git as environment variables on each command, built by
+# ``fixture_env``, and never as a ``git config`` write: a config write goes to
+# whichever repository git resolves, and under an inherited GIT_DIR that is the
+# developer's own repository rather than the fixture.
+COMMITTER_NAME = "guard fixture"
 COMMITTER_EMAIL = "guard@example.invalid"
+
+# Identity by environment, which git reads ahead of every config file. A shipped
+# script that commits inside a fixture gets the same identity this way.
+_FIXTURE_IDENTITY = {
+    "GIT_AUTHOR_NAME": COMMITTER_NAME,
+    "GIT_AUTHOR_EMAIL": COMMITTER_EMAIL,
+    "GIT_COMMITTER_NAME": COMMITTER_NAME,
+    "GIT_COMMITTER_EMAIL": COMMITTER_EMAIL,
+}
 
 # The secret scanner resolves its ruleset from this file in the tree it scans, so
 # a fixture that leaves it empty turns the scan into a no-op that reports clean.
@@ -69,13 +86,103 @@ SECRET_SCAN_CONFIG = ".gitleaks.toml"
 # this reason, in these words.
 GATE_ABSENT_REASON = "scripts/ is absent from the e2e runner image; this guard runs on the host"
 
+# The argument parser four of the gates source. It defines `die` and the --root
+# loop, so a gate that finds it missing aborts before it reads anything.
+GATE_SEAM = "gate-args.sh"
+
+
+def install_gate(root: Path, gate: str, *extra: str) -> Path:
+    """Copy a gate, the seam it sources, and any other file it reads, into ``root``.
+
+    The seam goes in unconditionally. A scratch tree that carries a gate and not
+    the file the gate sources fails every case in the suite with one message about
+    a missing file, which reads as a broken suite rather than a missing fixture
+    input -- and one gate here does not source it, for which the cost is a spare
+    file no case opens. ``deployment_docs`` made this same argument for the
+    document list its gate reads; ``extra`` is where that kind of file goes now.
+    """
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    for name in (gate, GATE_SEAM, *extra):
+        shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
+    return scripts / gate
+
+
+def hold_back(definition: Path, *entries: str) -> None:
+    """Append ``entries`` to DENY_PATHS in a fixture's copy of the shared definition.
+
+    One line per entry, each carrying the reference gate's waiver on that line.
+    The copy is a search root of that gate in every fixture that holds it, and a
+    line naming a held-back path is exactly what the gate refuses, so an entry
+    without the waiver would fail a case for a reason it is not testing.
+    """
+    with definition.open("a") as out:
+        for entry in entries:
+            out.write(
+                f"DENY_PATHS+=( {entry} )  # published-ref-allow: a held-back path a case adds\n"
+            )
+
+
 # One instance, shared by every suite that needs it — the secret-gate suite reads
-# it directly, and the two publish suites get it through PUBLISH_GUARD_MARKS.
-# Applying a MarkDecorator does not mutate it, so one object serves all three.
+# it directly, and the three publish suites get it through PUBLISH_GUARD_MARKS.
+# Applying a MarkDecorator does not mutate it, so one object serves all four.
 GITLEAKS_ABSENT = pytest.mark.skipif(
     shutil.which("gitleaks") is None,
     reason="gitleaks is not installed, and the gate under test refuses to run without it",
 )
+
+
+@functools.cache
+def repository_selecting_git_vars() -> frozenset[str]:
+    """The variables that tell git WHICH repository to act on.
+
+    This is git's own list, from ``git rev-parse --local-env-vars``: the
+    variables git itself clears before it crosses into another repository, for a
+    submodule for example. It is read from git rather than copied here, so it
+    cannot fall behind the installed git.
+
+    A git hook exports some of these. The pre-push hook runs ``make quality-ci``,
+    and from a linked worktree git hands that hook a GIT_DIR naming the
+    worktree's admin directory. ``-C`` does not override it, because an absolute
+    GIT_DIR wins over the directory git starts in. Every fixture command run
+    under it acts on the real repository: ``git -C <fixture> init`` re-initializes
+    it and writes ``core.bare = true`` into its shared config, ``commit`` lands on
+    the pushed branch, ``rm`` deletes tracked files, and ``config`` writes into
+    its ``.git/config``.
+
+    The list needs no repository, and git prints it whatever GIT_DIR says.
+    """
+    done = subprocess.run(
+        ["git", "rev-parse", "--local-env-vars"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=GIT_TIMEOUT,
+    )
+    return frozenset(done.stdout.split())
+
+
+def fixture_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment for any process that runs git against a fixture.
+
+    ``env`` is a complete environment, ``os.environ`` when it is omitted. The
+    result is a copy with every repository-selecting variable removed and the
+    fixture identity set, so git finds the fixture from the directory it runs in
+    and from nothing else. This is the one place the scrubbing happens: every
+    process a guard suite starts that runs git, directly or through a shipped
+    script, takes its environment from here. The exceptions are deliberate: the
+    cases built on ``hook_env`` hand a hook's variables to a child on purpose, to
+    show the child keeps out of the repository they name.
+
+    A caller that needs a variable of its own builds the full environment and
+    passes it in: ``fixture_env({**os.environ, "TMPDIR": scratch})``. Variables
+    that only tune git, such as ``GIT_TERMINAL_PROMPT``, pass through.
+    """
+    source = os.environ if env is None else env
+    selecting = repository_selecting_git_vars()
+    scrubbed = {name: value for name, value in source.items() if name not in selecting}
+    scrubbed.update(_FIXTURE_IDENTITY)
+    return scrubbed
 
 
 def git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -89,6 +196,9 @@ def git(*args: str) -> subprocess.CompletedProcess[str]:
     ``text=True`` is for those readers: they want ``.stdout`` as a string. It is
     not a better failure message — ``CalledProcessError`` renders only the
     command and the exit status, never the captured output.
+
+    The environment comes from ``fixture_env``, so an inherited GIT_DIR cannot
+    turn a fixture command into a command on the real repository.
     """
     return subprocess.run(
         ["git", *args],
@@ -96,6 +206,7 @@ def git(*args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         timeout=GIT_TIMEOUT,
+        env=fixture_env(),
     )
 
 
@@ -110,17 +221,18 @@ def commit_all(repo: Path, message: str) -> None:
     run_git(repo, "commit", "-qm", message)
 
 
-def init_scratch_repo(root: Path, *, branch: str, committer: str) -> None:
-    """Create ``root`` and make it an empty repository with a fixed identity.
+def init_scratch_repo(root: Path, *, branch: str) -> None:
+    """Create ``root`` and make it an empty repository.
 
     The branch name is a parameter because every caller depends on its own: the
     publish tool is told which ref to read and which to write, and a fixture
     built on the wrong branch drives nothing.
+
+    No identity is written into the repository. ``fixture_env`` passes it to
+    every command, so committing needs no ``git config`` call.
     """
     root.mkdir(parents=True, exist_ok=True)
     run_git(root, "init", "-q", "-b", branch)
-    run_git(root, "config", "user.email", COMMITTER_EMAIL)
-    run_git(root, "config", "user.name", committer)
 
 
 def run_gate(
@@ -159,8 +271,9 @@ def run_gate(
 
     ``env`` exists only so one suite can put a deliberately broken scanner, or a
     stub docker, on PATH — it selects which binary runs, never which tree is
-    read. Leaving it at ``None`` inherits the caller's environment, which is
-    exactly what passing no ``env`` at all would do.
+    read. Leaving it at ``None`` starts from the caller's environment. Either
+    way it goes through ``fixture_env``, because the gates run git against the
+    tree they are handed and an inherited GIT_DIR would point them elsewhere.
     """
     cmd = ["bash", str(root / "scripts" / gate)]
     if reads_root:
@@ -171,7 +284,7 @@ def run_gate(
         text=True,
         check=False,
         timeout=timeout,
-        env=env,
+        env=fixture_env(env),
     )
 
 
@@ -190,6 +303,22 @@ def guard_marks(*, skip_when: bool, reason: str = GATE_ABSENT_REASON) -> list[py
         pytest.mark.stack_isolation("isolated"),
         pytest.mark.skipif(skip_when, reason=reason),
     ]
+
+
+def make_recipe(makefile: str, target: str) -> list[str]:
+    """The command lines of ``target`` in ``makefile``: the tab-indented lines after it.
+
+    The lint guards check that ``make`` still runs the linter they test, with the
+    arguments they test it with, so they read the recipe rather than trusting it.
+    """
+    lines = makefile.splitlines()
+    start = lines.index(f"{target}:") + 1
+    recipe = []
+    for line in lines[start:]:
+        if not line.startswith("\t"):
+            break
+        recipe.append(line.strip())
+    return recipe
 
 
 def private_key_pem() -> bytes:

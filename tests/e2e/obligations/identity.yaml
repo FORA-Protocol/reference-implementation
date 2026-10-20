@@ -1,0 +1,1423 @@
+# Identity, keys and security: who signed a request and with which key, how keys
+# are published, rotated and revoked, how a delivery URL is bound to its buyer at
+# the edge, what a verifier may fetch, and what the identity service signs as the
+# agent. Request signatures beyond SIGNATURE-001..008 and the requester binding
+# beyond REQUESTER-001..003 live here; those two files keep their own entries.
+#
+# Areas: IDENTITY (request signatures, requester binding, recipient rule,
+# freshness), KEYS (key directories, validity windows, revocation), DELIVERY
+# (delivery URLs and proof of possession at the edge), FETCH (the redirects a
+# verifier refuses when it fetches a key directory, and follows when it fetches a
+# revocation list), MCP
+# (the identity service's MCP surface). What a verifier may connect to, the SSRF
+# guard, is outside the e2e harness.
+#
+# The Web Bot Auth wire profile (the Signature-Agent spellings, the tag parameter,
+# the covered-component minimum and the directory media type) is decided by the
+# IETF draft the WebBotAuth working group adopted, and its conformance tests carry
+# their own claims.
+# Registry entries (ADR-028 D1); the tests that prove them say so on themselves.
+#
+# An "# untested:" comment above an entry says why no test claims it. The comment
+# is not part of the entry: the registry schema is strict, so the note lives
+# beside it.
+#
+# A "negative:" case is a refusal with a typed error response (ADR-028 D1). What
+# an answer that refuses nothing must leave out is a "must not" in "positive:".
+
+- id: IDENTITY-001
+  title: A request signature that does not cover the four FORA components and its Signature-Agent member is refused
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      On a FORA RPC, which carries a body, the signature MUST also cover `@method`,
+      `@target-uri`, `content-digest` and `authorization`. A signature that omits one
+      of them is refused, and the refusal names the missing component.
+  positive: >-
+    The same discovery signed over all five components is answered with a verified
+    offer.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned, for a signature whose covered set leaves out
+        authorization, one that leaves out signature-agent, and one that leaves out
+        content-digest, each otherwise valid and made with the published key
+
+- id: IDENTITY-002
+  title: A covered header that is absent is refused, and a covered Authorization that is present but empty is accepted
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      A verifier MUST reject a request that **omits** a covered header, and MUST
+      accept a covered `Authorization` that is **empty**.
+  positive: >-
+    A discovery carrying an empty Authorization field line, covered by the
+    signature, is answered with a verified offer.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned when the empty Authorization field line is removed
+        after signing, and none when the Signature-Agent field line is removed
+
+- id: IDENTITY-003
+  title: A second field line beside a covered header changes its value and the request is refused
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      it means a verifier MUST NOT resolve a covered header by picking one field line
+      among several.
+  positive: The unaltered signed discovery is answered with a verified offer.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned when a second Authorization line carrying a bearer
+        token is added after signing, and none when a second Signature-Agent line
+        gives the signed member another agent's directory
+
+- id: IDENTITY-004
+  title: The verifier selects the key whose RFC 7638 thumbprint equals the keyid, and no other
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      The Exchange resolves a requester's public key by fetching its key directory —
+      the JWK Set at `{origin}/.well-known/http-message-signatures-directory` — and
+      selecting the `JsonWebKey` whose RFC 7638 thumbprint matches the request
+      signature's `keyid`.
+  positive: >-
+    An agent whose directory publishes two keys signs with the second, under the
+    second key's thumbprint, and is answered.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned when the keyid names the first published key while
+        the second signs, and none when the keyid is a free label rather than a
+        thumbprint
+
+- id: IDENTITY-005
+  title: On a direct request the key is looked up in the Signature-Agent directory, never in requester.domain
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      The verifier resolves the agent's keys from the COVERED `Signature-Agent`
+      member, never from this field.
+  positive: >-
+    A discovery whose Signature-Agent and requester.domain both name the agent's
+    directory is answered.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned when Signature-Agent names a directory that does not
+        publish the signing key and requester.domain names one that does
+
+- id: IDENTITY-007
+  title: An Exchange refuses a direct discovery whose requester.domain is not the host of its Signature-Agent
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      An Exchange applies it to every request whose signer it does not admit as a Broker;
+      a mismatch from a signer it does admit is a relayed request, one of the two cases
+      below.
+  positive: >-
+    The same discovery naming the host of the agent's own directory is answered with
+    a verified offer.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned when requester.domain names another agent's
+        published directory
+
+- id: IDENTITY-008
+  title: requester.domain is compared to the Signature-Agent host case-folded, with the port, and a subdomain never matches
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      the host of the origin that member names, compared by the identity rule
+      "Request recipient" defines (the shape check first, then case-folded, an absent
+      port the same as ":443", a subdomain a different party).
+  positive: >-
+    A direct discovery whose requester.domain is the agent's directory host in upper
+    case is answered with a verified offer.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned when requester.domain is a subdomain of the directory
+        host, and none when it is the directory host with a different port
+
+- id: IDENTITY-009
+  title: >-
+    The Broker's discovery fan-out names the agent whose signature the Broker verified
+    at Resolve
+  level: DECISION
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      it is the Broker's statement, under the Broker's own signature, of whom it
+      queries for.
+  positive: >-
+    The protocol author's decision: at Resolve the Broker verifies the agent's request
+    signature, whose content digest covers the body, and copies the verified agent's
+    domain into every fan-out ResourceQuery. It applies no further binding check. A
+    Resolve whose requester.domain is the agent's own directory host is answered, and
+    each fan-out ResourceQuery names that host. No fan-out ResourceQuery names a
+    requester.domain other than the host of the Signature-Agent the Broker verified.
+  negative: []
+
+- id: IDENTITY-010
+  title: An Exchange verifies every signature of a forwarded request, and refuses the request if any one of them fails
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      A request that carries several request signatures, such as a request a party
+      forwarded unchanged and covered under WG-00 §5.2.2, is refused if any one of
+      them fails its own signer's check.
+  positive: >-
+    A discovery signed by the agent and forwarded unchanged by a second party, whose
+    appended signature covers the agent's and names the party's own published
+    directory, is answered with a verified offer.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned when the agent's signature is made by a key its
+        directory does not publish and the forwarding party covers it with a valid
+        signature, and none when a further party appends a signature made by a key
+        its own directory does not publish
+
+- id: IDENTITY-011
+  title: An Exchange refuses a request carrying more signatures than its published max_intermediary_hops
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Every signature counts, whether or not it covers another. A request signed only by
+      the party that sent it — an agent, or a Broker for a request it authored — carries
+      one, so the cap bounds a request that a party forwarded unchanged and signed again.
+      An Exchange refuses a request carrying more before it verifies any signature, with
+      the Connect code resource_exhausted (HTTP 429) and no typed reason.
+  positive: >-
+    A discovery carrying exactly as many signatures as the Exchange's fora.json
+    publishes in max_intermediary_hops, the agent's and one per forwarding party, each
+    covering the one before it, is answered with a verified offer.
+  negative:
+    - code: resource_exhausted
+      reason: none; the field comment names the code and no typed reason (HTTP 429, no ErrorDetail)
+      side_effect: no offers are returned for the same request with one signature more
+
+- id: IDENTITY-012
+  title: Each signature's key is resolved in the directory its own covered Signature-Agent member names, never another signature's
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      A verifier MUST NOT attribute a signature to a member that signature does not
+      cover (WG-00 §5.2.2).
+  positive: >-
+    A forwarding party the Exchange was never configured with, whose appended
+    signature is made by the key its own directory publishes, is accepted: the
+    forwarded discovery is answered with a verified offer.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned for an appended signature made by the agent's key,
+        which the agent's directory publishes, under a member naming another party's
+        directory, which does not; the appended signature does not cover the agent's
+        member, so the agent's directory must not be used to verify it
+
+- id: IDENTITY-013
+  title: The Broker refuses a Resolve whose signature is missing, unverifiable, stale or replayed, with the three collapsed reasons
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      RequestAuthFailureReason — why the RFC 9421 HTTP message signature on an RPC
+      request failed verification, refused with the Connect code UNAUTHENTICATED.
+  positive: The same Resolve, correctly signed, is answered with verified offers.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_MISSING
+      side_effect: no offers are returned for an unsigned Resolve
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned for a Resolve signed by a key the agent's directory
+        does not publish, or whose body differs from the signed digest
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_STALE
+      side_effect: >-
+        no offers are returned for an expired, future-dated or replayed Resolve
+
+- id: IDENTITY-014
+  title: A signature without a nonce is accepted, and its exact bytes sent again are a replay
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      Verifiers do not require a nonce. A signature without one is still accepted,
+      because WG-00 sets no nonce requirement and other WBA signers omit it.
+  positive: A discovery signed with no nonce parameter is answered with a verified offer.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_STALE
+      side_effect: the same nonce-less signed bytes sent a second time return no offers
+
+- id: IDENTITY-015
+  title: Identical requests signed again in the same second are each accepted, because each carries a fresh nonce
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      Each new signing attempt gets a fresh nonce, so a client retry that signs the
+      request again is not refused as a replay.
+  positive: >-
+    Ten identical discoveries from one agent, each signed by the SDK in the same
+    second, are all answered with a verified offer.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_STALE
+      side_effect: >-
+        one of those ten signed requests resent byte for byte returns no offers
+
+- id: IDENTITY-016
+  title: >-
+    A signature created more than 300 seconds ahead of the verifier's clock is refused
+    as stale, and one created less far ahead is accepted
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      REQUEST_AUTH_FAILURE_REASON_SIGNATURE_STALE = 3; // outside its created/expires
+      window, or already used (replay); remedy: re-sign now
+  positive: >-
+    The verifier tolerates 300 seconds of clock skew on created, the number the
+    protocol author asked to be stated from what the SDK verifier enforces. A discovery
+    signed with created one minute ahead of the Exchange's clock is answered with a
+    verified offer.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_STALE
+      side_effect: >-
+        no offers are returned for a signature created ten minutes ahead of the
+        Exchange's clock
+
+- id: IDENTITY-025
+  title: >-
+    The same signed bytes sent again are refused as a replay for as long as the
+    signature is inside its window, not only while the replay store remembers it
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      Sending the same signed bytes again is still a replay, and the verifier refuses
+      it.
+  positive: >-
+    A discovery signed with a ten-minute window, the SDK's own default, is answered the
+    first time it is sent.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_STALE
+      side_effect: >-
+        the same signed bytes, sent again more than five minutes later and before the
+        signature expires, return no offers
+
+- id: IDENTITY-017
+  title: A requester.domain that carries a scheme, path or query is refused as malformed, and nothing is fetched for it
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      a scheme, path or query smuggled in here would choose what gets fetched, not
+      merely from where.
+  positive: The same discovery with a bare-host requester.domain is answered.
+  negative:
+    - code: invalid_argument
+      reason: none; a Requester field-rule failure carries no typed reason
+      side_effect: >-
+        no offers are returned for requester.domain "https://<host>/x", "<host>/x" and
+        "<host>?q=1"; that nothing is fetched for such a value is not observed without
+        a capture of the Exchange's outbound requests
+
+- id: IDENTITY-018
+  title: An Exchange refuses a discovery or a registration addressed to another recipient
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A recipient MUST reject a request whose `exchange` is not its own domain
+  positive: >-
+    A discovery and a registration naming exchange-a's own domain are answered by
+    exchange-a.
+  negative:
+    - code: invalid_argument
+      reason: none; the recipient rule names no typed reason
+      side_effect: >-
+        exchange-a returns no offers for a discovery whose exchange names exchange-b,
+        patched in the pre-signing hook after routing
+    - code: invalid_argument
+      reason: none; the recipient rule names no typed reason
+      side_effect: >-
+        exchange-a opens no account for a registration whose exchange names
+        exchange-b; GetAccountStatus at exchange-a still reports no account
+
+- id: IDENTITY-019
+  title: The recipient is shape-checked before it is case-folded, so a homograph never matches
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      so a consumer that normalises first turns a homograph into an exact match on
+      somebody else's identity.
+  positive: A discovery naming exchange-a's domain in upper case is answered by exchange-a.
+  negative:
+    - code: invalid_argument
+      reason: none; a field-rule failure carries no typed reason
+      side_effect: >-
+        no offers are returned for exchange-a's domain spelled with a fullwidth
+        letter that NFKC-folds to its ASCII form
+
+- id: IDENTITY-020
+  title: The recipient's port is part of its identity, and a subdomain names a different recipient
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A recipient's identity is ONE domain, matched exactly. A subdomain of it is a
+      different party
+  positive: A discovery naming exchange-a's domain with its port is answered.
+  negative:
+    - code: invalid_argument
+      reason: none; the recipient rule names no typed reason
+      side_effect: >-
+        no offers are returned for exchange-a's host with no port, with ":443", or
+        with a "eu." subdomain prefixed
+
+- id: IDENTITY-024
+  title: >-
+    A scope-gated term is offered on the scopes the requester states in its signed
+    request, and on nothing else
+  level: DECISION
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Scope coverage decides which terms the Exchange presents (see LicenseTerm.scopes,
+      which also states when an Exchange MAY require a verified delegation); it is not
+      access control.
+  positive: >-
+    The protocol author's decision: the Exchange presents the offers whose term scopes
+    match the scopes in the requester's signed request, and nothing more. A discovery
+    whose signed requester.scopes names the gated term's scope is offered that term.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned when the scope is added to requester.scopes after the
+        request was signed, so the gated term is not presented on a scope the
+        signature does not cover
+
+- id: KEYS-001
+  title: Every participant serves its key directory at the well-known path as a JWK Set, media type application/http-message-signatures-directory+json
+  level: MUST
+  actor: every participant
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      It is served over https, answers `200` with no redirect, and uses the media type
+      `application/http-message-signatures-directory+json`. The body is a JWK Set: a
+      `keys` array of Ed25519 JWKs plus an optional `revocation_url`.
+  positive: >-
+    The SDK's read_wba_directory accepts the directory of each Exchange, the Broker,
+    the console, each publishing edge and an identity-service agent subdomain: the
+    media type is application/http-message-signatures-directory+json and the document
+    passes the strict check.
+  negative: []
+
+- id: KEYS-002
+  title: Every directory key is an Ed25519 signing key, OKP, EdDSA, use sig, with no kid
+  level: MUST
+  actor: every participant
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      FORA v1.0 supports Ed25519 only: kty="OKP", crv="Ed25519", alg="EdDSA".
+  positive: >-
+    Every key in each participant's directory has kty OKP, crv Ed25519, alg EdDSA,
+    use sig, a 32-byte x, and no kid member.
+  negative: []
+
+- id: KEYS-003
+  title: Every directory holds at least one key valid at the moment it is served
+  level: MUST
+  actor: every participant
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      At least one key in the WBA directory's `keys` MUST be valid at serve time, and
+      verifiers MUST reject signatures whose key falls outside its window.
+  positive: >-
+    Each participant's directory, read now, holds a key with not_before at or before
+    now and not_after after now.
+  negative: []
+
+- id: KEYS-004
+  title: A signature by a key outside its half-open validity window is refused
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      The window is **half-open** `[not_before, not_after)` — a key is valid at
+      `not_before` and invalid **at and after** `not_after`.
+  positive: A discovery signed by a key whose window covers now is answered.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned for a key whose not_before is an hour ahead, and none
+        for a key whose not_after has passed
+
+- id: KEYS-005
+  title: During a rotation overlap both keys verify, and a key removed after the overlap does not
+  level: SHOULD
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      Publish the new key alongside the old key (both valid)
+  positive: >-
+    While the agent's directory publishes the old and the new key, discoveries signed
+    by either are answered.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        once the directory is republished without the old key and the Exchange has
+        re-read it, a discovery signed by the old key returns no offers
+
+- id: KEYS-006
+  title: A key the verifier has not seen is fetched at once, so a newly published key verifies without waiting for the cache
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      consumers poll on a 300s cadence (±10% jitter) and sync-fetch on an unknown
+      thumbprint.
+  positive: >-
+    After an agent's first signed discovery is answered, the agent adds a second key
+    to its directory and signs with it; the next discovery is answered at once.
+  negative: []
+
+- id: KEYS-007
+  title: An acceptance is verified only against keys currently valid in the requester's directory
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      The envelope carries no `keyid`, so the verifier tries the currently-valid
+      Ed25519 keys of that directory — rotation overlap keeps that set small.
+  positive: >-
+    During a rotation overlap, a Broker purchase whose acceptances are signed by the
+    old key is bought.
+  negative:
+    - code: ok
+      reason: >-
+        the item is not bought; the per-item shape is the one RELAY-015 settles
+      side_effect: >-
+        no balance moves when the acceptances are signed by a key whose not_after has
+        passed, and none when the key is on the directory's revocation list
+
+- id: KEYS-008
+  title: A signature by a key on its directory's revocation list is refused, even while the directory still publishes the key
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      A revoked thumbprint stays revoked; reject any signature whose key thumbprint is
+      in the set.
+  positive: >-
+    An agent whose directory publishes two keys, and whose own revocation list names
+    the second, is answered on a discovery signed by the first.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned for a direct discovery signed by the revoked key, while
+        the agent's directory still publishes it
+    - code: ok
+      reason: >-
+        the relayed purchase is not bought, whether the Broker refuses the call or
+        reports the item denied
+      side_effect: >-
+        no balance moves for a purchase through the Broker whose acceptances are
+        signed by the revoked key
+
+- id: KEYS-009
+  title: The Broker refuses a Resolve signed by a key on its directory's revocation list
+  level: MUST
+  actor: broker
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      A revoked thumbprint stays revoked; reject any signature whose key thumbprint is
+      in the set.
+  positive: A Resolve signed by the agent's other key, which no list names, is answered.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        while the agent's own revocation list names the key, a Resolve signed by it
+        returns no offers
+
+- id: KEYS-010
+  title: A revocation list is served with a short or zero freshness lifetime
+  level: SHOULD
+  actor: every participant
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      The `revocation_url` body, by contrast, SHOULD be served with a short or zero
+      freshness lifetime (e.g. `Cache-Control: max-age=60`, or `no-store`)
+  positive: >-
+    The revocation lists of the Broker, each Exchange that advertises one and an
+    identity-service agent answer with Cache-Control no-store or max-age of 60
+    seconds or less.
+  negative: []
+
+- id: KEYS-011
+  title: A directory's revocation_url serves a KeyRevocationList of thumbprints with its as_of
+  level: MUST
+  actor: every participant
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Snapshot semantics: `revoked` is the complete list of revoked key thumbprints
+      (RFC 7638, base64url-no-pad) at `as_of`.
+  positive: >-
+    The SDK's read_revocation_list accepts the list at the revocation_url of the
+    Broker, each Exchange that advertises one and an identity-service agent: as_of is
+    set and every entry is a 43-character base64url thumbprint.
+  negative: []
+
+- id: KEYS-013
+  title: A key's not_before and not_after do not move when its service restarts or rebuilds its directory
+  level: DECISION
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      RFC3339 timestamp. Key is invalid before this instant, and a key without it is never
+      valid.
+  positive: >-
+    The protocol author's decision: a key's validity window is fixed for the key. For
+    each of the Exchange, the Broker and the console, the directory read before and
+    after a restart carries the same x, not_before and not_after for every key that
+    did not change.
+  negative: []
+
+- id: KEYS-015
+  title: >-
+    A revocation list revokes only the keys of the directory that publishes it, so the
+    Broker's list cannot invalidate an agent's signature
+  level: DECISION
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Directory-level emergency revocation channel. One per directory; the list it
+      points to enumerates revoked key thumbprints.
+  positive: >-
+    The protocol author's decision: each party's revocation list covers only its own
+    keys, and each signature is verified against its own signer's directory. A
+    discovery signed by an agent key that the Broker's revocation list names, while
+    the agent's own directory publishes the key and the agent's own list does not name
+    it, is answered with a verified offer.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        the same discovery is refused once the agent's own revocation list names the
+        key, which KEYS-008 proves
+
+- id: KEYS-016
+  title: A direct request never depends on the Broker's key directory
+  level: DECISION
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      A request signed only by the agent is verified against the agent's directory and
+      list alone. It never depends on the Broker's directory being reachable.
+  positive: >-
+    The protocol author's decision, now stated in the protocol: a request the agent
+    signs alone is verified against the agent's own directory only. A direct
+    discovery sent while the Broker's key directory cannot be reached is answered with
+    a verified offer.
+  negative: []
+
+- id: KEYS-017
+  title: >-
+    A relayed request whose Broker signature cannot be verified is refused as a whole
+  level: DECISION
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      `BrokerService.ExecuteTransaction` re-packages the purchase, so the request
+      signature and the covered `Signature-Agent` member belong to the Broker.
+  positive: >-
+    The protocol author's decision: the request a Broker relays carries the Broker's
+    signature, verified against the Broker's own directory and the revocation list it
+    names, and a failure of that signature refuses the whole request. A purchase
+    through the Broker, with the Broker's key unrevoked, is bought.
+  negative:
+    - code: ok
+      reason: >-
+        the relayed purchase is not bought, whether the Broker refuses the call or
+        reports the item denied
+      side_effect: >-
+        no balance moves while the Broker's own revocation list names the Broker's
+        own keys
+
+- id: DELIVERY-001
+  title: Every delivery URL the Exchange issues verifies under the Exchange's published key with the SDK's URL verifier
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      Signed delivery URLs carry an Ed25519 signature made by the Exchange over
+      "GET\n<canonical URL>"; the delivery endpoint verifies it with the Exchange's
+      published public key.
+  positive: >-
+    The retrieval_endpoint of a bought item verifies with the SDK's signed-URL
+    verifier against the key its kid selects in the Exchange's directory, read with
+    read_wba_directory.
+  negative: []
+
+- id: DELIVERY-002
+  title: A delivery URL's kid is the thumbprint of its tenant's key, published in the Exchange's directory
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/signed-url-verification.mdx
+    quote: >-
+      RFC 7638 JWK Thumbprint of the **tenant's** Ed25519 public key. The edge
+      resolves it against the Exchange's key directory.
+  positive: >-
+    URLs bought from two tenants of one Exchange carry different kids, and each kid is
+    the thumbprint of a key in that Exchange's directory.
+  negative: []
+
+- id: DELIVERY-003
+  title: A URL whose agent_id is rewritten to another key's thumbprint is refused, whatever proof comes with it
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/signed-url-verification.mdx
+    quote: >-
+      Rewriting `agent_id` to match their own key fails step 1, because they cannot
+      forge the Exchange's signature.
+  positive: The unaltered URL fetched with the buyer's proof is served.
+  negative:
+    - code: "403"
+      reason: signature_mismatch
+      side_effect: >-
+        the content is not in the response when a second agent rewrites agent_id to
+        its own thumbprint and presents its own valid proof, on Cloudflare, Fastly and
+        Lambda@Edge
+
+- id: DELIVERY-004
+  title: A bound URL fetched without a proof of possession is refused
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      then require the fetcher to present its public key and a WBA signature over the
+      retrieval request ([Retrieval proof of possession](#retrieval-proof-of-possession)),
+      and check that `thumbprint(presented key)` equals both the signature's `keyid`
+      and `agent_identity_hash`.
+  positive: The same URL fetched with the buyer's proof is served.
+  negative:
+    - code: "403"
+      reason: missing_agent_key
+      side_effect: >-
+        the content is not in the response, on Cloudflare, Fastly and Lambda@Edge
+
+- id: DELIVERY-005
+  title: A proof that presents the buyer's public key but is not a signature by its private key is refused
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/signed-url-verification.mdx
+    quote: >-
+      To pass step 3 the attacker must present the agent's *public* key; to pass step
+      4 they must hold its *private* key.
+  positive: The URL fetched with the buyer's key presented and signing is served.
+  negative:
+    - code: "403"
+      reason: pop_sig_invalid
+      side_effect: >-
+        the content is not in the response when X-FORA-Agent-Key carries the buyer's
+        public key and the RFC 9421 proof is signed by another key
+    - code: "403"
+      reason: pop_sig_invalid
+      side_effect: >-
+        the content is not in the response when the proof's Signature is not a
+        64-byte Ed25519 signature, on Cloudflare, Fastly and Lambda@Edge
+
+- id: DELIVERY-006
+  title: A proof is bound to its method, its URL and a short window
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/signed-url-verification.mdx
+    quote: >-
+      Because the signature covers `@method` and `@target-uri`, a captured fetch
+      signature cannot be replayed against a different URL, or outside its short
+      window.
+  positive: Each URL fetched with a fresh proof over that URL is served.
+  negative:
+    - code: "403"
+      reason: pop_sig_invalid
+      side_effect: >-
+        the content is not served when a proof made for one bound URL of the buyer is
+        presented with another bound URL of the same buyer
+    - code: "403"
+      reason: pop_expired
+      side_effect: the content is not served for a proof whose expires has passed
+    - code: "403"
+      reason: pop_future_created
+      side_effect: >-
+        the content is not served for a proof created more than 300 seconds ahead of
+        the edge's clock
+
+- id: DELIVERY-007
+  title: A signed URL used with a method other than GET or HEAD is refused unless a proof binds the method
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/signed-url-verification.mdx
+    quote: >-
+      A signed request with a method other than `GET` or `HEAD` is therefore refused
+      with `405 method_not_bound`, **unless** the proof-of-possession check will run
+  positive: The same unbound URL read with GET is served.
+  negative:
+    - code: "405"
+      reason: method_not_bound
+      side_effect: >-
+        a POST with a body on an unbound URL does not reach the origin, on
+        Cloudflare and Lambda@Edge. Fastly is not driven: every URL its Exchange
+        issues is bound to a buyer, and the harness holds no key that edge accepts
+    - code: "403"
+      reason: pop_sig_invalid
+      side_effect: >-
+        a POST on a bound URL carrying a proof signed for GET does not reach the
+        origin, on Cloudflare, Fastly and Lambda@Edge
+
+- id: DELIVERY-008
+  title: A delivery URL whose exp has passed is refused by the edge's own clock
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/signed-url-verification.mdx
+    quote: >-
+      The edge rejects a URL whose `exp` has passed, using its own clock.
+  positive: The URL fetched before its exp is served.
+  negative:
+    - code: "403"
+      reason: expired
+      side_effect: >-
+        an Exchange-issued URL fetched after its exp, with a valid proof, serves no
+        content on Cloudflare, Fastly and Lambda@Edge
+
+- id: DELIVERY-009
+  title: When the edge cannot resolve the key directory it answers 503 and never falls through to the origin
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/signed-url-verification.mdx
+    quote: >-
+      If the key-resolution leg throws — the directory is unreachable, the response is
+      malformed — the edge answers `503 verify_unavailable`. It never falls through to
+      the origin.
+  positive: With the directory reachable, the same URL and proof are served.
+  negative:
+    - code: "503"
+      reason: verify_unavailable
+      side_effect: >-
+        the origin receives no request and the content is not in the response
+
+- id: DELIVERY-010
+  title: The edge strips agent_id, exp, kid and sig before forwarding to the origin, signed or unsigned
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/signed-url-verification.mdx
+    quote: >-
+      The edge strips `agent_id`, `exp`, `kid` and `sig` before forwarding to origin,
+      on both the signed and the unsigned path, so an origin can never receive
+      attacker-injected attribution parameters.
+  positive: >-
+    A served signed fetch reaches the origin with the publisher's own query
+    parameters and none of the four. An unsigned human read carrying agent_id and
+    kid passes through, and the origin receives neither parameter.
+  negative: []
+
+# untested: the only CloudFront RSA verifier in the e2e stack is the aws-edge service,
+# a stand-in for CloudFront's native check that runs none of the product's code, so a
+# test there would prove the stand-in. Driving it needs a real CloudFront distribution.
+- id: DELIVERY-011
+  title: On the CloudFront path the URL is a bearer credential, and its agent_id cannot be swapped
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/signed-url-verification.mdx
+    quote: >-
+      `agent_id` is set on the resource URL before signing, so the CloudFront
+      signature covers it and a URL holder cannot swap the value.
+  positive: >-
+    A CloudFront-signed URL fetched with no proof of possession is served until it
+    expires.
+  negative:
+    - code: "403"
+      reason: CloudFront refusal; the CDN generates the body
+      side_effect: >-
+        the content is not served when agent_id is changed to another thumbprint
+
+- id: DELIVERY-013
+  title: The Exchange issues delivery URLs with a short expiry
+  level: SHOULD
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/security/threat-model.mdx
+    quote: >-
+      The delivery endpoint refuses any URL whose `exp` has passed, and the Exchange
+      issues short expiries -- five minutes in the reference flows.
+  positive: >-
+    Every bought item's expires_at, and the exp of its URL, is at most five minutes
+    after the purchase, and the two agree.
+  negative: []
+
+- id: DELIVERY-014
+  title: A proof that covers more than the required components, @authority for example, is accepted
+  level: MUST
+  actor: edge
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/edge-function/signed-url-verification.mdx
+    quote: >-
+      These are the components the signature must cover at least: a proof that also
+      covers `@authority`, or a header, is accepted, and the extra components enter the
+      signature base.
+  positive: >-
+    A bound URL fetched with a proof that a third-party Web Bot Auth library made over
+    @method, the Signature-Agent member, @target-uri and @authority is served, on
+    Cloudflare, Fastly and Lambda@Edge.
+  negative:
+    - code: "401"
+      reason: bad_covered_components
+      side_effect: >-
+        the content is not served when the same library's proof covers @authority but
+        not @target-uri, and the refusal's Accept-Signature asks for @target-uri
+
+- id: FETCH-004
+  title: A key directory is never fetched through a redirect, so a signer whose directory path redirects is not authenticated
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      A key directory is fetched with no redirect. It answers `200` at
+      `/.well-known/http-message-signatures-directory` itself, and a verifier treats a
+      redirect, like any other status, as a discovery failure
+  positive: >-
+    A discovery signed under a Signature-Agent whose host answers the directory path
+    itself, with a directory that publishes the signing key, is answered with a
+    verified offer.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned for the same key signing under a host whose directory
+        path answers with a single redirect to that directory: the redirect is a
+        discovery failure, so no directory publishes the signing key
+
+- id: FETCH-010
+  title: A revocation list reached through up to five redirects is read, and revokes the keys it names
+  level: MAY
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A fetch of the list MAY follow up to five redirects (see "Redirects" under
+      Well-Known Discovery).
+  positive: >-
+    While an agent's revocation_url answers with a chain of five redirects, ending at
+    a list that names the agent's second key, a discovery signed by its first key is
+    answered.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        no offers are returned for a discovery signed by the second key, which only
+        the list at the end of the chain names
+
+- id: MCP-001
+  title: An MCP request without a valid bearer is refused before any outbound call
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      An unauthenticated request is refused before any outbound call is made.
+  positive: The same tools/call with the agent's bearer is answered.
+  negative:
+    - code: "401"
+      reason: WWW-Authenticate names the resource_metadata URL
+      side_effect: >-
+        a fora_register call with no bearer, and one whose bearer names the agent but
+        is signed by a key the service never held, open no account at the Exchange
+
+- id: MCP-002
+  title: Each MCP user signs with its own custodied key, so two users are two distinct agents
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      One developer, one subdomain, one key, so every MCP user is a distinct FORA agent
+      to the Broker and the Exchange.
+  positive: >-
+    Two users each buy the same free offer through fora_execute, with calls
+    interleaved; each delivery URL's agent_id is the thumbprint of the key in that
+    user's own subdomain directory, and the two differ.
+  negative: []
+
+- id: MCP-003
+  title: No tool argument can choose which agent is signed for
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      Which agent is being signed for comes from the **authenticated identity on the
+      request context**, never from a field the caller filled in.
+  positive: fora_status with only its declared arguments answers for the caller's own agent.
+  negative:
+    - code: tool error
+      reason: the arguments fail the tool's input schema
+      side_effect: >-
+        no outbound request is made for a fora_execute or fora_status call carrying
+        an extra argument naming another agent's subdomain or directory
+
+# blocked: the rotation half of MCP-004 needs an e2e-only identity key-rotation
+# control, which ADR-028 D6 does not list yet. The revocation half is driven
+# through the operator's identity-operator CLI.
+- id: MCP-004
+  title: The signing key is resolved per request, so the call after a rotation or a revocation never signs with the retired key
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      The signing key is resolved per request and never cached.
+  positive: >-
+    The first fora_execute after the agent's key is rotated returns a URL whose
+    agent_id is the new key's thumbprint. After the agent's key is revoked, the call
+    succeeds or fails, but no delivery URL is bound to the revoked thumbprint and no
+    captured outbound signature names it as keyid.
+  negative: []
+
+- id: MCP-005
+  title: An agent's subdomain serves its key directory as application/http-message-signatures-directory+json
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      | `/.well-known/http-message-signatures-directory` | Web Bot Auth key directory —
+      an RFC 7517 JWK Set, with a signed response |
+      `application/http-message-signatures-directory+json` |
+  positive: >-
+    After sign-up, read_wba_directory accepts the directory at the agent's subdomain,
+    and the agent's revocation list and signature agent card answer with
+    application/json.
+  negative: []
+
+- id: MCP-006
+  title: An agent's fora.json is a role marker and carries no key
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      The agent's `fora.json` is a role marker and nothing more: `ver`, `role:
+      ROLE_AGENT`, `domain`.
+  positive: >-
+    read_manifest at the agent's subdomain returns ver, role ROLE_AGENT and the
+    subdomain as domain, with no other member.
+  negative: []
+
+# blocked: needs an e2e-only identity key-rotation control, which ADR-028 D6 does
+# not list yet.
+- id: MCP-007
+  title: A rotated key is published beside the old one, and the old one keeps verifying until its window closes
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      New signatures use the new key; in-flight requests and cached directory copies
+      keep verifying against the old one until its window closes, after which it is
+      pruned.
+  positive: >-
+    Right after rotation the agent's directory publishes both keys, newest first, and
+    a request the agent signed with the old key just before rotation is still
+    accepted by the Exchange.
+  negative:
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
+      side_effect: >-
+        after the old key's not_after, the directory no longer publishes it and an
+        Exchange accepts nothing signed by it
+
+- id: MCP-008
+  title: Revoking an agent's key publishes it on the agent's revocation list and destroys the material
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      It publishes the compromised key to the subdomain's revocation list and destroys
+      the material.
+  positive: >-
+    Within the directory cache TTL after the operator revokes a key, the agent's
+    revocation list names its thumbprint, and no later tool call produces a
+    signature or a delivery URL bound to the revoked thumbprint.
+  negative: []
+
+- id: MCP-009
+  title: The MCP endpoint accepts the five listed protocol versions and refuses any other with 400
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      A request whose `Mcp-Protocol-Version` header names any other version is refused
+      with `400`.
+  positive: >-
+    tools/list and fora_status succeed on 2024-11-05, 2025-03-26, 2025-06-18 and
+    2025-11-25, with and without initialize, and on 2026-07-28 without initialize.
+  negative:
+    - code: "400"
+      reason: unsupported Mcp-Protocol-Version
+      side_effect: no tool runs and no outbound request is made for version 2099-01-01
+
+- id: MCP-010
+  title: The MCP endpoint answers GET and DELETE with 405 and Allow POST
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      An authenticated `GET` or `DELETE` returns `405` with `Allow: POST`, so there is
+      no server-to-client event stream and no session to delete.
+  positive: An authenticated POST of tools/list is answered with one application/json body.
+  negative:
+    - code: "405"
+      reason: Allow names POST
+      side_effect: >-
+        an authenticated GET asking for an event stream opens none, and a DELETE
+        deletes nothing
+
+- id: MCP-011
+  title: On 2026-07-28 a request whose Mcp-Method or Mcp-Name is missing or disagrees with the body is refused
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      A request where any of these is missing, or does not match the body, is refused
+      with `400`.
+  positive: >-
+    A 2026-07-28 tools/call of fora_status with matching Mcp-Method, Mcp-Name and
+    _meta version is answered.
+  negative:
+    - code: "400"
+      reason: header and body disagree
+      side_effect: >-
+        no tool runs, and no account is opened, when Mcp-Name says fora_status and
+        the body calls fora_register, nor when Mcp-Method is missing
+
+- id: MCP-012
+  title: The MCP endpoint issues no session id
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      The endpoint issues no `Mcp-Session-Id` and does not need one.
+  positive: >-
+    No response to initialize, tools/list or tools/call carries Mcp-Session-Id, and
+    a request sent with an invented one is answered the same as without it.
+  negative: []
+
+- id: MCP-013
+  title: fora_register reaches the named Exchange directly, signed with the agent's own key
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      Registration must reach the Exchange directly, because the Exchange derives the
+      binding between an account and an identity from the agent's **own** inbound
+      signature.
+  positive: >-
+    fora_register at exchange-a opens an account that fora_status at exchange-a
+    reports for that agent and for no other, and a paid purchase the agent makes
+    there is charged to it.
+  negative:
+    - code: tool error
+      reason: the exchange argument is not a bare domain
+      side_effect: >-
+        no account is opened and no hint is recorded for "https://exchange-c:8081/"
+
+- id: MCP-014
+  title: fora_report takes no endpoint argument and reaches the Exchange its report names
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      `fora_report` takes no endpoint argument.
+  positive: >-
+    After a paid purchase, fora_report files the usage report, and the Exchange that
+    sold the item records it.
+  negative:
+    - code: tool error
+      reason: the arguments fail the tool's input schema
+      side_effect: >-
+        no report is sent anywhere for a fora_report call carrying an endpoint or url
+        argument
+
+# harness: the altered offer needs an offer changed between the Broker and the
+# identity service, and the stack has no control that alters a Broker answer in
+# flight. The verified offers are tested; the altered offer is not.
+- id: MCP-015
+  title: fora_discover shows the agent only offers whose Exchange signature verifies
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      Offers are verified before the agent sees them, because an agent on this surface
+      runs no verifier of its own.
+  positive: >-
+    fora_discover returns the Exchange-signed offers for a seeded URI. An offer whose
+    price was altered after signing is not in offer_groups: it is dropped or reported
+    as refused, never returned as usable.
+  negative: []
+
+# harness: "the edge records exactly one delivery" needs a read of the edge's
+# delivery records, which the stack does not expose; the test asserts the bytes and
+# the absence of a delivery failure.
+- id: MCP-016
+  title: The identity service fetches the licensed bytes itself with the custodied key and returns them in the tool result
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      The resolution: **the service fetches the licensed bytes itself**, presenting the
+      custodied key as the proof of possession, and returns the content to the agent
+      inside the tool result.
+  positive: >-
+    fora_execute on a bound free offer returns the publisher's bytes inside the tool
+    result, fetched across an edge that enforces the key binding.
+  negative:
+    - code: "403"
+      reason: missing_agent_key
+      side_effect: >-
+        the delivery URL from the same call, fetched by the agent without a proof,
+        serves no content
+
+- id: MCP-017
+  title: The identity service's sign-in accepts only PKCE S256 and the authorization_code grant
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/identity/overview.mdx
+    quote: >-
+      Authorization codes are PKCE-protected with `S256`, authorization responses carry
+      the RFC 9207 `iss` parameter, and the only grant type offered is
+      `authorization_code`.
+  positive: >-
+    The sign-up flow with an S256 challenge returns a code with iss, which the token
+    endpoint exchanges for a bearer that fora_status accepts.
+  negative:
+    - code: "302"
+      reason: >-
+        OAuth error invalid_request, returned to the client's redirect URI with iss, as
+        RFC 6749 section 4.1.2.1 requires for an authorization request
+      side_effect: >-
+        no code is issued for an authorization request with code_challenge_method
+        plain or no challenge
+    - code: "400"
+      reason: OAuth error unsupported_grant_type
+      side_effect: no token is issued for grant_type client_credentials
+
+- id: MCP-018
+  title: Identical tool calls from one agent in the same second all succeed on every outbound leg
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/protocol/authentication.mdx
+    quote: >-
+      To prevent this, every FORA signer adds an RFC 9421 `nonce` parameter to every
+      signature
+  positive: >-
+    Ten concurrent fora_status calls, and ten concurrent fora_execute calls on a free
+    offer with distinct idempotency keys, all succeed for one agent.
+  negative: []
+
+- id: MCP-019
+  title: An MCP tool error's structured content is one refusal member, an UpstreamRefusal naming the refusing party, its code and its ErrorDetail unchanged
+  level: MUST
+  actor: identity
+  surface: mcp
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/getting-started/for-ai-agents.mdx
+    quote: >-
+      When a call is refused, the tool's error result carries `{"refusal":
+      UpstreamRefusal}` as its structured content: the party that refused (the Broker,
+      an Exchange or the Identity Service), the Connect code it answered with, and its
+      FORA `ErrorDetail` unchanged.
+  positive: >-
+    The structured content of the fora_report tool error, for a transaction id no one
+    holds, is an object whose one member is refusal, a strict UpstreamRefusal: party
+    is exchange-a's host, code is the Connect code exchange-a answers an SDK agent's
+    ReportUsage for the same unknown id with, and detail is the ErrorDetail of that
+    answer, with the same domain, typed reason blocks and metadata.
+  negative: []
+
+- id: IDENTITY-026
+  title: An agent becomes known to an Exchange only by a signed request; no unsigned route registers it
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      An agent becomes KNOWN to an Exchange just by sending a signed request.
+  positive: A fresh agent's first signed request makes it known to the Exchange.
+  negative:
+    - code: not_found
+      reason: none; the protocol defines no unsigned registration route
+      side_effect: an unsigned POST to the legacy registration path registers no agent

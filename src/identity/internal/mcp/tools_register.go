@@ -63,7 +63,7 @@ func (t *toolset) handleRegister(
 	if in.Exchange, err = t.checkExchangeArg(tool, in.Exchange); err != nil {
 		return nil, registerOutput{}, err
 	}
-	acct, err := t.accounts.Register(t.callCtx(ctx, who), who.subdomain, in.Exchange, in.Fields)
+	acct, err := t.accounts.Register(ctx, who.subdomain, in.Exchange, in.Fields)
 	if err != nil {
 		return nil, registerOutput{}, t.accountFailure(ctx, who, tool, err)
 	}
@@ -74,7 +74,7 @@ func (t *toolset) handleRegister(
 	// acct.Exchange rather than the argument: it is the spelling the note store
 	// and the wire used, so an operator filtering this event on the canonical
 	// domain finds the call that created the account.
-	t.logger(ctx, who).InfoContext(ctx, "identity.mcp.register",
+	t.logger(ctx).InfoContext(ctx, "identity.mcp.register",
 		"subdomain", who.subdomain, "exchange", acct.Exchange, "active", active)
 	return nil, registerOutput{
 		Exchange:   acct.Exchange,

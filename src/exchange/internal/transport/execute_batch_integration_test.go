@@ -10,6 +10,7 @@ import (
 	connect "connectrpc.com/connect"
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+	"google.golang.org/protobuf/proto"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
 )
@@ -23,14 +24,14 @@ import (
 func seedTwoResources(t *testing.T, h *testHarness) (*forav1.Offer, *forav1.Offer) {
 	t.Helper()
 	_, err := h.catalogClient.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, "agent-test", []*forav1.ResourceEntry{
-		{Domain: h.tenantDomain, Path: "/articles/one", Terms: []*forav1.LicenseTerm{seedPricedTerm()}},
-		{Domain: h.tenantDomain, Path: "/articles/two", Terms: []*forav1.LicenseTerm{seedPricedTerm()}},
+		{Domain: h.siteDomain, Path: "/articles/one", Terms: []*forav1.LicenseTerm{seedPricedTerm()}},
+		{Domain: h.siteDomain, Path: "/articles/two", Terms: []*forav1.LicenseTerm{seedPricedTerm()}},
 	})))
 	if err != nil {
 		t.Fatalf("seed push: %v", err)
 	}
-	offerOne := discoverOffer(t, h, "https://"+h.tenantDomain+"/articles/one")
-	offerTwo := discoverOffer(t, h, "https://"+h.tenantDomain+"/articles/two")
+	offerOne := discoverOffer(t, h, "https://"+h.siteDomain+"/articles/one")
+	offerTwo := discoverOffer(t, h, "https://"+h.siteDomain+"/articles/two")
 	return offerOne, offerTwo
 }
 
@@ -42,10 +43,11 @@ func seedPricedTermCurrency(currency string) *forav1.LicenseTerm {
 	return &forav1.LicenseTerm{
 		Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
 		Pricing: &forav1.Pricing{
-			Model:    forav1.PricingModel_PRICING_MODEL_PER_UNIT,
-			Rate:     "0.05",
-			Currency: currency,
-			Unit:     &unit,
+			Model:             forav1.PricingModel_PRICING_MODEL_PER_UNIT,
+			Rate:              "0.05",
+			Currency:          currency,
+			Unit:              &unit,
+			EstimatedQuantity: proto.Int32(1),
 		},
 	}
 }
@@ -70,14 +72,14 @@ func seedFreeTermCurrency(currency string) *forav1.LicenseTerm {
 func seedMixedCurrency(t *testing.T, h *testHarness) (paidUSD, freeEUR *forav1.Offer) {
 	t.Helper()
 	_, err := h.catalogClient.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, "agent-test", []*forav1.ResourceEntry{
-		{Domain: h.tenantDomain, Path: "/articles/paid-usd", Terms: []*forav1.LicenseTerm{seedPricedTermCurrency("USD")}},
-		{Domain: h.tenantDomain, Path: "/articles/free-eur", Terms: []*forav1.LicenseTerm{seedFreeTermCurrency("EUR")}},
+		{Domain: h.siteDomain, Path: "/articles/paid-usd", Terms: []*forav1.LicenseTerm{seedPricedTermCurrency("USD")}},
+		{Domain: h.siteDomain, Path: "/articles/free-eur", Terms: []*forav1.LicenseTerm{seedFreeTermCurrency("EUR")}},
 	})))
 	if err != nil {
 		t.Fatalf("seed push: %v", err)
 	}
-	return discoverOffer(t, h, "https://"+h.tenantDomain+"/articles/paid-usd"),
-		discoverOffer(t, h, "https://"+h.tenantDomain+"/articles/free-eur")
+	return discoverOffer(t, h, "https://"+h.siteDomain+"/articles/paid-usd"),
+		discoverOffer(t, h, "https://"+h.siteDomain+"/articles/free-eur")
 }
 
 // seedFreePaidUSD pushes one PAID USD entry and one FREE USD entry and returns
@@ -87,14 +89,14 @@ func seedMixedCurrency(t *testing.T, h *testHarness) (paidUSD, freeEUR *forav1.O
 func seedFreePaidUSD(t *testing.T, h *testHarness) (paid, free *forav1.Offer) {
 	t.Helper()
 	_, err := h.catalogClient.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, "agent-test", []*forav1.ResourceEntry{
-		{Domain: h.tenantDomain, Path: "/articles/paid-usd", Terms: []*forav1.LicenseTerm{seedPricedTerm()}},
-		{Domain: h.tenantDomain, Path: "/articles/free-usd", Terms: []*forav1.LicenseTerm{seedFreeTerm()}},
+		{Domain: h.siteDomain, Path: "/articles/paid-usd", Terms: []*forav1.LicenseTerm{seedPricedTerm()}},
+		{Domain: h.siteDomain, Path: "/articles/free-usd", Terms: []*forav1.LicenseTerm{seedFreeTerm()}},
 	})))
 	if err != nil {
 		t.Fatalf("seed push: %v", err)
 	}
-	return discoverOffer(t, h, "https://"+h.tenantDomain+"/articles/paid-usd"),
-		discoverOffer(t, h, "https://"+h.tenantDomain+"/articles/free-usd")
+	return discoverOffer(t, h, "https://"+h.siteDomain+"/articles/paid-usd"),
+		discoverOffer(t, h, "https://"+h.siteDomain+"/articles/free-usd")
 }
 
 // execTwoItemBatch executes a 2-item batch over the two offers under one shared
@@ -380,13 +382,8 @@ func TestExecuteTransaction_BatchPerItemDenial(t *testing.T) {
 
 	// Tamper offer two's signature → its presented-offer verify fails with
 	// SIGNATURE_INVALID, a per-item denial (denialReasonByKind), not an abort.
-	tampered := &forav1.Offer{
-		OfferId:   offerTwo.GetOfferId(),
-		Exchange:  offerTwo.GetExchange(),
-		Pricing:   offerTwo.GetPricing(),
-		Identity:  offerTwo.GetIdentity(),
-		Signature: offerTwo.GetSignature() + "00",
-	}
+	tampered := proto.Clone(offerTwo).(*forav1.Offer)
+	tampered.Signature += "00"
 
 	const idem = "tx-batch-mixed"
 	requester := newRequester("agent-test", "agent.example")
@@ -499,7 +496,7 @@ func TestExecuteTransaction_BatchIdempotencyReplayReturnsOriginalResult(t *testi
 		t.Fatal("first-call persisted transaction has empty transaction_id")
 	}
 	// One charge: 0.05 against the 10.00 seed → 9.95.
-	balAfterFirst, err := h.billing.GetBalance(ctx, h.billingRef)
+	balAfterFirst, err := h.billing.GetBalance(ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after first: %v", err)
 	}
@@ -514,21 +511,12 @@ func TestExecuteTransaction_BatchIdempotencyReplayReturnsOriginalResult(t *testi
 	if replayErr != nil {
 		t.Fatalf("replay must return the original result, not an error: %v", replayErr)
 	}
-	replayItems := second.Msg.GetItems()
-	if len(replayItems) != 1 {
-		t.Fatalf("replay returned %d items, want 1 (the original)", len(replayItems))
-	}
-	if got := replayItems[0].GetTransactionId(); got != origTxID {
-		t.Fatalf("replay transaction_id = %q, want the original %q", got, origTxID)
-	}
-	if got := replayItems[0].GetRetrievalEndpoint(); got != origURL {
-		t.Fatalf("replay retrieval_endpoint = %q, want the ORIGINAL %q verbatim", got, origURL)
-	}
+	assertReplayedOriginalItem(t, "replay", second.Msg.GetItems(), origTxID, origURL)
 
 	// The replay must not double-persist or double-charge: balance unchanged at
 	// 9.95 (still exactly one charge), and the derived-key row is still the lone
 	// persisted transaction.
-	balAfterReplay, err := h.billing.GetBalance(ctx, h.billingRef)
+	balAfterReplay, err := h.billing.GetBalance(ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after replay: %v", err)
 	}

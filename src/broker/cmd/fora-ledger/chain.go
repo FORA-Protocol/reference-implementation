@@ -113,12 +113,20 @@ func rowBrokerOffered(s Sources) Row {
 	}
 }
 
+// rowAgentAccepted names the agent by the identity the Exchange attributed the
+// transaction to. The requester id and domain are what the agent signed, and are
+// shown as such: neither names the agent on every path (a direct execute may
+// carry any domain).
 func rowAgentAccepted(s Sources) Row {
 	e := s.Evidence
+	party := "Agent (identity not reported by the Exchange)"
+	if s.Transaction.AgentID != "" {
+		party = "Agent " + s.Transaction.AgentID
+	}
 	return Row{
-		Party:      "Agent " + e.RequesterDomain,
+		Party:      party,
 		Step:       "3. offer accepted",
-		Event:      fmt.Sprintf("signed an acceptance as %s", e.RequesterID),
+		Event:      fmt.Sprintf("signed an acceptance as requester %s (domain %s)", e.RequesterID, e.RequesterDomain),
 		Correlator: "idem=" + e.RequestIdempotencyKey,
 		Crypto:     abbrev(e.AgentAcceptanceSignatureAlgorithm + " " + e.AgentAcceptanceSignature),
 	}

@@ -26,8 +26,9 @@ func serveExchangeAndAdmin(
 	queries *sqlc.Queries,
 	wrapped http.Handler,
 	audience *foraaudience.Interceptor,
+	controlRoutes []transport.AdminRoute,
 ) error {
-	adminHandler, err := buildAdminHandler(logger, pool, queries, audience)
+	adminHandler, err := buildAdminHandler(logger, pool, queries, audience, controlRoutes)
 	if err != nil {
 		return err
 	}
@@ -45,11 +46,15 @@ func serveExchangeAndAdmin(
 // integration harness both call. The admin plane is deliberately NOT wrapped by
 // WrapPublicSurface and NOT mounted through the connectserver verify seam: it has no
 // verified signer; the network allowlist is the only gate (ADR-022).
+//
+// controlRoutes are the e2e control service's routes, mounted behind the same
+// allowlist. A production build has none (see e2eControls).
 func buildAdminHandler(
 	logger *slog.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, audience *foraaudience.Interceptor,
+	controlRoutes []transport.AdminRoute,
 ) (http.Handler, error) {
 	adminSvc := service.NewAdminServiceFromPool(pool, queries)
 	evidenceSvc := service.NewEvidenceReadService(queries)
 	return transport.WrapAdminSurface(
-		logger, adminSvc, evidenceSvc, runhttp.EnvOr("ADMIN_ALLOWED_CIDRS", ""), audience)
+		logger, adminSvc, evidenceSvc, runhttp.EnvOr("ADMIN_ALLOWED_CIDRS", ""), audience, controlRoutes...)
 }

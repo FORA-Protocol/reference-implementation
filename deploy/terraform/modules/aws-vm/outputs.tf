@@ -29,3 +29,18 @@ output "ssh_command" {
   description = "Ready-made SSH command for the operator."
   value       = "ssh ubuntu@${aws_eip.this.public_ip}"
 }
+
+output "data_volume_id" {
+  description = "Id of the durable data volume, or null when data_volume_gb is unset."
+  value       = one(aws_ebs_volume.data[*].id)
+}
+
+output "availability_zone" {
+  description = "Availability zone of the subnet, the instance and the data volume."
+  value       = aws_subnet.public.availability_zone
+}
+
+output "ami_id" {
+  description = "The AMI the instance runs: ami_id when pinned, otherwise the newest Canonical build the lookup returned at plan time. Record it before pinning a long-lived instance."
+  value       = aws_instance.this.ami
+}

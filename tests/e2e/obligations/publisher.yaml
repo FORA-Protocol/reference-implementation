@@ -1,0 +1,329 @@
+# The publisher journey: a publisher signs in to the console, registers its
+# business and a domain, publishes the file the console hands it, has its catalog
+# imported by the operator's importer, sells a page, and reads the sale back on
+# its dashboard. Registry entries (ADR-028 D1); the tests that prove them say so
+# on themselves.
+#
+# The entries come from ADR-026 (the registration model and its amendments), the
+# console's and the importer's published sources, and the pinned protocol module.
+# Two behaviours the console does not have yet are untested, pending a console
+# product decision: showing a listing's import outcome, and counting denied
+# purchases.
+#
+# A "negative:" case is a refusal with a typed error response (ADR-028 D1). What
+# an answer that refuses nothing must leave out is a "must not" in "positive:".
+
+- id: PUB-001
+  title: Registering a business mints the publisher id on the Exchange for the person acting
+  level: MUST
+  actor: console
+  surface: console
+  source:
+    cite: docs/architecture/adr-026-publisher-registration-model.md
+    quote: >-
+      "Connect to `exchange.example`" runs `RegisterPublisher` on that Exchange, which
+      mints the publisher id there (D2) and grants it to the actor.
+  positive: >-
+    A fresh, verified publisher registers a business name in the console's wizard
+    and is handed a publisher id the Exchange minted (pub_-prefixed), and the file
+    the console then builds names that id as the payee.
+  negative: []
+
+- id: PUB-002
+  title: Registering the business again returns the same publisher
+  level: MUST
+  actor: console
+  surface: console
+  source:
+    cite: docs/architecture/adr-026-publisher-registration-model.md
+    quote: >-
+      `RegisterPublisher` is idempotent by actor: a caller that already holds a grant
+      gets that publisher back.
+  positive: >-
+    The same publisher submitting the business step a second time is handed the
+    publisher id it was handed the first time.
+  negative: []
+
+- id: PUB-003
+  title: The file the console generates names this Exchange, the publisher id and the operator's contributor
+  level: MUST
+  actor: console
+  surface: console
+  source:
+    cite: docs/architecture/adr-026-publisher-registration-model.md
+    quote: >-
+      written by the publisher into every domain's manifest as
+      `exchanges[].ext.resource_owner_id` for this seat
+  positive: >-
+    The fora.json the wizard hands over parses under the SDK's strict check as a
+    publisher manifest for the domain, names exactly this stack's Exchange with the
+    publisher's own id as its resource owner, and authorizes exactly the operator's
+    catalog contributor.
+  negative: []
+
+- id: PUB-004
+  title: Publishing that file activates the domain's listing
+  level: MUST
+  actor: exchange
+  surface: console
+  source:
+    cite: docs/architecture/adr-026-publisher-registration-model.md
+    quote: >-
+      A listing is proven when `https://<domain>/.well-known/fora.json` parses as a
+      `WellKnownManifest`, its `exchanges[]` has an entry whose `domain` is this seat's
+      hostname with `ext.resource_owner_id` equal to the registered publisher id
+  positive: >-
+    With the generated file published on the domain, the console's manifest check
+    passes with no repair sentences, the last wizard step registers the domain, and
+    the domains page lists the domain as verified.
+  negative: []
+
+- id: PUB-005
+  title: A person whose address the login provider has not verified cannot reach publisher functionality
+  level: MUST
+  actor: console
+  surface: console
+  source:
+    cite: src/console/internal/app/routes.go
+    quote: >-
+      everything that reads or writes a registration needs a session whose address the
+      provider verified.
+  positive: A verified publisher's sign-in ends on the console's home page.
+  negative:
+    - code: unauthenticated
+      reason: >-
+        the provider stops the sign-in at its own address check, so the console holds
+        no session, and the wizard refuses the business step with HTTP 401
+      side_effect: no publisher is registered for the person
+
+- id: PUB-006
+  title: Only the configured console may assert an actor on the Exchange's console routes
+  level: MUST
+  actor: exchange
+  surface: console
+  source:
+    cite: docs/architecture/adr-026-publisher-registration-model.md
+    quote: >-
+      the Exchange accepts an actor only from a `CONSOLE` caller.
+  positive: >-
+    The console's own signed read of the publisher's transactions answers, and the
+    dashboard lists the sale.
+  negative:
+    - code: unauthenticated
+      reason: the request is signed under a key directory that is not the console's
+      side_effect: >-
+        the publisher's transactions are not returned, although the request carries
+        that publisher's real actor and id
+
+- id: PUB-007
+  title: A domain belongs to one publisher; a second account cannot register it
+  level: MUST
+  actor: exchange
+  surface: console
+  source:
+    cite: docs/architecture/adr-026-publisher-registration-model.md
+    quote: >-
+      It belongs to exactly one publisher, deployment-wide,
+  positive: The first publisher registers the domain and it stays verified on its domains page.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        the wizard reports the domain taken, and the console refuses the last step with
+        HTTP 400
+      side_effect: the domain does not appear on the second publisher's domains page
+
+- id: PUB-008
+  title: A publisher's reads answer not found for another publisher's transaction
+  level: MUST
+  actor: exchange
+  surface: console
+  source:
+    cite: docs/architecture/adr-026-publisher-registration-model.md
+    quote: >-
+      a caller with no grant for the requested publisher gets `not_found`, never another
+      publisher's rows.
+  positive: The publisher that made the sale opens the transaction's page.
+  negative:
+    - code: not_found
+      reason: another publisher opens the same transaction's page and is answered 404
+      side_effect: the page carries none of the sale's evidence
+
+- id: PUB-009
+  title: The importer imports only the pages inside the listing's domain and licensed path scope
+  level: MUST
+  actor: importer
+  surface: console
+  source:
+    cite: src/exchange/RUNBOOK.md
+    quote: >-
+      keeps the pages on the listing's domain and inside its `content_path_scope`
+  positive: >-
+    A run over a sitemap listing two pages inside the licensed path and one outside
+    it reports two entries, both accepted, and the catalog lists exactly the two.
+    The page outside the licensed path is left out of the import, and the catalog
+    does not list it.
+  negative: []
+
+- id: PUB-010
+  title: The importer's pages appear in the publisher's catalog
+  level: MUST
+  actor: importer
+  surface: console
+  source:
+    cite: src/exchange/RUNBOOK.md
+    quote: >-
+      builds one catalog entry per page carrying those terms, validates the whole
+      listing locally, and pushes it through the signed catalog RPC as the contributor
+      identity below
+  positive: >-
+    After the first run completes, the console's catalog page lists every licensed
+    page of the sitemap, and an agent can discover and buy one of them.
+  negative: []
+
+- id: PUB-011
+  title: A repeat import creates no duplicate catalog entries
+  level: MUST
+  actor: importer
+  surface: console
+  source:
+    cite: src/exchange/RUNBOOK.md
+    quote: >-
+      a page it pushes again goes back under the identity it is stored under, so a
+      rerun updates every page without duplicates
+  positive: >-
+    A second run, which pushes the same pages again, completes with the same entries
+    accepted again, and the catalog lists each page once, exactly as it did after the
+    first run.
+  negative: []
+
+- id: PUB-012
+  title: Removing the contributor from the published file stops the import, and the catalog keeps its pages
+  level: MUST
+  actor: importer
+  surface: console
+  source:
+    cite: docs/architecture/adr-026-publisher-registration-model.md
+    quote: >-
+      removing the host from the manifest refuses the importer's next push
+  positive: With the contributor authorized, the run completes.
+  negative:
+    - code: failed
+      reason: >-
+        the listing outcome of the run after the publisher republished its file without
+        the contributor: nothing accepted
+      side_effect: the catalog lists the same pages it listed before the failed run
+
+- id: PUB-013
+  title: The publisher's income shows the sale at the fee rate in force
+  level: MUST
+  actor: exchange
+  surface: console
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/admin/v1/admin.proto
+    quote: >-
+      Fee rate in basis points of gross: fee = floor(gross * bps / 10000).
+  positive: >-
+    After a sale made while the seat's fee rate is 1000 basis points, the console's
+    income file totals one transaction whose gross is the agent's charge, whose fee
+    is floor(gross * 1000 / 10000) at the ledger's scale, and whose net is gross
+    minus fee, in the charge's currency.
+  negative: []
+
+- id: PUB-014
+  title: The publisher's transaction list shows the sale
+  level: MUST
+  actor: exchange
+  surface: console
+  source:
+    cite: docs/architecture/adr-026-publisher-registration-model.md
+    quote: >-
+      The publisher-scoped **read RPCs** (totals per period, transaction list and
+      detail, catalog, settings) join the same service.
+  positive: >-
+    The transaction list for the day of the sale has exactly one row: the sale's
+    transaction id, the page bought, the buying agent and the unit price in the
+    charge's currency.
+  negative: []
+
+- id: PUB-015
+  title: A transaction's evidence verifies, and anchors to the published keys of the Exchange and the agent
+  level: MUST
+  actor: console
+  surface: console
+  source:
+    cite: src/console/internal/web/static/evidence.js
+    quote: >-
+      A transaction carries two Ed25519 signatures.
+  positive: >-
+    The evidence on the transaction's page passes both Ed25519 checks through the
+    protocol SDK's verification functions, over bytes that are exactly the canonical
+    bytes; the acceptance names the offer's signature; the Exchange's key is in the
+    Exchange's published key directory and the agent's key in the agent's.
+  negative: []
+
+- id: PUB-016
+  title: A transaction's page never shows the delivery address
+  level: MUST
+  actor: console
+  surface: console
+  source:
+    cite: src/console/internal/dashboard/detail.go
+    quote: >-
+      SignedURLHash is the SHA-256 of the delivery address the agent was given, in
+      base64. The address itself is never shown.
+  positive: >-
+    The transaction's page carries the sale's evidence, and the signed retrieval
+    address the agent was given appears nowhere in the page, read whole.
+  negative: []
+
+- id: PUB-017
+  title: The HTTP-01 domain verification RPCs stay unimplemented
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: docs/architecture/adr-026-publisher-registration-model.md
+    quote: >-
+      The RPCs stay unimplemented on this Exchange; the Exchange answers them
+      `unimplemented`, as it does today.
+  positive: >-
+    The same agent, signing as itself, reads its account status at the same Exchange,
+    so the signature is accepted there.
+  negative:
+    - code: unimplemented
+      reason: RequestDomainVerification for the publisher's verified domain
+      side_effect: no verification challenge is issued
+
+# untested: a console product decision is pending: which fields the publisher sees
+# and where.
+- id: PUB-018
+  title: The console shows a listing's last import outcome
+  level: SHOULD
+  actor: console
+  surface: console
+  source:
+    cite: src/exchange/RUNBOOK.md
+    quote: >-
+      Each run writes its result to the listing row it worked on:
+  positive: >-
+    After a run, the domain's page in the console says whether the last import
+    completed, when, and how many pages it accepted, refused or skipped, and why a
+    failed run failed.
+  negative: []
+
+# untested: a console product decision is pending: whether and where denials are
+# recorded.
+- id: PUB-019
+  title: The publisher's totals count denied purchases
+  level: SHOULD
+  actor: exchange
+  surface: console
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/transaction-log/event-types.mdx
+    quote: >-
+      Logged after the Billing Adapter returns its authorization decision. Captures
+      both approvals and denials.
+  positive: >-
+    A purchase of the publisher's page that the Exchange denies is counted, by
+    reason, in the publisher's totals for its period.
+  negative: []

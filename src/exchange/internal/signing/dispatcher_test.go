@@ -33,7 +33,7 @@ func TestURLSignerFor_Ed25519(t *testing.T) {
 	t.Parallel()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	store := &stubStore{pub: pub, priv: priv}
-	sgn, err := signing.URLSignerFor(signing.TenantKeys{Scheme: signing.SchemeEd25519, Ed25519Ref: "k"}, store)
+	sgn, err := signing.URLSignerFor(signing.URLSigningKeys{Scheme: signing.SchemeEd25519, Ed25519Ref: "k"}, store)
 	if err != nil {
 		t.Fatalf("dispatcher: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestURLSignerFor_CloudFront(t *testing.T) {
 	t.Parallel()
 	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
 	store := &stubStore{rsa: priv}
-	sgn, err := signing.URLSignerFor(signing.TenantKeys{
+	sgn, err := signing.URLSignerFor(signing.URLSigningKeys{
 		Scheme:              signing.SchemeCFRSA,
 		RSARef:              "k",
 		CloudFrontKeyPairID: "APKATEST",
@@ -78,7 +78,7 @@ func TestURLSignerFor_CloudFrontMissingKeyPairID(t *testing.T) {
 	t.Parallel()
 	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
 	store := &stubStore{rsa: priv}
-	_, err := signing.URLSignerFor(signing.TenantKeys{Scheme: signing.SchemeCFRSA, RSARef: "k"}, store)
+	_, err := signing.URLSignerFor(signing.URLSigningKeys{Scheme: signing.SchemeCFRSA, RSARef: "k"}, store)
 	if err == nil {
 		t.Fatal("expected key pair id error")
 	}
@@ -86,7 +86,7 @@ func TestURLSignerFor_CloudFrontMissingKeyPairID(t *testing.T) {
 
 func TestURLSignerFor_UnknownScheme(t *testing.T) {
 	t.Parallel()
-	_, err := signing.URLSignerFor(signing.TenantKeys{Scheme: "BOGUS"}, &stubStore{})
+	_, err := signing.URLSignerFor(signing.URLSigningKeys{Scheme: "BOGUS"}, &stubStore{})
 	if err == nil {
 		t.Fatal("expected unknown-scheme error")
 	}
@@ -95,7 +95,7 @@ func TestURLSignerFor_UnknownScheme(t *testing.T) {
 func TestURLSignerFor_StoreError(t *testing.T) {
 	t.Parallel()
 	want := errors.New("boom")
-	_, err := signing.URLSignerFor(signing.TenantKeys{Scheme: signing.SchemeEd25519}, &stubStore{err: want})
+	_, err := signing.URLSignerFor(signing.URLSigningKeys{Scheme: signing.SchemeEd25519}, &stubStore{err: want})
 	if err == nil {
 		t.Fatal("expected store error")
 	}

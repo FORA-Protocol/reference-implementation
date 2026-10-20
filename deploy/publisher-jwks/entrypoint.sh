@@ -102,11 +102,16 @@ kid = kid_override or spec.get("kid") or "publisher-key"
 # has no per-entry slot, matching the edge's publisher-manifest.mjs emitter).
 exchanges_env = os.environ.get("EXCHANGES_JSON", "").strip()
 exchanges_in = json.loads(exchanges_env) if exchanges_env else []
+# An entry's ext is carried through as given, as the edge's manifest builder
+# does: it is where a publisher attests ext.resource_owner_id, the payee an
+# Exchange reads before it accepts a catalog push for the site, so a manifest
+# without it lists an Exchange that refuses every entry pushed for this host.
 exchanges = [
     {
         "domain": e["domain"],
         "endpoint": e["endpoint"],
         "relationship": "PROVIDER_RELATIONSHIP_DIRECT",
+        **({"ext": e["ext"]} if e.get("ext") else {}),
     }
     for e in exchanges_in
 ]
@@ -174,6 +179,32 @@ print(
     f"(kid={kid}, valid_from={valid_from}, valid_until={valid_until})"
 )
 PY
+
+# The Web Bot Auth profile requires the directory's response to be signed by
+# every key it lists, over "@authority";req and content-digest. nginx runs no
+# code per request, so the directory is signed once here, for the one host name
+# it is served under: DIRECTORY_AUTHORITY when set, otherwise the manifest's
+# domain, which is that host. fora-sign-directory (built into the image from
+# src/exchange/cmd/fora-sign-directory) signs through the protocol SDK, and prints the three
+# headers nginx then sends with the file (nginx.conf includes the snippet below).
+AUTHORITY="${DIRECTORY_AUTHORITY:-}"
+if [ -z "$AUTHORITY" ]; then
+    AUTHORITY="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["domain"])' \
+        "$WEB_ROOT/.well-known/fora.json")"
+fi
+SIGNATURE_HEADERS=/etc/nginx/directory-signature.conf
+fora-sign-directory -key "$KEY_FILE" -authority "$AUTHORITY" \
+    -body "$WEB_ROOT/.well-known/http-message-signatures-directory" \
+  | while IFS= read -r line; do
+        name="${line%%: *}"
+        value="${line#*: }"
+        printf "add_header %s '%s' always;\n" "$name" "$value"
+    done >"$SIGNATURE_HEADERS"
+if [ "$(wc -l <"$SIGNATURE_HEADERS")" -ne 3 ]; then
+    echo "publisher-jwks: signing the directory for $AUTHORITY failed" >&2
+    exit 1
+fi
+echo "publisher-jwks: signed the directory response for $AUTHORITY"
 
 echo "publisher-jwks: seeding complete; exec-ing $*"
 exec "$@"

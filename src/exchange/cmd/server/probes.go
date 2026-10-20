@@ -11,6 +11,12 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing"
 )
 
+// healthzPath is the route the liveness check is served at. The manifest
+// publishes it as WellKnownManifest.health_endpoint, which is what a Broker
+// probes to decide whether this Exchange is answering, so the route and the
+// published value are built from this one constant and cannot drift apart.
+const healthzPath = "/healthz"
+
 func healthzHandler(pool interface{ Ping(context.Context) error }) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if pool != nil {

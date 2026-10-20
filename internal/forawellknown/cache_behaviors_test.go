@@ -65,13 +65,17 @@ func TestCache_MalformedBodyNotCached(t *testing.T) {
 	c := newPublisherCache(clock.NewDeterministic(anchor))
 	ctx := context.Background()
 
+	// ErrFetch, not ErrSchemaInvalid: this body never parsed, so nothing was
+	// validated and the failure says nothing about what the origin publishes. It
+	// is the shape a proxy answering 200 with an error page produces, which is
+	// also why the cache must not remember it.
 	_, err := c.Get(ctx, origin.URL)
-	if !errors.Is(err, forawellknown.ErrSchemaInvalid) {
-		t.Fatalf("malformed Get = %v, want ErrSchemaInvalid", err)
+	if !errors.Is(err, forawellknown.ErrFetch) {
+		t.Fatalf("malformed Get = %v, want ErrFetch", err)
 	}
 	// A malformed response must not be cached — the next Get re-fetches.
-	if _, err := c.Get(ctx, origin.URL); !errors.Is(err, forawellknown.ErrSchemaInvalid) {
-		t.Fatalf("second malformed Get = %v, want ErrSchemaInvalid", err)
+	if _, err := c.Get(ctx, origin.URL); !errors.Is(err, forawellknown.ErrFetch) {
+		t.Fatalf("second malformed Get = %v, want ErrFetch", err)
 	}
 	if got := origin.Hits(); got != 2 {
 		t.Fatalf("origin hits = %d, want 2 (malformed not cached)", got)

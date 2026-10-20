@@ -1,5 +1,6 @@
 import { type App, createApp } from '../app.js';
 import { type EdgeEnv, buildDeps, originModeConfigured, parseEnv } from '../config.js';
+import { nobleEd25519 } from '../ed25519-noble.js';
 
 interface FastlyLike {
   addEventListener(
@@ -26,6 +27,7 @@ export function readFastlyEnv(getEnv: (name: string) => string | undefined): Edg
     FORA_VERIFY_KEYS: getEnv('FORA_VERIFY_KEYS'),
     WBA_KEYS_JSON: getEnv('WBA_KEYS_JSON'),
     WBA_REVOCATION_URL: getEnv('WBA_REVOCATION_URL'),
+    WBA_SIGNED_DIRECTORY_JSON: getEnv('WBA_SIGNED_DIRECTORY_JSON'),
     PROVIDER: getEnv('PROVIDER'),
     EXCHANGES_JSON: getEnv('EXCHANGES_JSON'),
     CATALOG_CONTRIBUTORS_JSON: getEnv('CATALOG_CONTRIBUTORS_JSON'),
@@ -33,6 +35,7 @@ export function readFastlyEnv(getEnv: (name: string) => string | undefined): Edg
     FORA_ENFORCE_BINDING: getEnv('FORA_ENFORCE_BINDING'),
     BOT_UA_ALLOW_JSON: getEnv('BOT_UA_ALLOW_JSON'),
     BOT_UA_DENY_JSON: getEnv('BOT_UA_DENY_JSON'),
+    LICENSED_PATHS_JSON: getEnv('LICENSED_PATHS_JSON'),
     // SAME_ZONE_ORIGIN is deliberately NOT forwarded: same-zone forwarding is
     // a Cloudflare routing behavior this runtime cannot honor.
   });
@@ -48,7 +51,10 @@ function getApp(): App {
   if (!originModeConfigured(env)) {
     throw new Error('edge misconfigured: set ORIGIN_URL to the origin backend');
   }
-  cachedApp = createApp(buildDeps(env));
+  // Fastly's SubtleCrypto has no Ed25519, so every Ed25519 check on this
+  // runtime — the key directory's response signatures, the signed URL and the
+  // delivery proof — runs through @noble/ed25519.
+  cachedApp = createApp(buildDeps(env, nobleEd25519));
   return cachedApp;
 }
 

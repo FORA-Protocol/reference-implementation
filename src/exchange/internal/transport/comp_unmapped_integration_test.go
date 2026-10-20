@@ -144,11 +144,11 @@ func TestComp_UnmappedConstructsFlag(t *testing.T) {
 	h := newPushHarness(t)
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 
 	const termPath = "/articles/comp-unmapped"
 	resourceID := "res-" + uuid.NewString()

@@ -14,7 +14,7 @@ variables {
   identity_hostname = "mcp.staging.example"
   zitadel_hostname  = "login.staging.example"
 
-  default_tenant_domain = "demo.staging.example"
+  default_tenant_domain = "exchange.staging.example"
 
   exchange_image = "registry.example.com/group/proj/exchange:test"
   broker_image   = "registry.example.com/group/proj/broker:test"

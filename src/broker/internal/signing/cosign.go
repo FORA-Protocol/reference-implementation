@@ -1,11 +1,14 @@
-// Package signing provides the Broker's ed25519 co-signer. The co-signer
-// produces a detached signature over each outbound query, transmitted as an
-// HTTP header. Per RFC 9421 hop-by-hop forwarding, the ordered set of these
-// per-hop request signatures IS the forwarding chain — there is no in-message
-// intermediary-hop array.
+// Package signing holds the Broker's ed25519 identity key: the key the Broker
+// publishes in its own Web Bot Auth key directory.
+//
+// The Broker authenticates every request it sends an Exchange — each
+// ResourceQuery of the discovery fan-out, and each TransactionRequest it
+// re-packages from an agent's purchase — with its own RFC 9421 signature, which
+// the relay HTTP client (xclient.NewSigningTransport) adds. That is the only
+// signature such a request carries: FORA authenticates every caller through Web
+// Bot Auth, so the Broker sends no signature header of its own design.
 //
 // Ed25519 is the only signing scheme — no HMAC, no shared secrets.
-// See `project_edge_signing_strategy` memory for the rationale.
 package signing
 
 import (
@@ -16,41 +19,36 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
-	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/runhttp"
 )
 
-// Header is the HTTP header name carrying the detached Broker signature.
-const Header = "X-FORA-Broker-Signature"
-
-// CoSigner signs outbound Exchange calls on behalf of the Broker.
+// CoSigner holds the Broker's identity key and the domain it publishes it under.
 type CoSigner struct {
-	domain   string
-	brokerID string
-	priv     ed25519.PrivateKey
-	clk      clock.Clock
+	domain string
+	priv   ed25519.PrivateKey
+	clk    clock.Clock
 }
 
 // NewCoSigner constructs a CoSigner. priv must be 64 bytes (ed25519 private key).
-// clk is the time source consulted for the forwarding-signature timestamp;
-// pass clock.System{} in production, a deterministic clock in tests.
-func NewCoSigner(domain, brokerID string, priv ed25519.PrivateKey, clk clock.Clock) (*CoSigner, error) {
+// clk is the time source Now reports; pass clock.System{} in production, a
+// deterministic clock in tests.
+func NewCoSigner(domain string, priv ed25519.PrivateKey, clk clock.Clock) (*CoSigner, error) {
 	if len(priv) != ed25519.PrivateKeySize {
 		return nil, fmt.Errorf("signing: private key must be %d bytes, got %d",
 			ed25519.PrivateKeySize, len(priv))
 	}
-	if domain == "" || brokerID == "" {
-		return nil, errors.New("signing: domain and broker ID are required")
+	if domain == "" {
+		return nil, errors.New("signing: domain is required")
 	}
 	if clk == nil {
 		clk = clock.System{}
 	}
-	return &CoSigner{domain: domain, brokerID: brokerID, priv: priv, clk: clk}, nil
+	return &CoSigner{domain: domain, priv: priv, clk: clk}, nil
 }
 
 // Domain returns the broker's domain.
@@ -67,23 +65,15 @@ func (c *CoSigner) PublicKey() ed25519.PublicKey {
 	return c.priv.Public().(ed25519.PublicKey)
 }
 
-// SignForward produces the Broker's detached forwarding signature over the
-// outbound query. Per RFC 9421 hop-by-hop forwarding, this per-hop request
-// signature is the Broker's contribution to the forwarding chain — the ordered
-// set of such signatures across intermediaries IS the chain, replacing the
-// removed in-message hop array. The signature travels in the
-// X-FORA-Broker-Signature header (see xclient); hop depth is counted from the
-// signature stack against RequestConstraints.max_hops /
-// WellKnownManifest.max_intermediary_hops. SignForward does not mutate req.
-func (c *CoSigner) SignForward(req *forav1.ResourceQuery) (string, error) {
-	if req == nil {
-		return "", errors.New("signing: nil ResourceQuery")
+// DirectorySigner returns the identity key as an SDK signer whose keyid is the
+// key's RFC 7638 thumbprint. The Broker's key directory lists this key, so the
+// directory response carries its signature.
+func (c *CoSigner) DirectorySigner() (helpers.Signer, error) {
+	keyID, err := helpers.Thumbprint(c.PublicKey())
+	if err != nil {
+		return nil, fmt.Errorf("signing: identity key thumbprint: %w", err)
 	}
-	now := c.clk.Now()
-	payload := fmt.Sprintf("broker:%s|id:%s|query:%s|ts:%d",
-		c.domain, c.brokerID, strings.Join(req.GetUris(), ","), now.Unix())
-	sig := ed25519.Sign(c.priv, []byte(payload))
-	return base64.RawURLEncoding.EncodeToString(sig), nil
+	return helpers.NewEd25519Signer(keyID, c.priv)
 }
 
 // AllowEphemeralKeyEnv opts the Broker out of the persistent-identity
@@ -101,9 +91,9 @@ const AllowEphemeralKeyEnv = "BROKER_ALLOW_EPHEMERAL_KEY"
 // Broker's identity on the next restart. Setting AllowEphemeralKeyEnv opts out
 // and restores the throwaway-key behaviour for development and CI.
 //
-// clk is the time source consulted for the intermediary stamp; pass
-// clock.System{} in production wiring.
-func LoadFromEnv(domain, brokerID string, clk clock.Clock) (*CoSigner, error) {
+// clk is the time source the signer's Now reports; pass clock.System{} in
+// production wiring.
+func LoadFromEnv(domain string, clk clock.Clock) (*CoSigner, error) {
 	if seed := os.Getenv("BROKER_ED25519_SEED"); seed != "" {
 		raw, err := base64.RawURLEncoding.DecodeString(seed)
 		if err != nil {
@@ -114,14 +104,14 @@ func LoadFromEnv(domain, brokerID string, clk clock.Clock) (*CoSigner, error) {
 				ed25519.SeedSize)
 		}
 		priv := ed25519.NewKeyFromSeed(raw)
-		return NewCoSigner(domain, brokerID, priv, clk)
+		return NewCoSigner(domain, priv, clk)
 	}
 	if path := os.Getenv("BROKER_ED25519_KEY_FILE"); path != "" {
 		priv, err := loadPEM(path)
 		if err != nil {
 			return nil, err
 		}
-		return NewCoSigner(domain, brokerID, priv, clk)
+		return NewCoSigner(domain, priv, clk)
 	}
 	if !runhttp.EnvOptIn(AllowEphemeralKeyEnv) {
 		return nil, fmt.Errorf(
@@ -133,7 +123,7 @@ func LoadFromEnv(domain, brokerID string, clk clock.Clock) (*CoSigner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate ephemeral key: %w", err)
 	}
-	return NewCoSigner(domain, brokerID, priv, clk)
+	return NewCoSigner(domain, priv, clk)
 }
 
 func loadPEM(path string) (ed25519.PrivateKey, error) {

@@ -159,28 +159,53 @@ func TestBuildAssertions_tamperingIsCaught(t *testing.T) {
 	}
 }
 
-// The signed Requester.id is a directory URI; the Broker keys its audit on the
-// canonical host. Plain string equality between the two would fail on a chain
-// that is entirely genuine, so the normalization is the behavior under test.
-func TestBrokerSawThisAgent_normalizesTheDirectoryURI(t *testing.T) {
-	for _, spelling := range []string{
-		"https://agents.example",
-		"http://agents.example",
-		"https://AGENTS.example",
-		"https://agents.example/",
-	} {
-		t.Run(spelling, func(t *testing.T) {
-			f := newFixture(t)
-			f.Sources.Evidence.RequesterID = spelling
-			// The acceptance must be re-signed: requester_id is one of the four
-			// members it covers, so editing the row alone would fail a
-			// different assertion and prove nothing about this one.
-			resignAcceptance(t, f, spelling)
+// An agent may resolve through the Broker and then execute directly at the
+// Exchange, where Requester.domain is not checked against the caller. The chain
+// is genuine, so an unrelated domain must not break the identity check: it keys
+// on the agent the Exchange attributed the transaction to.
+func TestBrokerSawThisAgent_ignoresAnUnrelatedRequesterDomain(t *testing.T) {
+	f := newFixture(t)
+	f.Sources.Evidence.RequesterDomain = "unrelated.example"
+	resignAcceptance(t, f, &forav1.Requester{Id: fixtureReqID, Domain: "unrelated.example"})
 
-			if a := assertionByName(t, BuildAssertions(f.Sources), "Broker's agent"); !a.OK {
-				t.Errorf("%q should normalize to the Broker's %q: %s", spelling, fixtureReqHost, a.Detail)
-			}
-		})
+	if a := assertionByName(t, BuildAssertions(f.Sources), "Broker's agent"); !a.OK {
+		t.Errorf("a direct execute with an unrelated requester domain must still link: %s", a.Detail)
+	}
+}
+
+// The check still separates agents: a Broker row for a different agent fails.
+func TestBrokerSawThisAgent_differentAgentFails(t *testing.T) {
+	f := newFixture(t)
+	f.Sources.Selection.AgentID = "someone-else.example"
+
+	a := assertionByName(t, BuildAssertions(f.Sources), "Broker's agent")
+	if a.OK || a.Unchecked {
+		t.Errorf("a Broker row naming a different agent must fail, got OK=%v Unchecked=%v: %s",
+			a.OK, a.Unchecked, a.Detail)
+	}
+}
+
+// An older Exchange sends no agent_id. The check is reported as unavailable, and
+// it does not fall back to a requester field, even when that field would match.
+func TestBrokerSawThisAgent_absentAgentIDIsUnchecked(t *testing.T) {
+	f := newFixture(t)
+	f.Sources.Transaction.AgentID = ""
+
+	a := assertionByName(t, BuildAssertions(f.Sources), "Broker's agent")
+	if !a.Unchecked {
+		t.Errorf("an absent transaction agent_id must leave the check unchecked, got OK=%v: %s", a.OK, a.Detail)
+	}
+}
+
+// Requester.id is a free label. A chain whose label names no host at all is
+// still one agent, identified by its requester domain.
+func TestBrokerSawThisAgent_ignoresTheRequesterLabel(t *testing.T) {
+	f := newFixture(t)
+	f.Sources.Evidence.RequesterID = "parse-probe"
+	resignAcceptance(t, f, &forav1.Requester{Id: "parse-probe", Domain: fixtureDomain})
+
+	if a := assertionByName(t, BuildAssertions(f.Sources), "Broker's agent"); !a.OK {
+		t.Errorf("a non-host requester label must not fail the identity check: %s", a.Detail)
 	}
 }
 
@@ -263,7 +288,7 @@ func TestEd25519Assertion_rejectsMalformedInputs(t *testing.T) {
 
 // resignAcceptance rebuilds and re-signs the acceptance so the fixture stays
 // internally consistent after a test edits one of the four signed members.
-func resignAcceptance(t *testing.T, f *fixture, requesterID string) {
+func resignAcceptance(t *testing.T, f *fixture, requester *forav1.Requester) {
 	t.Helper()
 	offer := &forav1.Offer{
 		OfferId:   fixtureOfferID,
@@ -271,7 +296,7 @@ func resignAcceptance(t *testing.T, f *fixture, requesterID string) {
 		Signature: f.Sources.Evidence.OfferSig,
 	}
 	canonical, err := helpers.CanonicalAcceptanceBytes(
-		offer, &forav1.Requester{Id: requesterID, Domain: fixtureDomain}, fixtureIdempotency)
+		offer, requester, fixtureIdempotency)
 	if err != nil {
 		t.Fatalf("canonical acceptance: %v", err)
 	}

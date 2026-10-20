@@ -27,8 +27,8 @@ const ProtectedResourceMetadataPath = "/.well-known/oauth-protected-resource"
 // expiry, with no introspection call.
 //
 // The subject is the developer's minted subdomain — the durable agent identity —
-// and it is carried out as TokenInfo.UserID so the transport layer can also use it
-// to pin a session to one user.
+// and it is carried out as TokenInfo.UserID, which the SDK hands each tool call
+// and callerFrom checks against the request context.
 //
 // A token that fails any check comes back as auth.ErrInvalidToken, which the
 // middleware renders as 401 plus the WWW-Authenticate challenge. The reason is

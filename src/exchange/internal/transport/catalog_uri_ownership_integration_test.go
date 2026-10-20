@@ -34,11 +34,11 @@ func TestPushResources_DuplicateURIUnderDifferentResourceIDRejected(t *testing.T
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 	client := h.signedCat(callerID, priv)
 
 	const path = "/articles/duplicate-uri"
@@ -48,7 +48,7 @@ func TestPushResources_DuplicateURIUnderDifferentResourceIDRejected(t *testing.T
 	if resp, err := client.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, callerID, []*forav1.ResourceEntry{{
 		ContentId: proto.String("original"),
 		Domain:    h.publisherDom, Path: path,
-		Terms: []*forav1.LicenseTerm{seedPricedTerm()},
+		Terms: []*forav1.LicenseTerm{seedPricedTermEst(1)},
 	}}))); err != nil || resp.Msg.GetAccepted() != 1 {
 		t.Fatalf("owner push: err=%v accepted=%d, want 1", err, accepted(resp))
 	}
@@ -63,7 +63,7 @@ func TestPushResources_DuplicateURIUnderDifferentResourceIDRejected(t *testing.T
 	resp, err := client.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, callerID, []*forav1.ResourceEntry{{
 		ContentId: proto.String("shadow"),
 		Domain:    h.publisherDom, Path: path,
-		Terms: []*forav1.LicenseTerm{seedPricedTermEst(1)},
+		Terms: []*forav1.LicenseTerm{seedPricedTermEst(2)},
 	}})))
 	// All-or-nothing: a duplicate-URI (shadow) entry rejects the whole push.
 	if err == nil {
@@ -74,7 +74,7 @@ func TestPushResources_DuplicateURIUnderDifferentResourceIDRejected(t *testing.T
 	// The owner's offer is intact: still exactly one offer, bound to the owner's
 	// URI and still carrying the owner's term. offer_id is minted fresh per
 	// issued offer, so row identity is observed through the signed content: the
-	// shadow entry's term sets estimated_quantity=1 while the owner's sets none,
+	// shadow entry's term sets estimated_quantity=2 while the owner's sets 1,
 	// so any leak of the shadow row is visible on the projected pricing.
 	after := discoverOffers(t, h, uri)
 	if len(after) != 1 {
@@ -83,8 +83,8 @@ func TestPushResources_DuplicateURIUnderDifferentResourceIDRejected(t *testing.T
 	if got := after[0].GetIdentity().GetCanonicalUrl(); got != uri {
 		t.Fatalf("owner offer canonical_url = %q, want %q — shadow push overwrote the URI", got, uri)
 	}
-	if est := after[0].GetPricing().GetEstimatedQuantity(); est != 0 {
-		t.Fatalf("owner offer now carries estimated_quantity=%d (the shadow entry's term) — shadow push overwrote the URI", est)
+	if est := after[0].GetPricing().GetEstimatedQuantity(); est != 1 {
+		t.Fatalf("owner offer now carries estimated_quantity=%d, not the owner's 1 — shadow push overwrote the URI", est)
 	}
 }
 
@@ -101,11 +101,11 @@ func TestPushResources_RepushSameResourceUpsertsCleanly(t *testing.T) {
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 	client := h.signedCat(callerID, priv)
 
 	const path = "/articles/repush"
@@ -163,11 +163,11 @@ func TestPushResources_URIMoveRejectedOfferKeepsBinding(t *testing.T) {
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 	client := h.signedCat(callerID, priv)
 
 	const oldPath = "/articles/move-old"
@@ -201,14 +201,14 @@ func TestPushResources_URIMoveRejectedOfferKeepsBinding(t *testing.T) {
 	}
 
 	// Step 3: /old was not freed — B's claim on it is still an ownership conflict.
-	if _, err := push("claimer", oldPath, seedPricedTermEst(1)); err == nil {
+	if _, err := push("claimer", oldPath, seedPricedTermEst(2)); err == nil {
 		t.Fatal("B claimed /old — the rejected move must not free the URI")
 	} else {
 		assertConnectError(t, err, connect.CodeInvalidArgument, "uri_owned_by_other_resource")
 	}
 
-	// Step 4: discovery still binds /old to A (its term carries no
-	// estimated_quantity; B's discriminator term sets 1) and /new to nothing.
+	// Step 4: discovery still binds /old to A (its term's estimated_quantity is
+	// 1; B's discriminator term sets 2) and /new to nothing.
 	after := discoverOffers(t, h, oldURI)
 	if len(after) != 1 {
 		t.Fatalf("offers at /old = %d, want 1", len(after))
@@ -216,8 +216,8 @@ func TestPushResources_URIMoveRejectedOfferKeepsBinding(t *testing.T) {
 	if got := after[0].GetIdentity().GetCanonicalUrl(); got != oldURI {
 		t.Fatalf("offer at /old carries canonical_url %q, want %q", got, oldURI)
 	}
-	if est := after[0].GetPricing().GetEstimatedQuantity(); est != 0 {
-		t.Fatalf("offer at /old carries estimated_quantity=%d (B's term) — binding moved", est)
+	if est := after[0].GetPricing().GetEstimatedQuantity(); est != 1 {
+		t.Fatalf("offer at /old carries estimated_quantity=%d, not A's 1 — binding moved", est)
 	}
 	if got := discoverOfferCount(t, h, newURI); got != 0 {
 		t.Fatalf("offers at /new = %d, want 0 (the move was rejected)", got)

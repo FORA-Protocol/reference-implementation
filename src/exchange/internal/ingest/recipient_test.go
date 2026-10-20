@@ -2,14 +2,8 @@ package ingest_test
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,6 +15,7 @@ import (
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/ingest"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/ingest/ingesttest"
 )
 
 // A single valid feed line. The push only has to reach the server for these
@@ -90,7 +85,7 @@ func TestRun_RecipientTheWireWouldRefuseStopsTheLocalRun(t *testing.T) {
 				ExchangeURL: url,
 				Exchange:    tc.exchange,
 				TenantID:    "tenant-recipient",
-				KeyPath:     writeContributorKey(t),
+				KeyPath:     ingesttest.WriteContributorKeyFile(t, "publisher.example"),
 				Feed:        strings.NewReader(feedLine),
 				Clk:         clock.System{},
 			})
@@ -134,7 +129,7 @@ func runAgainstRecordingExchange(t *testing.T, exchange string) (recipient, url 
 		ExchangeURL: srv.URL,
 		Exchange:    exchange,
 		TenantID:    "tenant-recipient",
-		KeyPath:     writeContributorKey(t),
+		KeyPath:     ingesttest.WriteContributorKeyFile(t, "publisher.example"),
 		Feed:        strings.NewReader(feedLine),
 		Clk:         clock.System{},
 	}); err != nil {
@@ -159,28 +154,4 @@ func (c *recordingCatalog) PushResources(
 	return connect.NewResponse(&forav1.PushResourcesResponse{
 		Ver: helpers.ProtocolVersion, Accepted: int32(len(req.Msg.GetEntries())),
 	}), nil
-}
-
-// writeContributorKey mints a throwaway contributor keypair on disk in the shape
-// LoadContributorKey reads.
-func writeContributorKey(t *testing.T) string {
-	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("ed25519: %v", err)
-	}
-	doc := ingest.ContributorKey{
-		KID:        "publisher.example",
-		PrivateKey: base64.RawURLEncoding.EncodeToString(priv.Seed()),
-		PublicKey:  base64.RawURLEncoding.EncodeToString(pub),
-	}
-	raw, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatalf("marshal key: %v", err)
-	}
-	path := filepath.Join(t.TempDir(), "contributor-key.json")
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatalf("write key: %v", err)
-	}
-	return path
 }

@@ -122,13 +122,15 @@ run "all_optional_bindings_render" {
     catalog_contributors_json = "[{\"domain\":\"contrib.example\",\"relationship\":\"operator\"}]"
     wba_keys_json             = "[{\"kty\":\"OKP\",\"crv\":\"Ed25519\"}]"
     wba_revocation_url        = "https://news.example.com/wba/revoked"
+    wba_signed_directory_json = "{\"body\":\"{}\",\"content_digest\":\"d\",\"signature_input\":\"i\",\"signature\":\"s\"}"
     bot_ua_allow_json         = "[\"Googlebot\"]"
     bot_ua_deny_json          = "[\"GPTBot\"]"
+    licensed_paths_json       = "[\"/paid/\"]"
   }
 
   assert {
-    condition     = length(cloudflare_workers_script.this.plain_text_binding) == 15
-    error_message = "Four required plus all eleven optional bindings must render"
+    condition     = length(cloudflare_workers_script.this.plain_text_binding) == 17
+    error_message = "Four required plus all thirteen optional bindings must render"
   }
 
   assert {
@@ -136,7 +138,8 @@ run "all_optional_bindings_render" {
       for name in [
         "FORA_VERIFY_KEYS", "FORA_ENFORCE_BINDING", "ORIGIN_URL", "SAME_ZONE_ORIGIN",
         "RSL_BODY", "ACME_TOKENS_JSON", "CATALOG_CONTRIBUTORS_JSON", "WBA_KEYS_JSON",
-        "WBA_REVOCATION_URL", "BOT_UA_ALLOW_JSON", "BOT_UA_DENY_JSON",
+        "WBA_REVOCATION_URL", "WBA_SIGNED_DIRECTORY_JSON", "BOT_UA_ALLOW_JSON", "BOT_UA_DENY_JSON",
+        "LICENSED_PATHS_JSON",
       ] :
       anytrue([
         for binding in cloudflare_workers_script.this.plain_text_binding :

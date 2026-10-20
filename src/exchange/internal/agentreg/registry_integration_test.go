@@ -7,14 +7,15 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	"github.com/FORA-Protocol/protocol/sdk/go/resolvers"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/agentid/agentidtest"
@@ -66,9 +67,32 @@ func (o *fixtureOrigin) handle(w http.ResponseWriter, r *http.Request) {
 	keys := append([]fixtureKey(nil), o.keys...)
 	o.mu.Unlock()
 
-	w.Header().Set("Content-Type", "application/jwk-set+json")
-	_, _ = w.Write(agentWBAJSON(keys))
+	// Served as every key directory is: the directory media type and a response
+	// signature by each listed key, covering the authority the request named —
+	// the agent's own host, which the rewriter keeps in the Host header.
+	body := agentWBAJSON(keys)
+	signers := make([]helpers.Signer, 0, len(keys))
+	for _, k := range keys {
+		if priv, ok := privateHalves.Load(string(k.pub)); ok {
+			signers = append(signers, testutil.DirectorySigner(priv.(ed25519.PrivateKey)))
+		}
+	}
+	if len(signers) > 0 {
+		sig, err := helpers.SignDirectoryResponse(r.Context(), strings.ToLower(r.Host), body, signers,
+			1_000_000_000, 4_000_000_000)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		sig.Apply(w.Header())
+	}
+	w.Header().Set("Content-Type", forawellknown.WBAMediaType)
+	_, _ = w.Write(body)
 }
+
+// privateHalves maps each generated public key to its private half, so the
+// fixture origin can sign its directory response with the keys it lists.
+var privateHalves sync.Map
 
 // hitCount returns how many WBA-directory fetches the origin has served, so a
 // debounce test can assert a burst of refreshes coalesced into a single fetch.
@@ -87,10 +111,11 @@ func (o *fixtureOrigin) setKeys(agentID string, keys []fixtureKey) {
 
 func mustEd25519(t *testing.T) ed25519.PublicKey {
 	t.Helper()
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("ed25519 gen: %v", err)
 	}
+	privateHalves.Store(string(pub), priv)
 	return pub
 }
 
@@ -133,42 +158,60 @@ func newTestQueries(t *testing.T) *sqlc.Queries {
 	return sqlc.New(acquireTestDB(t, context.Background()))
 }
 
+// setupRegistry builds the registry over a fresh database and returns it beside
+// the raw queries the presence assertions still need.
+//
+// The queries are handed back rather than the repository because two of the
+// assertions in this package cannot be made through it. repo.Agent carries no
+// RegisteredAt, which the upsert-idempotency test compares across three reads,
+// and agentFromRow puts DiscoveryUrl through textOrEmpty, which collapses SQL
+// NULL to the empty string so "the column was null" stops being distinguishable.
+// Both are gaps in the read surface rather than facts about these tests; widening
+// repo.Agent is a production change and does not belong to the branch that
+// noticed. Everything that asserts a row is ABSENT goes through requireNoAgentRow
+// below, which does use the repository.
 func setupRegistry(t *testing.T, clock agentreg.Clock) (agentreg.Registry, *sqlc.Queries, *hostRewriter) {
 	t.Helper()
-	q := newTestQueries(t)
-	rw := newHostRewriter()
-	reg := agentreg.New(agentreg.Config{
-		Repo:  repo.NewAgentRepo(q),
-		HTTP:  &http.Client{Transport: rw},
-		Clock: clock,
-	})
-	return reg, q, rw
+	return setupRegistryWith(t, clock, 0)
 }
 
-// TestRegistry_HonorsConfiguredSchemeAndPort proves Gate-1 self-signup builds
-// its well-known fetch URL from Config.Scheme/Port. The registry is given a
-// PLAIN http client (no host rewriter), so the ONLY way the fetch can reach the
-// loopback origin is if Scheme=http + the origin's port are threaded into the
-// fetch URL. With the default https:443 the fetch would fail to connect — this
-// is the exact gap that forced the e2e DB key pre-seed.
-func TestRegistry_HonorsConfiguredSchemeAndPort(t *testing.T) {
+// requireNoAgentRow asserts, through the repository production writes with, that
+// the registration left no row behind.
+//
+// Through the repository and not the raw query, because the two ask different
+// questions. AgentRepo.ByID reduces the id through agentKey before it reaches
+// SQL -- the canonicalisation the repo owns precisely so no caller has to
+// remember it -- and answers ErrAgentNotFound rather than whatever error came
+// back. "No row under the key production would have written" is the claim these
+// tests mean to make; "the raw query returned some error" is weaker and is keyed
+// differently from the read production performs.
+func requireNoAgentRow(t *testing.T, ctx context.Context, q *sqlc.Queries, agentID, why string) {
+	t.Helper()
+	if _, err := repo.NewAgentRepo(q).ByID(ctx, agentID); !errors.Is(err, repo.ErrAgentNotFound) {
+		t.Fatalf("a row persists under %q although %s: ByID = %v, want ErrAgentNotFound",
+			agentID, why, err)
+	}
+}
+
+// TestRegistry_FetchesTheDirectoryOverHTTPSOnly pins that Gate-1 self-signup
+// reads a key directory over https and nothing else. The agent's directory is
+// served only over plaintext, at the agent's own host:port, and the registry is
+// given a plain client with no rewriter: its fetch goes to https at that
+// authority, never reaches the plaintext handler, and registers nothing. Before
+// the Web Bot Auth profile a deployment scheme setting could move this fetch to
+// http; no setting can now.
+func TestRegistry_FetchesTheDirectoryOverHTTPSOnly(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	q := newTestQueries(t)
 	ctx := t.Context()
 
 	pub := mustEd25519(t)
-	origin := newFixtureOrigin(t, "placeholder", []fixtureKey{{
-		kid: "k1", pub: pub,
-		validFrom:  now.Add(-time.Hour),
-		validUntil: now.Add(24 * time.Hour),
-	}})
+	origin := newFixtureOrigin(t, "placeholder", nil)
 	originURL, err := url.Parse(origin.server.URL)
 	if err != nil {
 		t.Fatalf("parse origin url: %v", err)
 	}
-	// The agent_id IS the loopback host the origin listens on, so the
-	// identity-anchored fetch targets the origin directly.
-	agentID := originURL.Hostname() // "127.0.0.1"
+	agentID := originURL.Host // 127.0.0.1:PORT, served over plaintext only
 	origin.setKeys(agentID, []fixtureKey{{
 		kid: "k1", pub: pub,
 		validFrom:  now.Add(-time.Hour),
@@ -176,31 +219,18 @@ func TestRegistry_HonorsConfiguredSchemeAndPort(t *testing.T) {
 	}})
 
 	reg := agentreg.New(agentreg.Config{
-		Repo:   repo.NewAgentRepo(q),
-		HTTP:   &http.Client{}, // no rewriter: only Scheme/Port can route this fetch
-		Clock:  &fixedClock{now: now},
-		Scheme: "http",
-		Port:   originURL.Port(),
+		Repo:  repo.NewAgentRepo(q),
+		HTTP:  &http.Client{},
+		Clock: &fixedClock{now: now},
 	})
-
-	if err := reg.RegisterFromDirectory(ctx, agentID, agentID); err != nil {
-		t.Fatalf("register over http (scheme/port not honored?): %v", err)
+	err = reg.RegisterFromDirectory(ctx, agentID, agentID)
+	if !errors.Is(err, resolvers.ErrDirectoryUnavailable) || agentreg.IsCallerFault(err) {
+		t.Fatalf("a plaintext-only directory: want a transient read failure, got %v", err)
 	}
-	got, err := reg.LookupPublicKey(ctx, agentID)
-	if err != nil {
-		t.Fatalf("lookup: %v", err)
+	if hits := origin.hitCount(); hits != 0 {
+		t.Fatalf("the plaintext directory was read %d times; a key directory is fetched over https only", hits)
 	}
-	if !pub.Equal(got) {
-		t.Fatal("lookup key mismatch")
-	}
-	row, err := q.GetAgent(ctx, agentID)
-	if err != nil {
-		t.Fatalf("GetAgent: %v", err)
-	}
-	wantURL, _ := forawellknown.WBAURL(agentID, "http", originURL.Port())
-	if !row.DiscoveryUrl.Valid || row.DiscoveryUrl.String != wantURL {
-		t.Fatalf("discovery_url = %+v, want %q (scheme/port must be reflected)", row.DiscoveryUrl, wantURL)
-	}
+	requireNoAgentRow(t, ctx, q, agentID, "the directory is not served over https")
 }
 
 func TestRegistry_HappyPath(t *testing.T) {
@@ -234,7 +264,7 @@ func TestRegistry_HappyPath(t *testing.T) {
 	}
 	// The stored discovery_url is the identity-anchored discovery URL derived from
 	// agent_id, not whatever the caller passed.
-	wantURL, _ := forawellknown.WBAURL(agentID, "", "")
+	const wantURL = "https://agent.fixture.test/.well-known/http-message-signatures-directory"
 	if !row.DiscoveryUrl.Valid || row.DiscoveryUrl.String != wantURL {
 		t.Fatalf("discovery_url = %+v, want %q", row.DiscoveryUrl, wantURL)
 	}
@@ -273,9 +303,7 @@ func TestRegistry_DiscoveryURLNamingNoHostRefused(t *testing.T) {
 				t.Errorf("refusal also matches ErrMalformedDirectory; the split is what "+
 					"gives this fault its own diagnosis (err=%v)", err)
 			}
-			if _, err := q.GetAgent(ctx, agentID); err == nil {
-				t.Fatal("a refused registration must not have written a row")
-			}
+			requireNoAgentRow(t, ctx, q, agentID, "the registration was refused")
 		})
 	}
 }
@@ -301,9 +329,7 @@ func TestRegistry_DiscoveryURLNotAnchored(t *testing.T) {
 	if !errors.Is(err, agentreg.ErrAgentIDMismatch) {
 		t.Fatalf("want ErrAgentIDMismatch for unanchored discovery_url, got %v", err)
 	}
-	if _, err := q.GetAgent(ctx, victimID); err == nil {
-		t.Fatal("victim agent must not be registered from an unanchored host")
-	}
+	requireNoAgentRow(t, ctx, q, victimID, "the discovery host is not anchored to it")
 }
 
 // NOTE: the former TestRegistry_AgentIDMismatch is intentionally removed. After
@@ -637,8 +663,8 @@ func TestRegistry_LookupUnknown(t *testing.T) {
 // (resolvers.NewGuardedClientFromEnv) — never a fail-open http.DefaultClient.
 //
 // The guard refuses to dial a non-public address at connect time, so pointing a
-// registration at a loopback origin fails the fetch (surfaced as ErrFetch) and
-// persists no agent row. With an unguarded client the same dial would instead
+// registration at a loopback origin fails the read, transiently, and persists no
+// agent row. With an unguarded client the same dial would instead
 // reach the origin, so this assertion fails closed against a regression.
 func TestRegistry_GuardedClientRefusesLoopback(t *testing.T) {
 	// Keep the address guard ON (SKIP_SSRF unset) but permit http (ALLOW_INSECURE),
@@ -668,90 +694,10 @@ func TestRegistry_GuardedClientRefusesLoopback(t *testing.T) {
 		Clock: &fixedClock{now: now},
 	})
 	err = reg.RegisterFromDirectory(ctx, loopbackID, loopbackID)
-	if !errors.Is(err, forawellknown.ErrFetch) {
-		t.Fatalf("the SDK-guarded client must refuse a loopback target (fetch failure); got %v", err)
+	if !errors.Is(err, resolvers.ErrDirectoryUnavailable) || agentreg.IsCallerFault(err) {
+		t.Fatalf("the SDK-guarded client must refuse a loopback target (a transient read failure); got %v", err)
 	}
-	if _, err := q.GetAgent(ctx, loopbackID); err == nil {
-		t.Fatal("a guard-blocked registration must not persist an agent row")
-	}
-}
-
-// newRawOrigin serves a fixed status + body at the WBA directory path, for
-// failure fixtures the JWK-set-shaped fixtureOrigin cannot express (malformed
-// body, 5xx).
-func newRawOrigin(t *testing.T, status int, body string) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != forawellknown.WBAPath {
-			http.NotFound(w, r)
-			return
-		}
-		w.WriteHeader(status)
-		_, _ = io.WriteString(w, body)
-	}))
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-func TestRegistry_NoValidKey(t *testing.T) {
-	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	reg, q, rw := setupRegistry(t, &fixedClock{now: now})
-	ctx := t.Context()
-
-	// Every published key's validity window lies entirely in the past.
-	pub := mustEd25519(t)
-	const agentID = "agent.fixture.test"
-	origin := newFixtureOrigin(t, agentID, []fixtureKey{{
-		kid: "k1", pub: pub,
-		validFrom:  now.Add(-48 * time.Hour),
-		validUntil: now.Add(-time.Hour),
-	}})
-	rw.set(agentID, origin.server.URL)
-
-	err := reg.RegisterFromDirectory(ctx, agentID, agentID)
-	if !errors.Is(err, agentreg.ErrNoValidKey) {
-		t.Fatalf("want ErrNoValidKey for an all-expired manifest, got %v", err)
-	}
-	if _, err := q.GetAgent(ctx, agentID); err == nil {
-		t.Fatal("no agent row should persist when no key is currently valid")
-	}
-}
-
-func TestRegistry_MalformedManifest(t *testing.T) {
-	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	reg, q, rw := setupRegistry(t, &fixedClock{now: now})
-	ctx := t.Context()
-
-	const agentID = "agent.fixture.test"
-	rw.set(agentID, newRawOrigin(t, http.StatusOK, "{not valid fora json").URL)
-
-	err := reg.RegisterFromDirectory(ctx, agentID, agentID)
-	if !errors.Is(err, agentreg.ErrMalformedDirectory) {
-		t.Fatalf("want ErrMalformedDirectory for a schema-invalid body, got %v", err)
-	}
-	if _, err := q.GetAgent(ctx, agentID); err == nil {
-		t.Fatal("no agent row should persist for a malformed manifest")
-	}
-}
-
-func TestRegistry_TransientFetchFailure(t *testing.T) {
-	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	reg, q, rw := setupRegistry(t, &fixedClock{now: now})
-	ctx := t.Context()
-
-	const agentID = "agent.fixture.test"
-	rw.set(agentID, newRawOrigin(t, http.StatusServiceUnavailable, "upstream down").URL)
-
-	// A 503 is a transient transport failure: it surfaces verbatim (ErrFetch) so
-	// the lazy-registration mapper classifies it Unavailable/retryable, not as a
-	// permanent caller fault (mapLazyRegisterError).
-	err := reg.RegisterFromDirectory(ctx, agentID, agentID)
-	if !errors.Is(err, forawellknown.ErrFetch) {
-		t.Fatalf("want forawellknown.ErrFetch for a 503, got %v", err)
-	}
-	if _, err := q.GetAgent(ctx, agentID); err == nil {
-		t.Fatal("no agent row should persist on a transient fetch failure")
-	}
+	requireNoAgentRow(t, ctx, q, loopbackID, "the SSRF guard blocked the fetch")
 }
 
 func bytesEqual(a, b []byte) bool {

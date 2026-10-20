@@ -1,7 +1,8 @@
-// Package forasdk is the identity service's outbound FORA legs that the
-// protocol SDK now owns: discovery through the Broker, the usage report to the
-// Exchange that issued the offer, and the content fetch against a signed
-// delivery URL.
+// Package forasdk is the identity service's outbound FORA legs, all of which
+// the protocol SDK owns: discovery and the purchase through the Broker, the
+// usage report to the Exchange that issued the offer, the content fetch against
+// a signed delivery URL, and the two account calls — opening an account at an
+// Exchange and asking after one.
 //
 // # Why a client per call
 //
@@ -13,11 +14,11 @@
 // key the context resolves to.
 //
 // What that costs is bounded, because the expensive parts are injected rather
-// than rebuilt: the endpoint resolver holds the manifest cache and is shared
-// with the account leg so both resolve an Exchange the same way, the home
-// transport holds its connection pool, and the signature window holds the
-// running maximum that keeps repeat signatures apart. What is per-call is a
-// handful of small values over those.
+// than rebuilt: the endpoint resolver holds the manifest cache, so every leg
+// here resolves an Exchange the same way; the requirements reader holds its
+// compiled-schema memo; and the home transport holds its connection pool. What
+// is per-call is a handful of small values over those, the two signature windows
+// among them: each is the SDK's plain clock window and holds no state.
 //
 // The GUARDED leg is the exception, and it is worth naming because the obvious
 // reading is wrong. The SDK composes its SSRF guard by cloning the transport it
@@ -26,12 +27,35 @@
 //
 // Reuse there comes from holding one client across a batch — see ContentSession,
 // where the batch size is the caller's choice and the cost would otherwise scale
-// with it. ReportUsage holds no client across anything: one report is one call,
-// so it pays a handshake and abandons a transport whose idle connection stays
-// open until it times out. That is bounded by how often an agent reports rather
-// than by anything a caller can inflate, which is why it is stated here and not
-// fixed — closing it means either caching clients across calls, or an SDK seam
-// that takes an already-guarded transport instead of cloning one.
+// with it. The three single-call legs hold no client across anything: one report,
+// one registration or one status question is one call, so each pays a TLS
+// handshake and abandons a transport whose idle connection stays open until it
+// times out, along with the per-origin client pool built beside it.
+//
+// The call rate on those legs is not bounded by anything this service controls.
+// AccountStatus takes a domain and nothing else, buys nothing, and an
+// authenticated agent can call it in a loop, so the handshakes follow the call
+// rate, aimed at whatever host that agent named. ReportUsage was the only leg
+// paying this cost when the paragraph was first written, and its rate follows how
+// often an agent reports; the account legs are the ones a caller can inflate.
+//
+// One half of that IS bounded here. guardedIdleTimeout caps how long the socket
+// each abandoned transport leaves behind stays open, where Go's default holds it
+// for 90 seconds — so what accumulates under a burst is bounded by the burst
+// rather than by an idle timer nobody chose. The handshake per call, and the call
+// rate itself, are not bounded by it.
+//
+// It is also a REGRESSION rather than a standing cost. The hand-written leg these
+// two account calls replaced built one guarded client once and kept an LRU of
+// Connect clients over that single transport, so repeated account calls to one
+// Exchange reused a connection.
+//
+// The durable close is the SDK seam named above: one that accepts an
+// already-guarded round-tripper instead of composing the guard by cloning. A
+// per-agent client cache is NOT the alternative it looks like — the SDK's signing
+// transport binds one signer for its lifetime and its key id is fixed at
+// construction, taking neither a request nor a context, so a service that signs
+// for every agent it fronts cannot hold one transport per agent.
 //
 // # Two transports, and why the guard sits on only one
 //
@@ -41,13 +65,9 @@
 // serves names an endpoint, and a signed call then goes there. That leg dials
 // under the SDK's SSRF guard, so the dial-time address check that already covers
 // the manifest fetch also covers the RPC that follows it. Without that the guard
-// would stop one hop short of the request that matters.
-//
-// # What is NOT here
-//
-// Register, account status and the purchase itself stay in foraclient. The first
-// two have no SDK verb yet; the purchase goes to the Broker's relay route, which
-// is a raw HTTP POST rather than the ExchangeService RPC the SDK's Execute calls.
+// would stop one hop short of the request that matters. The purchase is a
+// Broker call, BrokerService.ExecuteTransaction, so it takes the Broker's
+// transport like discovery does.
 package forasdk
 
 import (
@@ -67,6 +87,28 @@ import (
 // agent is waiting on the other end of a tool call — so a request that has not
 // answered within this is more useful as an error than as a hang.
 const DefaultTimeout = 30 * time.Second
+
+// guardedIdleTimeout bounds how long a socket left behind by a guarded call stays
+// open with nothing on it.
+//
+// The SDK composes its SSRF guard by CLONING the base transport, so every call on
+// that leg gets its own connection pool and abandons it when the call returns.
+// Nothing reuses that socket -- the next call clones again -- but the abandoned
+// transport keeps its own idle timer, and Go's default leaves the connection open
+// for 90 seconds. An authenticated agent picks the call rate on these legs, so
+// the sockets held for nothing accumulate at whatever rate it chooses.
+//
+// Short enough that the held sockets do not outlive the burst that made them, and
+// long enough that a redirect or a retry within one call still finds the
+// connection. It is deliberately NOT applied to homeBase: that transport is
+// shared and keeps its pool, so reuse there is real and shortening it would
+// throw away connections the next call wants.
+//
+// This bounds the LEAKED SOCKETS and nothing else. It does not bound the call
+// rate, and it does not recover the connection reuse the hand-written leg had --
+// that needs the SDK seam named in the package doc, one that accepts an
+// already-guarded round-tripper instead of cloning.
+const guardedIdleTimeout = 5 * time.Second
 
 // DefaultSignatureTTL is how long an outbound RFC 9421 signature stays valid.
 // Short enough that a captured request is not replayable for long, long enough
@@ -89,16 +131,16 @@ const DefaultPoPTTL = 30 * time.Second
 // with, and it is never dialled.
 //
 // The SDK's NewClient takes the agent's HOME Exchange, which Discover and
-// Execute go to. This package calls neither: its report leg routes to the
-// Exchange the offer names, resolved per call from that Exchange's own manifest,
-// and its fetch leg speaks to a delivery edge. A reserved-invalid host is what
+// Execute go to. This package calls neither. Its report and account legs route
+// to the Exchange the message names, resolved per call from that Exchange's own
+// manifest, and its fetch leg speaks to a delivery edge. A reserved-invalid host is what
 // makes that structural — should a home-Exchange call ever be added here by
 // mistake, it fails loudly at the first dial instead of quietly reaching
 // whatever a plausible-looking default pointed at.
 const homeExchangePlaceholder = "https://home.invalid"
 
-// Config wires a Client. Keys, BrokerURL and OfferKeys are required; the rest
-// take defaults.
+// Config wires a Client. Keys, BrokerURL, OfferKeys, Endpoints and Requirements
+// are required; the rest take defaults.
 type Config struct {
 	// Keys resolves the key each outbound request is signed with, per request,
 	// from the authenticated identity on the context. Pass
@@ -120,14 +162,30 @@ type Config struct {
 	// SSRF-guarded client, because the domain comes off an offer rather than out
 	// of configuration.
 	//
-	// REQUIRED, and INJECTED rather than built here, which is the change worth
-	// naming: the account leg needs the SAME instance. Two resolvers would be two
+	// REQUIRED, and INJECTED rather than built here. Two resolvers would be two
 	// manifest caches and two chances for one leg to apply the same-host rule
 	// while the other did not — and the account leg is where a wrong answer sends
 	// a signed registration somewhere the operator never chose. Building it at the
 	// composition root is also what lets a deployment's Exchange policy sit on it,
-	// where no leg can be routed around it.
+	// where no leg can be routed around it, and it is the only place that can show
+	// the whole outbound posture at once.
 	Endpoints connect.EndpointResolver
+
+	// Requirements reads what one Exchange asks of a registration — the terms
+	// revision that submitting one accepts, and the schema its registration_data
+	// must match — from that Exchange's own manifest, freshly on every read.
+	//
+	// REQUIRED and INJECTED, for the same reason Endpoints is, and the leading
+	// reason is the deployment's Exchange POLICY. A zero WellKnownOptions leaves
+	// the SDK reader's Allow hook nil, so a defaulted reader would fetch the
+	// manifest of any domain an authenticated agent names, including one the
+	// operator's allowlist excludes -- on the one outbound leg that dials before
+	// an endpoint resolver could apply that policy for it. The default is thinner
+	// in two further ways: it projects a few members where this deployment holds
+	// the whole document to the published schema, and it memoises nothing where
+	// this one keeps the compiled validator per distinct document. Defaulting
+	// here would drop all three silently, so New refuses without one.
+	Requirements connect.RegistrationRequirementsReader
 
 	// Timeout bounds a single outbound RPC. Defaults to DefaultTimeout.
 	Timeout time.Duration
@@ -172,16 +230,21 @@ type Client struct {
 	// would fetch it every time.
 	endpoints connect.EndpointResolver
 
-	// signWindow is ONE window for the whole process. It has to be: the monotonic
-	// variant keeps a running maximum so two identical requests inside one second
-	// cannot produce byte-identical signatures, which the peers' replay stores
-	// reject as a duplicate. A per-call window starts from zero and never sees the
-	// previous call, so the property it exists for would not hold.
+	// requirements answers what one Exchange asks of a registration. Shared
+	// across calls so the compiled-schema memo it holds survives them; the
+	// manifest read behind it is never cached, which is the protocol's rule.
+	requirements connect.RegistrationRequirementsReader
+
+	// signWindow stamps every FORA request signature: the SDK's clock window,
+	// now() to now()+SignatureTTL. It does not keep signatures unique: the SDK
+	// signing transport puts a fresh nonce on every signature, and that is what
+	// keeps two identical requests inside one second from colliding in the
+	// peers' replay stores.
 	signWindow core.Window
-	// proofWindow is a plain clock window rather than the monotonic one. The
-	// delivery edge keeps no replay store to collide in, so the drift buys
-	// nothing there and a proof whose expiry ran ahead of the clock would only
-	// widen the window in which an observed request can be repeated.
+	// proofWindow stamps every proof of possession: the same clock window over
+	// PoPTTL, a knob of its own because the delivery edge keeps no replay store,
+	// so this lifetime is the whole window in which an observed request can be
+	// repeated.
 	proofWindow core.Window
 
 	// homeBase and guardedBase are shared so every call dials on one set of
@@ -215,7 +278,15 @@ func New(cfg Config) (*Client, error) {
 	if cfg.Endpoints == nil {
 		return nil, errors.New(
 			"forasdk: Config.Endpoints is required; build the resolver once at the " +
-				"composition root and inject it, so this leg and the account leg share one")
+				"composition root and inject it, so every leg resolves an Exchange the same way",
+		)
+	}
+	if cfg.Requirements == nil {
+		return nil, errors.New(
+			"forasdk: Config.Requirements is required; the SDK's own reader would be " +
+				"used otherwise, and it applies no Exchange allowlist, does not validate " +
+				"the manifest against the published schema and memoises no compiled schema",
+		)
 	}
 	cfg = cfg.withDefaults()
 	return &Client{
@@ -223,10 +294,11 @@ func New(cfg Config) (*Client, error) {
 		brokerURL:    cfg.BrokerURL,
 		offerKeys:    cfg.OfferKeys,
 		endpoints:    cfg.Endpoints,
-		signWindow:   core.Window(forahttpsig.MonotonicWindow(cfg.Clock, cfg.SignatureTTL)),
-		proofWindow:  core.Window(forahttpsig.ClockWindow(cfg.Clock, cfg.PoPTTL)),
+		requirements: cfg.Requirements,
+		signWindow:   core.ClockWindow(cfg.Clock.Now, cfg.SignatureTTL),
+		proofWindow:  core.ClockWindow(cfg.Clock.Now, cfg.PoPTTL),
 		homeBase:     clonedTransport(),
-		guardedBase:  clonedTransport(),
+		guardedBase:  guardedTransportBase(),
 		timeout:      cfg.Timeout,
 		fetchTimeout: cfg.FetchTimeout,
 		maxBytes:     cfg.MaxBytes,
@@ -237,9 +309,9 @@ func New(cfg Config) (*Client, error) {
 // rest of it does not restate the defaulting per consumer.
 //
 // It is not every optional field, and the ones it leaves alone are left alone on
-// purpose. Endpoints has no default to settle: New requires it, because the
-// resolver belongs to the composition root that can show the whole outbound
-// posture and hand the same instance to both legs. FetchTimeout and MaxBytes are
+// purpose. Endpoints and Requirements have no default to settle: New requires
+// both, because each belongs to the composition root that can show the whole
+// outbound posture and hand one instance to every leg. FetchTimeout and MaxBytes are
 // passed on as given, because their defaults belong to the code that consumes
 // them — the SDK's own, in both cases — and a second default here would be a copy
 // that can disagree.
@@ -268,4 +340,14 @@ func clonedTransport() *http.Transport {
 		return t.Clone()
 	}
 	return &http.Transport{}
+}
+
+// guardedTransportBase is the template the SSRF-guarded leg's per-call transports
+// are cloned from, carrying the idle bound those clones would otherwise take from
+// Go's default. The setting has to live here rather than on the clone, because
+// the clone is made inside the SDK and this is the only value that reaches it.
+func guardedTransportBase() *http.Transport {
+	t := clonedTransport()
+	t.IdleConnTimeout = guardedIdleTimeout
+	return t
 }

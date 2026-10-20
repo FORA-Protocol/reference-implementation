@@ -42,7 +42,7 @@ func TestExecuteTransaction_RequestKeyReuseWithNewOfferRefused(t *testing.T) {
 	if _, err := executeSingleItem(t, h, idem, first); err != nil {
 		t.Fatalf("original execute must succeed: %v", err)
 	}
-	balAfterFirst, err := h.billing.GetBalance(ctx, h.billingRef)
+	balAfterFirst, err := h.billing.GetBalance(ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after first: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestExecuteTransaction_RequestKeyReuseWithNewOfferRefused(t *testing.T) {
 	// No side effects from the refused reuse: no row under the new offer's
 	// derived key, and the balance still reflects exactly one charge.
 	assertNoTransaction(t, h, derivedTxKey(idem, second))
-	balAfterReuse, err := h.billing.GetBalance(ctx, h.billingRef)
+	balAfterReuse, err := h.billing.GetBalance(ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after refused reuse: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestExecuteTransaction_RequestKeyIndependentPerAgent(t *testing.T) {
 
 	// Agent B: its own registered key, its own freshly discovered offers, the
 	// SAME idempotency_key value, and its own complete-set proof over each.
-	clientB, _, bPriv := h.addCallerWithKey(t, "agent-b-key-scope", "AGENT")
+	clientB, bPriv := h.addCallerWithKey(t, "agent-b-key-scope", "AGENT")
 	bRequester := newRequester("agent-b-key-scope", "agent-b.example")
 	executeAsB := func(offer *forav1.Offer) (*connect.Response[forav1.TransactionResponse], error) {
 		req := &forav1.TransactionRequest{

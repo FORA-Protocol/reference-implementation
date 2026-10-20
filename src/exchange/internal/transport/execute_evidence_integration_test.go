@@ -218,7 +218,7 @@ func TestExecuteTransaction_EvidenceAlgorithmLabelsAreServerDerived(t *testing.T
 	offer := discoverOffer(t, h, uri)
 	offer.SignatureAlgorithm = "RS256-FORGED"
 
-	requester := agentRequester("agent-test")
+	requester := agentRequester()
 	const reqKey = "tx-ev-alg"
 	acceptance := signAcceptanceFor(t, h.callerPriv, offer, requester, reqKey)
 	acceptance.SignatureAlgorithm = "" // an empty label still satisfies NOT NULL
@@ -427,7 +427,7 @@ func TestExecuteTransaction_PartiallyDeniedBatchEvidence(t *testing.T) {
 	}
 	tamperedB.OfferId = genuineB.GetOfferId() + "-tampered"
 
-	requester := agentRequester("agent-test")
+	requester := agentRequester()
 	const reqKey = "tx-ev-partial"
 	resp, err := executeItems(
 		t, h, reqKey,

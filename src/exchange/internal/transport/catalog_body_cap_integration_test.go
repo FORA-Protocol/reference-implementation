@@ -80,11 +80,11 @@ func TestPushResources_CatalogBodyOverCapIsRefusedAsResourceExhausted(t *testing
 	t.Run("signed contributor", func(t *testing.T) {
 		h := newPushHarness(t)
 		h.publisher.setContributors(callerID)
-		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		_, priv, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
 			t.Fatalf("caller key: %v", err)
 		}
-		h.publishAgent(t, callerID, pub)
+		h.publishAgent(t, callerID, priv)
 		signing := newSigningTransport(h.baseTransport, callerID, priv)
 
 		const path = "/cap/body-over-signed"
@@ -149,11 +149,11 @@ func TestPushResources_CatalogMessageOverCapIsResourceExhausted(t *testing.T) {
 	const callerID = "caller.example"
 	h := newPushHarness(t)
 	h.publisher.setContributors(callerID)
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("caller key: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 	gz := foraconnect.NewCatalogServiceClient(
 		&http.Client{Transport: newSigningTransport(h.baseTransport, callerID, priv)},
 		h.server.URL, connect.WithGRPC(), connect.WithSendGzip(),

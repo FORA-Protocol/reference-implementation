@@ -38,11 +38,12 @@ func SendAbsoluteForm(t *testing.T, socketHost string, req *http.Request, body [
 	fmt.Fprintf(&b, "Content-Length: %d\r\n\r\n", len(body))
 	b.Write(body)
 
-	conn, err := net.Dial("tcp", socketHost)
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(req.Context(), "tcp", socketHost)
 	if err != nil {
 		t.Fatalf("dial %s: %v", socketHost, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := io.WriteString(conn, b.String()); err != nil {
 		t.Fatalf("write raw request: %v", err)
 	}

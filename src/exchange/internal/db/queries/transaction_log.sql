@@ -4,9 +4,8 @@
 INSERT INTO fora.transaction_log (
     transaction_id, idempotency_key, tenant_id, agent_id, resource_id,
     offer_id, agent_identity_hash, signed_url_hash, expiry,
-    billing_id, unit_cost, currency, consumed_unit, denial_reason,
-    result_payload
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+    billing_id, unit_cost, currency, consumed_unit, result_payload
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 RETURNING *;
 
 -- name: GetTransactionByIdempotencyKey :one
@@ -20,3 +19,9 @@ SELECT * FROM fora.transaction_log WHERE idempotency_key = $1;
 -- tenant-filtered; the returned row carries tenant_id so callers scope/assert
 -- the tenant binding themselves.
 SELECT * FROM fora.transaction_log WHERE transaction_id = $1;
+
+-- name: GetTransactionByTenantAndID :one
+-- Reads one tenant's transaction. A caller that reads on behalf of a tenant
+-- uses this rather than GetTransactionByID, so the tenant predicate is part of
+-- the query and not a check every such caller has to remember.
+SELECT * FROM fora.transaction_log WHERE tenant_id = $1 AND transaction_id = $2;

@@ -53,9 +53,10 @@ func detailsOf[T proto.Message](tb testing.TB, err error) []T {
 // more. ValidationViolations below reads a different message — protovalidate's
 // Violations, which arrives as a CONTAINER holding the list rather than as one
 // detail per violation — so it flattens where this one collects. The walk under
-// both is detailsOf above; only the message type and the flattening differ. The
-// one hand-written walk left anywhere else is in the identity MCP error mapper,
-// which is PRODUCTION code and cannot use a helper that fails a test.
+// both is detailsOf above; only the message type and the flattening differ.
+// Production code keeps its own walks, because it cannot use a helper that fails
+// a test: the identity MCP error mapper and the Broker purchase service's
+// firstErrorDetail.
 //
 // It takes a plain error and unwraps it in detailsOf, because no caller holds a
 // *connect.Error already: every one of them starts from what an RPC or an error

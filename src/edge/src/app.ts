@@ -1,10 +1,13 @@
 import { Hono } from 'hono';
 import type { Context, MiddlewareHandler } from 'hono';
 
-import { type PopResult, verifyAgentBinding } from '@fora-protocol/sdk-l1/pop';
-import { type VerifyResult, verifyEd25519SignedUrl } from '@fora-protocol/sdk-l1/verify';
+import { type Ed25519Verify, type PopResult, verifyAgentBinding } from '@fora-protocol/sdk/pop';
+import { type VerifyResult, verifyEd25519SignedUrl } from '@fora-protocol/sdk/verify';
+import { AcceptSignatureHeader } from '@fora-protocol/sdk/wire';
 
 import { classifyClient } from './bot-classification.js';
+import { webCryptoEd25519 } from './ed25519.js';
+import { inLicensedScope } from './licensed-scope.js';
 import { type DeliveryFacts, logDelivery, logDeny, logEvent } from './log.js';
 import {
   type AppDeps,
@@ -12,6 +15,7 @@ import {
   WBA_DIRECTORY_CONTENT_TYPE,
   WBA_PATH,
   WELL_KNOWN_PATH,
+  signedDirectoryHeaders,
 } from './types.js';
 
 export type { AppVariables } from './types.js';
@@ -37,14 +41,24 @@ const requestIdMiddleware: MiddlewareHandler<{ Variables: AppVariables }> = asyn
 function mountWellKnownRoutes(app: App, deps: AppDeps): void {
   app.get('/healthz', (c) => c.text('ok'));
   app.get(WELL_KNOWN_PATH, (c) => c.json(deps.manifest));
-  // Pure Web Bot Auth directory: the publisher's Ed25519 signing key(s) as a JWK
-  // Set, served with application/jwk-set+json so any off-the-shelf WBA verifier
-  // can read it. Absent (404) on deployments that publish no signing key.
+  // Pure Web Bot Auth directory: the publisher's Ed25519 signing key(s), served
+  // with application/http-message-signatures-directory+json, the media type the
+  // Web Bot Auth profile names. Absent (404) on deployments that publish no
+  // signing key.
+  // A pre-signed directory is served byte for byte with its response signatures;
+  // without one the directory is served unsigned, which a reader under the
+  // profile refuses to take keys from.
   app.get(WBA_PATH, (c) => {
+    if (deps.wbaSigned) {
+      return c.body(deps.wbaSigned.body, 200, signedDirectoryHeaders(deps.wbaSigned));
+    }
     if (!deps.wba) return c.text('not found', 404);
     return c.body(JSON.stringify(deps.wba), 200, { 'content-type': WBA_DIRECTORY_CONTENT_TYPE });
   });
-  app.get('/rsl.txt', (c) => c.text(deps.rslBody ?? '', 200, { 'content-type': 'text/plain' }));
+  app.get('/rsl.txt', (c) => {
+    if (!deps.rslBody?.trim()) return c.text('not found', 404);
+    return c.text(deps.rslBody, 200, { 'content-type': 'text/plain' });
+  });
   app.get('/.well-known/fora-verify/:token', (c) => {
     const token = c.req.param('token');
     const body = deps.acmeTokens?.[token];
@@ -70,8 +84,10 @@ async function catchallHandler(
     // (form posts, webhooks, APIs) carry no licensable content in the response
     // and routinely come from clients without a browser User-Agent, so they
     // pass straight to the origin. Search crawlers pass like humans — the
-    // publisher wants indexing; only AI bots are sent to negotiate.
-    if (isReadMethod(c.req.method)) {
+    // publisher wants indexing; only AI bots are sent to negotiate. And only
+    // inside the paths the publisher licenses: the rest of the site is not for
+    // sale, so it passes like any other read.
+    if (isReadMethod(c.req.method) && inLicensedScope(url.pathname, deps.licensedPaths)) {
       const cls = classifyClient(
         userAgent,
         deps.botSignal?.(c.req.raw),
@@ -158,16 +174,27 @@ async function enforceBinding(
     method: c.req.method,
     headers: c.req.raw.headers,
     agentId,
+    verifyEd25519: ed25519Of(deps),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
   });
   if (!pop.ok) return handlePopResult(c, pop);
   return undefined;
 }
 
+// A refusal the agent can fix by signing again — no signature, a missing or
+// wrong tag, a covered set other than the profile's, a Signature-Agent in a
+// refused form — carries the SDK's Accept-Signature value (POP_ACCEPT_SIGNATURE)
+// and is answered 401 with it (RFC 9421 §5.1, WG-00 §5.3), as the SDK's Hono
+// binding answers it. Every other refusal is 403. The body is the same
+// {error, reason} either way.
 function handlePopResult(c: Context<{ Variables: AppVariables }>, pop: PopResult): Response {
   const reason = pop.reason ?? 'unknown';
   logDeny(c, 'edge.deny.binding', reason);
-  return c.json({ error: 'Agent binding check failed', reason }, 403);
+  const body = { error: 'Agent binding check failed', reason };
+  if (pop.acceptSignature !== undefined) {
+    return c.json(body, 401, { [AcceptSignatureHeader]: pop.acceptSignature });
+  }
+  return c.json(body, 403);
 }
 
 // The query parameters the Exchange's URL signer appends — a reserved
@@ -186,8 +213,8 @@ export const SIGNATURE_PARAMS = ['exp', 'sig', 'kid', 'agent_id'] as const;
 // answer (the empty 200 below). A CDN-side entry — the Lambda@Edge wrapper —
 // needs to tell that answer apart from a real generated response so it can
 // hand the request back to the CDN instead of serving the empty body; the
-// status and body alone are ambiguous (/rsl.txt with no RSL_BODY configured
-// is also an empty 200). Only the no-target branch of passToOrigin may emit
+// status and body alone do not identify a forwarding decision.
+// Only the no-target branch of passToOrigin may emit
 // it: the entries with an origin mode never reach that branch, so on those
 // runtimes the header simply never appears.
 export const CDN_AUTHORIZED_HEADER = 'x-edge-authorized';
@@ -288,9 +315,19 @@ function handleVerifyUnavailable(c: Context<{ Variables: AppVariables }>, err: u
   );
 }
 
+// ed25519Of is the one Ed25519 primitive a request is checked with: the
+// runtime's own when it injected one, WebCrypto otherwise.
+function ed25519Of(deps: AppDeps): Ed25519Verify {
+  return deps.verifyEd25519 ?? webCryptoEd25519;
+}
+
 async function defaultVerify(rawUrl: string, deps: AppDeps): Promise<VerifyResult> {
-  return verifyEd25519SignedUrl(rawUrl, {
+  const ed25519 = ed25519Of(deps);
+  return verifyEd25519SignedUrl<Uint8Array<ArrayBuffer>>(rawUrl, {
     resolveKey: deps.resolveKey,
+    // The signed-URL verifier's order is (key, message, signature); the SDK's
+    // Ed25519 primitive takes (publicKey, signature, message).
+    verify: (key, message, signature) => ed25519(key, signature, message),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
   });
 }

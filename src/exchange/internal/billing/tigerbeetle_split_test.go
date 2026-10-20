@@ -61,7 +61,7 @@ func mustAuthorize(t *testing.T, a billing.Adapter, cost string) string {
 // ledger read on tbtest.Ledger.
 func assertSplit(t *testing.T, a billing.Adapter, ns string, agentBal, owner, platform int64) {
 	t.Helper()
-	bal, err := a.GetBalance(context.Background(), "ag")
+	bal, err := a.GetBalance(context.Background(), "ag", confCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance(agent): %v", err)
 	}

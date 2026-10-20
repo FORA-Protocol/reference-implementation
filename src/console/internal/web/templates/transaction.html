@@ -1,0 +1,70 @@
+{{define "content"}}
+{{with .Transaction}}
+<nav aria-label="breadcrumb">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="{{.List}}">Transactions</a></li>
+    <li class="breadcrumb-item active text-break" aria-current="page">{{.ID}}</li>
+  </ol>
+</nav>
+<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+  <h1 class="h3 mb-0">Transaction</h1>
+  <span class="badge text-bg-{{.Status.Tone}}" data-status="{{.Status.Value}}">Report: {{.Status.Label}}</span>
+</div>
+
+<section class="card p-3 mb-3" aria-labelledby="sale-heading">
+  <h2 class="h6" id="sale-heading">The sale</h2>
+  <dl class="facts mb-0">
+    <dt>When</dt><dd>{{.When}}</dd>
+    <dt>Agent</dt><dd class="text-break">{{.Agent}}</dd>
+    <dt>Transaction id</dt><dd class="text-break"><code>{{.ID}}</code></dd>
+  </dl>
+</section>
+
+<section class="card p-3 mb-3" aria-labelledby="offer-heading">
+  <h2 class="h6" id="offer-heading">What the agent accepted</h2>
+  {{with .Offer}}
+  <dl class="facts mb-0">
+    {{if .Title}}<dt>Title</dt><dd>{{.Title}}</dd>{{end}}
+    {{if .URL}}<dt>Page</dt><dd class="text-break">{{.URL}}</dd>{{end}}
+    <dt>Price</dt><dd>{{.Price}}</dd>
+    {{if .Terms}}<dt>Terms</dt><dd>{{range .Terms}}<span class="d-block">{{.}}</span>{{end}}</dd>{{end}}
+    {{if .UnitCost}}<dt>Unit cost</dt><dd>{{.UnitCost}}</dd>{{end}}
+    {{if .EstimatedQuantity}}<dt>Estimated quantity</dt><dd>{{.EstimatedQuantity}}</dd>{{end}}
+    {{if .ReportWindow}}<dt>Report within</dt><dd>{{.ReportWindow}}</dd>{{end}}
+    {{if .Expires}}<dt>Offer valid until</dt><dd>{{.Expires}}</dd>{{end}}
+    <dt>Offer id</dt><dd class="text-break"><code>{{.ID}}</code></dd>
+  </dl>
+  <p class="text-body-secondary small mt-2 mb-0">Read from the bytes the exchange signed, not from your catalog as it stands today.</p>
+  {{else}}
+  <p class="mb-0">The signed offer could not be read as an offer. The Verify button below still checks its signature.</p>
+  {{end}}
+</section>
+
+<section class="card p-3 mb-3" aria-labelledby="report-heading">
+  <h2 class="h6" id="report-heading">Usage report</h2>
+  <p class="mb-0" data-reporting>{{.Reporting}}</p>
+  {{with .Obligation}}
+  <dl class="facts mt-2 mb-0">
+    <dt>State</dt><dd>{{.State}}</dd>
+    <dt>Due by</dt><dd>{{.Due}}</dd>
+    {{if .Fulfilled}}<dt>Received</dt><dd>{{.Fulfilled}}</dd>{{end}}
+    {{if .Consumed}}<dt>Reported quantity</dt><dd>{{.Consumed}}</dd>{{end}}
+    {{if .Outcome}}<dt>Check</dt><dd>{{.Outcome}}</dd>{{end}}
+  </dl>
+  {{end}}
+</section>
+
+<section class="card p-3 mb-3" aria-labelledby="evidence-heading" id="evidence" data-evidence="{{.Evidence}}">
+  <h2 class="h6" id="evidence-heading">Evidence</h2>
+  <p class="small mb-2">
+    The exchange signed the offer, and the agent signed its acceptance of it. Verify checks both
+    Ed25519 signatures here in your browser, against the keys recorded with the transaction.
+  </p>
+  {{if .SignedURLHash}}<p class="small text-body-secondary text-break">Delivery address hash (SHA-256): <code>{{.SignedURLHash}}</code></p>{{end}}
+  <button class="btn btn-outline-primary btn-sm align-self-start" type="button" id="verify" disabled>Verify</button>
+  <ul class="verify-results list-unstyled small mt-2 mb-0" id="verify-results" aria-live="polite"></ul>
+  <noscript><p class="small mt-2 mb-0">Verification runs in the browser and needs JavaScript.</p></noscript>
+</section>
+<script type="module" src="/static/transaction.js"></script>
+{{end}}
+{{end}}

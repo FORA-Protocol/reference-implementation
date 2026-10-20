@@ -51,11 +51,11 @@ func TestPushResources_ImpersonationRejectedAsUnauthenticated(t *testing.T) {
 	// The attacker is legitimately registered: publish its agent manifest, then
 	// drive one honest self-push so the lazy self-signup path stores the attacker's
 	// real key in the agents repo.
-	attackerPub, attackerPriv, err := ed25519.GenerateKey(rand.Reader)
+	_, attackerPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen attacker key: %v", err)
 	}
-	h.publishAgent(t, attackerID, attackerPub)
+	h.publishAgent(t, attackerID, attackerPriv)
 	attackerClient := h.signedCat(attackerID, attackerPriv)
 	if _, err := attackerClient.PushResources(h.ctx, connect.NewRequest(&forav1.PushResourcesRequest{
 		Exchange: harnessExchangeDomain,
@@ -71,11 +71,11 @@ func TestPushResources_ImpersonationRejectedAsUnauthenticated(t *testing.T) {
 
 	// The victim is ALSO a real contributor: publish its manifest so the catalog
 	// verifier can learn victim's own key when a push claims caller_id=victim.
-	victimPub, _, err := ed25519.GenerateKey(rand.Reader)
+	_, victimPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen victim key: %v", err)
 	}
-	h.publishAgent(t, victimID, victimPub)
+	h.publishAgent(t, victimID, victimPriv)
 
 	uri := "https://" + h.publisherDom + "/articles/impersonated"
 

@@ -44,37 +44,26 @@ cover both halves without any test mocking the Exchange.
 
 Round-trip honesty
 ------------------
-The single leg here is a full protocol round-trip: signed
-``BrokerService/Resolve`` (RFC 9421, keyID == requester.id) → Broker → real
-Exchange ``DiscoverResources`` → the Broker's fail-closed Verifier (real WBA key
-fetch) → the typed ``DiscoveryResponse`` the agent decodes. Presence of a signed
-offer is asserted through that same public surface — no DB or internal-state read.
+The single leg here is a full protocol round-trip: a ``BrokerService/Resolve``
+the SDK signs (RFC 9421) → Broker → real Exchange ``DiscoverResources`` → the
+Broker's fail-closed Verifier (real WBA key fetch) → the typed
+``DiscoveryResponse`` the SDK decodes and verifies. Presence of a signed offer is
+asserted through that same public surface — no DB or internal-state read.
 """
 
 from __future__ import annotations
 
-from typing import Any, cast
+from contextlib import closing
 
-import httpx
 import pytest
 
-from . import broker_client
+from .broker_purchase import resolve_offer
 from .conftest import StackURLs
+from .sdk_client import sdk_broker_client
 from .seed import SeededFixture
 
 # ADR-008 D5 — declare stack-isolation contract.
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
-
-
-def _offers_in_groups(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Flatten every offer across all ``offer_groups`` of a DiscoveryResponse.
-
-    Reads the canonical proto-JSON (emit-unpopulated, camelCase-with-snake
-    fallback) the Broker emits on ``BrokerService/Resolve`` — the same shape
-    ``broker_client._first_offer`` / ``resolve_carriers`` read.
-    """
-    groups = cast(list[dict[str, Any]], payload.get("offer_groups") or [])
-    return [o for g in groups for o in cast(list[dict[str, Any]], g.get("offers") or [])]
 
 
 def test_broker_admits_real_exchange_signed_offer_into_offer_groups(
@@ -85,30 +74,23 @@ def test_broker_admits_real_exchange_signed_offer_into_offer_groups(
 
     The Broker's Verifier is fail-CLOSED, so the offer surfaces ONLY if its
     signature verified against the exchange's real WBA-published key — presence is
-    the observable proof that verification passed. Driven on the FREE demo resource
-    (socrates) so no billing gate can pre-empt discovery; the currency-matched demo
-    buyer signs the Resolve (keyID == requester.id).
+    the observable proof that verification passed. The SDK then verifies the same
+    offer again, fail-closed, against the key it reads from the same directory,
+    and ``resolve_offer`` refuses a group carrying any offer it rejected. Driven on
+    the FREE demo resource (socrates) so no billing gate can pre-empt discovery;
+    the currency-matched demo buyer signs the Resolve.
     """
     res = seeded.free
-    resp = broker_client.resolve(
-        compose_stack,
-        {"agent_id": res.buyer_agent_id, "uri": res.uri, "intended_use": "ai-input"},
-        key_path=res.buyer_key_path,
+    buyer = sdk_broker_client(
+        compose_stack, agent_id=res.buyer_agent_id, key_path=res.buyer_key_path
     )
-    assert resp.status_code == httpx.codes.OK, resp.text
-    payload = cast(dict[str, Any], resp.json())
-
-    offers = _offers_in_groups(payload)
-    assert offers, (
-        "licensed resolve returned no offers in offer_groups — the fail-closed "
-        f"Verifier admitted nothing (verification failed or offer absent): {payload!r}"
-    )
+    with closing(buyer) as client:
+        winner = resolve_offer(client, res.uri)
 
     # The admitted offer carries the Exchange's genuine signature. Its PRESENCE
-    # past the fail-closed Verifier is the proof that verification succeeded; the
-    # non-empty signature is the artifact that was verified.
-    winner = offers[0]
-    signature = winner.get("signature")
+    # past both fail-closed Verifiers is the proof that verification succeeded;
+    # the non-empty signature is the artifact that was verified.
+    signature = winner.offer.get("signature")
     assert isinstance(signature, str) and signature, (
-        f"admitted offer carries no signature — cannot have passed the Verifier: {winner!r}"
+        f"admitted offer carries no signature — cannot have passed the Verifier: {winner.offer!r}"
     )

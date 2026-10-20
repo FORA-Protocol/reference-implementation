@@ -27,7 +27,7 @@ func TestSmoke_PushDiscoverExecuteReport(t *testing.T) {
 	smokeEstimated := int32(50)
 	smokeUnit := "accesses"
 	pushResp, err := h.catalogClient.PushResources(ctx, connect.NewRequest(newPushRequest(h.tenantID, "agent-test", []*forav1.ResourceEntry{{
-		Domain: h.tenantDomain,
+		Domain: h.siteDomain,
 		Path:   "/articles/hello",
 		Terms: []*forav1.LicenseTerm{{
 			Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
@@ -55,7 +55,7 @@ func TestSmoke_PushDiscoverExecuteReport(t *testing.T) {
 	}
 
 	// 2. DiscoverResources.
-	discovered, err := h.exchangeClient.DiscoverResources(ctx, connect.NewRequest(newResourceQuery(newRequester("agent-test", "agent.example"), []string{"https://" + h.tenantDomain + "/articles/hello"})))
+	discovered, err := h.exchangeClient.DiscoverResources(ctx, connect.NewRequest(newResourceQuery(newRequester("agent-test", "agent.example"), []string{"https://" + h.siteDomain + "/articles/hello"})))
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}

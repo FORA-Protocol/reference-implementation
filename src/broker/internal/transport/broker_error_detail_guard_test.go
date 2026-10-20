@@ -10,9 +10,12 @@ import (
 // This is a STRUCTURAL guard, not a behavioral test. It pins the NON-behavioral
 // half of the ADR-019 broker error-parity disease: a future broker fault sink
 // must NOT assemble a forav1.ErrorDetail inline (struct literal or
-// connect.NewErrorDetail) — it must route through the single shared
-// brokerDetail/attachDetail builders in broker_error_detail.go, so the
-// Domain + Message + metadata-ride cannot drift between sinks. Inline assembly
+// connect.NewErrorDetail) — it builds the envelope through brokerDetail in
+// broker_error_detail.go and attaches it with the SDK's
+// connectserver.AttachDetail, so the Domain + Message + metadata-ride cannot
+// drift between sinks. The scan sees only those two literal forms: a detail
+// built through an SDK helper (executeFaultError's request_auth_failure detail)
+// is outside it. Inline assembly
 // produces byte-identical wire output when metadata is empty, so no integration
 // test can observe the bypass; only a source-level guard catches a new sink that
 // re-inlines the envelope. (Sanctioned structural-disease exception: a
@@ -40,7 +43,8 @@ func inlineDetailBanned(src string) bool {
 
 // TestNoInlineErrorDetailAssembly walks every non-test .go file in the broker
 // transport package (except the canonical builder) and fails if any re-inlines
-// the ErrorDetail envelope instead of delegating to brokerDetail/attachDetail.
+// the ErrorDetail envelope instead of delegating to brokerDetail and
+// connectserver.AttachDetail.
 func TestNoInlineErrorDetailAssembly(t *testing.T) {
 	t.Parallel() // pure source scan — no shared DB, safe to parallelize.
 
@@ -67,7 +71,7 @@ func TestNoInlineErrorDetailAssembly(t *testing.T) {
 	}
 	if len(offenders) > 0 {
 		t.Fatalf("inline forav1.ErrorDetail assembly found in %v — route the fault "+
-			"through brokerDetail/attachDetail (%s) instead so the Domain + metadata "+
+			"through brokerDetail and connectserver.AttachDetail (%s) instead so the Domain + metadata "+
 			"ride cannot drift between sinks (ADR-019)", offenders, canonicalDetailFile)
 	}
 }

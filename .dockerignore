@@ -43,10 +43,13 @@ pkg/
 # scripts/ stays out of build contexts EXCEPT the shared key helpers, which
 # the publisher-jwks image copies in so its entrypoint renders the WBA
 # directory through the same module the key-gen scripts use.
+# go-mod-fetch.sh is also allowlisted so Dockerfiles can COPY it for
+# the canonical module-fetch step (single source of truth for retry policy).
 scripts/*
 !scripts/lib/
 scripts/lib/*
 !scripts/lib/ed25519_keys.py
+!scripts/go-mod-fetch.sh
 analysis/
 analysis-*
 ec-br-*

@@ -26,14 +26,15 @@ import (
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/db"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/logging"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/oidcup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/runhttp"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/session"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/app"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/idconfig"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/lifecycle"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/oauthserver"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/oidcup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/publisher"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/session"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/token"
 )
 
@@ -42,8 +43,16 @@ func main() {
 	// distroless image has no shell or curl, so the compose healthcheck
 	// execs the service binary itself. Mirrors the Exchange and Broker.
 	runhttp.MaybeHealthcheck("IDENTITY_ADDR", ":8083")
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	if err := run(logger); err != nil {
+	// One IDENTITY_LOG_LEVEL governs the whole service: the agent directories,
+	// sign-up and the MCP adapter all log through this logger. A value that is
+	// not a level stops the boot here, before anything connects, through the
+	// same identity.exit record as every other start-up failure.
+	const levelVar = "IDENTITY_LOG_LEVEL"
+	logger, err := logging.Setup(os.Stdout, levelVar, runhttp.EnvTrimmed(levelVar))
+	if err == nil {
+		err = run(logger)
+	}
+	if err != nil {
 		logger.Error("identity.exit", "err", err)
 		os.Exit(1)
 	}

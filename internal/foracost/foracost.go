@@ -1,5 +1,5 @@
-// Package foracost aggregates per-item FORA transaction costs into the
-// batch-level total_cost scalar.
+// Package foracost aggregates per-item FORA transaction costs: per currency
+// (PerCurrency), and into the batch-level total_cost scalar (BatchTotal).
 //
 // A multi-source (multi-exchange) or mixed-currency batch must never collapse
 // charges into a single mis-labeled scalar: summing amounts across differing
@@ -8,10 +8,11 @@
 // the per-item items[].cost; the batch scalar is a convenience that is emitted
 // ONLY when the whole batch shares one currency, and is absent (nil) otherwise.
 //
-// Both the Exchange (its own items[] batch) and the Broker (the fan-out merge
-// across exchanges) render total_cost through this one primitive so the two
-// surfaces cannot drift. Money is exact decimal end to end
-// (helpers.ParseMoney/FormatMoney), never float.
+// The Exchange renders its own items[] batch's total_cost through BatchTotal,
+// and the Broker renders BrokerTransactionResponse.totals across Exchanges
+// through PerCurrency, which BatchTotal is built on, so the two surfaces sum the
+// same way. Money is exact decimal end to end (helpers.ParseMoney/FormatMoney),
+// never float.
 package foracost
 
 import (
@@ -23,14 +24,37 @@ import (
 )
 
 // BatchTotal renders the batch-level total_cost from the authoritative per-item
-// costs of a result set. It sums the costed items per ISO-4217 currency and
-// returns a single *forav1.Cost when every costed item shares one currency
-// (Amount = the exact decimal sum), or nil when the items span multiple
-// currencies or none carry a cost — in which case callers rely on the per-item
-// items[].cost. Items with a nil Cost or empty Currency are skipped. A
-// non-decimal cost Amount yields an error (the caller surfaces it as internal /
-// omits the scalar) rather than a silent miscount.
+// costs of a result set. It returns a single *forav1.Cost when every costed item
+// shares one currency (Amount = the exact decimal sum), or nil when the items
+// span multiple currencies or none carry a cost — in which case callers rely on
+// the per-item items[].cost. A non-decimal cost Amount yields an error (the
+// caller surfaces it as internal / omits the scalar) rather than a silent
+// miscount.
 func BatchTotal(items []*forav1.TransactionResultItem) (*forav1.Cost, error) {
+	totals, err := PerCurrency(items)
+	if err != nil {
+		return nil, err
+	}
+	// Zero costed items (every item denied / free) or a mixed-currency batch: no
+	// single scalar is meaningful, so the aggregate is absent and items[].cost is
+	// the sole authoritative cost.
+	if len(totals) != 1 {
+		return nil, nil
+	}
+	return totals[0], nil
+}
+
+// PerCurrency sums the costed items per ISO-4217 currency and returns one
+// *forav1.Cost per currency, in the order each currency first appears among the
+// items. Amounts are added as exact decimals and never summed across currencies
+// or converted; unit_cost stays unset. Items with a nil Cost or an empty
+// Currency are skipped, and no costed item at all yields a nil slice. A
+// non-decimal cost Amount yields an error rather than a silent miscount.
+//
+// It sums every item it is given. Which items count is the caller's decision:
+// the Broker passes only the items that carry neither a denial nor an upstream
+// refusal.
+func PerCurrency(items []*forav1.TransactionResultItem) ([]*forav1.Cost, error) {
 	sums := map[string]decimal.Decimal{}
 	order := make([]string, 0)
 	for _, it := range items {
@@ -48,16 +72,13 @@ func BatchTotal(items []*forav1.TransactionResultItem) (*forav1.Cost, error) {
 		}
 		sums[cur] = sums[cur].Add(amount)
 	}
-	// Zero costed items (every item denied / free) or a mixed-currency batch: no
-	// single scalar is meaningful, so the aggregate is absent and items[].cost is
-	// the sole authoritative cost.
-	if len(order) != 1 {
-		return nil, nil
+	var totals []*forav1.Cost
+	for _, cur := range order {
+		amountStr, err := helpers.FormatMoney(sums[cur])
+		if err != nil {
+			return nil, fmt.Errorf("format %s total: %w", cur, err)
+		}
+		totals = append(totals, &forav1.Cost{Amount: amountStr, Currency: cur})
 	}
-	cur := order[0]
-	amountStr, err := helpers.FormatMoney(sums[cur])
-	if err != nil {
-		return nil, fmt.Errorf("format batch total_cost: %w", err)
-	}
-	return &forav1.Cost{Amount: amountStr, Currency: cur}, nil
+	return totals, nil
 }

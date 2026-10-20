@@ -4,51 +4,10 @@ package transport_test
 
 import (
 	"context"
-	"crypto/ed25519"
-	"errors"
-	"sync"
-
-	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
-	"google.golang.org/protobuf/types/known/structpb"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/agentreg"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 )
-
-// allowAllRegistry stores callers in memory and always accepts their
-// registration. Tests that exercise the happy PushResources path use this to
-// skip the RFC 9421 signature gate without wiring a full fixture origin.
-type allowAllRegistry struct {
-	mu   sync.Mutex
-	keys map[string]ed25519.PublicKey
-}
-
-func newAllowAllRegistry() *allowAllRegistry {
-	return &allowAllRegistry{keys: map[string]ed25519.PublicKey{}}
-}
-
-func (r *allowAllRegistry) put(id string, pub ed25519.PublicKey) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.keys[id] = pub
-}
-
-func (r *allowAllRegistry) LookupPublicKey(_ context.Context, id string) (ed25519.PublicKey, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if k, ok := r.keys[id]; ok {
-		return k, nil
-	}
-	return nil, agentreg.ErrUnknown
-}
-
-func (r *allowAllRegistry) RegisterFromDirectory(_ context.Context, _ string, _ string) error {
-	return errors.New("allowAllRegistry: self-signup not supported in tests")
-}
-
-func (r *allowAllRegistry) RefreshDirectoryKey(_ context.Context, _ string) error {
-	return errors.New("allowAllRegistry: directory refresh not supported in tests")
-}
 
 // harnessResourceOwner is the resource_owner_id the catch-all manifest stub
 // attests for every push, so accepted entries carry a payee and pass the gate.
@@ -76,20 +35,9 @@ func newAllowAllManifestCache(caller string) *allowAllManifestCache {
 	}
 }
 
+// Get serves the document the publisher console would generate for domain,
+// built by the shared builder rather than written out here, so the harness
+// cannot drift from the file a publisher actually deploys.
 func (c *allowAllManifestCache) Get(_ context.Context, domain string) (*forawellknown.Manifest, error) {
-	ext, err := structpb.NewStruct(map[string]any{"resource_owner_id": c.resourceOwner})
-	if err != nil {
-		return nil, err
-	}
-	return &forawellknown.Manifest{
-		Ver:    forawellknown.Version,
-		Role:   forawellknown.RolePublisher,
-		Domain: domain,
-		CatalogContributors: []*forav1.CatalogContributor{
-			{Domain: c.caller, Relationship: "publisher"},
-		},
-		Exchanges: []*forav1.AuthorizedExchange{
-			{Domain: c.exchangeDomain, Ext: ext},
-		},
-	}, nil
+	return exchangetest.PublisherManifest(c.exchangeDomain, c.caller, domain, c.resourceOwner), nil
 }

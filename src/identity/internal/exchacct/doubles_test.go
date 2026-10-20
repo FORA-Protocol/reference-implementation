@@ -2,7 +2,6 @@ package exchacct_test
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -34,13 +33,29 @@ const payloadSentinel = "VAT-SENTINEL-0000"
 // itself, which is exactly the second caller the kind's doc says can reach it.
 var malformedValue = payloadSentinel + string([]byte{0xff, 0xfe})
 
-func newTestService(t *testing.T, notes account.RegistrationLog) *exchacct.Service {
+// newService builds the service under test from cfg, filling in the two
+// collaborators New requires and failing the test if it refuses.
+//
+// It takes the whole Config rather than the one field the first version took.
+// That version could express exactly one arrangement -- the counting caller, a
+// caller-supplied note log, no clock -- so every test that wanted a different
+// caller or a controlled clock wrote the constructor and the same four-line
+// error check itself, and seven of them did. The two axes that actually vary are
+// which caller double is bound and whether a clock is set, and a Config argument
+// carries both.
+//
+// The defaults are the doubles rather than nil because New refuses nil, and
+// because a test that does not name a collaborator is saying it does not care
+// what that collaborator does -- not that it wants the service built without one.
+func newService(t *testing.T, cfg exchacct.Config) *exchacct.Service {
 	t.Helper()
-	svc, err := exchacct.New(exchacct.Config{
-		Requirements: publishingNothing{},
-		Caller:       &countingCaller{},
-		Notes:        notes,
-	})
+	if cfg.Caller == nil {
+		cfg.Caller = &countingCaller{}
+	}
+	if cfg.Notes == nil {
+		cfg.Notes = &recordingNotes{}
+	}
+	svc, err := exchacct.New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -73,15 +88,6 @@ func (c *tickingClock) Now() time.Time {
 }
 
 func (*tickingClock) After(time.Duration) <-chan time.Time { return make(chan time.Time) }
-
-// publishingNothing is an Exchange that publishes no schema and no terms digest,
-// which is the normal absent case and leaves the pack step as the only thing
-// between the caller's map and the wire.
-type publishingNothing struct{}
-
-func (publishingNothing) Requirements(context.Context, string) (account.Requirements, error) {
-	return account.Requirements{}, nil
-}
 
 // countingCaller records how many times the wire was reached. It answers rather
 // than fails, so a test asserting "nothing was sent" cannot pass because the send
@@ -145,10 +151,22 @@ func sameConfirmedAccount(a, b exchacct.Account) bool {
 		a.AsOf.Equal(b.AsOf)
 }
 
-// refusingReader is a requirements reader that refuses with a chosen cause,
-// wrapped the way the real one wraps its sentinels.
-type refusingReader struct{ err error }
+// refusingCaller is an outbound leg that fails with a chosen cause, so a test can
+// hand the classifier one failure at a time.
+//
+// It stands in for the leg rather than for a peer. The leg is where the manifest
+// is now read and where the payload is pre-checked, so the refusals a test wants
+// to classify all arrive from it — including the ones no peer ever saw.
+type refusingCaller struct{ err error }
 
-func (r refusingReader) Requirements(context.Context, string) (account.Requirements, error) {
-	return account.Requirements{}, fmt.Errorf("%w: exchange.example", r.err)
+func (c refusingCaller) Register(
+	context.Context, *forav1.RegisterRequest,
+) (*forav1.RegisterResponse, error) {
+	return nil, c.err
+}
+
+func (c refusingCaller) AccountStatus(
+	context.Context, *forav1.GetAccountStatusRequest,
+) (*forav1.GetAccountStatusResponse, error) {
+	return nil, c.err
 }

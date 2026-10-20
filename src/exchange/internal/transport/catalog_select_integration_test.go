@@ -47,7 +47,7 @@ func pushTerms(t *testing.T, h *pushHarness, client foraconnect.CatalogServiceCl
 // catalog. The projection assertions are about which terms project, never about
 // the price, so one shared shape suffices.
 func selectPricing() *forav1.Pricing {
-	return &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.05", Currency: "USD", Unit: proto.String("accesses")}
+	return &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.05", Currency: "USD", Unit: proto.String("accesses"), EstimatedQuantity: proto.Int32(1)}
 }
 
 // userTypeTerm builds an ENUMERATED term carrying a single-token USER_TYPE
@@ -101,15 +101,29 @@ func discoverOffersAs(t *testing.T, h *pushHarness, uri string, spec requesterSp
 	return discoverAs(t, h, uri, spec).GetOffers()
 }
 
-// discoverTermsAs returns the terms on the single offer DiscoverResources
-// projects for uri to the requester spec.
+// discoverTermsAs returns every license term DiscoverResources projects for uri
+// to the requester spec, in offer order. An offer sells exactly one term, so N
+// eligible terms are discovered as N offers and this is the whole projection.
 func discoverTermsAs(t *testing.T, h *pushHarness, uri string, spec requesterSpec) []*forav1.LicenseTerm {
 	t.Helper()
-	offers := discoverOffersAs(t, h, uri, spec)
-	if len(offers) != 1 {
-		t.Fatalf("discover %s: offers = %d, want 1", uri, len(offers))
+	return offerTerms(t, uri, discoverOffersAs(t, h, uri, spec))
+}
+
+// offerTerms reads the one term each offer sells, in offer order, and fails the
+// test if any offer carries a different number. That cardinality is the
+// protocol's, not a convenience of this helper: an offer that fused several
+// terms would leave every term after the first unsellable, because execute
+// charges the single price the offer carries.
+func offerTerms(t *testing.T, uri string, offers []*forav1.Offer) []*forav1.LicenseTerm {
+	t.Helper()
+	out := make([]*forav1.LicenseTerm, 0, len(offers))
+	for i, o := range offers {
+		if len(o.GetTerms()) != 1 {
+			t.Fatalf("discover %s: offer %d carries %d terms, want exactly 1", uri, i, len(o.GetTerms()))
+		}
+		out = append(out, o.GetTerms()[0])
 	}
-	return offers[0].GetTerms()
+	return out
 }
 
 // requesterSpec bundles the identity-only Requester with the advisory,

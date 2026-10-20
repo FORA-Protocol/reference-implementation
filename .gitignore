@@ -83,6 +83,8 @@ Thumbs.db
 # Runtime logs and ephemeral reports
 logs/
 .jscpd-reports/
+# Suite reports a remote test run copies back into the worktree.
+test-results/
 
 # Stale Go build artifacts at repo root (none should land here)
 /prototype
@@ -108,10 +110,13 @@ derive-ensemble/
 # Obsidian editor workspace (local-only, not part of the docs source)
 docs/.obsidian/
 
-# Runtime artifact written by the cross-container revocation e2e (test_revocation_channel).
+# Runtime artifact the revocation obligations write as the Broker's list (harness/broker_revocations.py).
 tests/e2e/harness/revocations/revocations.json
 
 # Beads: the Dolt server is the source of truth. .beads/metadata.json was
 # git-tracked, so a branch checkout restored its pre-Dolt SQLite stub and bd
 # silently opened an empty database — hiding all 5279 issues. Never track it.
 .beads/
+
+# The obligation report every e2e session writes beside its pytest configuration.
+tests/e2e/obligation-report.json

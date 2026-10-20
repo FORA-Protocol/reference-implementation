@@ -9,11 +9,36 @@
 // literal check passes, and the omission check passes. It was verified to pass
 // all of them before this check existed.
 //
-// It is not harmless. fora.proto states the two are separate namespaces and must
-// not be coupled: the /.well-known/fora.json document version carries a MUST-equal
-// rule and is rejected outright when it differs, while the envelope version is
-// advisory. They agree today and would silently diverge the day either moves,
-// with nothing failing at the moment the coupling was introduced.
+// It is not harmless. The contract -- github.com/FORA-Protocol/protocol, pinned in
+// the root go.mod -- keeps the two as separate namespaces, says they must not be
+// coupled, and enforces them in opposite directions. The /.well-known/fora.json
+// document version is a rejection gate: a reader accepts a recognised MAJOR
+// whatever the MINOR, and refuses an unrecognised MAJOR, a value that is not
+// MAJOR.MINOR, and an absent one. That document sits at a fixed path and is read
+// before any signature is checked, so a layout the reader cannot classify must not
+// supply the endpoint a signed call is then sent to. The envelope version is the
+// reverse: advisory, never a rejection gate, and a receiver that checks it MUST NOT
+// reject an unrecognised minor. They agree today and would silently diverge the day
+// either moves, with nothing failing at the moment the coupling was introduced.
+//
+// That describes the CONTRACT, and this tree implements it rather than diverging
+// from it.
+//
+// An earlier version of this paragraph said otherwise -- that internal/forawellknown
+// pinned ver with a schema const, refusing a conformant "1.1" document the
+// contract's rule accepts -- and told the next reader to treat that divergence as
+// live and unexplained. There is nothing to treat. The embedded manifest schema
+// types ver as a plain required string and carries no const at all; one there
+// would fail the check that keeps that schema to wire shape, which lists const
+// among the value-level keywords it forbids. The major-version rule runs in code
+// instead, through the SDK's own receive-side check, so a recognised major is
+// accepted whatever its minor and there is ONE implementation of the rule rather
+// than a schema pattern and a code path that can drift apart.
+//
+// Per ADR-025 D3, which settled it: exact matching is the REJECTED alternative
+// there, because it refuses the additive minor revisions the version scheme
+// promises will keep working. This is named here only so the header is not read
+// as a description of a strictness this tree does not have.
 //
 // The coupling has two directions and this check reads both. An envelope stamped
 // from the manifest is caught by requiring an echo's receiver to be an envelope

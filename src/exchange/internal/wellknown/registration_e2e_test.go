@@ -44,8 +44,8 @@ func loadSchema(t *testing.T, raw string) *regschema.Schema {
 // against this document, so a schema that arrives altered rejects payloads the
 // Exchange would have accepted.
 func TestForaManifest_PublishesConfiguredRegistrationSchema(t *testing.T) {
-	pub, _ := newKeyPair(t)
-	cfg := exchangeConfig(pub)
+	_, priv := newKeyPair(t)
+	cfg := exchangeConfig(priv)
 	cfg.RegistrationDataSchema = loadSchema(t, testutil.RegistrationSchemaJSON)
 	srv, _ := serveConfig(t, cfg)
 
@@ -57,8 +57,8 @@ func TestForaManifest_PublishesConfiguredRegistrationSchema(t *testing.T) {
 // what makes "which terms did this operator accept" answerable after a later
 // revision, so a registration echoes the exact string published here.
 func TestForaManifest_PublishesConfiguredTerms(t *testing.T) {
-	pub, _ := newKeyPair(t)
-	cfg := exchangeConfig(pub)
+	_, priv := newKeyPair(t)
+	cfg := exchangeConfig(priv)
 	cfg.TermsURI, cfg.TermsDigest = testutil.TermsURI, testutil.TermsDigest
 	srv, _ := serveConfig(t, cfg)
 
@@ -77,8 +77,8 @@ func TestForaManifest_PublishesConfiguredTerms(t *testing.T) {
 // and never a member of account_registration, so an Exchange that inspects no
 // registration data and publishes no block can still version its terms.
 func TestForaManifest_TermsDigestSitsBesideTermsURI(t *testing.T) {
-	pub, _ := newKeyPair(t)
-	cfg := exchangeConfig(pub)
+	_, priv := newKeyPair(t)
+	cfg := exchangeConfig(priv)
 	cfg.TermsURI, cfg.TermsDigest = testutil.TermsURI, testutil.TermsDigest
 	cfg.RegistrationDataSchema = loadSchema(t, testutil.RegistrationSchemaJSON)
 	srv, _ := serveConfig(t, cfg)
@@ -107,8 +107,8 @@ func TestForaManifest_TermsDigestSitsBesideTermsURI(t *testing.T) {
 // nothing must publish no block at all — not an empty one, which would read as
 // a promise to enforce something.
 func TestForaManifest_OmitsBlockWithoutSchema(t *testing.T) {
-	pub, _ := newKeyPair(t)
-	srv, _ := serveConfig(t, exchangeConfig(pub))
+	_, priv := newKeyPair(t)
+	srv, _ := serveConfig(t, exchangeConfig(priv))
 
 	m, raw := fetchManifest(t, srv.URL)
 	if m.GetAccountRegistration() != nil {
@@ -130,8 +130,8 @@ func TestForaManifest_OmitsBlockWithoutSchema(t *testing.T) {
 func TestForaManifest_RefusesUnusableTermsPair(t *testing.T) {
 	for _, tc := range testutil.MalformedTermsDigests {
 		t.Run(tc.Name, func(t *testing.T) {
-			pub, _ := newKeyPair(t)
-			cfg := exchangeConfig(pub)
+			_, priv := newKeyPair(t)
+			cfg := exchangeConfig(priv)
 			cfg.TermsURI, cfg.TermsDigest = tc.URI, tc.Digest
 			if _, err := wellknown.New(cfg); err == nil {
 				t.Errorf("wellknown.New accepted terms_uri %q with terms_digest %q", tc.URI, tc.Digest)

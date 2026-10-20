@@ -7,6 +7,7 @@ import (
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"github.com/FORA-Protocol/protocol/gen/go/vocab/pricingunits"
+	"google.golang.org/protobuf/proto"
 )
 
 // pricedTerm builds an unrestricted PER_UNIT term carrying the given pricing so
@@ -18,10 +19,11 @@ func pricedTerm(label, unit, rate string) *forav1.LicenseTerm {
 		Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
 		PartLabel: &l,
 		Pricing: &forav1.Pricing{
-			Model:    forav1.PricingModel_PRICING_MODEL_PER_UNIT,
-			Rate:     rate,
-			Currency: "USD",
-			Unit:     &u,
+			Model:             forav1.PricingModel_PRICING_MODEL_PER_UNIT,
+			Rate:              rate,
+			Currency:          "USD",
+			Unit:              &u,
+			EstimatedQuantity: proto.Int32(1),
 		},
 	}
 }
@@ -118,11 +120,11 @@ func TestDiscover_PricingDerivedFromTerm(t *testing.T) {
 	}
 }
 
-// TestDiscover_MultiTermHeadlineIsFirstProjected pins the documented multi-term
-// pricing decision: when several eligible terms project, the
-// top-level Offer.pricing is the Pricing of the FIRST projected term (publisher
-// order). The publisher controls the headline by ordering its terms.
-func TestDiscover_MultiTermHeadlineIsFirstProjected(t *testing.T) {
+// TestDiscover_MultiTermYieldsOneOfferPerTerm pins the multi-term pricing
+// decision: every eligible term becomes its own offer, priced from that term,
+// in publisher order. Nothing picks a headline among them — the agent reads all
+// the alternatives and chooses one.
+func TestDiscover_MultiTermYieldsOneOfferPerTerm(t *testing.T) {
 	h := newPushHarness(t)
 	callerID := "caller.example"
 	client := setupTermContributor(t, h, callerID)
@@ -137,21 +139,25 @@ func TestDiscover_MultiTermHeadlineIsFirstProjected(t *testing.T) {
 	)
 
 	offers := discoverOffers(t, h, uri)
-	if len(offers) != 1 {
-		t.Fatalf("offers = %d, want 1", len(offers))
+	if len(offers) != 2 {
+		t.Fatalf("offers = %d, want 2 (both terms project, one offer each)", len(offers))
 	}
-	// Both terms project (unrestricted); headline pricing is the first one.
-	if got := len(offers[0].GetTerms()); got != 2 {
-		t.Fatalf("terms = %d, want 2 (both project)", got)
-	}
+	// Both terms project (unrestricted), each on its own offer, in push order.
+	offerTerms(t, uri, offers)
 	if got := offers[0].GetPricing().GetRate(); got != firstRate {
-		t.Errorf("headline rate = %v, want %v (first projected term)", got, firstRate)
+		t.Errorf("first offer rate = %v, want %v (the term it sells)", got, firstRate)
+	}
+	if got := offers[1].GetPricing().GetRate(); got != secondRate {
+		t.Errorf("second offer rate = %v, want %v (the term it sells)", got, secondRate)
+	}
+	if offers[0].GetOfferId() == offers[1].GetOfferId() {
+		t.Errorf("both offers carry offer_id %q, want distinct ids", offers[0].GetOfferId())
 	}
 }
 
 // TestDiscover_RestrictedTermStillPricesAsRealOffer proves the priced-offer
 // guarantee for a term carrying a USER_TYPE restriction: the offer derives its
-// headline price from the real LicenseTerm's Pricing (here 0.05 PER_UNIT), never
+// price from the real LicenseTerm's Pricing (here 0.05 PER_UNIT), never
 // a $0.05 free/stub. Post-ADR-014 the restriction no longer gates discovery —
 // the Exchange projects by scope/resource_id only and the restriction rides on
 // the returned offer for the agent to self-honour — so a requester declaring the
@@ -169,13 +175,13 @@ func TestDiscover_RestrictedTermStillPricesAsRealOffer(t *testing.T) {
 	pushTerms(t, h, client, callerID, path, userTypeTerm("academic-permitted", "academic"))
 
 	// Any requester now discovers the term; the offer prices off the real term,
-	// not a stub. Assert one offer carrying the real PER_UNIT 0.05 headline.
+	// not a stub. Assert one offer carrying the real PER_UNIT 0.05 price.
 	academic := requesterWithExt("agent-academic", "academic", "")
 	got := discoverOffersAs(t, h, uri, academic)
 	if len(got) != 1 {
 		t.Fatalf("offers = %d, want 1 (restricted term still projects as one real offer)", len(got))
 	}
 	if rate := got[0].GetPricing().GetRate(); rate != money(t, 0.05) {
-		t.Fatalf("headline rate = %v, want %q (real term price, not a stub)", rate, money(t, 0.05))
+		t.Fatalf("offer rate = %v, want %q (real term price, not a stub)", rate, money(t, 0.05))
 	}
 }

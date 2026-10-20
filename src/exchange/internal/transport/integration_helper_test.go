@@ -28,8 +28,10 @@ import (
 	sharedb "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/db"
 	rwtestutil "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/testutil"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo/repotest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/service"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/signing"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/sor"
@@ -57,9 +59,15 @@ type testHarness struct {
 	adminURL string
 	// adminClient is the client for adminURL, cached with it so one bring-up
 	// serves both the tests that read evidence and the tests that write policy.
-	adminClient  foraadminv1connect.AdminServiceClient
-	tenantID     string
-	tenantDomain string
+	adminClient foraadminv1connect.AdminServiceClient
+	// tenantID is the one Exchange SEAT this harness sells as. Its tenants.domain
+	// is harnessExchangeDomain, and every catalog row the harness pushes is
+	// stored under it.
+	tenantID string
+	// siteDomain is the publisher SITE the harness registers and pushes entries
+	// for: registered under harnessResourceOwner and listed ACTIVE on the seat. A
+	// separate namespace from the seat's domain.
+	siteDomain string
 	// billingRef is the account handle the default agent-test caller was
 	// registered under during bring-up (ADR-021 D5): the charge path
 	// keys the ledger account on this ref, not on the agent id, so every test that
@@ -93,16 +101,26 @@ type testHarness struct {
 
 // exchangeDBFixture carries the shared test infrastructure produced by
 // setupExchangeTestDB: a live testcontainers-backed pool, generated sqlc
-// queries, a freshly inserted tenant (with its Ed25519 signing key in
-// keystore), and one upserted agent whose id is supplied by the caller.
+// queries, a freshly inserted seat (with its Ed25519 signing key in keystore),
+// one registered publisher site listed active on that seat, and one upserted
+// agent whose id is supplied by the caller.
 type exchangeDBFixture struct {
-	ctx          context.Context
-	logger       *slog.Logger
-	pool         *pgxpool.Pool
-	queries      *sqlc.Queries
-	keystore     *signing.InMemoryKeyStore
-	tenantID     string
-	tenantDomain string
+	ctx      context.Context
+	logger   *slog.Logger
+	pool     *pgxpool.Pool
+	queries  *sqlc.Queries
+	keystore *signing.InMemoryKeyStore
+	// tenantID is the seat; its tenants.domain is harnessExchangeDomain.
+	tenantID string
+	// siteDomain is the publisher site registered under harnessResourceOwner and
+	// listed ACTIVE on the seat, which is what catalog entries are pushed for.
+	siteDomain string
+	// seatKeyRef, seatPub and seatPriv are the seat's Ed25519 offer-signing key:
+	// the ref stored on the tenants row, and the pair the keystore resolves it
+	// to. A harness that signs offers itself builds its signer from the pair.
+	seatKeyRef string
+	seatPub    ed25519.PublicKey
+	seatPriv   ed25519.PrivateKey
 	// agentPub/agentPriv is the seeded agent's Ed25519 key. The agents row is
 	// upserted with agentPub, so a caller that signs with agentPriv and names
 	// this agent as its Signature-Agent satisfies the identity↔key binding (the
@@ -116,19 +134,28 @@ type exchangeDBFixture struct {
 // deferred refusal provider under when the Exchange boots without RSA material.
 const deferredRSAKeyRef = "cf-rsa-primary"
 
+// cloudFrontTestKeyRef is the seat's rsa_key_ref in every harness, and the ref
+// startExchangeServer registers its generated RSA private key under. One
+// constant so the row and the keystore cannot drift apart: a site registered on
+// AWS_CLOUDFRONT_RSA resolves its signer through this ref and no test has to
+// re-state it.
+const cloudFrontTestKeyRef = "cf-test"
+
 // setupExchangeTestDB resets the shared package Postgres to its migrated
-// baseline (see TestMain), inserts a tenant with an Ed25519 signing key, and
-// upserts a single agent under agentID. Shared across harnesses so the DB
-// boilerplate lives in exactly one place.
+// baseline (see TestMain), inserts the seat with an Ed25519 signing key,
+// registers one publisher site listed active on it, and upserts a single agent
+// under agentID. Shared across harnesses so the DB boilerplate lives in exactly
+// one place.
 func setupExchangeTestDB(t *testing.T, agentID string) exchangeDBFixture {
 	return setupExchangeTestDBDeferredRSA(t, agentID, false)
 }
 
-// setupExchangeTestDBDeferredRSA is setupExchangeTestDB with a choice of tenant
-// signing scheme. deferredRSA=true seeds the tenant on AWS_CLOUDFRONT_RSA with
-// its rsa_key_ref resolving only to the deferred-boot refusal provider — the
-// exact shape installRSAKey wires when the Exchange starts without an RSA key —
-// so transport tests can drive the FailedPrecondition refusal end to end.
+// setupExchangeTestDBDeferredRSA is setupExchangeTestDB with a choice of signing
+// scheme for the registered site. deferredRSA=true registers the site on
+// AWS_CLOUDFRONT_RSA and gives the seat an rsa_key_ref that resolves only to the
+// deferred-boot refusal provider — the exact shape installRSAKey wires when the
+// Exchange starts without an RSA key — so transport tests can drive the
+// FailedPrecondition refusal end to end.
 func setupExchangeTestDBDeferredRSA(t *testing.T, agentID string, deferredRSA bool) exchangeDBFixture {
 	t.Helper()
 	ctx := context.Background()
@@ -137,32 +164,45 @@ func setupExchangeTestDBDeferredRSA(t *testing.T, agentID string, deferredRSA bo
 
 	queries := sqlc.New(pool)
 	tenantID := "t_" + uuid.NewString()
-	// The tenant id is a database key and carries an underscore; the domain is a
-	// host and may not (ResourceEntry.domain is a bare-host wire rule, and the
+	// The seat id is a database key and carries an underscore; the site domain is
+	// a host and may not (ResourceEntry.domain is a bare-host wire rule, and the
 	// catalog URI is built from it), so the fixture domain is derived from the
 	// uuid alone, never from the id.
-	tenantDomain := "tenant-" + strings.TrimPrefix(tenantID, "t_") + ".example"
+	siteDomain := "publisher-" + strings.TrimPrefix(tenantID, "t_") + ".example"
 
 	keystore := signing.NewInMemoryKeyStore()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("ed25519 gen: %v", err)
 	}
-	ed25519Ref := "secret://ed25519/" + tenantID
+	ed25519Ref := repotest.SeatEd25519KeyRef(tenantID)
 	keystore.PutEd25519(ed25519Ref, pub, priv)
 
+	// The seat answers on this Exchange's own domain, which is what the push
+	// path resolves it by. The site below is a different host entirely.
 	insert := sqlc.InsertTenantParams{
 		TenantID:        tenantID,
-		Domain:          tenantDomain,
+		Domain:          harnessExchangeDomain,
 		Ed25519KeyRef:   ed25519Ref,
 		ReportingPolicy: []byte(`{}`),
-		SigningScheme:   sqlc.ForaSigningSchemeED25519,
-		RsaKeyRef:       pgtype.Text{},
+		// The seat holds one private-key reference per scheme, whatever its
+		// sites sign with, so the RSA ref is always present and a site
+		// registered on AWS_CLOUDFRONT_RSA resolves its signer through it.
+		RsaKeyRef: pgtype.Text{String: cloudFrontTestKeyRef, Valid: true},
+	}
+	// The payee row itself is seeded once per test by acquireTestDB, so this
+	// only attaches the site to it.
+	site := repotest.Site{
+		SeatTenantID: tenantID,
+		Domain:       siteDomain,
+		PublisherID:  harnessResourceOwner,
 	}
 	if deferredRSA {
-		insert.SigningScheme = sqlc.ForaSigningSchemeAWSCLOUDFRONTRSA
+		// The private key is the seat's and the scheme is the site's, so the
+		// deferred-RSA shape is written across both rows.
 		insert.RsaKeyRef = pgtype.Text{String: deferredRSAKeyRef, Valid: true}
-		insert.CloudfrontKeyPairID = pgtype.Text{String: "cf-deferred-test", Valid: true}
+		site.SigningScheme = string(sqlc.ForaSigningSchemeAWSCLOUDFRONTRSA)
+		site.CloudFrontKeyPairID = "cf-deferred-test"
 		keystore.PutRSAFunc(deferredRSAKeyRef, func() (*rsa.PrivateKey, error) {
 			return nil, fmt.Errorf(
 				"%w — set FORA_RSA_PRIVATE_PEM or FORA_RSA_PRIVATE_PEM_FILE",
@@ -171,8 +211,9 @@ func setupExchangeTestDBDeferredRSA(t *testing.T, agentID string, deferredRSA bo
 		})
 	}
 	if _, err := queries.InsertTenant(ctx, insert); err != nil {
-		t.Fatalf("insert tenant: %v", err)
+		t.Fatalf("insert seat: %v", err)
 	}
+	repotest.SeedSite(t, ctx, pool, site)
 	agentPub, agentPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("agent ed25519 gen: %v", err)
@@ -180,15 +221,18 @@ func setupExchangeTestDBDeferredRSA(t *testing.T, agentID string, deferredRSA bo
 	seedAgent(t, ctx, queries, agentID, agentPub)
 
 	return exchangeDBFixture{
-		ctx:          ctx,
-		logger:       logger,
-		pool:         pool,
-		agentPub:     agentPub,
-		agentPriv:    agentPriv,
-		queries:      queries,
-		keystore:     keystore,
-		tenantID:     tenantID,
-		tenantDomain: tenantDomain,
+		ctx:        ctx,
+		logger:     logger,
+		pool:       pool,
+		agentPub:   agentPub,
+		agentPriv:  agentPriv,
+		queries:    queries,
+		keystore:   keystore,
+		tenantID:   tenantID,
+		siteDomain: siteDomain,
+		seatKeyRef: ed25519Ref,
+		seatPub:    pub,
+		seatPriv:   priv,
 	}
 }
 
@@ -233,7 +277,7 @@ func (h *testHarness) now() time.Time {
 // to call startAdminServer itself, which gave the package two bring-up paths for
 // one surface and started a second listener the moment such a test also read an
 // obligation through the cached one.
-func (h *testHarness) adminSurface(t *testing.T) (foraadminv1connect.AdminServiceClient, string) {
+func (h *testHarness) adminSurface(t testing.TB) (foraadminv1connect.AdminServiceClient, string) {
 	t.Helper()
 	if h.adminURL == "" {
 		h.adminClient, h.adminURL = startAdminServer(t, h, "127.0.0.0/8")
@@ -242,7 +286,7 @@ func (h *testHarness) adminSurface(t *testing.T) (foraadminv1connect.AdminServic
 }
 
 // adminBaseURL is adminSurface for the readers that need only the URL.
-func (h *testHarness) adminBaseURL(t *testing.T) string {
+func (h *testHarness) adminBaseURL(t testing.TB) string {
 	t.Helper()
 	_, url := h.adminSurface(t)
 	return url
@@ -288,6 +332,10 @@ type harnessOptions struct {
 	// Pass a wrapper (e.g. recordingAdapter) to observe billing calls while
 	// inner keeps the real balance semantics.
 	server billing.Adapter
+	// ledgerCurrencies are the currencies this Exchange bills in; nil → the
+	// suite's single-currency default. Set it together with a server adapter
+	// configured for the same set.
+	ledgerCurrencies []string
 	// txRunner overrides the service's transaction runner; nil → PoolRunner.
 	// A failing runner drives the persist-failure hot path.
 	txRunner sharedb.TxRunner
@@ -307,7 +355,7 @@ type harnessOptions struct {
 	logger *slog.Logger
 	// maxSignatures bounds the inbound signature (hop) chain depth at the
 	// global httpsig gate; 0 → unbounded. Set to mirror the production ceiling
-	// (max_intermediary_hops + 1) when exercising the hop bound.
+	// (max_intermediary_hops) when exercising the hop bound.
 	maxSignatures int
 	// manifests overrides the catch-all manifest cache; nil → an
 	// allowAllManifestCache that authorizes the caller and attests
@@ -330,6 +378,13 @@ type harnessOptions struct {
 	// (see setupExchangeTestDBDeferredRSA), driving the FailedPrecondition
 	// refusal through the full transport surface.
 	deferredRSATenant bool
+	// journalPool, when set, is the pool the denial journal writes through;
+	// nil is the harness's own. Pass closedPool(t) to make every journal write
+	// fail in the driver.
+	journalPool *pgxpool.Pool
+	// lifetimes shortens a tenant's offer and delivery-URL lifetimes, as the e2e
+	// control service does; nil is production's none.
+	lifetimes service.Lifetimes
 }
 
 // harnessTxRunner resolves the transaction runner the service gets: a wrapper
@@ -363,7 +418,7 @@ func newTestHarnessWith(t *testing.T, opts harnessOptions) *testHarness {
 	t.Helper()
 	fx := setupExchangeTestDBDeferredRSA(t, "agent-test", opts.deferredRSATenant)
 	ctx, logger, pool, queries, keystore := fx.ctx, fx.logger, fx.pool, fx.queries, fx.keystore
-	tenantID, tenantDomain := fx.tenantID, fx.tenantDomain
+	tenantID, siteDomain := fx.tenantID, fx.siteDomain
 	if opts.logger != nil {
 		logger = opts.logger
 	}
@@ -389,8 +444,8 @@ func newTestHarnessWith(t *testing.T, opts harnessOptions) *testHarness {
 	// with a stub key; re-seed it with the caller's real signing key so the
 	// transport signature and the body acceptance share one identity.
 	seedAgent(t, ctx, queries, callerID, callerPub)
-	registry := newAllowAllRegistry()
-	registry.put(callerID, callerPub)
+	registry := exchangetest.NewRegistry()
+	registry.Put(callerID, callerPub)
 	var manifests service.ManifestCache = newAllowAllManifestCache(callerID)
 	if opts.manifests != nil {
 		manifests = opts.manifests
@@ -432,9 +487,12 @@ func newTestHarnessWith(t *testing.T, opts harnessOptions) *testHarness {
 		// Register (bring-up below) needs the default tenant to resolve
 		// its activation policy, and a deterministic billing_ref so the seeded
 		// balance's account key is known ahead of time.
-		defaultTenantDomain: tenantDomain,
+		defaultTenantDomain: harnessExchangeDomain,
 		billingRefGen:       func() string { return defaultCallerBillingRef },
 		sor:                 opts.sor,
+		ledgerCurrencies:    opts.ledgerCurrencies,
+		journalPool:         opts.journalPool,
+		lifetimes:           opts.lifetimes,
 	})
 	if err := srv.catalogSvc.Bootstrap(ctx); err != nil {
 		t.Fatalf("catalog bootstrap: %v", err)
@@ -468,7 +526,7 @@ func newTestHarnessWith(t *testing.T, opts harnessOptions) *testHarness {
 		keystore:       keystore,
 		clk:            opts.clk,
 		tenantID:       tenantID,
-		tenantDomain:   tenantDomain,
+		siteDomain:     siteDomain,
 		billingRef:     billingRef,
 		callerPub:      callerPub,
 		callerPriv:     callerPriv,
@@ -486,6 +544,6 @@ func newTestHarnessWith(t *testing.T, opts harnessOptions) *testHarness {
 // of "AGENT" or "BROKER".
 func (h *testHarness) addCaller(t *testing.T, agentID, requesterType string) foraconnect.ExchangeServiceClient {
 	t.Helper()
-	client, _, _ := h.addCallerWithKey(t, agentID, requesterType)
+	client, _ := h.addCallerWithKey(t, agentID, requesterType)
 	return client
 }

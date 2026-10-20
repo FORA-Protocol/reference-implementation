@@ -1,6 +1,6 @@
 # ADR-009 — Identity Boundary: Exchange vs Billing
 
-**Status:** Accepted (2026-06-02); **amended 2026-08-13** — D2's "no protocol-driven onboarding flow mints a balance" is narrowed: the Register flow MAY grant a tenant-configured one-time default credit (`tenants.default_agent_credit`, 0 = disabled) to a newly registered agent, drawn from the operator's `platform:liquidity` account under an idempotent `"service-welcome:" + billing_ref` ledger slot. Everything else in D2 stands. See the [Amendment (2026-08-13)](#amendment-2026-08-13--tenant-configured-default-credit-at-register) section.
+**Status:** Accepted (2026-06-02); **amended 2026-08-13** — D2's "no protocol-driven onboarding flow mints a balance" is narrowed: the Register flow MAY grant an operator-configured one-time default credit (`EXCHANGE_DEFAULT_AGENT_CREDIT`, unset = disabled) to a newly registered agent, drawn from the operator's `platform:liquidity` account under an idempotent `"service-welcome:" + billing_ref` ledger slot. Everything else in D2 stands. See the [Amendment (2026-08-13)](#amendment-2026-08-13--tenant-configured-default-credit-at-register) section.
 
 ---
 
@@ -101,18 +101,26 @@ freshly registered agent held a zero balance, so its first paid transaction was 
 denied with `INSUFFICIENT_BALANCE` until an operator funded the account by hand. That
 sentence is narrowed. One protocol flow now mints a balance, under operator control:
 
-- **Tenant configuration.** `fora.tenants.default_agent_credit` (`NUMERIC(20,8)`,
-  non-negative, denominated in the deployment ledger currency) is the one-time credit a
-  newly registered agent receives. The default is 0, which disables the grant entirely —
-  an unconfigured deployment keeps the exact pre-amendment behavior. The environment
-  variable `EXCHANGE_DEFAULT_AGENT_CREDIT` is the sole configuration channel: every
-  boot replaces the column with the variable's value (unset means 0, so removing the
-  variable disables the grant at the next restart), there is no admin RPC, and operator
-  SQL is not a supported channel. The column is per-tenant in the schema, but the
-  Register flow reads it only from the deployment's configured default tenant — the
-  same shape as `activate_new_agents_by_default`, because the RegisterRequest carries
-  no tenant field. Resolving an agent to a specific tenant, and with it genuinely
-  per-tenant grants, is future work.
+- **Deployment configuration.** The environment variable
+  `EXCHANGE_DEFAULT_AGENT_CREDIT` is the one-time credit a newly registered agent
+  receives, one non-negative amount per currency the deployment bills in. Unset or empty
+  disables the grant entirely — an unconfigured deployment keeps the exact
+  pre-amendment behavior. It is the sole configuration channel: there is no admin RPC
+  and no database column. The Exchange parses it once at boot, refusing to start on a
+  malformed value or a currency it does not bill in, and holds the parsed map in its own
+  configuration, so changing or removing it takes effect at the next restart. Because
+  the RegisterRequest carries no tenant field, the grant applies to every first
+  registration on the Exchange, whose activation policy is read from the deployment's
+  configured default tenant. Resolving an agent to a specific tenant, and with it
+  genuinely per-tenant grants, is future work.
+
+  As first implemented, the boot step copied the variable into a column on the default
+  tenant (`fora.tenants.default_agent_credit`, later the per-currency
+  `default_agent_credits`) and Register read the column. The copy was written only when
+  that tenant already existed at boot, so a deployment that created its tenant after the
+  Exchange started granted nothing until a restart, without any error. The column was
+  dropped and Register now reads the configuration directly; the variable's semantics
+  are unchanged.
 - **When it runs.** Only in the first-register branch of the Register flow, after the
   ledger account is created and before the `billing_ref` is stored on the agent row. The
   already-registered fast path never credits. A grant failure fails the Register RPC, so

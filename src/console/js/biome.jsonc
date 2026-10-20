@@ -1,0 +1,15 @@
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  // The console's browser scripts follow the edge worker's rules: one rule set
+  // for the repository's JavaScript, kept in one file.
+  "extends": ["../../edge/biome.jsonc"],
+  "files": {
+    // The scripts themselves live beside the pages that load them, in
+    // ../internal/web/static, and are passed on the command line. Only
+    // JavaScript is checked there: the stylesheets are Bootstrap's and the
+    // console's own, and alpine.min.js is Alpine's release build, vendored
+    // byte for byte.
+    "include": ["*.js", "*.jsonc", "*.json", "tests/**", "../internal/web/static/*.js"],
+    "ignore": ["node_modules", "package-lock.json", "../internal/web/static/alpine.min.js"]
+  }
+}

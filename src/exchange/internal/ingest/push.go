@@ -1,3 +1,11 @@
+// Package ingest signs a FORA catalog feed and pushes it to the Exchange.
+//
+// It reads the feed through the shared catalogfeed package — one resource per
+// line, parsed into typed records and mapped to proto-exact
+// fora.v1.ResourceEntry values — then signs and submits them through the
+// protocol SDK's catalog client over the CatalogService.PushResources RPC, in
+// several submissions when the feed is larger than the wire bound on one. The
+// cmd/fora-ingest binary is a thin flag-parsing wrapper over Run and Check.
 package ingest
 
 import (
@@ -17,20 +25,16 @@ import (
 	"github.com/FORA-Protocol/protocol/sdk/go/core"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/catalogfeed"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/foraaudience"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
 )
 
 // signatureTTL bounds the RFC 9421 signature's validity window. Every
 // submission is one synchronous RPC signed just before it is sent, so a short
 // window suffices.
 const signatureTTL = 30 * time.Second
-
-// ErrEmptyFeed refuses a feed that maps to no entries. The wire refuses it too
-// — PushResourcesRequest.entries carries repeated.min_items = 1 — so the push
-// and the local check answer with this one sentence rather than two, which is
-// what makes --check's verdict the same verdict the run reaches.
-var ErrEmptyFeed = errors.New("the feed holds no entries; an empty push asks for nothing and is refused")
 
 // ContributorKey is the on-disk shape of a catalog-contributor Ed25519
 // keypair: a kid plus base64url-encoded raw (32-byte) seed and public key.
@@ -72,20 +76,40 @@ func LoadContributorKey(path string) (kid string, priv ed25519.PrivateKey, err e
 	return doc.KID, ed25519.NewKeyFromSeed(seed), nil
 }
 
+// SignatureAgentFor is the https origin a contributor's catalog push names as
+// its Signature-Agent member: https://<kid>, the contributor hostname its
+// keypair names, which is where the contributor serves its key directory. The
+// Exchange's catalog gate resolves the signing key by the push's caller_id,
+// which is that same kid (LoadContributorKey), so the member names the directory
+// the gate reads, and a Web Bot Auth verifier that follows the member finds the
+// same key. A kid that does not make an https origin (helpers.CheckHTTPSOrigin)
+// is refused before anything is signed or sent.
+func SignatureAgentFor(kid string) (string, error) {
+	origin := "https://" + kid
+	if err := helpers.CheckHTTPSOrigin(origin); err != nil {
+		return "", fmt.Errorf("catalog push signature agent: %w", err)
+	}
+	return origin, nil
+}
+
 // NewCatalogClient builds the SDK catalog client the push speaks through,
-// against the Exchange at exchangeURL, signing as the contributor kid. Custody
-// stays at the pipeline root: the private key becomes an SDK Signer here and
-// never travels through PushEntries.
+// against the Exchange at exchangeURL, signing as the contributor whose key
+// directory is served at signatureAgent (an https origin, see
+// SignatureAgentFor). Custody stays at the pipeline root: the private key
+// becomes an SDK Signer here and never travels through PushEntries.
 //
 // The composition: an Ed25519 signer whose RFC 9421 keyid is the RFC 7638
-// thumbprint of priv's public key; kid as the covered Signature-Agent
-// directory origin, which is where the Exchange fetches that key; a
-// MonotonicWindow, so two submissions signed within the same wall-clock second
-// never carry identical created/expires and every on-the-wire signature stays
-// unique for the Exchange's replay store; and strict wire validation, so a
-// request the Exchange would refuse at its wire tier is refused here, before
-// it is signed or sent. No sign predicate is needed: this client dials only
-// /fora.v1.CatalogService/* procedures, every one of which is signed.
+// thumbprint of priv's public key; signatureAgent as the covered
+// Signature-Agent member, which names the contributor's directory to any Web
+// Bot Auth verifier; the
+// SDK's ClockWindow over clk for the signature timestamps (the SDK transport
+// adds a fresh nonce to every signature, and the nonce is what keeps two
+// identical submissions in one second unique for the Exchange's replay store);
+// and
+// strict wire validation, so a request the Exchange would refuse at its wire
+// tier is refused here, before it is signed or sent. No sign predicate is
+// needed: this client dials only /fora.v1.CatalogService/* procedures, every
+// one of which is signed.
 //
 // What the SDK client brings over a signing transport composed around the
 // generated client: it refuses redirects (a client that followed one would
@@ -100,9 +124,22 @@ func LoadContributorKey(path string) (kid string, priv ed25519.PrivateKey, err e
 // fails with a transport error before any verdict arrives. Connect has no
 // trailer dependency. Same decision, same reason, as the Broker's Exchange
 // relay client.
+//
+// extra options follow the signing ones, so a caller can add what its run
+// needs. The CLI (Run) passes sdkconnect.WithRequestIDFunc over the one id it
+// puts on the run's context, so every submission of a run carries the same
+// X-Request-ID and the Exchange's log lines for the run share one request_id.
+// The automatic import builds its client through importer.NewCatalogClient,
+// which is given its run's id the same way -- fora-import also logs that id on
+// its own lines -- and adds the label that marks its pushes as the import's.
+// This constructor never adds that label, so a push through Run is always
+// recorded as a manual one.
 func NewCatalogClient(
-	exchangeURL, kid string, priv ed25519.PrivateKey, clk clock.Clock,
+	exchangeURL, signatureAgent string, priv ed25519.PrivateKey, clk clock.Clock, extra ...sdkconnect.ClientOption,
 ) (*sdkconnect.CatalogClient, error) {
+	if err := helpers.CheckHTTPSOrigin(signatureAgent); err != nil {
+		return nil, fmt.Errorf("catalog push signature agent: %w", err)
+	}
 	if clk == nil {
 		clk = clock.System{}
 	}
@@ -114,12 +151,13 @@ func NewCatalogClient(
 	if err != nil {
 		return nil, fmt.Errorf("build contributor signer: %w", err)
 	}
-	return sdkconnect.NewCatalogClient(strings.TrimRight(exchangeURL, "/"),
+	opts := append([]sdkconnect.ClientOption{
 		sdkconnect.WithSigner(signer),
-		sdkconnect.WithSignatureAgent(kid),
-		sdkconnect.WithSignWindow(core.MonotonicWindow(clk.Now, signatureTTL)),
+		sdkconnect.WithSignatureAgent(signatureAgent),
+		sdkconnect.WithSignWindow(core.ClockWindow(clk.Now, signatureTTL)),
 		sdkconnect.WithValidation(sdkconnect.ValidationStrict),
-	), nil
+	}, extra...)
+	return sdkconnect.NewCatalogClient(strings.TrimRight(exchangeURL, "/"), opts...), nil
 }
 
 // PushTarget names who one catalog push is addressed to and who is sending
@@ -186,7 +224,7 @@ func PushEntries(
 	entries []*forav1.ResourceEntry,
 ) (PushReport, error) {
 	if len(entries) == 0 {
-		return PushReport{}, ErrEmptyFeed
+		return PushReport{}, catalogfeed.ErrEmptyFeed
 	}
 	bound, err := EntriesPerSubmission()
 	if err != nil {
@@ -263,8 +301,9 @@ type Options struct {
 // a non-nil error when configuration is incomplete, the feed is malformed or
 // empty, or a submission was refused or could not be sent. The report is
 // written once anything was sent, so a refusal mid-run still says what was
-// stored. main is a thin wrapper over this so the parse/map/push/exit-code
-// contract is exercised by tests.
+// stored. Every submission of the run carries one request id: the one ctx
+// already carries, or one minted for the run. main is a thin wrapper over this
+// so the parse/map/push/exit-code contract is exercised by tests.
 func Run(ctx context.Context, opts Options) (PushReport, error) {
 	if opts.ExchangeURL == "" {
 		return PushReport{}, errors.New("exchange URL is required")
@@ -277,11 +316,11 @@ func Run(ctx context.Context, opts Options) (PushReport, error) {
 		return PushReport{}, fmt.Errorf("catalog push: %w", err)
 	}
 
-	records, err := ParseJSONL(opts.Feed)
+	records, err := catalogfeed.ParseJSONL(opts.Feed)
 	if err != nil {
 		return PushReport{}, err
 	}
-	entries, err := MapRecords(records)
+	entries, err := catalogfeed.MapRecords(records)
 	if err != nil {
 		return PushReport{}, err
 	}
@@ -290,7 +329,15 @@ func Run(ctx context.Context, opts Options) (PushReport, error) {
 	if err != nil {
 		return PushReport{}, err
 	}
-	client, err := NewCatalogClient(opts.ExchangeURL, kid, priv, opts.Clk)
+	signatureAgent, err := SignatureAgentFor(kid)
+	if err != nil {
+		return PushReport{}, err
+	}
+	// One request id for the whole run, set before the client exists so every
+	// submission reads the same one; a caller that already set one keeps it.
+	ctx = reqctx.WithID(ctx, reqctx.IDOrNew(ctx))
+	client, err := NewCatalogClient(opts.ExchangeURL, signatureAgent, priv, opts.Clk,
+		sdkconnect.WithRequestIDFunc(func() string { return reqctx.IDOrNew(ctx) }))
 	if err != nil {
 		return PushReport{}, err
 	}
@@ -304,18 +351,4 @@ func Run(ctx context.Context, opts Options) (PushReport, error) {
 		WriteReport(opts.Report, report)
 	}
 	return report, err
-}
-
-// MapRecords maps every parsed record to a proto-exact ResourceEntry, wrapping
-// the first mapping failure with the offending record's index and URI.
-func MapRecords(records []Record) ([]*forav1.ResourceEntry, error) {
-	entries := make([]*forav1.ResourceEntry, 0, len(records))
-	for i := range records {
-		entry, err := mapRecord(records[i])
-		if err != nil {
-			return nil, fmt.Errorf("record %d (%s%s): %w", i, records[i].Domain, records[i].Path, err)
-		}
-		entries = append(entries, entry)
-	}
-	return entries, nil
 }

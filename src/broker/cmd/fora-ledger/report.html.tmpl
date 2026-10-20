@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FORA evidence chain — {{.TransactionID}}</title>
+<style>
+/* Design tokens follow the FORA protocol documentation (Starlight defaults):
+   the same greys, accent hue, semantic colours, type scale and system fonts.
+   Light is the default; dark follows the operating system preference. */
+:root {
+  --gray-1: hsl(224, 14%, 16%); --gray-2: hsl(224, 10%, 23%); --gray-3: hsl(224, 7%, 36%);
+  --gray-4: hsl(224, 6%, 56%); --gray-5: hsl(224, 6%, 77%); --gray-6: hsl(224, 20%, 94%);
+  --gray-7: hsl(224, 19%, 97%); --white: hsl(224, 10%, 10%); --black: hsl(0, 0%, 100%);
+  --accent: hsl(234, 90%, 60%); --accent-high: hsl(234, 80%, 30%);
+  --green: hsl(101, 90%, 46%); --green-high: hsl(101, 80%, 22%); --green-low: hsl(101, 85%, 90%);
+  --orange: hsl(41, 90%, 60%); --orange-high: hsl(41, 80%, 25%); --orange-low: hsl(41, 90%, 88%);
+  --red: hsl(339, 90%, 60%); --red-high: hsl(339, 80%, 30%); --red-low: hsl(339, 80%, 90%);
+  --text: var(--gray-2); --bg: var(--black); --bg-code: var(--gray-6); --hairline: var(--gray-5);
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', 'Noto Sans', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --gray-1: hsl(224, 20%, 94%); --gray-2: hsl(224, 6%, 77%); --gray-3: hsl(224, 6%, 56%);
+    --gray-4: hsl(224, 7%, 36%); --gray-5: hsl(224, 10%, 23%); --gray-6: hsl(224, 14%, 16%);
+    --white: hsl(0, 0%, 100%); --black: hsl(224, 10%, 10%);
+    --accent: hsl(224, 100%, 60%); --accent-high: hsl(224, 100%, 85%);
+    --green: hsl(101, 82%, 63%); --green-high: hsl(101, 82%, 80%); --green-low: hsl(101, 39%, 22%);
+    --orange: hsl(41, 82%, 63%); --orange-high: hsl(41, 82%, 87%); --orange-low: hsl(41, 39%, 22%);
+    --red: hsl(339, 82%, 63%); --red-high: hsl(339, 82%, 87%); --red-low: hsl(339, 39%, 22%);
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 2rem 1.5rem 3rem; background: var(--bg); color: var(--text);
+  font-family: var(--font); font-size: 1rem; line-height: 1.75; }
+main { max-width: 64rem; margin: 0 auto; }
+h1, h2 { color: var(--white); line-height: 1.2; font-weight: 600; margin: 0 0 1rem; }
+h1 { font-size: 2.1875rem; }
+h2 { font-size: 1.5rem; margin-top: 2.5rem; }
+code { font-family: var(--font-mono); font-size: 0.875rem; background: var(--bg-code);
+  padding: 0.125rem 0.375rem; border-radius: 0.25rem; overflow-wrap: anywhere; }
+dl.ids { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; margin: 0 0 1.5rem; }
+dl.ids dt { color: var(--gray-3); }
+dl.ids dd { margin: 0; }
+.aside { padding: 1rem; border-inline-start: 0.25rem solid var(--aside-border); background: var(--aside-bg);
+  color: var(--white); margin: 1.5rem 0; }
+.aside-title { font-size: 1.125rem; font-weight: 600; line-height: 1.2; color: var(--aside-accent); margin: 0 0 0.5rem; }
+.aside p { margin: 0; }
+.aside-note { --aside-accent: var(--green-high); --aside-border: var(--green); --aside-bg: var(--green-low); }
+.aside-caution { --aside-accent: var(--orange-high); --aside-border: var(--orange); --aside-bg: var(--orange-low); }
+.aside-danger { --aside-accent: var(--red-high); --aside-border: var(--red); --aside-bg: var(--red-low); }
+table { border-spacing: 0; width: 100%; display: block; overflow: auto; }
+th, td { border-bottom: 1px solid var(--hairline); padding: 0.5rem 1rem; vertical-align: baseline; text-align: left; }
+th:first-child, td:first-child { padding-inline-start: 0; }
+th:last-child, td:last-child { padding-inline-end: 0; }
+th { color: var(--white); font-weight: 600; white-space: nowrap; }
+td.step { white-space: nowrap; }
+td.absence { color: var(--gray-3); font-style: italic; }
+ol.assertions { list-style: none; padding: 0; margin: 0; }
+ol.assertions li { display: grid; grid-template-columns: 6.5rem 1fr; gap: 0.25rem 1rem;
+  padding: 0.75rem 0; border-bottom: 1px solid var(--hairline); }
+.badge { display: inline-block; font-size: 0.8125rem; font-weight: 600; line-height: 1.5; text-align: center;
+  padding: 0.125rem 0.5rem; border-radius: 0.25rem; border: 1px solid var(--badge-border);
+  background: var(--badge-bg); color: var(--badge-text); align-self: start; }
+.badge-held { --badge-border: var(--green); --badge-bg: var(--green-low); --badge-text: var(--green-high); }
+.badge-failed { --badge-border: var(--red); --badge-bg: var(--red-low); --badge-text: var(--red-high); }
+.badge-unchecked { --badge-border: var(--orange); --badge-bg: var(--orange-low); --badge-text: var(--orange-high); }
+.assertion-name { color: var(--white); font-weight: 600; }
+.assertion-detail { color: var(--text); overflow-wrap: anywhere; }
+footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--hairline);
+  color: var(--gray-3); font-size: 0.8125rem; }
+</style>
+</head>
+<body>
+<main>
+<h1>FORA evidence chain</h1>
+<dl class="ids">
+  <dt>Transaction</dt><dd><code>{{.TransactionID}}</code></dd>
+  <dt>Tenant</dt><dd><code>{{.TenantID}}</code></dd>
+</dl>
+
+{{if gt .Tally.Failed 0 -}}
+<div class="aside aside-danger" role="status"><p class="aside-title">Failed: {{.Tally.Failed}} assertion(s) did not hold</p>
+{{- else if gt .Tally.Skipped 0 -}}
+<div class="aside aside-caution" role="status"><p class="aside-title">Incomplete: {{.Tally.Skipped}} assertion(s) could not be checked</p>
+{{- else -}}
+<div class="aside aside-note" role="status"><p class="aside-title">Verified: every checked assertion holds</p>
+{{- end}}
+<p>{{.Summary}}</p>
+</div>
+
+<h2>Chain</h2>
+<table>
+<thead><tr><th>Party</th><th>Step</th><th>Event</th><th>Correlator</th><th>Crypto</th></tr></thead>
+<tbody>
+{{range .Rows -}}
+<tr><td>{{.Party}}</td><td class="step">{{.Step}}</td>
+{{- if .Absence}}<td class="absence" colspan="3">— {{.Absence}}</td>
+{{- else}}<td>{{.Event}}</td><td><code>{{.Correlator}}</code></td><td><code>{{.Crypto}}</code></td>{{end}}</tr>
+{{end -}}
+</tbody>
+</table>
+
+<h2>Assertions</h2>
+<ol class="assertions">
+{{range .Assertions -}}
+<li><span class="badge badge-{{.State}}">{{if eq .State "held"}}Holds{{else if eq .State "failed"}}Failed{{else}}Unchecked{{end}}</span>
+<span class="assertion-name">{{.Name}}</span><span></span><span class="assertion-detail">{{.Detail}}</span></li>
+{{end -}}
+</ol>
+
+<footer>Generated {{.Generated}} by fora-ledger. Both Ed25519 signatures were re-verified offline from the stored bytes and keys;
+"Unchecked" means a source was not read, which is not a failed check.</footer>
+</main>
+</body>
+</html>

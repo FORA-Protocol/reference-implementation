@@ -226,7 +226,7 @@ func mustCoSigner(t *testing.T) *signing.CoSigner {
 	if err != nil {
 		t.Fatalf("identity keygen: %v", err)
 	}
-	signer, err := signing.NewCoSigner("broker.example", "broker-1", identityPriv, nil)
+	signer, err := signing.NewCoSigner("broker.example", identityPriv, nil)
 	if err != nil {
 		t.Fatalf("cosigner: %v", err)
 	}

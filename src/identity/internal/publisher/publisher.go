@@ -9,6 +9,7 @@ package publisher
 
 import (
 	"context"
+	"crypto"
 	"errors"
 	"fmt"
 	"sync"
@@ -18,6 +19,7 @@ import (
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
+	wkserver "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/server"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/directory"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/keystore"
 )
@@ -46,6 +48,12 @@ const (
 	// failure that would also take the card down.
 	maxDirectoryKeys = 64
 
+	// directorySignatureAuthorities bounds how many authorities one agent's
+	// directory keeps a response signature for. An agent's directory is served
+	// under its own host, so one is the usual count; the bound only stops a
+	// caller inventing Host values from growing the cache.
+	directorySignatureAuthorities = 4
+
 	// defaultBuildTimeout bounds a single document build. The build runs on a
 	// cancellation-detached context (so a disconnecting caller cannot fail its
 	// singleflight peers), which also strips the caller's deadline — this re-imposes
@@ -71,10 +79,20 @@ type KeySource interface {
 	List(ctx context.Context, subdomain string) ([]keystore.Key, error)
 }
 
-// Config wires a Service. Keys, Cards, Revocations, and Registrations are required;
-// the rest take defaults.
+// KeySigners is the slice of custody that signs an agent's directory response:
+// a signer for each listed key. *keystore.VaultStore satisfies it.
+type KeySigners interface {
+	Signer(ctx context.Context, ref keystore.Ref) (crypto.Signer, error)
+}
+
+// Config wires a Service. Keys, Signers, Cards, Revocations, and Registrations are
+// required; the rest take defaults.
 type Config struct {
-	Keys          KeySource
+	Keys KeySource
+	// Signers signs each agent's directory response with the keys it lists: a
+	// key directory is signed once per listed key, and a verifier hands out only
+	// the keys that signed it.
+	Signers       KeySigners
 	Cards         directory.CardReader
 	Revocations   directory.RevocationReader
 	Registrations Registrations
@@ -95,6 +113,7 @@ type Config struct {
 // Service builds, caches, and serves an agent's documents by subdomain.
 type Service struct {
 	keys          KeySource
+	signers       KeySigners
 	cards         directory.CardReader
 	revocations   directory.RevocationReader
 	registrations Registrations
@@ -117,6 +136,9 @@ type Service struct {
 func New(cfg Config) (*Service, error) {
 	if cfg.Keys == nil {
 		return nil, errors.New("publisher: Config.Keys is required")
+	}
+	if cfg.Signers == nil {
+		return nil, errors.New("publisher: Config.Signers is required to sign directory responses")
 	}
 	if cfg.Cards == nil {
 		return nil, errors.New("publisher: Config.Cards is required")
@@ -149,6 +171,7 @@ func New(cfg Config) (*Service, error) {
 	}
 	return &Service{
 		keys:          cfg.Keys,
+		signers:       cfg.Signers,
 		cards:         cfg.Cards,
 		revocations:   cfg.Revocations,
 		registrations: cfg.Registrations,
@@ -366,6 +389,8 @@ func (s *Service) buildWBA(ctx context.Context, subdomain string, ds *docSet) (b
 			return false, buildErr
 		}
 		ds.wba = wba
+		ds.wbaKeys = active
+		ds.signatures = wkserver.NewSignatureCache(s.clock.Now, directorySignatureAuthorities)
 		ds.keyExpiry = earliestNotAfter(active)
 		return false, nil
 	case errors.Is(err, keystore.ErrNotFound), errors.Is(err, keystore.ErrInvalidSubdomain):

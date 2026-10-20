@@ -43,7 +43,7 @@ func postRawConnect(t *testing.T, base http.RoundTripper, url string, body []byt
 	if err != nil {
 		t.Fatalf("raw post: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	got, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read raw response: %v", err)

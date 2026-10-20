@@ -63,5 +63,5 @@ func TestExecuteTransaction_UnregisteredAgentFreeSucceeds(t *testing.T) {
 	}
 
 	// The billing adapter saw nothing: no Authorize, Record, or Release.
-	assertBillingLifecycle(t, rec, false, 0, 0)
+	assertBillingLifecycle(t, rec, false, 0)
 }

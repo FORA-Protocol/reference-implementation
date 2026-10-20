@@ -403,8 +403,10 @@ requirement that `ext` and attestation `claims` are objects.
 
 | Reason | Meaning |
 |---|---|
-| `unknown_publisher_domain` | No tenant is registered for the line's `domain`. |
-| `tenant_mismatch` | The caller-supplied tenant disagrees with the one derived from `domain`. |
+| `publisher_domain_not_registered` | The line's `domain` is not a registered site. |
+| `publisher_domain_listing_not_active` | The site is registered, but it is not offered on this Exchange's seat, or its listing has not yet been proven by the manifest it serves. |
+| `resource_owner_id_mismatch` | The `resource_owner_id` the manifest attests for this Exchange is not the payee the site is registered under. |
+| `tenant_mismatch` | The caller-supplied tenant disagrees with the seat this Exchange answers as. |
 | `caller_not_in_catalog_contributors` | The publisher's `/.well-known/fora.json` does not authorize this caller to contribute. |
 | `missing_resource_owner_id` | The manifest's entry for this Exchange carries no `resource_owner_id`, so there is no settlement payee. It is never inferred. |
 | `publisher_manifest_version_refused` | The publisher's `/.well-known/fora.json` carries a document `ver` this Exchange does not accept — another major, or none. The Exchange reads major 1 and any minor of it. |

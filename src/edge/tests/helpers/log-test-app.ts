@@ -6,7 +6,7 @@ import { vi } from 'vitest';
 
 import { type App, createApp } from '../../src/app.js';
 import type { AppDeps } from '../../src/types.js';
-import type { TestKeypair } from './ed25519.js';
+import { type TestKeypair, rawPublicKey } from './ed25519.js';
 
 // The minimal shape of a vitest console spy this helper needs — structural,
 // so the suites can pass vi.spyOn(console, ...) without importing vitest
@@ -74,7 +74,7 @@ export function makeLogTestApp(
       supported_profiles: ['fora-news-v1'],
     },
     exchangeUrl: 'https://exchange.test',
-    resolveKey: async (kid) => (kid === exchangeKid ? keypair.publicKey : undefined),
+    resolveKey: async (kid) => (kid === exchangeKid ? rawPublicKey(keypair) : undefined),
     enforceBinding: true,
     ...overrides,
   };

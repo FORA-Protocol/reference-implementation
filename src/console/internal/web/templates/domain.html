@@ -1,0 +1,104 @@
+{{define "content"}}
+<nav aria-label="breadcrumb">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/domains">My domains</a></li>
+    <li class="breadcrumb-item active" aria-current="page">{{.Registration.Domain}}</li>
+  </ol>
+</nav>
+<h1 class="h3">{{.Registration.Domain}}
+  {{if .Registration.Active}}<span class="badge text-bg-success align-middle">Verified</span>
+  {{- else}}<span class="badge text-bg-warning align-middle">Not verified</span>{{end}}</h1>
+<p class="text-secondary">{{.Registration.CDN}} · {{.SiteTerms.Summary}}</p>
+{{if not .Registration.Active}}
+<p class="text-secondary">This domain is saved, but nothing on it is sold until it is verified. For that,
+  the file below has to be served at <code>/.well-known/fora.json</code> on the domain, the package has to be
+  installed on your CDN{{if not .SiteTerms.Set}}, and the domain's terms have to be set{{end}}.</p>
+<p><a class="btn btn-primary" href="/domains/{{.Registration.Domain}}/setup">Finish setup</a></p>
+{{end}}
+<p class="text-secondary small">
+{{- if .Registration.ImportReplacesManualTerms}}The automatic import also applies these terms to the pages it finds already in the catalog. Their titles and descriptions stay.
+{{- else}}Pages that were already in the catalog keep their own terms.{{end -}}
+</p>
+
+{{if .Warnings}}
+<div class="alert alert-warning">
+  <ul class="mb-0">{{range .Warnings}}<li>{{.}}</li>{{end}}</ul>
+</div>
+{{end}}
+
+{{if .Downloads}}
+<h2 class="h5 mt-4">Your setup files</h2>
+<ul class="list-group">
+{{range .Downloads}}
+  <li class="list-group-item d-flex justify-content-between align-items-center gap-2">
+    <span>
+      <span class="fw-semibold">{{.Name}}</span>
+      <span class="d-block text-body-secondary small">{{.Description}}</span>
+    </span>
+    <a class="btn btn-outline-primary btn-sm" href="{{.URL}}" download>Download</a>
+  </li>
+{{end}}
+</ul>
+{{end}}
+
+{{with .SiteTerms}}{{if .Set}}
+<h2 class="h5 mt-4">Your terms</h2>
+<p class="text-secondary small">What an agent is offered when it asks for one of this domain's pages.</p>
+<fieldset class="sample terms-readonly" disabled>
+  <legend class="visually-hidden">Your terms</legend>
+  <div class="controls">
+    <div class="ctl">
+      <span class="k">price</span>
+      <div class="seg">
+        <input type="radio" id="m-free" name="pricing_model" value="free" {{if not .Charging}}checked{{end}}>
+        <label for="m-free">Free</label>
+        <input type="radio" id="m-paid" name="pricing_model" value="per_unit" {{if .Charging}}checked{{end}}>
+        <label for="m-paid">Charge</label>
+      </div>
+      {{if .Charging}}
+      <div class="price">
+        <span>{{.Currency}}</span>
+        <input type="text" value="{{.Rate}}" aria-label="Price per {{.Unit}}">
+      </div>
+      <span class="per">per {{.Unit}}</span>
+      {{end}}
+    </div>
+    <div class="ctl">
+      <span class="k">uses</span>
+      <div class="checks">
+        {{range .Uses}}
+        <label>
+          <input type="checkbox" {{if .Permitted}}checked{{end}}>
+          <span>{{.Label}}</span>
+          <span class="note">{{.Note}}</span>
+        </label>
+        {{end}}
+      </div>
+    </div>
+    <div class="ctl">
+      <span class="k">attribution</span>
+      <div class="checks">
+        <label>
+          <input type="checkbox" {{if .Attribution}}checked{{end}}>
+          <span>Required</span>
+          <span class="note">every use must credit you</span>
+        </label>
+      </div>
+    </div>
+  </div>
+  <div class="codebox offer mt-3">
+    {{if .OfferWarning}}<div>{{.OfferWarning}}</div>{{else}}
+    <ul>
+      {{range .Offer}}
+      <li{{if .Indent}} class="in"{{end}}><span class="lbl">{{.Label}}</span>{{if .Value}}<span class="val"> {{.Value}}</span>{{end}}</li>
+      {{end}}
+    </ul>
+    {{end}}
+  </div>
+</fieldset>
+<p class="text-body-secondary small mt-2">These are the terms this domain was registered with, and the offer an agent gets under them for a page of your site. They cannot be changed here yet.</p>
+{{else}}
+<h2 class="h5 mt-4">Your terms</h2>
+<p class="text-secondary">Not set yet. An agent can be offered nothing from this domain until they are.</p>
+{{end}}{{end}}
+{{end}}

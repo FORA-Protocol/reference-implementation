@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
-
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/agentid"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
@@ -37,10 +35,6 @@ const RejectionReasonNotInContributors = "caller_not_in_catalog_contributors"
 // which is what the ingest-tier rule reads.
 const RejectionReasonInvalidTerms = "invalid_license_terms"
 
-// RejectionReasonUnknownPublisherDomain is emitted when an entry's domain has no
-// tenant on this Exchange — it cannot own a catalog row here.
-const RejectionReasonUnknownPublisherDomain = "unknown_publisher_domain"
-
 // RejectionReasonManifestVersionRefused is emitted when an entry's owner
 // manifest was fetched and read but carries a document version this Exchange
 // does not accept (forawellknown.ErrVersionRefused): another major, or no
@@ -56,8 +50,8 @@ const RejectionReasonManifestVersionRefused = "publisher_manifest_version_refuse
 const RejectionReasonMissingResourceOwner = "missing_resource_owner_id"
 
 // RejectionReasonTenantMismatch is emitted when the caller-supplied req.tenant_id
-// disagrees with the tenant the entry's domain resolves to; the server-derived
-// tenant is authoritative and the disagreeing client value is rejected.
+// disagrees with the seat this Exchange sells as; the server-resolved seat is
+// authoritative and the disagreeing client value is rejected.
 const RejectionReasonTenantMismatch = "tenant_mismatch"
 
 // CatalogPushRejection captures a single rejected entry along with its
@@ -92,8 +86,8 @@ const catalogRejectMsg = "exchange.catalog_push.reject"
 // refusals are collected rather than at each gate that produces one.
 //
 // It runs once over the whole set for the reason reject exists: a push can be
-// refused for seven reasons across two files, and a log call per gate is a list
-// that goes out of date the first time an eighth is added. Here there is one
+// refused for many reasons across several files, and a log call per gate is a
+// list that goes out of date the first time another is added. Here there is one
 // call, and it sees whatever partitionByContributor collected.
 //
 // It carries the machine-readable reason and the URI, which is what an operator
@@ -144,12 +138,17 @@ func formatRejections(rejections []CatalogPushRejection) string {
 // manifest that does not attest a resource_owner_id for this Exchange yields
 // RejectionReasonMissingResourceOwner (the payee is never inferred — there is no
 // tenant_id fallback). Any other fetch error aborts the batch.
+//
+// domain is the site the caller's entry resolved to, and resolveSite has already
+// refused it if it is not registered here. Taking the domain rather than the
+// ResourceEntry keeps that precondition visible at the call site: this function
+// is where the Exchange makes an outbound request, and it fetches only hosts the
+// registration table already named.
 func (s *CatalogService) resolveManifestGates(
 	ctx context.Context,
-	e *forav1.ResourceEntry,
-	callerID, uri string,
+	domain, callerID, uri string,
 ) (string, *CatalogPushRejection, error) {
-	manifest, err := s.manifests.Get(ctx, e.GetDomain())
+	manifest, err := s.manifests.Get(ctx, domain)
 	if err != nil {
 		if errors.Is(err, forawellknown.ErrNoDocument) {
 			return "", reject(uri, RejectionReasonNotInContributors), nil //nolint:nilerr // err->rejection

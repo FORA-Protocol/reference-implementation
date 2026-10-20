@@ -38,7 +38,9 @@ func TestMain(m *testing.M) {
 var schedAnchor = time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
 
 // newRotationStore resets the shared Vault to an empty mount and returns a store over
-// it plus the deterministic clock driving it, so each test starts clean.
+// it plus the deterministic clock driving it, so each test starts clean. The store
+// holds a token with only the Identity Service's production policy, so a rotation
+// or prune that needs a capability the policy does not grant fails here.
 func newRotationStore(tb testing.TB) (*keystore.VaultStore, *clock.DeterministicClock) {
 	tb.Helper()
 	if err := sharedVault.Reset(tb.Context()); err != nil {
@@ -46,7 +48,7 @@ func newRotationStore(tb testing.TB) (*keystore.VaultStore, *clock.Deterministic
 	}
 	clk := clock.NewDeterministic(schedAnchor)
 	store, err := keystore.NewVaultStore(keystore.Config{
-		Client: sharedVault.Client, Mount: sharedVault.Mount, Clk: clk,
+		Client: sharedVault.IdentityServiceClient(tb), Mount: sharedVault.Mount, Clk: clk,
 	})
 	if err != nil {
 		tb.Fatalf("new vault store: %v", err)

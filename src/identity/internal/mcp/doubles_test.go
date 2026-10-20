@@ -3,6 +3,7 @@
 package mcp_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -19,14 +20,14 @@ import (
 	"github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
 	"github.com/FORA-Protocol/protocol/sdk/go/connectserver"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	audiencetest "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/foraaudience/testutil"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/foraauth"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
+	wkserver "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/server"
 	rwtestutil "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/testutil"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/httpsig"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
 )
 
 // The validity window every fixture peer publishes its offer-signing key over.
@@ -38,8 +39,9 @@ var (
 )
 
 // foraPeer is a stand-in Broker or Exchange that gates every RPC behind the
-// PRODUCTION RFC 9421 middleware (internal/httpsig.Middleware) — the same gate the
-// real Exchange runs.
+// protocol SDK's request verifier (helpers.VerifyRequestResolved) — the verify
+// face the real Exchange's gate runs. It is served over https, as every FORA
+// peer and every key directory is.
 //
 // That is the point of these tests. A double that merely accepted the call would
 // prove the tool assembled a request; running the real verifier proves the request
@@ -57,7 +59,6 @@ type foraPeer struct {
 	// calls, so an accidental call to one fails loudly as unimplemented rather
 	// than silently succeeding against a stub.
 	forav1connect.UnimplementedExchangeServiceHandler
-	forav1connect.UnimplementedBrokerServiceHandler
 
 	srv *httptest.Server
 
@@ -71,12 +72,11 @@ type foraPeer struct {
 	reportResp   *forav1.UsageReportResponse
 	err          error
 
-	// Execute relay (a bespoke route, not a Connect RPC). relayResp is the 200
-	// body; relayErrStatus/relayErrBody, when set, make it answer non-2xx with
-	// that raw body — the broker's protojson ErrorDetail shape.
-	relayResp      *forav1.TransactionResponse
-	relayErrStatus int
-	relayErrBody   []byte
+	// BrokerService.ExecuteTransaction. executeResp is the combined answer the
+	// Broker returns; executeErr, when set, is the Broker's own refusal instead,
+	// ErrorDetail and all.
+	executeResp *forav1.BrokerTransactionResponse
+	executeErr  *connect.Error
 
 	// Last request per RPC, so a test can assert what the tool actually put on
 	// the wire — not merely that something arrived.
@@ -156,12 +156,21 @@ type peerCall struct {
 	// disclosure. Recorded on every call so assertNoBearerLeaked can check the
 	// property everywhere rather than in one test that has to remember to.
 	Authorization string
+	// RequestID is the X-Request-ID the call arrived with, so a test can check
+	// that an outbound leg travels under the id of the tool call that caused it.
+	RequestID string
 }
+
+// endpointPathPrefix is the path an Exchange can legitimately advertise in front
+// of its RPC routes. The peer serves its ExchangeService at both the bare path
+// and behind this one, so a test can stage the endpoint shape that took the
+// account calls out of the signed set.
+const endpointPathPrefix = "/api"
 
 // newFORAPeer starts a peer serving both FORA services behind the signature gate.
 // Serving both on one origin keeps the fixture small; a tool only ever calls the
 // service it is wired to, and the recorded path says which was used.
-func newFORAPeer(t *testing.T, resolver httpsig.KeyResolver) *foraPeer {
+func newFORAPeer(t *testing.T, resolver helpers.KeyResolver) *foraPeer {
 	t.Helper()
 	offerPub, offerPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -180,18 +189,26 @@ func newFORAPeer(t *testing.T, resolver httpsig.KeyResolver) *foraPeer {
 	// Exchange does. Without it the double is weaker than the peer it stands for:
 	// every account call could leave with a missing or wrong recipient and the
 	// suite would pass while production refused all of them. Mounted on the
-	// ExchangeService alone — it is the only service here whose messages name a
-	// recipient, and the relay POST below is not a Connect route at all.
+	// ExchangeService alone: a TransactionRequest sent to the Broker names the
+	// Exchanges it routes to, not the Broker, so the Broker does not check it.
 	// Both doubles serve through the canonical codec, because both stand in for a
 	// peer that does. The MCP adapter decodes these replies; feeding it the
 	// camelCase alias would test a wire form no FORA service produces.
 	exchangePath, exchangeHandler := forav1connect.NewExchangeServiceHandler(p,
 		connect.WithInterceptors(audiencetest.MustInterceptor(t, self)),
 		connect.WithCodec(connectserver.EmitUnpopulatedJSONCodec()))
-	brokerPath, brokerHandler := forav1connect.NewBrokerServiceHandler(p,
+	brokerPath, brokerHandler := forav1connect.NewBrokerServiceHandler(brokerFace{p},
 		connect.WithCodec(connectserver.EmitUnpopulatedJSONCodec()))
 	mux.Handle(exchangePath, exchangeHandler)
 	mux.Handle(brokerPath, brokerHandler)
+	// The SAME ExchangeService, also served behind a path prefix. An endpoint is
+	// constrained on host, port and userinfo and says nothing about a path, so an
+	// Exchange advertising ".../api" is conformant and a peer that could only be
+	// reached at a bare origin could not stand in for one. Mounted
+	// unconditionally: nothing advertises a prefixed endpoint unless a test calls
+	// setManifestEndpoint, so this reaches no existing case.
+	mux.Handle(endpointPathPrefix+exchangePath,
+		http.StripPrefix(endpointPathPrefix, exchangeHandler))
 
 	// The manifest an Exchange serves about itself. fora_report finds where to
 	// send a report by reading this — never from our configuration — so the peer
@@ -220,34 +237,32 @@ func newFORAPeer(t *testing.T, resolver httpsig.KeyResolver) *foraPeer {
 	// The Web Bot Auth directory carrying this peer's OFFER-signing key. After the
 	// WBA split that key lives only here, and it is what discovery resolves an
 	// offer's signature against, so a peer without this document issues offers
-	// nobody can verify. Unsigned for the same reason as the manifest above: a
-	// public key-discovery document is unauthenticated in production too.
+	// nobody can verify. Served as every key directory is: over https, under the
+	// directory media type, with a response signature by the key it lists.
+	directory := rwtestutil.MarshalWBA(rwtestutil.WBAFile(
+		forawellknown.NewKey(p.offerPub, wbaNotBefore, wbaNotAfter)))
+	signatures := wkserver.NewSignatureCache(nil, 0)
 	mux.HandleFunc("GET /.well-known/http-message-signatures-directory",
-		func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/jwk-set+json")
-			// Built through the shared key builder, which stamps the RFC 8037 JWK
-			// header quartet in exactly one place. A literal here would be a second
-			// copy of that quartet, unchecked against the schema and free to drift
-			// from what the resolver reads.
-			_, _ = w.Write(rwtestutil.MarshalWBA(rwtestutil.WBAFile(
-				forawellknown.NewKey(p.offerPub, wbaNotBefore, wbaNotAfter))))
+		func(w http.ResponseWriter, r *http.Request) {
+			_ = wkserver.WriteDirectory(w, r, directory,
+				[]helpers.Signer{rwtestutil.DirectorySigner(p.offerPriv)}, signatures)
 		})
 
-	// The Broker's bespoke execute-relay route. It is not a Connect path, so it is
-	// handled by hand; it IS signed traffic, so the predicate below routes it
-	// through the same signature gate as the /fora.* RPCs.
-	mux.HandleFunc("POST /broker/v1/exchange/execute", p.serveRelay)
-
-	gated := httpsig.Middleware(resolver, httpsig.NewMemoryReplayStore(nil),
-		httpsig.InterceptorOptions{
-			OnVerified: p.record,
-			// Verify the relay route in addition to the default /fora.* set, so a
-			// relay POST is held to the same signature standard as an RPC. The
-			// well-known document stays unverified — it matches neither clause.
-			PathPredicate: func(path string) bool {
-				return strings.HasPrefix(path, foraauth.FORAProcedurePrefix) || path == "/broker/v1/exchange/execute"
-			},
-		}, mux)
+	// Verify the /fora.* set, and the same set behind the path prefix. The
+	// well-known documents stay unverified — they match neither clause.
+	//
+	// The prefixed mount needs its own clause and this is the load-bearing half
+	// of it. "/api/fora.v1.ExchangeService/Register" matches neither of the other
+	// two, so without this the gate would wave a prefixed call through
+	// unverified, p.record would never run, and a test asserting the call was
+	// signed would pass whether it was or not. It is widened to the exact prefix
+	// this peer serves rather than to a substring match, because a predicate that
+	// accepts "/fora." anywhere in a path stops being the check it is standing in
+	// for.
+	gated := verifyGate(resolver, p.record, func(path string) bool {
+		return strings.HasPrefix(path, foraauth.FORAProcedurePrefix) ||
+			strings.HasPrefix(path, endpointPathPrefix+foraauth.FORAProcedurePrefix)
+	}, mux)
 
 	// Counting sits OUTSIDE the signature gate and outside the mux, so it sees a
 	// request whatever happens to it afterwards — refused for its signature,
@@ -258,15 +273,48 @@ func newFORAPeer(t *testing.T, resolver httpsig.KeyResolver) *foraPeer {
 		p.countHTTPRequest()
 		gated.ServeHTTP(w, r)
 	})
-	srv.Start()
+	srv.StartTLS()
 	p.srv = srv
 	t.Cleanup(p.srv.Close)
 	return p
 }
 
-// record notes a verified call. It runs as the middleware's OnVerified hook, so it
-// only ever sees requests whose signature already passed.
-func (p *foraPeer) record(r *http.Request, v *httpsig.VerifiedRequest) *http.Request {
+// verifyGate is the peer's signature gate. A request whose path signed selects
+// is verified with the SDK's request verifier against resolver — required
+// components, the Web Bot Auth profile, the freshness window and the Ed25519
+// signature — and refused 401, with Accept-Signature where the SDK names one,
+// when it fails. A request that passes is recorded through onVerified and
+// served. It keeps no replay store: no case here sends one signature twice.
+func verifyGate(
+	resolver helpers.KeyResolver, onVerified func(*http.Request, *helpers.VerifiedRequest) *http.Request,
+	signed func(string) bool, next http.Handler,
+) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !signed(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read body", http.StatusBadRequest)
+			return
+		}
+		v, err := helpers.VerifyRequestResolved(r.Context(), r, body, resolver, helpers.VerifyOptions{})
+		if err != nil {
+			if accept, ok := helpers.AcceptSignatureFor(err); ok {
+				w.Header().Set(helpers.AcceptSignatureHeader, accept)
+			}
+			connectserver.WriteReject(w, connect.CodeUnauthenticated, err)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		next.ServeHTTP(w, onVerified(r, v))
+	})
+}
+
+// record notes a verified call. It runs as the gate's verified hook, so it only
+// ever sees requests whose signature already passed.
+func (p *foraPeer) record(r *http.Request, v *helpers.VerifiedRequest) *http.Request {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls = append(p.calls, peerCall{
@@ -274,6 +322,7 @@ func (p *foraPeer) record(r *http.Request, v *httpsig.VerifiedRequest) *http.Req
 		KeyID:          v.KeyID,
 		SignatureAgent: v.SignatureAgent,
 		Authorization:  r.Header.Get("Authorization"),
+		RequestID:      r.Header.Get(reqctx.HeaderRequestID),
 	})
 	return r
 }
@@ -383,6 +432,32 @@ func (p *foraPeer) OfferAt(t *testing.T, offerID string, expiresAt time.Time) *f
 	offer.Signature = sig
 	offer.SignatureAlgorithm = helpers.OfferSignatureAlgorithm
 	return offer
+}
+
+// deliveryExpiry is the expiry every fixture delivery URL is signed with: far
+// enough out that no suite run reaches it.
+var deliveryExpiry = time.Unix(4102444800, 0)
+
+// SignDelivery signs rawURL the way this peer, as the issuing Exchange, signs a
+// delivery URL: Ed25519 under the key its Web Bot Auth directory publishes, named
+// by that key's thumbprint in kid. An agent_id already on rawURL is kept, so the
+// URL stays bound to whichever agent the test bound it to.
+//
+// The identity service does not verify the URL's signature: the protocol leaves
+// that to the edge serving it. The fixtures still sign every URL, so what the
+// service returns and fetches is shaped exactly as an issuing Exchange would
+// issue it.
+func (p *foraPeer) SignDelivery(t *testing.T, rawURL string) string {
+	t.Helper()
+	kid, err := helpers.Thumbprint(p.offerPub)
+	if err != nil {
+		t.Fatalf("thumbprint the peer key: %v", err)
+	}
+	signed, err := helpers.SignURLEd25519(p.offerPriv, kid, rawURL, "", deliveryExpiry)
+	if err != nil {
+		t.Fatalf("sign delivery URL %q: %v", rawURL, err)
+	}
+	return signed.URL
 }
 
 // advertisedEndpoint is the endpoint this peer names in its well-known manifest.
@@ -570,37 +645,32 @@ func (p *foraPeer) ReportUsage(
 	return connect.NewResponse(resp), nil
 }
 
-// serveRelay stands in for the Broker's execute-relay endpoint. By the time it
-// runs the signature gate has already verified sig1, so it records the request
-// and answers with whatever the test programmed: the 200 TransactionResponse, or
-// a non-2xx protojson ErrorDetail (the broker's error-envelope shape).
-func (p *foraPeer) serveRelay(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(r.Body)
-	var req forav1.TransactionRequest
-	// DiscardUnknown mirrors the real relay's tolerance for forward-compatible bodies.
-	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(body, &req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	p.mu.Lock()
-	p.lastExecute = &req
-	errStatus, errBody, resp := p.relayErrStatus, p.relayErrBody, p.relayResp
-	p.mu.Unlock()
+// --- BrokerService ---
 
-	w.Header().Set("Content-Type", "application/json")
-	if errStatus != 0 {
-		w.WriteHeader(errStatus)
-		_, _ = w.Write(errBody)
-		return
+// brokerFace is the peer seen as the Broker. ExchangeService and BrokerService
+// both name an RPC ExecuteTransaction, with different responses, so one type
+// cannot serve both: the peer itself is the Exchange, and this wrapper adds the
+// Broker's purchase beside the Resolve it already has.
+type brokerFace struct{ *foraPeer }
+
+// ExecuteTransaction stands in for the Broker's purchase RPC. By the time it runs
+// the signature gate has verified the request, so it records it and answers with
+// whatever the test programmed: the Broker's refusal, or its combined answer.
+func (b brokerFace) ExecuteTransaction(
+	_ context.Context, req *connect.Request[forav1.TransactionRequest],
+) (*connect.Response[forav1.BrokerTransactionResponse], error) {
+	b.mu.Lock()
+	b.lastExecute = req.Msg
+	refusal, resp := b.executeErr, b.executeResp
+	b.mu.Unlock()
+	if refusal != nil {
+		return nil, refusal
 	}
 	if resp == nil {
-		resp = &forav1.TransactionResponse{Ver: helpers.ProtocolVersion}
+		resp = &forav1.BrokerTransactionResponse{Ver: helpers.ProtocolVersion}
 	}
-	out, _ := protojson.MarshalOptions{UseProtoNames: true}.Marshal(resp)
-	_, _ = w.Write(out)
+	return connect.NewResponse(resp), nil
 }
-
-// --- BrokerService ---
 
 func (p *foraPeer) Resolve(
 	_ context.Context, req *connect.Request[forav1.DiscoveryRequest],

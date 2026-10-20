@@ -3,8 +3,8 @@ import { URL, fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { decodeBase64Url } from '@fora-protocol/sdk-l1/base64url';
-import { thumbprint } from '@fora-protocol/sdk-l1/thumbprint';
+import { decodeBase64Url } from '@fora-protocol/sdk/base64url';
+import { thumbprint } from '@fora-protocol/sdk/thumbprint';
 
 // Shared cross-language fixture (ADR-013 D4). The Go (internal/forathumbprint)
 // and Python (src/mcp fora_mcp_shim.thumbprint) implementations are pinned to

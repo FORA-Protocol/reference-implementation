@@ -2,21 +2,19 @@
 // pass ("shared SHAPE, not shared PACKAGE" — mirror the Exchange
 // thin-adapter→service exemplar locally in the broker).
 //
-// This is a behavior-preserving refactor: its BEHAVIORAL coverage is the
-// existing broker transport integration suite (discover_relay, selection
-// audit, replay, batch/denial/repackage/budget, wellknown byte-parity),
-// which must pass UNCHANGED. These guards pin only the structural target
-// that suite cannot see:
+// Their behavioural coverage is the Broker transport integration suite (the
+// purchase, resolve, registry-health and selection-audit tests). These guards
+// pin only the structural target that suite cannot see:
 //
-//  1. src/broker/internal/relay exists and owns the relay security
-//     pipeline + batch fan-out (transport keeps only ServeHTTP adapters
-//     and write sinks).
-//  2. internal/relay never imports transport and never touches
+//  1. The purchase service is the business half of
+//     BrokerService.ExecuteTransaction and lives in internal/purchase; the
+//     transport package declares none of its names.
+//  2. internal/purchase never imports transport or touches
 //     http.ResponseWriter (the sink is inverted to typed returns).
 //  3. Neither service composes the well-known manifest+WBA handler pair
 //     inline; the compose lives once below both services (root internal/).
 //
-// The depguard slice (broker-relay-no-transport + fixing the negation-only
+// The depguard slice (broker-purchase-no-transport + fixing the negation-only
 // no-circular-internal files list) is lint config, not a test; the
 // implementer must prove each new rule bites with a throwaway forbidden
 // import before trusting it.
@@ -32,39 +30,48 @@ import (
 	"testing"
 )
 
-// relayPackageDir is the target home of the broker relay service layer.
-const relayPackageDir = "src/broker/internal/relay"
+// purchasePackageDir is the service layer behind BrokerService.ExecuteTransaction.
+const purchasePackageDir = "src/broker/internal/purchase"
 
-// brokerTransportDir is the thin-adapter layer the pipeline moves OUT of.
+// brokerTransportDir is the thin-adapter layer the fan-out moves OUT of.
 const brokerTransportDir = "src/broker/internal/transport"
 
-// brokerTransportImport is the import path internal/relay must never name.
+// brokerTransportImport is the import path internal/purchase must never name.
 const brokerTransportImport = "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/" + brokerTransportDir
 
-// movedDownSymbols are the pipeline declarations that leave the transport
-// package. The guard is a NEGATION on transport ownership: rename-and-move
-// satisfies it (transport must simply not declare the symbol any more).
-// Deliberately excludes generic or adapter-legit names (serve, serveBatch,
-// readBody, audit, forward — the write sinks and orchestration stay in
-// transport per the recorded refinement).
-var movedDownSymbols = map[string]string{
-	// Relay security pipeline (bounded read, SSRF allowlist, sig1
-	// verify, replay guard) moves down to internal/relay.
-	"verifyAndGuardReplay":      "relay security pipeline",
-	"verifyAgentSignature":      "relay security pipeline",
-	"endpointAllowed":           "relay security pipeline",
-	"preflight":                 "relay security pipeline",
-	"unregisteredEndpointError": "relay security pipeline",
-	// Batch fan-out moves down to internal/relay (types crossing the
-	// boundary move DOWN; serveBatch stays as the transport adapter).
-	"batchGroup":              "batch fan-out",
-	"fanOutBatch":             "batch fan-out",
-	"resolveBatchGroups":      "batch fan-out",
-	"resolveBatchEndpoint":    "batch fan-out",
-	"mergeBatchResults":       "batch fan-out",
-	"collectGroupDenials":     "batch fan-out",
-	"contentUnavailableItem":  "batch fan-out",
-	"resolveExchangeEndpoint": "batch fan-out",
+// purchaseSharedNames are the purchase package's declarations that are generic
+// enough for a transport adapter to declare legitimately too: the constructor and
+// the port names, the audit sink with its outcome type and level rule, and plain
+// words. Every OTHER top-level name the purchase package declares is its own.
+var purchaseSharedNames = map[string]bool{
+	"New": true, "Service": true, "Execute": true, "Registry": true,
+	"EndpointResolver": true, "ExchangeCaller": true,
+	"audit": true, "auditMessage": true, "outcome": true, "level": true,
+	"group": true, "answer": true, "send": true, "firstErrorDetail": true,
+}
+
+// purchaseOnlyNames is every top-level name (methods included) that the purchase
+// package's non-test files declare, less purchaseSharedNames. It is read from the
+// package itself, so a name the package gains or renames later is covered with
+// no edit here, and a list kept by hand cannot go stale.
+func purchaseOnlyNames(t *testing.T, root string) map[string]bool {
+	t.Helper()
+	files := goSourceFilesUnder(t, root, purchasePackageDir, false)
+	if len(files) == 0 {
+		t.Fatalf("no source files under %s; the guard would check nothing", purchasePackageDir)
+	}
+	names := map[string]bool{}
+	for _, rel := range files {
+		for name := range topLevelDeclNames(parseGoFile(t, root, rel)) {
+			if !purchaseSharedNames[name] {
+				names[name] = true
+			}
+		}
+	}
+	if len(names) == 0 {
+		t.Fatalf("%s declares no name of its own; the guard would check nothing", purchasePackageDir)
+	}
+	return names
 }
 
 // goSourceFilesUnder yields every non-generated .go file under rel
@@ -117,7 +124,7 @@ func parseGoFile(t *testing.T, root, rel string) *ast.File {
 
 // topLevelDeclNames collects every top-level func/method, type, const, and
 // var name declared in the file. Method names are included (the pipeline
-// substance is mostly methods on relayCore/ExchangeRelayHandler).
+// substance is mostly methods).
 func topLevelDeclNames(f *ast.File) map[string]bool {
 	names := map[string]bool{}
 	for _, d := range f.Decls {
@@ -156,63 +163,48 @@ func astReferencesIdent(f *ast.File, name string) bool {
 	return found
 }
 
-// TestBrokerRelayServiceLayerExists fails while the broker has no
-// internal/relay package — i.e. while the relay security pipeline and the
-// batch fan-out still live in the transport package. The Exchange exemplar
-// (and the broker's own internal/resolve) is a real package with non-test
-// source files.
-func TestBrokerRelayServiceLayerExists(t *testing.T) {
+// TestPurchaseFanOutSymbolsLeftTransport fails when the transport package
+// declares a name the purchase service owns (purchaseOnlyNames): the business
+// half of BrokerService.ExecuteTransaction lives in internal/purchase, and
+// transport keeps only Connect adapters and write sinks.
+func TestPurchaseFanOutSymbolsLeftTransport(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	files := goSourceFilesUnder(t, root, relayPackageDir, false)
-	if len(files) == 0 {
-		t.Errorf("%s has no non-test Go source files — the broker relay service layer "+
-			"(relay security pipeline + batch fan-out) must live there, mirroring "+
-			"src/broker/internal/resolve; transport keeps only ServeHTTP adapters and write sinks",
-			relayPackageDir)
-	}
-}
-
-// TestRelayPipelineSymbolsLeftTransport fails while the transport package
-// still DECLARES the relay-pipeline / batch-fan-out substance. The guard is
-// ownership-negative: moving a symbol down (renamed or not) satisfies it;
-// keeping it in transport does not.
-func TestRelayPipelineSymbolsLeftTransport(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
+	owned := purchaseOnlyNames(t, root)
 	for _, rel := range goSourceFilesUnder(t, root, brokerTransportDir, false) {
-		decls := topLevelDeclNames(parseGoFile(t, root, rel))
-		for sym, group := range movedDownSymbols {
-			if decls[sym] {
-				t.Errorf("%s declares %s (%s) — that logic moves DOWN to %s; "+
-					"transport keeps only ServeHTTP adapters and write sinks",
-					rel, sym, group, relayPackageDir)
+		for sym := range topLevelDeclNames(parseGoFile(t, root, rel)) {
+			if owned[sym] {
+				t.Errorf("%s declares %s, which %s owns; "+
+					"transport keeps only Connect adapters and write sinks",
+					rel, sym, purchasePackageDir)
 			}
 		}
 	}
 }
 
-// TestRelayPackagePurity pins the target invariants of internal/relay for
-// every source file it gains: it never imports the transport package (the
-// dependency points transport→relay only) and never names
+// TestPurchasePackagePurity pins the target invariants of internal/purchase
+// for every source file it gains: it never imports the transport package (the
+// dependency points transport→service only) and never names
 // http.ResponseWriter (the write sink is inverted to typed
-// result/*broker.Error returns; transport owns every write). Vacuously
-// green while the package is absent — TestBrokerRelayServiceLayerExists
-// owns existence.
-func TestRelayPackagePurity(t *testing.T) {
+// result/*broker.Error returns; transport owns every write).
+func TestPurchasePackagePurity(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	for _, rel := range goSourceFilesUnder(t, root, relayPackageDir, false) {
+	files := goSourceFilesUnder(t, root, purchasePackageDir, false)
+	if len(files) == 0 {
+		t.Fatal("no service-layer source files found; the guard would check nothing")
+	}
+	for _, rel := range files {
 		f := parseGoFile(t, root, rel)
 		for _, imp := range f.Imports {
 			if strings.Trim(imp.Path.Value, `"`) == brokerTransportImport {
-				t.Errorf("%s imports the broker transport package — internal/relay must never "+
+				t.Errorf("%s imports the broker transport package — a service layer must never "+
 					"import transport (ports are locally-owned structural interfaces; "+
 					"types crossing the boundary move down)", rel)
 			}
 		}
 		if astReferencesIdent(f, "ResponseWriter") {
-			t.Errorf("%s references ResponseWriter — internal/relay receives NO "+
+			t.Errorf("%s references ResponseWriter — a service layer receives NO "+
 				"http.ResponseWriter; return typed results/*broker.Error and let the "+
 				"transport adapter own every write", rel)
 		}

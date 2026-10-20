@@ -14,7 +14,7 @@ import (
 // plain transfers move balances without a funding step.
 func ownerAccount(t *testing.T, c *tigerbeetle.Client, tag string) tigerbeetle.ID {
 	t.Helper()
-	id, err := tigerbeetle.AccountID(tigerbeetle.PrefixOwner, sharedTB.Salt(t)+tag)
+	id, err := tigerbeetle.AccountID(tigerbeetle.PrefixOwner, testCurrency, sharedTB.Salt(t)+tag)
 	if err != nil {
 		t.Fatalf("AccountID%s: %v", tag, err)
 	}
@@ -66,7 +66,7 @@ func TestCreateLinked_AtomicRollback(t *testing.T) {
 	c := newTestClient(t)
 	src, b := ownerAccount(t, c, "-src"), ownerAccount(t, c, "-b")
 	salt := sharedTB.Salt(t)
-	agent, err := tigerbeetle.AccountID(tigerbeetle.PrefixAgent, salt+"-agent")
+	agent, err := tigerbeetle.AccountID(tigerbeetle.PrefixAgent, testCurrency, salt+"-agent")
 	if err != nil {
 		t.Fatalf("AccountID agent: %v", err)
 	}

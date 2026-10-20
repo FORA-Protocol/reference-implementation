@@ -102,7 +102,9 @@ func newFixture(t *testing.T) *fixture {
 			Transaction: &evidenceview.TransactionState{
 				// The derived per-item key: the signed request key with the
 				// offer id appended, which is how the Exchange writes it.
-				IdempotencyKey:  fixtureIdempotency + ":" + fixtureOfferID,
+				IdempotencyKey: fixtureIdempotency + ":" + fixtureOfferID,
+				// The agent the Exchange attributed the transaction to.
+				AgentID:         fixtureReqHost,
 				SignedURLExpiry: &expiry,
 				SignedURLHash:   digest[:],
 			},

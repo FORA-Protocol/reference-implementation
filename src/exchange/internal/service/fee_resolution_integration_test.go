@@ -7,17 +7,21 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo/repotest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/service/servicetest"
 )
 
 const feeTestTenantID = "t1"
 
 // setupFeeTest brings up a migrated testcontainer Postgres and seeds the tenant
-// prerequisite, returning the sqlc querier (for the fixture mutators) and the
-// tenant id. Shared by the resolution and negative tests.
-func setupFeeTest(t *testing.T) (context.Context, sqlc.Querier, string) {
+// prerequisite, returning the pool (for the payee seed), the sqlc querier (for
+// the fixture mutators) and the tenant id. Shared by the resolution and negative
+// tests.
+func setupFeeTest(t *testing.T) (context.Context, *pgxpool.Pool, sqlc.Querier, string) {
 	t.Helper()
 	ctx := context.Background()
 	pool := servicetest.AcquireTestDB(t, ctx)
@@ -27,11 +31,11 @@ func setupFeeTest(t *testing.T) (context.Context, sqlc.Querier, string) {
 	// surface sibling Exchange tests use), not a raw SQL string.
 	if _, err := q.InsertTenant(ctx, sqlc.InsertTenantParams{
 		TenantID: feeTestTenantID, Domain: "publisher.example", Ed25519KeyRef: "k",
-		ReportingPolicy: []byte(`{}`), SigningScheme: sqlc.ForaSigningSchemeED25519,
+		ReportingPolicy: []byte(`{}`),
 	}); err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
-	return ctx, q, feeTestTenantID
+	return ctx, pool, q, feeTestTenantID
 }
 
 // TestFeeRateResolutionPersists drives the commission-rate resolution through the
@@ -49,7 +53,7 @@ func setupFeeTest(t *testing.T) (context.Context, sqlc.Querier, string) {
 // is a persistence round-trip, not a protocol one — the end-to-end "rate rides the
 // hold and posts net-of-fee" assertion belongs to the settlement-split slice.
 func TestFeeRateResolutionPersists(t *testing.T) {
-	ctx, q, tenantID := setupFeeTest(t)
+	ctx, pool, q, tenantID := setupFeeTest(t)
 	// Configure a non-zero tenant default via the fixture mutator (column
 	// defaults to 0 on insert).
 	if _, err := q.SetTenantFeeRateBps(ctx, sqlc.SetTenantFeeRateBpsParams{TenantID: tenantID, FeeRateBps: 250}); err != nil {
@@ -59,7 +63,10 @@ func TestFeeRateResolutionPersists(t *testing.T) {
 	tenantRepo := repo.NewTenantReadRepo(q)
 
 	// Seed an override for one owner through the repo write surface.
-	const ownerWithOverride = "owner-x"
+	// The override references fora.publishers now, so the payee it names has to
+	// be registered before the override can be written.
+	const ownerWithOverride = "pub-with-override"
+	repotest.SeedPublisher(t, ctx, pool, ownerWithOverride, "Stoa Press")
 	if err := feeRepo.Set(ctx, tenantID, ownerWithOverride, 1000); err != nil {
 		t.Fatalf("seed override: %v", err)
 	}
@@ -99,11 +106,14 @@ func TestFeeRateResolutionPersists(t *testing.T) {
 // with nothing persisted (Testing Doctrine §10 — the failure path through the same
 // surface that owns the write).
 func TestFeeOverrideRejectsOutOfRange(t *testing.T) {
-	ctx, q, tenantID := setupFeeTest(t)
+	ctx, pool, q, tenantID := setupFeeTest(t)
 	feeRepo := repo.NewFeeOverrideRepo(q)
 
 	// 10000 bps (= 100%) violates the CHECK (fee_rate_bps < 10000) at write time.
-	const owner = "owner-bad"
+	// A registered payee, so the only thing left to reject the write is the
+	// CHECK this test is about.
+	const owner = "pub-bad-rate"
+	repotest.SeedPublisher(t, ctx, pool, owner, "Stoa Press")
 	if err := feeRepo.Set(ctx, tenantID, owner, 10000); !errors.Is(err, repo.ErrFeeRateOutOfRange) {
 		t.Fatalf("Set(bps=10000) error = %v, want ErrFeeRateOutOfRange", err)
 	}
@@ -128,11 +138,11 @@ func TestFeeOverrideRejectsOutOfRange(t *testing.T) {
 // InsertTenant query (the same tier-2 fallback the sibling fee tests use — no public
 // tenant-provisioning RPC exists yet).
 func TestFeeOverrideTenantIsolation(t *testing.T) {
-	ctx, q, tenantA := setupFeeTest(t)
+	ctx, pool, q, tenantA := setupFeeTest(t)
 	const tenantB = "t2"
 	if _, err := q.InsertTenant(ctx, sqlc.InsertTenantParams{
 		TenantID: tenantB, Domain: "sibling.example", Ed25519KeyRef: "k",
-		ReportingPolicy: []byte(`{}`), SigningScheme: sqlc.ForaSigningSchemeED25519,
+		ReportingPolicy: []byte(`{}`),
 	}); err != nil {
 		t.Fatalf("seed tenant B: %v", err)
 	}
@@ -147,7 +157,8 @@ func TestFeeOverrideTenantIsolation(t *testing.T) {
 	tenantRepo := repo.NewTenantReadRepo(q)
 
 	// One owner, override configured ONLY under tenant A.
-	const sharedOwner = "owner-shared"
+	const sharedOwner = "pub-shared"
+	repotest.SeedPublisher(t, ctx, pool, sharedOwner, "Harmonia Records")
 	if err := feeRepo.Set(ctx, tenantA, sharedOwner, 1000); err != nil {
 		t.Fatalf("seed override (tenantA, owner): %v", err)
 	}

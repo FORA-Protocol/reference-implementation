@@ -1,0 +1,27 @@
+{
+  "name": "@fora/wba-oracle-ts",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Web Bot Auth conformance oracle for the e2e harness: Cloudflare's web-bot-auth library behind POST /sign, /verify and /import, with GET /healthz.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/server.ts",
+    "fmt": "biome format --write .",
+    "fmt:check": "biome format .",
+    "lint": "biome check --error-on-warnings .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "structured-headers": "2.0.3",
+    "web-bot-auth": "0.2.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.9.4",
+    "@types/node": "24.19.0",
+    "typescript": "5.9.3"
+  }
+}

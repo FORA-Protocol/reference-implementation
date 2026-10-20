@@ -70,7 +70,7 @@ this is the only place this document names one, and every command below reuses
 it:
 
 ```bash
-VERSION=1.0.0-rc.4
+VERSION=1.0.0-rc.5
 docker pull ghcr.io/fora-protocol/exchange:$VERSION
 ```
 
@@ -273,10 +273,14 @@ services:
       EXCHANGE_DSN: "postgres://fora:${DB_PASSWORD}@db.internal:5432/fora?sslmode=require"
       # Second database, for the agent-account registry. Create it first (§4).
       EXCHANGE_SOR_DSN: "postgres://fora:${DB_PASSWORD}@db.internal:5432/fora_sor?sslmode=require"
+      # Optional; unset means INFO. The start-up check below reads INFO lines.
+      EXCHANGE_LOG_LEVEL: "INFO"
       REDIS_URL: "rediss://:${REDIS_PASSWORD}@cache.internal:6379/0"
       EXCHANGE_DOMAIN: "exchange.example"
       EXCHANGE_PUBLIC_ORIGIN: "https://exchange.example"
-      EXCHANGE_DEFAULT_TENANT: "www.publisher.example"
+      # The seat, which is this Exchange's own hostname — never a publisher's.
+      # It may be omitted entirely, because EXCHANGE_DOMAIN is the fallback.
+      EXCHANGE_DEFAULT_TENANT: "exchange.example"
       EXCHANGE_BROKER_WELLKNOWN_URL: "https://broker.example/.well-known/fora.json"
       EXCHANGE_REVOCATION_POLL_INTERVAL: "5m"
       FORA_ED25519_PRIVATE_PEM_FILE: "/keys/ed25519-private.pem"
@@ -286,10 +290,10 @@ services:
       FORA_BILLING_ADAPTER: "tigerbeetle"
       EXCHANGE_BILLING_LEDGER: "978"
       EXCHANGE_BILLING_TB_ADDRESS: "10.0.6.20:3000"
-      # Welcome credit for newly registered agents, in WHOLE units of the
-      # ledger currency: "100" on the EUR ledger above grants EUR 100.00 per
-      # agent, not 100 cents — [`CONFIGURATION.md`](CONFIGURATION.md) §2.1.
-      # EXCHANGE_DEFAULT_AGENT_CREDIT: "100"
+      # Welcome credit for newly registered agents, per currency, in WHOLE
+      # units: "EUR=100" on the EUR ledger above grants EUR 100.00 per agent,
+      # not 100 cents — [`CONFIGURATION.md`](CONFIGURATION.md) §2.1.
+      # EXCHANGE_DEFAULT_AGENT_CREDIT: "EUR=100"
     volumes:
       - ./keys:/keys:ro                 # readable by uid 65532
 ```
@@ -321,12 +325,12 @@ One more line may appear, between `rsa signing key loaded` and
 `billing adapter`, and it is a warning rather than an error:
 
 ```
-{"level":"WARN","msg":"default tenant not found yet — Register will fail until it is seeded","default_tenant_domain":"www.publisher.example"}
+{"level":"WARN","msg":"default tenant not found yet — Register will fail until it is seeded","default_tenant_domain":"exchange.example"}
 ```
 
-That is expected on a first boot, before you have created any publisher. It is
+That is expected on a first boot, before you have created the seat. It is
 **not** expected afterwards: while it appears, no agent can register and
-therefore no agent can buy. Create the tenant (`RUNBOOK.md` §4.2) and restart.
+therefore no agent can buy. Create the seat (`RUNBOOK.md` §4.2) and restart.
 
 Read the rest of the list as a checklist, because several of the lines are
 absent rather than wrong when a setting is missing:
@@ -418,6 +422,7 @@ of the `exchange.exit` line and match it here:
 
 | `err` begins with | Cause | Fix |
 |---|---|---|
+| `EXCHANGE_LOG_LEVEL:` | The value is not `DEBUG`, `INFO`, `WARN` or `ERROR` (any case) | Correct it, or remove the variable for the default `INFO`. |
 | `EXCHANGE_BROKER_WELLKNOWN_URL is required` | The variable is unset | Set it. The address is mandatory at boot, even though the document itself is only fetched at runtime. |
 | `sor: EXCHANGE_SOR_DSN is required …` | The variable is unset | Set it. §2, §4. |
 | `sor: setup database:` | The account-registry database does not exist, is unreachable, or the user cannot create a schema in it | Create the database and grant the user (§4). |

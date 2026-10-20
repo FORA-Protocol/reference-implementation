@@ -24,6 +24,8 @@ import (
 	foraadminv1 "github.com/FORA-Protocol/protocol/gen/go/fora/admin/v1"
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 )
 
 // seedMeteringNoneTerm is a priced term whose pricing meters nothing: a one-time
@@ -32,10 +34,7 @@ import (
 // other field matches seedPricedTermEst, so a test that swaps this in changes one
 // axis only.
 func seedMeteringNoneTerm() *forav1.LicenseTerm {
-	term := seedPricedTermEst(1)
-	metering := forav1.PricingMetering_PRICING_METERING_NONE
-	term.Pricing.Metering = &metering
-	return term
+	return exchangetest.UnmeteredTerm("0.05")
 }
 
 // TestExecuteTransaction_OverdueRate_Boundary walks the rate ceiling through the
@@ -115,16 +114,21 @@ func TestExecuteTransaction_AllReportedSomeLate_NotBlocked(t *testing.T) {
 // longer kills a whole batch.
 //
 // The refusal used to carry a kind with no wire reason, so the batch loop could
-// not classify it as a per-item denial and aborted the entire request: one
-// overdue obligation destroyed every item, including ones for tenants the agent
-// was perfectly current with. Both halves of that are asserted here, because
-// only the second one is the fix — "no error" would also be true of a loop that
-// denied everything.
+// not classify it as a per-item denial and aborted the entire request with an
+// error. Here the batch carries two items for the seat the agent is behind on.
+// Both come back denied in-body under HTTP 200, each naming
+// DENIAL_REASON_REPORTING_OVERDUE, with no retrieval endpoint. An aborting loop
+// would return an RPC error and no items at all.
 //
-// The batch carries three items: two for the tenant the agent is behind on, and
-// one for a tenant it has never transacted with, so it owes that tenant nothing.
-// The first two come back denied in-body under HTTP 200, and the third comes back
-// delivered.
+// One half of the original scenario is not reachable any more and is deliberately
+// not simulated here. The gate is scoped per (tenant, agent), and this test used
+// to carry a third item for a second tenant the agent owed nothing, which came
+// back delivered alongside the two denials. A deployment now sells as exactly one
+// seat: every catalog row a push can create belongs to that seat, so no batch
+// built through the public surface can hold items for two tenants. The general
+// property that a denied item does not stop a sibling from being delivered is
+// covered by the mixed batch in TestExecuteTransaction_BatchPerItemDenial, where
+// the per-item difference is a tampered signature rather than a second tenant.
 func TestExecuteTransaction_Batch_OverdueDeniesItemsAndContinues(t *testing.T) {
 	h, _, _, det := newReportingHarness(t)
 
@@ -133,13 +137,6 @@ func TestExecuteTransaction_Batch_OverdueDeniesItemsAndContinues(t *testing.T) {
 
 	first := pushDiscoverOffer(t, h, 1)
 	second := pushDiscoverTermOffer(t, h, "/articles/second", seedPricedTermEst(1))
-	// A second publisher the agent is current with: no obligations at all for
-	// this (tenant, agent), so nothing is overdue and the gate has no reason to
-	// refuse. addTenant seeds the row and its signing key, which the offer for
-	// this domain is signed with.
-	otherTenantID, _ := h.addTenant(t, "current-publisher", "agent-current-publisher")
-	third := pushDiscoverTermOfferForTenant(
-		t, h, otherTenantID, "current-publisher.example", "/articles/third", seedPricedTermEst(1))
 
 	const reqKey = "tx-batch-overdue"
 	requester := newRequester("agent-test", "agent.example")
@@ -150,34 +147,22 @@ func TestExecuteTransaction_Batch_OverdueDeniesItemsAndContinues(t *testing.T) {
 		Items: []*forav1.TransactionItem{
 			{Offer: first, AgentAcceptance: signAcceptanceFor(t, h.callerPriv, first, requester, reqKey)},
 			{Offer: second, AgentAcceptance: signAcceptanceFor(t, h.callerPriv, second, requester, reqKey)},
-			{Offer: third, AgentAcceptance: signAcceptanceFor(t, h.callerPriv, third, requester, reqKey)},
 		},
 	}))
 	if err != nil {
 		t.Fatalf("an overdue agent's batch must return in-body denials, not abort: %v", err)
 	}
 	items := resp.Msg.GetItems()
-	if len(items) != 3 {
-		t.Fatalf("batch returned %d items, want 3 — the loop aborted instead of continuing", len(items))
+	if len(items) != 2 {
+		t.Fatalf("batch returned %d items, want 2 — the loop aborted instead of continuing", len(items))
 	}
-	for i, item := range items[:2] {
+	for i, item := range items {
 		if got := item.GetDenialReason(); got != forav1.DenialReason_DENIAL_REASON_REPORTING_OVERDUE {
 			t.Errorf("item %d denial_reason = %v, want DENIAL_REASON_REPORTING_OVERDUE", i, got)
 		}
 		if item.GetRetrievalEndpoint() != "" {
 			t.Errorf("item %d was denied but still carries a retrieval_endpoint", i)
 		}
-	}
-	// The item that makes this test about "continues" rather than "does not
-	// error": a tenant the agent owes nothing is delivered in the same response.
-	survivor := items[2]
-	if got := survivor.GetDenialReason(); got != forav1.DenialReason_DENIAL_REASON_UNSPECIFIED {
-		t.Errorf("the unaffected tenant's item was denied with %v; the gate is per "+
-			"(tenant, agent) and this agent owes that tenant nothing", got)
-	}
-	if survivor.GetRetrievalEndpoint() == "" {
-		t.Error("the unaffected tenant's item carries no retrieval_endpoint: the batch " +
-			"denied every item instead of only the affected ones")
 	}
 }
 

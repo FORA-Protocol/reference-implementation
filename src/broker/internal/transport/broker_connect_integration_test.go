@@ -30,6 +30,7 @@ import (
 	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,13 +75,13 @@ type brokerConnectFixture struct {
 // serves it via httptest. The wiring mirrors production so the test exercises the
 // SAME middleware chain (ADR-008 D1 parity; Testing Doctrine pt9).
 //
-// callerID/callerPub seed the resolver so the SIGNED happy/refusal paths verify;
+// callerPub seeds the resolver so the SIGNED happy/refusal paths verify;
 // negative-path tests register extra keys via fx.resolver.Put after start.
-func startBrokerConnectServer(t *testing.T, fx *fixture, callerID string, callerPub ed25519.PublicKey) *brokerConnectFixture {
+func startBrokerConnectServer(t *testing.T, fx *fixture, callerPub ed25519.PublicKey) *brokerConnectFixture {
 	t.Helper()
 
 	// The SDK resolver keys by RFC 9421 keyid — an RFC 7638 thumbprint after
-	// the WBA split — not by the caller's directory identity (callerID).
+	// the WBA split — not by the caller's directory identity, so none is taken.
 	resolver := helpers.NewStaticKeyResolver(map[string]ed25519.PublicKey{rwtestutil.MustThumbprint(t, callerPub): callerPub})
 	replayStore := replay.NewCoreAdapter(replay.NewMemoryStore(time.Now))
 	// Built by the function production builds it with, not by a list assembled
@@ -98,7 +99,7 @@ func startBrokerConnectServer(t *testing.T, fx *fixture, callerID string, caller
 	// connectserver.NewBrokerServiceHandler wraps request-id (outermost) → RFC 9421
 	// verify middleware → connect interceptors (protovalidate).
 	connectPath, connectHandler := connectserver.NewBrokerServiceHandler(
-		transport.NewBrokerConnectHandler(fx.resolveHandler),
+		transport.NewBrokerConnectHandler(fx.resolveHandler, fx.purchase),
 		svrOpts...,
 	)
 	mux := http.NewServeMux()
@@ -136,12 +137,13 @@ func signingBrokerJSONClient(
 	return foraconnect.NewBrokerServiceClient(client, baseURL, connect.WithProtoJSON()), cap
 }
 
-// brokerSigningTransport builds the canonical FORA RFC 9421 signing transport
-// (sdk/go/core.NewSigningTransport) over base: it signs every /fora.* call with
-// keyID as the Signature-Agent directory and priv's RFC 7638 thumbprint as the
-// RFC 9421 keyid, under a 3600s window that keeps `expires` inside the verifier's
-// freshness check for the whole test run. Shared by both the gRPC and JSON client
-// builders so the signing setup lives once.
+// brokerSigningTransport builds the canonical FORA signing transport
+// (sdk/go/core.NewSigningTransport) over base: it signs every /fora.* call under
+// the Web Bot Auth profile with keyID's directory as the Signature-Agent member
+// — keyID itself when it is an origin, https://<keyID> for a bare host — and
+// priv's RFC 7638 thumbprint as the RFC 9421 keyid, under the profile's longest
+// window, five minutes. Shared by both the gRPC and JSON client builders so the
+// signing setup lives once.
 func brokerSigningTransport(base http.RoundTripper, keyID string, priv ed25519.PrivateKey) http.RoundTripper {
 	thumb, err := helpers.Thumbprint(priv.Public().(ed25519.PublicKey))
 	if err != nil {
@@ -154,9 +156,19 @@ func brokerSigningTransport(base http.RoundTripper, keyID string, priv ed25519.P
 	return core.NewSigningTransport(
 		signer, base,
 		core.WithSignPredicate(foraauth.IsFORAProcedure),
-		core.WithSignatureAgent(keyID),
-		core.WithWindow(core.ClockWindow(time.Now, 3600*time.Second)),
+		core.WithSignatureAgent(agentOriginOf(keyID)),
+		core.WithWindow(core.ClockWindow(time.Now, helpers.MaxSignatureLifetime)),
 	)
+}
+
+// agentOriginOf is the Signature-Agent member a test caller named by directory
+// signs with: directory itself when it carries a scheme, https://<directory>
+// for a bare host.
+func agentOriginOf(directory string) string {
+	if strings.Contains(directory, "://") {
+		return directory
+	}
+	return "https://" + directory
 }
 
 // newBrokerKeyPair generates a fresh Ed25519 keypair for a caller.

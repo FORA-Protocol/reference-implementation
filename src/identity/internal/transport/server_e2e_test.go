@@ -82,10 +82,13 @@ func newFixture(t *testing.T) *fixture {
 // newFixture so the backend-outage suite can wire the identical production chain
 // over a pool that cannot connect, without a second copy of this wiring drifting
 // from the one every other test drives.
+//
+// The store holds a token with only the Identity Service's production policy, so
+// revocation and every served document run with the capabilities production grants.
 func wireFixture(t *testing.T, pool *pgxpool.Pool) *fixture {
 	t.Helper()
 	store, err := keystore.NewVaultStore(keystore.Config{
-		Client: sharedVault.Client,
+		Client: sharedVault.IdentityServiceClient(t),
 		Mount:  sharedVault.Mount,
 		Clk:    clock.System{},
 	})
@@ -96,7 +99,7 @@ func wireFixture(t *testing.T, pool *pgxpool.Pool) *fixture {
 	revocations := repo.NewRevocationRepo(pool)
 	devs := repo.NewDeveloperRepo(pool)
 	svc, err := publisher.New(publisher.Config{
-		Keys: store, Cards: cards, Revocations: revocations, Registrations: devs,
+		Keys: store, Signers: store, Cards: cards, Revocations: revocations, Registrations: devs,
 		Clock: clock.System{},
 	})
 	if err != nil {
@@ -225,6 +228,49 @@ func TestServesWBAForFreshSubdomain(t *testing.T) {
 	got, ok := set.Keys[0].Key.(ed25519.PublicKey)
 	if !ok || !got.Equal(created.Public) {
 		t.Fatal("served key does not match the created key")
+	}
+}
+
+// TestWBAResponseIsSignedByTheAgentsCustodiedKeys pins the directory rule a
+// verifier applies before it hands out any key: the response carries a
+// signature by each listed key — here the agent's two custodied keys — over the
+// authority the request named, the agent's own host. A response for one agent's
+// host does not verify under another authority.
+func TestWBAResponseIsSignedByTheAgentsCustodiedKeys(t *testing.T) {
+	f := newFixture(t)
+	sub := "agent-signed." + baseZone
+	first := mustCreate(t, f.store, sub)
+	second := mustCreate(t, f.store, sub)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, f.srv.URL+forawellknown.WBAPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = sub
+	resp, err := f.srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	keys := []ed25519.PublicKey{first.Public, second.Public}
+	verified, err := helpers.VerifyDirectoryResponse(sub, resp.Header, body, keys, time.Now())
+	if err != nil {
+		t.Fatalf("directory response: %v", err)
+	}
+	for _, k := range []keystore.Key{first, second} {
+		if !verified[k.Ref.Thumbprint] {
+			t.Errorf("key %s did not sign the directory response", k.Ref.Thumbprint)
+		}
+	}
+	if other, err := helpers.VerifyDirectoryResponse("agent-other."+baseZone, resp.Header, body, keys, time.Now()); err == nil && len(other) != 0 {
+		t.Errorf("the response verified under another agent's authority: %v", other)
 	}
 }
 

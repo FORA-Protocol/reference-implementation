@@ -34,8 +34,8 @@ import { SELF } from 'cloudflare:test';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { fetchMock } from '../helpers/fetch-mock.js';
 
-import { decodeBase64Url, encodeBase64Url } from '@fora-protocol/sdk-l1/base64url';
-import { thumbprint } from '@fora-protocol/sdk-l1/thumbprint';
+import { decodeBase64Url, encodeBase64Url } from '@fora-protocol/sdk/base64url';
+import { thumbprint } from '@fora-protocol/sdk/thumbprint';
 import {
   type TestKeypair,
   futureExp,
@@ -102,7 +102,7 @@ beforeEach(async () => {
   // every later test.
   fetchMock.reset();
   // Exchange WBA directory endpoint (verify keys for the signed URL).
-  setupWbaDirectoryMock(exchangeKeypair);
+  await setupWbaDirectoryMock(exchangeKeypair);
   // Pass-through origin behind the edge (empty 200s; status-level assertions).
   setupOriginMock();
 

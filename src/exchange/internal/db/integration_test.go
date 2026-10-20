@@ -27,7 +27,6 @@ func TestExchangeMigrationsSmoke(t *testing.T) {
 		Domain:          tenantID + ".example",
 		Ed25519KeyRef:   "secret://ed25519/" + tenantID,
 		ReportingPolicy: []byte(`{}`),
-		SigningScheme:   sqlc.ForaSigningSchemeED25519,
 	})
 	if err != nil {
 		t.Fatalf("InsertTenant: %v", err)

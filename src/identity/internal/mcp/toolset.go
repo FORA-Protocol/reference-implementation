@@ -1,18 +1,16 @@
 package mcp
 
 import (
-	"context"
 	"log/slog"
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/exchacct"
 )
 
-// The dependency set every tool handler is a method on, the two helpers all five
-// of them share, and the table that mounts them.
+// The dependency set every tool handler is a method on, the helper they share,
+// and the table that mounts them.
 //
 // This file is named for what it holds rather than for any tool, and that is the
 // layout rule for the package: tools_<name>.go holds that tool and nothing else,
@@ -25,10 +23,10 @@ import (
 // toolset holds what the tool handlers need. It exists so the handlers are
 // methods with one dependency set rather than closures capturing loose values.
 type toolset struct {
-	fora foraCaller
-	// discovery and reports are the legs the protocol SDK serves; fora is what
-	// this repository still implements. See ports.go for why the split is at the
-	// seam rather than behind one interface.
+	// purchases, discovery and reports are the outbound legs, one port per
+	// operation; see ports.go for why the split is at the seam rather than behind
+	// one interface.
+	purchases purchaser
 	discovery discoverer
 	reports   reporter
 	// accounts opens and reports the caller's Exchange accounts. The two account
@@ -54,39 +52,28 @@ type toolset struct {
 	maxCallContentBytes int64
 	maxItemContentBytes int64
 	// log is the construction-time logger, used only when a call arrives with no
-	// request-scoped one. Handlers log through toolset.logger(ctx, caller).
+	// request-scoped one. Handlers log through toolset.logger(ctx).
 	log *slog.Logger
 	// directory builds a caller's directory origin. It is the OUTBOUND SIGNER's own
-	// function (agentsign), not a copy of its logic: the Broker/Exchange authorize a
-	// request by comparing the signed Signature-Agent origin to requester.id, so
-	// the two values must be produced by the same code, not merely configured from
-	// the same setting.
+	// function (agentsign), not a copy of its logic: the origin is what the signed
+	// Signature-Agent header carries, and the Broker and the Exchange both derive
+	// the caller's identity from that header, so the value this service sends and
+	// the value it signs must be produced by the same code rather than merely
+	// configured from the same setting.
 	directory func(subdomain string) string
 }
 
-// callCtx is the context every outbound leg and the service below it run under:
-// the caller's context carrying this call's correlation id, plus the same
-// request-scoped logger the handler logs through.
-//
-// The logger is attached rather than left to be found, because the one already
-// on the context belongs to whichever request opened the SESSION, and a service
-// reading that would stamp every line with the wrong request id.
-//
-// EVERY tool handler goes through this, not only the ones with a service under
-// them that reads the logger today. caller.outbound is the correlation id alone
-// and is what this builds on; no handler calls it directly, deliberately. Two
-// forms for one concept would leave the next tool author picking one at random,
-// and the choice decides whether a line added a layer down carries this call's
-// request id or the session-open request's — the exact failure this helper
-// exists to remove.
-func (t *toolset) callCtx(ctx context.Context, who caller) context.Context {
-	return reqctx.IntoContext(who.outbound(ctx), t.logger(ctx, who))
-}
-
 // agentDirectory is the caller's directory origin — its FORA identity, matching
-// the Signature-Agent the outbound signature carries. requester.id must be this,
-// not the bare subdomain, or the Broker/Exchange reject the call as one agent
-// trying to act on behalf of another.
+// the Signature-Agent the outbound signature carries.
+//
+// The MCP adapter puts this origin in requester.id as well. That is a deliberate
+// choice and not a requirement the Exchange imposes: requester.id is a free label
+// the protocol lets an agent pick, and the Exchange derives the identity from the
+// covered Signature-Agent instead. Sending the origin keeps the two agreeing, so
+// an operator reading a transaction's evidence row sees the party that signed it.
+// The Broker does not compare it either. What the Broker DOES check, on a
+// purchase, is that requester.domain names the same host as the verified
+// Signature-Agent, because the Exchange discovers the acceptance key from it.
 func (t *toolset) agentDirectory(subdomain string) string {
 	return t.directory(subdomain)
 }
@@ -120,17 +107,38 @@ func (t *toolset) register(srv *mcpsdk.Server) {
 			"'exchange' to get every Exchange this adapter has registered the agent at, each source " +
 			"\"local_hint\": those come from a local note, make no network call, can be out of " +
 			"date, and miss any registration made outside this adapter — re-ask with 'exchange' to " +
-			"confirm one. 'active' is null wherever nobody authoritative was asked. This tool does " +
+			"confirm one. 'active' is null wherever nobody authoritative was asked. 'balances' lists " +
+			"what the account can spend now, one {amount, currency} entry per currency, with holds " +
+			"for pending purchases subtracted; an empty list means the balance is not reported, " +
+			"not that it is zero, and hints never carry one. This tool does " +
 			"not report what an Exchange requires to register; that is published in the Exchange's " +
 			"own /.well-known/fora.json.",
 	}, t.handleStatus)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name: "fora_discover",
-		Description: "Find licensable offers for one or more URLs, or for a free-form query. " +
-			"Returns one group per requested URL, each carrying that URL's offers. A URL with " +
-			"nothing licensable comes back as an empty group with a reason, never silently dropped. " +
-			"Pass an offer back unchanged to license it.",
+		Description: "Find licensable offers for one or more URLs, or by a free-form query, search " +
+			"filters or both. " +
+			"Returns one group per requested URL, each carrying that URL's offers. A query returns " +
+			"one group per resource it matched, best match first; whether a query can match " +
+			"anything depends on how the Broker is configured, and a query that matches nothing " +
+			"comes back with a reason. A URL with nothing licensable comes back as an empty group " +
+			"with a reason, never silently dropped. When URLs are given, the URLs are used and " +
+			"the query and search_filters are not. Pass an offer back unchanged to license it. " +
+			"search_filters narrows a search with required constraints, with or without a query. " +
+			"fora-music-v1 keys: music.isrc (a 12-character upper-case ISRC without hyphens, " +
+			"or an array of them); music.genre, music.mood, music.instruments, music.suitable_for " +
+			"(a lower-case label or an array of labels); music.energy (low, medium or high, or an " +
+			"array of them); music.vocals (true or false); music.bpm_range and " +
+			"music.duration_seconds_range (a string \"MIN-MAX\", \"MIN-\" or \"-MAX\", " +
+			"inclusive, e.g. \"90-120\"). An array means any of its values; every key must " +
+			"match. A malformed value is an error naming the key; keys the profile does not " +
+			"define are ignored. A well-formed filter that no track matches comes back with the reason " +
+			"NOT_IN_CATALOG, not as an error. With a query: BPM and duration ranges in the query " +
+			"are intersected with the filter ranges, and tracks the query excludes are removed. " +
+			"If some filtered tracks match the query's wanted tags, only those matching the most " +
+			"of them are returned; otherwise every track that passes the filters and the " +
+			"query's exclusions and ranges is returned.",
 	}, t.handleDiscover)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
@@ -138,8 +146,11 @@ func (t *toolset) register(srv *mcpsdk.Server) {
 		Description: "License one or more discovered offers and get a signed delivery URL for each. " +
 			"Pass the offers fora_discover returned, unchanged. A single offer is fine — it is just a " +
 			"batch of one. Each result is licensed independently: a delivered item carries a delivery " +
-			"URL and its transaction id, a refused one carries the reason. The content itself comes " +
-			"back with the result, so there is nothing further to fetch.",
+			"URL and its transaction id, a refused one carries the reason. By default the content " +
+			"itself comes back with the result, so there is nothing further to fetch. With " +
+			"embed_content false, the content is not fetched and the result carries only the " +
+			"short-lived delivery URL for each item.",
+		InputSchema: executeInputSchema(),
 	}, t.handleExecute)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{

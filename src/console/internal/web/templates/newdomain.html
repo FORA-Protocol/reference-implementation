@@ -1,0 +1,303 @@
+{{define "content"}}
+<div x-data="wizard()" x-cloak id="wizard" data-boot="{{.Boot}}">
+
+  <!-- The progress header. Numbers are positions in the list the server sent,
+       so a publisher who already has a business name still starts at 1. -->
+  <ol class="wiz-steps">
+    <template x-for="(step, i) in steps" :key="step.key">
+      <li :class="stepClass(i)">
+        <template x-if="i < index">
+          <!-- A step passed over with Skip for now shows a dash instead of the
+               tick, so it does not read as done. -->
+          <button type="button" class="wiz-stack" @click="goBack(i)"
+                  :aria-label="'Back to ' + step.title + (isSkipped(i) ? ', skipped' : '')">
+            <span class="wiz-num" aria-hidden="true" x-text="isSkipped(i) ? '–' : '✓'"></span>
+            <span class="wiz-label" x-text="step.title"></span>
+          </button>
+        </template>
+        <template x-if="i >= index">
+          <span class="wiz-stack" :aria-current="i === index ? 'step' : false">
+            <span class="wiz-num" x-text="i + 1"></span>
+            <span class="wiz-label" x-text="step.title"></span>
+          </span>
+        </template>
+      </li>
+    </template>
+  </ol>
+
+  <div x-show="error" class="alert alert-danger" x-text="error"></div>
+
+  <div class="card wiz-body"><div class="card-body">
+
+    <!-- 1. The business name. Shown only to someone who has not registered one;
+         there is no way to change it afterwards, so it is asked once. -->
+    <div x-show="step === 'name'">
+      <h1 class="h4">What is your business called?</h1>
+      <p class="text-secondary">This is the name your payments are made out to. It cannot be changed here later.</p>
+      <label class="form-label" for="display-name">Business name</label>
+      <input class="form-control" id="display-name" x-model="name" @keyup.enter="next()"
+             autocomplete="organization">
+    </div>
+
+    <!-- 2. The domain and what serves it. Detection decides: a network we
+         cannot equip ends the wizard rather than becoming a question the
+         publisher would have to guess at. -->
+    <div x-show="step === 'domain'">
+      <h1 class="h4">Which domain are you licensing?</h1>
+      <p class="text-secondary">We work out which CDN serves it, because that decides how the rest of the setup goes.</p>
+      <div class="mb-3">
+        <label class="form-label" for="domain">Domain</label>
+        <!-- The check sits on the field it is about, and it is what opens the
+             way forward: a lookup takes a DNS query and a request to somebody
+             else's web server, so it runs when the publisher says the address
+             is right rather than on every keystroke.
+
+             The field stays editable on the dead end. Typing in it clears what
+             was found, which blocks Next again -- the commonest reason to end
+             up there is a typo, and a field locked to the wrong address would
+             leave the only way out through the dashboard. -->
+        <!-- Read-only when the wizard reopens a saved domain: the domain is
+             what was saved, and finishing its setup does not change it. -->
+        <div class="input-group">
+          <input class="form-control" id="domain" x-model="domain" @keyup.enter="checkNetwork()"
+                 placeholder="www.example.com" autocomplete="url" :readonly="resuming">
+          <button class="btn btn-primary" type="button" @click="checkNetwork()" x-show="!resuming"
+                  :disabled="busy || !domain.trim()">Check</button>
+        </div>
+        <div class="form-text">The hostname only, with no https:// in front and no path after it.</div>
+      </div>
+
+      <!-- What the check found, directly under the field it was about. The
+           three outcomes are mutually exclusive and all three decide the same
+           thing: whether there is a way forward from here. -->
+      <div x-show="network && !unsupported && !taken" class="alert alert-success"
+           x-text="networkNotice"></div>
+      <!-- The address is a link, not a sentence with an address in it. This
+           screen has no way forward, so writing to us IS the next step, and it
+           has to look like one. -->
+      <div x-show="unsupported" class="alert alert-warning">
+        <p class="mb-0" x-text="message"></p>
+        <p class="mb-0 mt-2" x-show="supportEmail">
+          Write to us at
+          <a class="support-address" :href="'mailto:' + supportEmail" x-text="supportEmail"></a>
+          and we will say what we can do.
+        </p>
+      </div>
+      <div x-show="limitReached" class="alert alert-warning" x-text="message"></div>
+      <!-- A domain this publisher already holds is opened rather than added
+           again: its saved answers are what finishing its setup works from. -->
+      <div x-show="yours" class="alert alert-info">
+        <span x-text="yoursVerified ? 'This domain is already one of yours, and it is verified.'
+                                    : 'This domain is already one of yours, and it is not verified yet.'"></span>
+        <a :href="yoursLink" x-text="yoursVerified ? 'Open it' : 'Finish its setup'"></a>
+      </div>
+      <div x-show="taken" class="alert alert-danger">
+        This domain is already registered to another publisher. If it is yours, write to us and we will transfer it.
+      </div>
+
+      <div class="mb-3" x-show="!unsupported">
+        <label class="form-label" for="paths">Licensed paths <span class="text-secondary fw-normal">(optional)</span></label>
+        <input class="form-control" id="paths" x-model="paths_" :readonly="resuming">
+        <div class="form-text">
+          Which parts of the domain you license. Leave this empty to license all of it.
+          To license only some of it, list those paths separated by commas, like
+          <code>/articles/, /archive/</code>.
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. The discovery document. It is what proves the domain is theirs: the
+         domain is verified, and anything on it sold, only once the Exchange
+         has read it. -->
+    <div x-show="step === 'document'">
+      <h1 class="h4">Publish this file on your domain</h1>
+      <p class="text-secondary">
+        It proves <span x-text="domain"></span> is yours and names who gets paid.
+        Serve the file below, then check.
+      </p>
+      <template x-for="file in manifestFiles" :key="file.name">
+        <div>
+          <div class="filerow">
+            <div>
+              <span class="fw-semibold" x-text="file.name"></span>
+              <span class="d-block text-secondary small">Serve this at
+                <code x-text="domain + '/.well-known/fora.json'"></code>.</span>
+            </div>
+            <a class="btn btn-outline flex-shrink-0" :href="file.url" download>Download</a>
+          </div>
+        </div>
+      </template>
+      <div x-show="checks.document.reasons.length" class="alert alert-warning mt-3">
+        <p class="fw-semibold mb-2">We read the file at your domain and it does not match yet.</p>
+        <ul class="mb-0">
+          <template x-for="reason in checks.document.reasons" :key="reason">
+            <li x-text="reason"></li>
+          </template>
+        </ul>
+      </div>
+      <div x-show="checks.document.passed" class="alert alert-success mt-3">
+        Your domain is confirmed as yours.
+      </div>
+    </div>
+
+    <!-- 4. The edge package. The same three questions the written instructions
+         used to ask the publisher to ask their own site with curl. -->
+    <div x-show="step === 'package'">
+      <h1 class="h4">Install the package on your CDN</h1>
+      <p class="text-secondary" x-text="edge.message || 'This is the part that runs on your own account, so it is the one part we cannot do for you.'"></p>
+      <template x-for="file in edgeFiles" :key="file.name">
+        <div class="filerow mb-3">
+          <div>
+            <span class="fw-semibold" x-text="file.name"></span>
+            <span class="d-block text-secondary small" x-text="file.description"></span>
+          </div>
+          <a class="btn btn-outline flex-shrink-0" :href="file.url" download>Download</a>
+        </div>
+      </template>
+      <template x-for="s in edgeSteps" :key="s.id">
+        <div class="steps">
+          <p class="text-secondary" x-text="s.summary"></p>
+          <template x-for="cmd in (s.commands || [])" :key="cmd.label">
+            <div class="cmd">
+              <span class="cmd-label" x-text="cmd.label"></span>
+              <pre class="codebox" x-show="cmd.run"><code x-text="cmd.run"></code></pre>
+              <span class="cmd-expect" x-show="cmd.expect" x-text="cmd.expect"></span>
+            </div>
+          </template>
+          <p class="text-secondary small mb-0" x-show="s.note" x-text="s.note"></p>
+        </div>
+      </template>
+      <!-- Only what did not pass. The full list was three rows for a publisher
+           to read, most of them green, to learn one thing -- and that thing is
+           already in the sentence above. What cannot be dropped is the reason:
+           the heading says whether the package answered US, and a package that
+           answers us can still refuse readers or hide the discovery document,
+           which locks this step with nothing on screen to explain it. -->
+      <div class="probes mt-3" x-show="edgeFailures.length">
+        <template x-for="c in edgeFailures" :key="c.label">
+          <div class="probe" :class="'probe-' + c.outcome">
+            <span class="probe-mark" aria-hidden="true"
+                  x-text="c.outcome === 'failed' ? '\u00d7' : '?'"></span>
+            <span>
+              <span class="fw-semibold" x-text="c.label"></span>
+              <span class="d-block text-secondary small" x-text="c.detail"></span>
+            </span>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- 5. The licensing, with the offer an agent would be shown beside it. -->
+    <div x-show="step === 'terms'">
+      <h1 class="h4">What do you allow, and at what price?</h1>
+      <p class="text-secondary" x-text="termsNote || 'This is what an agent is offered when it asks for one of your pages.'"></p>
+      <p class="text-secondary small" x-show="!resuming">Not ready to decide? Skip for now saves the domain without
+        terms. It is listed as not verified, and nothing on it is sold until you set them.</p>
+      <div class="sample">
+        <div class="controls">
+          <div class="ctl">
+            <span class="k">price</span>
+            <div class="seg">
+              <input type="radio" id="m-free" value="free" x-model="terms.pricing_model">
+              <label for="m-free">Free</label>
+              <input type="radio" id="m-paid" value="per_unit" x-model="terms.pricing_model">
+              <label for="m-paid">Charge</label>
+            </div>
+            <!-- Under the control that turns it on, because it is the second
+                 half of one answer. It arrives already filled in: an empty
+                 field would answer the publisher's first click with a refusal
+                 before they had typed anything. -->
+            <div class="price" x-show="terms.pricing_model === 'per_unit'">
+              <span x-text="currency"></span>
+              <input type="text" inputmode="decimal" x-model="terms.rate"
+                     :aria-label="'Price per ' + unit">
+            </div>
+            <!-- Under the field rather than inside it. On one line the unit
+                 made the row wider than its own column, which overflowed at
+                 every width narrow enough to matter. -->
+            <span class="per" x-show="terms.pricing_model === 'per_unit'"
+                  x-text="'per ' + unit"></span>
+          </div>
+          <div class="ctl">
+            <span class="k">uses</span>
+            <div class="checks">
+              <template x-for="fn in functions" :key="fn.value">
+                <label>
+                  <input type="checkbox" :value="fn.value" x-model="terms.permitted_functions">
+                  <span x-text="fn.label"></span>
+                  <span class="note" x-text="fn.note"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+          <div class="ctl">
+            <span class="k">attribution</span>
+            <div class="checks">
+              <label>
+                <input type="checkbox" x-model="terms.attribution_required">
+                <span>Required</span>
+                <span class="note">every use must credit you</span>
+              </label>
+            </div>
+          </div>
+        </div>
+        <p class="terms-source" x-show="termsSource" x-text="termsSource"></p>
+        <div class="codebox offer">
+          <div x-show="offerWarning" x-text="offerWarning"></div>
+          <ul x-show="!offerWarning">
+            <template x-for="(line, i) in offer" :key="i">
+              <li :class="line.indent ? 'in' : ''">
+                <span class="lbl" x-text="line.label"></span>
+                <span class="val" x-show="line.value" x-text="' ' + line.value"></span>
+              </li>
+            </template>
+          </ul>
+        </div>
+        <!-- Its own row under the offer: the answer changes what happens to
+             pages already in the catalog, not the offer drawn above it. -->
+        <div class="checks mt-3">
+          <label>
+            <input type="checkbox" x-model="importReplacesManualTerms">
+            <span>Replace the terms of pages that are already in the catalog</span>
+            <span class="note">Pages added before automatic import, for example from a feed, keep their
+              own terms unless you tick this. Their titles and descriptions are kept either way.</span>
+          </label>
+        </div>
+      </div>
+    </div>
+
+  </div></div>
+
+  <div class="wiz-actions">
+    <button class="btn btn-outline-secondary" type="button" @click="back()" x-show="index > 0">Back</button>
+    <!-- Only for a publisher who has a domain already: they are adding one
+         more and can go back to it. Leaving this way saves nothing, because
+         the domain is saved only by the last step's buttons. The answers held
+         in the browser are dropped, so the next visit starts clean rather than
+         on a domain given up on. On the domain step Skip for now does the same
+         for every publisher, and the dead end has its own way back, so this one
+         is shown on neither. -->
+    <a class="btn btn-outline-secondary" :href="paths.home" @click="forget()"
+       x-show="hasDomains && !unsupported && step !== 'domain'">Cancel</a>
+    <span class="spacer"></span>
+    <span class="text-secondary small" x-show="busy">Checking…</span>
+    <span class="text-secondary small" x-show="!busy && needsCheck && checkedAt"
+          x-text="'Checked at ' + checkedAt + ', not there yet'"></span>
+    <button class="btn btn-outline" type="button" x-show="needsCheck" @click="runCheck()" :disabled="busy">
+      Check again
+    </button>
+    <button class="btn btn-outline-secondary" type="button" x-show="skippable" @click="skip()" :disabled="busy">
+      Skip for now
+    </button>
+    <button class="btn btn-primary" type="button" x-show="!unsupported" @click="next()" :disabled="busy || !canAdvance">
+      <span x-text="last ? 'Finish setup' : 'Next'"></span>
+    </button>
+    <a class="btn btn-outline-secondary" :href="paths.home" x-show="unsupported">Back to your domains</a>
+  </div>
+</div>
+
+<script src="/static/alpine.min.js" defer></script>
+<script src="/static/wizard-calls.js"></script>
+<script src="/static/wizard-flow.js"></script>
+<script src="/static/wizard.js"></script>
+{{end}}

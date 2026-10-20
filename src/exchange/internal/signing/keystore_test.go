@@ -214,7 +214,7 @@ func TestURLSignerFor_CFRSASurfacesDeferredKeyError(t *testing.T) {
 			ErrRSAKeyUnavailable)
 	})
 
-	_, err := URLSignerFor(TenantKeys{
+	_, err := URLSignerFor(URLSigningKeys{
 		Scheme:              SchemeCFRSA,
 		RSARef:              "cf-rsa-primary",
 		CloudFrontKeyPairID: "K123",
@@ -243,7 +243,7 @@ func TestURLSignerFor_Ed25519NeedsNoRSAKey(t *testing.T) {
 	}
 	store.PutEd25519("ed-ref", pub, priv)
 
-	if _, err := URLSignerFor(TenantKeys{
+	if _, err := URLSignerFor(URLSigningKeys{
 		Scheme:     SchemeEd25519,
 		Ed25519Ref: "ed-ref",
 	}, store); err != nil {

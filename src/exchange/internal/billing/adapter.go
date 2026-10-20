@@ -57,6 +57,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"strings"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing/tigerbeetle"
@@ -136,13 +137,15 @@ type Adapter interface {
 	EnsureAgentAccount(ctx context.Context, billingRef string) error
 	// Credit grants funds to the agent's account outside any transaction — the
 	// Register flow uses it for the tenant-configured one-time default credit.
-	// amount must be positive and denominated in the deployment ledger
-	// currency: every adapter rejects a currency that does not match the one
-	// it keeps balances in, with ErrInvalidAmount. The idempotency key is REQUIRED and names the
-	// grant's ledger slot — see the package idempotency contract for the
-	// first-credit-wins rule and the reserved key namespaces. An empty
-	// billingRef, an invalid key, or a non-positive amount is a caller bug,
-	// rejected with a plain error.
+	// amount must be positive and denominated in one of the currencies the
+	// deployment bills in: every adapter rejects a currency it does not keep
+	// balances in, with ErrInvalidAmount. The idempotency key is REQUIRED and
+	// names the grant's ledger slot — see the package idempotency contract for
+	// the first-credit-wins rule and the reserved key namespaces. On a
+	// multi-currency deployment that slot is shared across currencies, so a
+	// caller granting in more than one currency puts the currency in its key
+	// (WelcomeCreditKey does). An empty billingRef, an invalid key, or a
+	// non-positive amount is a caller bug, rejected with a plain error.
 	Credit(ctx context.Context, billingRef string, amount Amount, idempotencyKey string) error
 	// Authorize reserves funds against the estimated quantity. Returns a
 	// BillingID that identifies the reservation for subsequent Record/Release
@@ -183,7 +186,19 @@ type Adapter interface {
 	// (ADR-011 D7 inverse-posting memo); adapters that keep a ledger persist it
 	// for the audit trail.
 	Refund(ctx context.Context, billingID string, amount Amount, reason string, idempotencyKey string) error
-	GetBalance(ctx context.Context, billingRef string) (Amount, error)
+	// GetBalance returns the settled balance an account holds in ONE currency.
+	// Balances are never summed across currencies: each currency is separate
+	// money, so the caller names the one it wants. A currency the deployment
+	// does not bill in is an error, as is an account with no balance record in
+	// that currency.
+	GetBalance(ctx context.Context, billingRef, currency string) (Amount, error)
+	// AvailableBalance returns what an account can spend now in ONE currency:
+	// posted credits minus posted debits minus pending holds. It is never
+	// negative. A configured currency in which this billing_ref has no ledger
+	// account returns ErrNoLedgerAccount; a currency the deployment does not
+	// bill in is a plain configuration error, as in GetBalance. An adapter
+	// that keeps no balance at all returns ErrBalanceNotReported.
+	AvailableBalance(ctx context.Context, billingRef, currency string) (Amount, error)
 	// GetQuota returns the remaining unit-count quota for an account, or 0 when no
 	// cap is configured. A persisted adapter that does not model a unit-count
 	// quota MAY always return 0 (no cap); quota parity is therefore not asserted
@@ -246,6 +261,16 @@ var (
 	// than mis-attribute revenue. Non-splitting adapters (free, in-memory) ignore
 	// the payee and never return it.
 	ErrUnknownPayee = errors.New("billing: resource owner not attested")
+
+	// ErrBalanceNotReported is returned by AvailableBalance on an adapter that
+	// keeps no balance (the free tier). Its GetBalance maximum is a stand-in, not
+	// money, so it must never be reported to an agent as a balance.
+	ErrBalanceNotReported = errors.New("billing: balance not reported by this adapter")
+
+	// ErrNoLedgerAccount is returned by AvailableBalance when the deployment
+	// bills in the currency but this billing_ref has no ledger account in it,
+	// for example a currency added to the deployment after the agent registered.
+	ErrNoLedgerAccount = errors.New("billing: no ledger account in this currency")
 )
 
 // DemoCurrency is the currency the demo tiers denominate everything in: the
@@ -253,6 +278,24 @@ var (
 // One constant so the wiring, the two adapters and the deployment currency
 // cannot drift apart.
 const DemoCurrency = "USD"
+
+// demoCurrencies is DemoCurrency as the one-element accepted set the demo tiers
+// hand the shared credit gate and the one-element set their GetBalance answers
+// for. The demo tiers are deliberately single-currency: only the persisted
+// TigerBeetle adapter keeps a balance per currency.
+var demoCurrencies = []string{DemoCurrency}
+
+// BaseCurrency is the deployment's own currency: the first of the currencies
+// its billing backend keeps a ledger in, in configuration order. The
+// well-known document advertises it as base_currency, and a publisher's
+// revenue totals are read in it when the request names no currency, so both
+// answer the same way. An empty list has no base currency and yields "".
+func BaseCurrency(ledgerCurrencies []string) string {
+	if len(ledgerCurrencies) == 0 {
+		return ""
+	}
+	return ledgerCurrencies[0]
+}
 
 // errEmptyBillingRef rejects an empty billingRef on every adapter's
 // EnsureAgentAccount and Credit. Unexported (unlike the sentinels above)
@@ -287,12 +330,12 @@ var reservedCreditKeyPrefixes = []string{
 }
 
 // validateCreditArgs is the shared argument gate every adapter's Credit opens
-// with, so the contract cannot drift per implementation. expectedCurrency is
-// the currency the calling adapter keeps its balances in; a mismatch returns
-// ErrInvalidAmount, so the service maps it to a 4xx the same way a bad refund
-// amount maps. Every adapter has a currency — the demo tiers report
-// DemoCurrency from GetBalance — so no adapter is exempt from this check.
-func validateCreditArgs(billingRef string, amount Amount, idempotencyKey, expectedCurrency string) error {
+// with, so the contract cannot drift per implementation. accepted lists the
+// currencies the calling adapter keeps balances in; a credit in any other
+// currency returns ErrInvalidAmount, so the service maps it to a 4xx the same
+// way a bad refund amount maps. Every adapter has at least one currency — the
+// demo tiers keep DemoCurrency — so no adapter is exempt from this check.
+func validateCreditArgs(billingRef string, amount Amount, idempotencyKey string, accepted []string) error {
 	if billingRef == "" {
 		return errEmptyBillingRef
 	}
@@ -307,9 +350,19 @@ func validateCreditArgs(billingRef string, amount Amount, idempotencyKey, expect
 	if amount.Value == nil || amount.Value.Sign() <= 0 || amount.Currency == "" {
 		return errBadCreditAmount
 	}
-	if amount.Currency != expectedCurrency {
-		return fmt.Errorf("%w: credit currency %q does not match ledger currency %q",
-			ErrInvalidAmount, amount.Currency, expectedCurrency)
+	if !slices.Contains(accepted, amount.Currency) {
+		return fmt.Errorf("%w: credit currency %q is not one of the ledger currencies %q",
+			ErrInvalidAmount, amount.Currency, accepted)
 	}
 	return nil
+}
+
+// nonNegative returns v, or zero when v is negative. AvailableBalance never
+// reports a negative amount: a ledger that somehow shows more held than
+// credited has nothing to spend, not a debt to report.
+func nonNegative(v *big.Rat) *big.Rat {
+	if v.Sign() < 0 {
+		return new(big.Rat)
+	}
+	return v
 }

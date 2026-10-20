@@ -14,10 +14,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/FORA-Protocol/protocol/sdk/go/resolvers"
 	"golang.org/x/time/rate"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/agentid/agentidtest"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/agentreg"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/transport"
 )
@@ -291,7 +291,7 @@ func TestAgentsRegister_NoErrorBlamesTheCommercialOverlay(t *testing.T) {
 	}{
 		{"not a host", agentreg.ErrNotAHost, "does not name a host"},
 		{"host mismatch", agentreg.ErrAgentIDMismatch, "does not match agent_id"},
-		{"absent directory", forawellknown.ErrNoDocument, "no key directory"},
+		{"absent directory", agentreg.ErrNoDirectory, "no key directory"},
 		{"malformed directory", agentreg.ErrMalformedDirectory, "key directory"},
 		{"no valid key", agentreg.ErrNoValidKey, "key directory"},
 		{"upstream fetch failure", errors.New("dial tcp: connection refused"), "key directory"},
@@ -342,13 +342,28 @@ func TestAgentsRegister_StatusFollowsTheSharedCallerFaultSplit(t *testing.T) {
 	}{
 		{"not a host", agentreg.ErrNotAHost, http.StatusBadRequest},
 		{"host mismatch", agentreg.ErrAgentIDMismatch, http.StatusBadRequest},
-		{"absent directory", forawellknown.ErrNoDocument, http.StatusBadRequest},
+		{"absent directory", agentreg.ErrNoDirectory, http.StatusBadRequest},
 		{"malformed directory", agentreg.ErrMalformedDirectory, http.StatusBadRequest},
 		{"no valid key", agentreg.ErrNoValidKey, http.StatusBadRequest},
 		// The 502 case the endpoint was built for, and the control that keeps it
 		// from collapsing into the 400s: the origin is reachable and broken, so
 		// the next attempt genuinely may succeed.
-		{"unreachable origin", fmt.Errorf("%w: dial tcp: connection refused", forawellknown.ErrFetch), http.StatusBadGateway},
+		{"unreachable origin", fmt.Errorf("agentreg: read key directory: %w",
+			fmt.Errorf("%w: fetch: dial tcp: connection refused", resolvers.ErrDirectoryUnavailable)), http.StatusBadGateway},
+		// The shape a body that is not a key directory arrives in, which a proxy
+		// answering 200 with an error page produces. It answers 502 for the same
+		// reason the row above does, and the contrast with malformed-directory is
+		// the point: that one broke a rule of the read, so it returns the same
+		// answer forever and stays a 400.
+		//
+		// This row builds the error by hand like every other row here, so it pins
+		// the STATUS this endpoint gives a failure of that shape and nothing more.
+		// It does not prove such a body actually arrives shaped that way — that is
+		// asserted in agentreg against the real read, because a row written from a
+		// hand-built sentinel keeps passing after the classification it assumes has
+		// moved.
+		{"body that is not JSON", fmt.Errorf("agentreg: read key directory: %w",
+			fmt.Errorf("%w: decode: invalid character '<'", resolvers.ErrDirectoryUnavailable)), http.StatusBadGateway},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -376,7 +391,7 @@ func TestAgentsRegister_StatusFollowsTheSharedCallerFaultSplit(t *testing.T) {
 func TestAgentsRegister_AbsentDirectoryDoesNotBlameTheFetch(t *testing.T) {
 	t.Parallel()
 
-	_, body := postRegisterStubbed(t, stubRegistry{registerErr: forawellknown.ErrNoDocument}, map[string]string{
+	_, body := postRegisterStubbed(t, stubRegistry{registerErr: agentreg.ErrNoDirectory}, map[string]string{
 		"agent_id": "agent.example", "discovery_url": "https://agent.example",
 	})
 	if strings.Contains(body["error"], "failed to fetch") {

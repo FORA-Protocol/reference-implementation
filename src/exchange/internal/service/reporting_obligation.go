@@ -42,16 +42,12 @@ type obligationPlan struct {
 // transaction_log.result_payload on the same INSERT that writes the obligation —
 // so both have to be decided before either is written.
 func (s *ExchangeService) planObligation(tenant repo.Tenant, pricing PricingDoc) obligationPlan {
-	policy := decodeReportingPolicy(tenant.ReportingPolicy)
-	tolerance := defaultQuantityTolerance
-	if policy.QuantityTolerance != nil {
-		tolerance = *policy.QuantityTolerance
-	}
+	policy := effectiveReportingPolicy(tenant.ReportingPolicy, s.cfg.ReportWindow)
 	return obligationPlan{
 		Required:          pricing.MetersUsage(),
-		WindowSeconds:     windowSecondsForObligation(policy, s.cfg.ReportWindow),
-		RequiredFields:    requiredFieldsFor(policy, pricing),
-		QuantityTolerance: tolerance,
+		WindowSeconds:     policy.WindowSeconds,
+		RequiredFields:    requiredFieldsFor(policy.RequiredFields, pricing),
+		QuantityTolerance: policy.QuantityTolerance,
 	}
 }
 
@@ -59,8 +55,7 @@ func (s *ExchangeService) planObligation(tenant repo.Tenant, pricing PricingDoc)
 // Always returns a non-nil slice: the required_fields column is NOT NULL TEXT[]
 // and sqlc passes the Go slice straight through, so a nil would violate the
 // constraint.
-func requiredFieldsFor(policy reportingPolicy, pricing PricingDoc) []string {
-	fields := policy.RequiredFields
+func requiredFieldsFor(fields []string, pricing PricingDoc) []string {
 	if pricing.IsFree() {
 		// A price-zero transaction stores no billing_id (ADR-009 D5), so a
 		// conformant report carries an empty billing_id — which validateRequiredFields

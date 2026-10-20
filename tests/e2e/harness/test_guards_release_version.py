@@ -38,7 +38,7 @@ import pytest
 
 from .conftest import REPO_ROOT
 from .deployment_docs import DECLARED_VERSION, DOCS, build_tree, doc_body
-from .guard_harness import GIT_TIMEOUT, git, guard_marks, run_git
+from .guard_harness import GIT_TIMEOUT, fixture_env, git, guard_marks, run_git
 
 # A file mode does not stop uid 0, so the cases that make a document read-only
 # would quietly become happy-path runs under root and assert nothing at all.
@@ -89,7 +89,7 @@ def _make_fixture(tmp_path: Path, *, push_branch: bool = True) -> Fixture:
     origin = tmp_path / "origin.git"
     public = tmp_path / "public.git"
 
-    build_tree(repo, branch=_BRANCH, committer="release guard")
+    build_tree(repo, branch=_BRANCH)
     for bare in (origin, public):
         git("init", "-q", "--bare", "-b", "main", str(bare))
 
@@ -114,7 +114,9 @@ def _run(
 
     The working directory is what selects the tree — the tool resolves its
     repository with ``git rev-parse --show-toplevel`` — so there is no argument
-    that could redirect a real run somewhere else.
+    that could redirect a real run somewhere else. An inherited GIT_DIR would,
+    because git prefers it to the working directory, so the environment goes
+    through ``fixture_env``, which removes it.
 
     stdin is /dev/null on purpose. The tool refuses to start when it cannot ask
     for confirmation, and inheriting pytest's stdin would make that rule fire or
@@ -123,8 +125,8 @@ def _run(
     ``env`` exists only so one case can point TMPDIR at a directory it can count
     afterwards. It selects where scratch files are written, never which tree is
     read — the same line the shared gate runner draws around its own ``env``.
-    Callers merge rather than replace: a bare dict would drop PATH, HOME and
-    every GIT_* variable out from under the tool.
+    Callers merge rather than replace: a bare dict would drop PATH and HOME out
+    from under the tool.
     """
     return subprocess.run(
         ["bash", str(_SCRIPT), *args],
@@ -134,7 +136,7 @@ def _run(
         check=False,
         stdin=subprocess.DEVNULL,
         timeout=GIT_TIMEOUT,
-        env=env,
+        env=fixture_env(env),
     )
 
 
@@ -145,9 +147,9 @@ def _head(repo: Path) -> str:
 def _declared(repo: Path, docs: tuple[str, ...] = DOCS) -> list[str]:
     """The version each document declares right now.
 
-    ``docs`` is a parameter because the suite that proves both tools read one
-    shared list drives a tree with a fourth document, and the default here is the
-    three-entry literal that would not see it.
+    ``docs`` is a parameter so a case can drive a tree whose document list is
+    not the shipped one. No case does today; the default is the literal in
+    ``deployment_docs``, which is held level with the shipped list by hand.
     """
     values = []
     for doc in docs:

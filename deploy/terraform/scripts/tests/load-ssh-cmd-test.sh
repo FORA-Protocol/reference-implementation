@@ -2,7 +2,8 @@
 # Prove load_ssh_cmd builds the right ssh command line: the bare destination
 # when the operator selects no key, "-o IdentitiesOnly=yes -i <path>" spliced in
 # ahead of the destination when FORA_SSH_IDENTITY_FILE is set, and a path
-# containing a space kept in ONE array element. A helper that exists to keep the
+# containing a space kept in ONE array element, and "-o BatchMode=yes" right
+# after ssh when a script asks for batch mode. A helper that exists to keep the
 # identity out of Terraform has to be SEEN doing it — the previous line built
 # SSH_CMD by word-splitting a Terraform output, which both carried the last
 # applier's key path and broke on a path with a space. The harness stubs
@@ -31,7 +32,8 @@ chmod +x "${work}/bin/terraform"
 
 # emit_cmd [identity] → SSH_CMD's elements, one per line, from a subshell wired
 # the way the consumer scripts are. One element per line is what makes the
-# space case checkable: a split path would show up as two lines.
+# space case checkable: a split path would show up as two lines. LOAD_ARGS is
+# what the helper is called with ("batch" for the production scripts).
 emit_cmd() {
     (
         export PATH="${work}/bin:${PATH}"
@@ -42,7 +44,8 @@ emit_cmd() {
             unset FORA_SSH_IDENTITY_FILE
         fi
         . "${SCRIPTS_DIR}/lib/staging-env.sh"
-        load_ssh_cmd
+        # shellcheck disable=SC2086 # empty or one word, split on purpose
+        load_ssh_cmd ${LOAD_ARGS:-}
         printf '%s\n' "${SSH_CMD[@]}"
     )
 }
@@ -67,4 +70,10 @@ got="$(emit_cmd "/opt/operator keys/fora")"
 want="$(printf 'ssh\n-o\nIdentitiesOnly=yes\n-i\n/opt/operator keys/fora\nubuntu@198.51.100.10\n')"
 [ "${got}" = "${want}" ] || fail "spaced identity path was split: ${got}"
 
-echo "load_ssh_cmd test passed (bare destination; identity spliced in; spaced path kept whole)"
+# Batch mode: ssh fails rather than prompting, with the identity still spliced
+# in ahead of the destination.
+got="$(LOAD_ARGS=batch emit_cmd /opt/operator-keys/fora)"
+want="$(printf 'ssh\n-o\nBatchMode=yes\n-o\nIdentitiesOnly=yes\n-i\n/opt/operator-keys/fora\nubuntu@198.51.100.10\n')"
+[ "${got}" = "${want}" ] || fail "batch command was: ${got}"
+
+echo "load_ssh_cmd test passed (bare destination; identity spliced in; spaced path kept whole; batch mode)"

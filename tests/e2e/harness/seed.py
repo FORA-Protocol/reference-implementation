@@ -1,6 +1,6 @@
 """Seeding helpers for the E2E stack — Phase-2b demo-catalog edition.
 
-The e2e catalog is this harness's own three publisher feeds
+The e2e catalog is this harness's own publisher feeds
 (``fixtures/catalog/{philosophy,music,sfx}.jsonl``), ingested through the
 REAL production binary ``cmd/fora-ingest`` (ParseJSONL → mapRecord, which
 canonicalizes terms through the SDK helper → signed
@@ -13,13 +13,33 @@ one.
 
 The binary ships in the runner image at ``/usr/local/bin/fora-ingest``
 (built by the Go builder stage of ``tests/e2e/Dockerfile``); the seed shells
-out to it once per feed, under the owning demo-domain tenant.
+out to it once per feed, under the seat of the exchange that sells that site.
 
-Setup state that in production would arrive through separate onboarding paths
-is still written via direct SQL (the production onboarding RPCs are out of e2e
-scope): tenant rows (``fora.tenants``), buyer/agent rows (``fora.agents``), the
-broker exchange row (``broker.exchanges``), and the per-tenant broker-relay
-opt-in.
+Most of the stack arrives through its own surfaces. The Broker reads its
+exchange registry from its configuration file (``BROKER_REGISTRY_FILE``). Each
+buyer's identity is learned by every Exchange from the buyer's own Web Bot Auth
+directory the first time it signs a call, and each buyer opens its own account
+through a signed Register (see ``seed_accounts``). The Broker's relay identity
+needs no row: an Exchange recognizes the Broker it is configured with from the
+directory that publishes the Broker's key.
+
+What no product surface can create yet is written by ``operator_writes``, the
+one harness module that opens a database connection: the seat row
+(``fora.tenants``) with its relay opt-in and activation policy, the publisher
+registration rows (``fora.publishers``, ``fora.publisher_domains``,
+``fora.publisher_domain_listings``), the approval of the credit-less buyer's
+held account, and the second seat exchange-a holds for the tenant-isolation
+suite. Each of those functions names the surface that is missing.
+
+A ``fora.tenants`` row is the EXCHANGE SEAT, not a publisher: its domain is the
+exchange's own hostname, and it carries the seller settings and the URL-signing
+key refs. A publisher is a ``fora.publishers`` row (the payee), its site a
+``fora.publisher_domains`` row (which carries the CDN signing scheme and the
+CloudFront key-pair id), and the site offered on a seat a
+``fora.publisher_domain_listings`` row. Catalog push resolves the seat from
+``EXCHANGE_DOMAIN`` and the entry's domain from ``fora.publisher_domains``, then
+requires the listing for that pair to be ``ACTIVE`` — so every listing is seeded
+already ACTIVE.
 
 NO catalog-writer signing key is pre-seeded into ``fora.agents`` (Core
 Invariant). Each demo feed is ingested under its publisher's OWN self-publish
@@ -36,76 +56,89 @@ for Gate 2 and ``exchange.e2e.local`` for the Broker probe) AND verifying +
 serving the signed content on port 80. So BOTH the Exchange Gate-2 manifest
 fetch and the agent's signed-URL content fetch resolve natively to the right
 edge — tests fetch demo-domain URIs directly, no Host override.
+
+The fourth domain, ``archive.demo.fora-protocol.org``, has no edge. The
+``archive-jwks`` host answers for it with the publisher's key directory and its
+``fora.json`` (naming exchange-d), which is everything the ingest and the Broker
+read; nothing fetches its content.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import time
+from contextlib import closing, nullcontext
 from pathlib import Path
 
 import httpx
-import psycopg
-from fora_sdk.b64 import b64url_decode
+from fora_sdk.sync import BrokerClient
 
-from .catalog_push import (
-    load_public_key_bytes,
+from .broker_purchase import resolve_request
+from .operator_writes import (
+    activate_new_agents,
+    approve_held_account,
+    boot_fixture_second_seat,
+    list_site_on_seat,
+    pg_dsn,
+    provision_seat,
+    register_publisher,
+    register_site,
 )
-from .ingest_runner import ingest_succeeded, run_ingest
+from .poll import poll_until
+from .sdk_client import sdk_broker_client
+from .seed_accounts import FUNDED_BUYERS, register_buyers, register_credit_less_buyer
+from .seed_ingest import ingest_all_feeds
+from .stack_urls import StackURLs
 from .exchanges import (
     EXCHANGE_A_DOMAIN,
-    EXCHANGE_A_INTERNAL_URL,
     EXCHANGE_B_DOMAIN,
     EXCHANGE_B_INTERNAL_URL,
     EXCHANGE_C_DOMAIN,
     EXCHANGE_C_INTERNAL_URL,
+    EXCHANGE_D_DOMAIN,
+    EXCHANGE_D_INTERNAL_URL,
+    RELAY_REFUSING_EXCHANGES,
+    SECOND_SEAT_OF_EXCHANGE_A,
+    SECOND_SEAT_OF_EXCHANGE_A_DOMAIN,
+    seat_tenant_id,
 )
 from .e2e_catalog import (
     _FIXTURES_DIR,
     CANARY_MARKER,  # noqa: F401  (re-exported for the ~40 `from .seed import` call sites)
-    CATALOG_CONTRIBUTOR_ID,
+    CATALOG_CONTRIBUTOR_ID,  # noqa: F401  (re-exported)
     CONTRIBUTOR_KEY_PATH,  # noqa: F401  (re-exported)
-    DEMO_CF_PUBLISHER_HOST,  # noqa: F401  (re-exported)
+    DEMO_ARCHIVE_DOMAIN,
     DEMO_MUSIC_DOMAIN,
     DEMO_PHILOSOPHY_DOMAIN,
+    DEMO_PUBLISHER_ID,
+    DEMO_PUBLISHER_NAME,
     DEMO_SFX_DOMAIN,
     DemoResource,  # noqa: F401  (re-exported)
-    EDGE_PUBLIC_URL,  # noqa: F401  (re-exported)
-    EUR_AGENT_ID,
-    EUR_AGENT_KEY_PATH,
-    NOBILLING_AGENT_ID,
-    NOBILLING_AGENT_KEY_PATH,
+    EUR_AGENT_ID,  # noqa: F401  (re-exported)
+    EUR_AGENT_KEY_PATH,  # noqa: F401  (re-exported)
+    NOBILLING_AGENT_ID,  # noqa: F401  (re-exported)
+    NOBILLING_AGENT_KEY_PATH,  # noqa: F401  (re-exported)
+    SEAT_OF_MUSIC,  # noqa: F401  (re-exported)
+    SEAT_OF_PHILOSOPHY,  # noqa: F401  (re-exported)
+    SEAT_OF_SFX,  # noqa: F401  (re-exported)
     SeededFixture,
-    USD_AGENT_ID,
-    USD_AGENT_KEY_PATH,
+    USD_AGENT_ID,  # noqa: F401  (re-exported)
+    USD_AGENT_KEY_PATH,  # noqa: F401  (re-exported)
     _build_fixture,
 )
 
-EXCHANGE_INTERNAL_URL = EXCHANGE_A_INTERNAL_URL
-
-# ───── Multi-exchange topology: 3 REAL exchanges, each with its own
+# ───── Multi-exchange topology: 4 REAL exchanges, each with its own
 # catalog DB + identity. exchange-a keeps the cluster default DB `fora` (shared
-# with the broker schema); exchange-b/c get separate databases `fora_b`/`fora_c`.
+# with the broker schema); exchange-b/c/d get separate databases
+# `fora_b`/`fora_c`/`fora_d`.
 # Each exchange's EXCHANGE_DOMAIN is stamped onto Offer.exchange, named as the
 # recipient of every addressed request, and its EXCHANGE_PUBLIC_ORIGIN MUST
-# equal the endpoint registered in broker.exchanges (the post-resolve SSRF
-# equality gate). The music publisher (fastly-edge) is fronted by exchange-b;
-# the sfx publisher (aws-edge) by exchange-c.
+# equal the endpoint the Broker's registry file (fixtures/broker_registry.yml)
+# names for it (the post-resolve SSRF equality gate). The music publisher (fastly-edge) is fronted by exchange-b;
+# the sfx publisher (aws-edge) by exchange-c; the archive publisher (no edge) by
+# exchange-d.
 #
-# The three identities and the in-network URL built from each are defined in
+# The identities and the in-network URL built from each are defined in
 # exchanges.py, which also carries the mapping between them in both directions.
-# They are bound to the names this module has always exported so its callers do
-# not have to move.
-EXCHANGE_DOMAIN = EXCHANGE_A_DOMAIN
-
-# Default signing key refs — must match those the Exchange populates at startup
-# (see src/exchange/cmd/server/main.go).
-ED25519_KEY_REF = "exchange-primary"
-RSA_KEY_REF = "cf-rsa-primary"
-CLOUDFRONT_KEY_PAIR_ID = "cf-rsa-primary"
-
-DEFAULT_PG_CONNECT_TIMEOUT_SEC = 20
 
 # Per-domain SELF-PUBLISH signing keys: caller_id == publisher domain. The
 # demo ingest signs each feed with its publisher's own key (caller_id == domain;
@@ -116,6 +149,9 @@ DEFAULT_PG_CONNECT_TIMEOUT_SEC = 20
 SELFPUB_PHILOSOPHY_KEY_PATH = _FIXTURES_DIR / "selfpub_philosophy_key.json"
 SELFPUB_MUSIC_KEY_PATH = _FIXTURES_DIR / "selfpub_music_key.json"
 SELFPUB_SFX_KEY_PATH = _FIXTURES_DIR / "selfpub_sfx_key.json"
+# The archive publisher has no edge: its directory is served by the archive-jwks
+# host, which mounts this same fixture.
+SELFPUB_ARCHIVE_KEY_PATH = _FIXTURES_DIR / "selfpub_archive_key.json"
 
 # The e2e catalog feeds, owned by this harness — see fixtures/catalog/README.md.
 # They are resolved from this package, not from the repository root, because the
@@ -123,390 +159,190 @@ SELFPUB_SFX_KEY_PATH = _FIXTURES_DIR / "selfpub_sfx_key.json"
 # path would not exist in the container.
 CATALOG_DIR = _FIXTURES_DIR / "catalog"
 
-# Per-edge feed + its owning tenant/scheme. The Exchange derives the owning
-# tenant from each ResourceEntry's domain via the UNIQUE fora.tenants.domain
-# mapping, so the binary's --tenant MUST be the domain's tenant.
+# The demo SITES: which exchange sells each one, the signing scheme its
+# CDN needs, its feed, and its self-publish key.
 #
-# (tenant_id, domain, signing_scheme, feed path, self-publish key)
+# The signing scheme is a fact about the site's CDN, so it is written on the
+# site's fora.publisher_domains row. No tenant id appears here any more: the
+# tenant is the seat, one per exchange, and it is looked up from the exchange
+# that fronts the site.
+#
+# (domain, exchange identity, signing_scheme, feed path, self-publish key)
 E2E_PUBLISHERS: tuple[tuple[str, str, str, Path, Path], ...] = (
     (
-        "tenant-demo-philosophy",
         DEMO_PHILOSOPHY_DOMAIN,
+        EXCHANGE_A_DOMAIN,
         "ED25519",
         CATALOG_DIR / "philosophy.jsonl",
         SELFPUB_PHILOSOPHY_KEY_PATH,
     ),
     (
-        "tenant-demo-music",
         DEMO_MUSIC_DOMAIN,
+        EXCHANGE_B_DOMAIN,
         "ED25519",
         CATALOG_DIR / "music.jsonl",
         SELFPUB_MUSIC_KEY_PATH,
     ),
     (
-        "tenant-demo-sfx",
         DEMO_SFX_DOMAIN,
+        EXCHANGE_C_DOMAIN,
         "AWS_CLOUDFRONT_RSA",
         CATALOG_DIR / "sfx.jsonl",
         SELFPUB_SFX_KEY_PATH,
     ),
+    (
+        DEMO_ARCHIVE_DOMAIN,
+        EXCHANGE_D_DOMAIN,
+        "ED25519",
+        CATALOG_DIR / "archive.jsonl",
+        SELFPUB_ARCHIVE_KEY_PATH,
+    ),
 )
 
-# Edge public hosts used by the relay-flow e2e tests (ported from the v1.1
-# harness during the merge reconciliation).
-EDGE_PUBLIC_HOST = "edge:8787"
-AWS_EDGE_PUBLIC_HOST = "aws-edge:8788"
-FASTLY_EDGE_PUBLIC_HOST = "fastly-edge:7676"
+# The catalog database each exchange owns. The broker schema lives in `fora`
+# alongside exchange-a's catalog; the other exchanges get their own.
+CATALOG_DB_BY_EXCHANGE = {
+    EXCHANGE_A_DOMAIN: "fora",
+    EXCHANGE_B_DOMAIN: "fora_b",
+    EXCHANGE_C_DOMAIN: "fora_c",
+    EXCHANGE_D_DOMAIN: "fora_d",
+}
 
+# The account registry (System of Record) each exchange owns, by its
+# EXCHANGE_SOR_DSN. The seed approves the credit-less buyer's held account
+# here, the way an operator does; see seed_accounts and operator_writes.
+# test_guards_exchange_identity.py fails when this and the compose file disagree.
+SOR_DB_BY_EXCHANGE = {
+    EXCHANGE_A_DOMAIN: "fora_sor",
+    EXCHANGE_B_DOMAIN: "fora_sor_b",
+    EXCHANGE_C_DOMAIN: "fora_sor_c",
+    EXCHANGE_D_DOMAIN: "fora_sor_d",
+}
 
-def _set_allow_broker_relay(dsn: str, *, tenant_id: str) -> None:
-    """Opt a tenant into broker-relayed transactions (column defaults to FALSE)."""
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute(
-            "UPDATE fora.tenants SET allow_broker_relay = TRUE WHERE tenant_id = %s",
-            (tenant_id,),
-        )
-        conn.commit()
-
-
-# Broker outbound-relay identity (kid prefixed "broker."). The Broker signs
-# relayed Exchange RPCs with this key (BROKER_RELAY_KEY_FILE), so the Exchange's
-# resolveCaller must find the kid classified as BROKER; authorizeForAgent then
-# honours it on tenants with allow_broker_relay=true. The pubkey is READ from
-# the generated broker-relay fixture (the same file the broker container mounts)
-# so seed registration and the broker's actual signing key can never drift.
-_BROKER_RELAY_KID = "broker.broker-local.v1"
-_BROKER_RELAY_KEY_FILE = _FIXTURES_DIR / "broker_relay_key.json"
-
-
-def _broker_relay_pubkey_bytes() -> bytes:
-    """Raw 32-byte Ed25519 pubkey of the broker-relay identity, from the fixture."""
-    doc = json.loads(_BROKER_RELAY_KEY_FILE.read_text())
-    return b64url_decode(doc["public_key"])
-
-
-# ───── DSN + readiness ──────────────────────────────────────────────────────
-
-
-def _resolve_pg_dsn(compose_file: str) -> str:
-    """Resolve the Postgres DSN based on whether we run inside compose or on the host."""
-    return _resolve_pg_dsn_for_db(compose_file, "fora")
-
-
-def _resolve_pg_dsn_for_db(compose_file: str, db_name: str) -> str:
-    """Resolve the Postgres DSN for a SPECIFIC database on the same cluster.
-
-    All three exchange catalog DBs (``fora``, ``fora_b``, ``fora_c``) live on the
-    one Postgres cluster; only the database name in the DSN differs. The broker
-    schema lives in ``fora`` (BROKER_DSN), so the broker.exchanges registry is
-    written there while each exchange's tenants/agents go into its own DB.
-    """
-    if os.environ.get("FORA_E2E_IN_NETWORK") == "1":
-        return f"postgres://fora:fora@postgres:5432/{db_name}"
-    from ._compose import resolve_host_port
-
-    port = resolve_host_port(Path(compose_file), "postgres", 5432)
-    return f"postgres://fora:fora@127.0.0.1:{port}/{db_name}"
-
-
-def _wait_pg(dsn: str, timeout_seconds: float = 20.0) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    last_err: Exception | None = None
-    while time.monotonic() < deadline:
-        try:
-            with psycopg.connect(dsn, connect_timeout=3) as conn:
-                conn.execute("SELECT 1")
-                return
-        except psycopg.Error as exc:
-            last_err = exc
-        time.sleep(0.5)
-    msg = f"postgres not reachable at {dsn}: {last_err}"
-    raise TimeoutError(msg)
+# The domains the seed creates seat rows under — one per exchange, each equal to
+# that exchange's own EXCHANGE_DOMAIN. The compose guard compares every
+# service's EXCHANGE_DEFAULT_TENANT against this set.
+SEEDED_SEAT_DOMAINS = frozenset(CATALOG_DB_BY_EXCHANGE)
 
 
 def _wait_exchange_ready(exchange_host_url: str, timeout_seconds: float = 20.0) -> None:
     """Wait for Exchange healthz."""
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
+
+    def healthy() -> bool:
         try:
             r = httpx.get(f"{exchange_host_url}/healthz", timeout=2.0)
-            if r.status_code == httpx.codes.OK:
-                return
         except httpx.HTTPError:
-            pass
-        time.sleep(0.5)
-    msg = f"exchange not healthy at {exchange_host_url}"
-    raise TimeoutError(msg)
+            return False
+        return r.status_code == httpx.codes.OK
 
-
-# ───── Tenant / agent / exchange registration (direct SQL — onboarding RPCs
-# are out of e2e scope) ─────────────────────────────────────────────────────
-
-
-def _register_tenant(dsn: str, *, tenant_id: str, domain: str, scheme: str) -> None:
-    """Idempotent tenant insert for either signing scheme.
-
-    ``fora.tenants`` has UNIQUE constraints on BOTH tenant_id and domain; we
-    check-before-insert so the first caller wins the domain and reruns no-op.
-    """
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM fora.tenants WHERE domain = %s", (domain,))
-        if cur.fetchone() is not None:
-            cur.execute(
-                "UPDATE fora.tenants SET allow_broker_relay = TRUE WHERE domain = %s",
-                (domain,),
-            )
-            conn.commit()
-            return
-        if scheme == "AWS_CLOUDFRONT_RSA":
-            cur.execute(
-                """
-                INSERT INTO fora.tenants (
-                    tenant_id, domain, ed25519_key_ref,
-                    reporting_policy, signing_scheme, rsa_key_ref,
-                    cloudfront_key_pair_id, allow_broker_relay
-                ) VALUES (%s, %s, %s, '{}', 'AWS_CLOUDFRONT_RSA', %s, %s, TRUE)
-                """,
-                (tenant_id, domain, ED25519_KEY_REF, RSA_KEY_REF, CLOUDFRONT_KEY_PAIR_ID),
-            )
-        else:
-            cur.execute(
-                """
-                INSERT INTO fora.tenants (
-                    tenant_id, domain, ed25519_key_ref,
-                    reporting_policy, signing_scheme, allow_broker_relay
-                ) VALUES (%s, %s, %s, '{}', 'ED25519', TRUE)
-                """,
-                (tenant_id, domain, ED25519_KEY_REF),
-            )
-        conn.commit()
-
-
-def _upsert_agent(
-    dsn: str, *, agent_id: str, pubkey: bytes | None = None, requester_type: str = "AGENT"
-) -> None:
-    """Register an agent in fora.agents (FK target + caller authz).
-
-    ``pubkey`` is optional: when omitted it is derived from the agent's signing
-    keyfile via :func:`_agent_public_key` (the relay-flow tests register agents
-    without passing a key), else a zero placeholder for pure FK targets.
-
-    Buyer agents (requester_type AGENT) get ``billing_ref`` set equal to their
-    ``agent_id``. Production mints a random handle at Register (ADR-021 D1), but
-    the demo path never calls Register (onboarding RPC is out of e2e scope), and
-    the paid charge path denies an agent whose row carries no billing_ref
-    (ACCOUNT_NOT_REGISTERED). Reusing the agent_id as the handle keeps the
-    agent_id-keyed EXCHANGE_BILLING_SEED balances working without re-keying. A
-    matching active SoR account is seeded by :func:`_register_sor_accounts`.
-    Brokers keep a NULL billing_ref — they relay, they never buy.
-    """
-    if pubkey is None:
-        pubkey = _agent_public_key(agent_id)
-    billing_ref = agent_id if requester_type == "AGENT" else None
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO fora.agents (agent_id, public_key, requester_type, billing_ref)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (agent_id) DO UPDATE SET
-                public_key = EXCLUDED.public_key,
-                requester_type = EXCLUDED.requester_type,
-                billing_ref = EXCLUDED.billing_ref
-            """,
-            (agent_id, pubkey, requester_type, billing_ref),
-        )
-        conn.commit()
-
-
-def _register_sor_accounts(sor_dsn: str, agent_ids: tuple[str, ...]) -> None:
-    """Seed active System-of-Record accounts for the demo buyers.
-
-    The paid charge path reads the buyer's billing_ref off its fora.agents row
-    (set to the agent_id by :func:`_upsert_agent`) and then asks the SoR whether
-    that account is active (IsActive → checkAccountActive). The SoR runs in its
-    OWN database (EXCHANGE_SOR_DSN: fora_sor / fora_sor_b / fora_sor_c), which
-    starts empty — so an account the SoR does not know is denied
-    ACCOUNT_INACTIVE before Authorize. Registering an active account
-    (billing_ref == subdomain == agent_id) lets the paid path reach billing;
-    funding is separate (EXCHANGE_BILLING_SEED), so an active-but-unfunded buyer
-    is correctly denied INSUFFICIENT_BALANCE, not ACCOUNT_INACTIVE.
-    """
-    with psycopg.connect(sor_dsn) as conn, conn.cursor() as cur:
-        for agent_id in agent_ids:
-            cur.execute(
-                """
-                INSERT INTO sor.agent_accounts (billing_ref, subdomain, active)
-                VALUES (%s, %s, TRUE)
-                ON CONFLICT (billing_ref) DO UPDATE SET active = TRUE
-                """,
-                (agent_id, agent_id),
-            )
-        conn.commit()
-
-
-def _upsert_exchange(dsn: str, *, exchange_id: str, domain: str, endpoint: str) -> None:
-    """Idempotent broker.exchanges insert (check-before-insert on domain).
-
-    ``endpoint`` is the exchange's EXCHANGE_PUBLIC_ORIGIN — the broker's relay
-    SSRF-equality gate (exchange_relay.go) matches the well-known-resolved
-    endpoint against THIS registered value, so per the multi-exchange topology
-    each row carries its own exchange's origin (exchange-a/b/c).
-    """
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM broker.exchanges WHERE domain = %s", (domain,))
-        if cur.fetchone() is not None:
-            return
-        cur.execute(
-            """
-            INSERT INTO broker.exchanges (
-                exchange_id, domain, endpoint, trust_level,
-                supported_profiles, priority, probe_state
-            ) VALUES (%s, %s, %s, 'VERIFIED', %s::jsonb, 10, 'LIVE')
-            ON CONFLICT (exchange_id) DO UPDATE SET
-                domain = EXCLUDED.domain, endpoint = EXCLUDED.endpoint,
-                trust_level = EXCLUDED.trust_level, updated_at = NOW()
-            """,
-            (exchange_id, domain, endpoint, json.dumps(["fora-news-v1"])),
-        )
-        conn.commit()
-
-
-def _register_tenants_and_buyers(dsn: str) -> None:
-    """Register every demo tenant + buyer + the broker-relay agent in ONE catalog DB.
-
-    Multi-exchange topology: execute's caller-authz resolves the requester
-    via ``agents.ByID`` against the EXCHANGE's OWN catalog DB, so the full setup
-    (all 3 demo tenants + the 3 buyers + the broker-relay agent) is replicated into
-    EACH exchange DB (``fora``, ``fora_b``, ``fora_c``). Registering all 3 tenants
-    in every DB is harmless — each exchange only ingests its own publisher's feed,
-    so the catalog rows stay isolated even though the tenant rows are replicated.
-
-    Deliberately does NOT pre-seed any catalog-writer signing key into
-    ``fora.agents`` (Core Invariant). The demo publishers' self-publish
-    keys and the 3rd-party contributor key are learned by the Exchange ONLY via
-    the well-known fetch at catalog-push time (Gate-1 self-signup).
-    """
-    for tenant_id, domain, scheme, _feed, _key in E2E_PUBLISHERS:
-        _register_tenant(dsn, tenant_id=tenant_id, domain=domain, scheme=scheme)
-        # the agent originates ExecuteTransaction via the Broker relay
-        # (agent sig1 + broker sig2); authorizeForAgent honours the relay only on
-        # tenants opted in here.
-        _set_allow_broker_relay(dsn, tenant_id=tenant_id)
-
-    # Buyers + the credit-less buyer (real pubkeys; kid == agent_id). Buyers are
-    # registered directly because their onboarding RPC is out of e2e scope — this
-    # is distinct from the catalog-WRITER keys, which the well-known-trust rule forbids pre-seeding.
-    _upsert_agent(dsn, agent_id=USD_AGENT_ID, pubkey=load_public_key_bytes(USD_AGENT_KEY_PATH))
-    _upsert_agent(dsn, agent_id=EUR_AGENT_ID, pubkey=load_public_key_bytes(EUR_AGENT_KEY_PATH))
-    _upsert_agent(
-        dsn, agent_id=NOBILLING_AGENT_ID, pubkey=load_public_key_bytes(NOBILLING_AGENT_KEY_PATH)
+    poll_until(
+        healthy,
+        timeout_seconds,
+        interval_s=0.5,
+        failure=lambda: f"exchange not healthy at {exchange_host_url}",
     )
-    # Broker outbound-relay identity (classified BROKER).
-    _upsert_agent(
+
+
+# ───── Seat and publisher registration (operator writes) ────────────────────
+#
+# A publisher registers themselves through the console. No e2e suite completes
+# that registration: the console suite walks the wizard up to the document
+# check, which this stack's origin fails, and a completed registration is
+# covered by the console's integration tests, which run the Exchange's real
+# registration surface in-process. Every suite here needs a registered
+# publisher as a precondition rather than as its subject. The console cannot
+# give it one either: only exchange-a runs a console, and a console
+# registration mints its own publisher id, while the demo sites' manifests
+# attest a fixed one. So the rows are written by operator_writes, which says
+# what surface is missing for each.
+
+
+def _provision_seat_and_sites(dsn: str, *, exchange: str) -> None:
+    """Provision ONE exchange's seat and the sites it sells.
+
+    The seat is NOT replicated: each exchange owns exactly one, keyed on its own
+    hostname, and its catalog rows are scoped to it. Only the sites this exchange
+    fronts are registered and listed here — a push of another exchange's site
+    would find no listing on this seat, which is the truth the topology already
+    had and now states in the data.
+
+    No identity is written. The buyers' identities are learned from their own
+    directories when they first sign a call, and the catalog-writer keys (the
+    publishers' self-publish keys, the third-party contributor key) are learned
+    from the well-known fetch at catalog-push time (Gate-1 self-signup).
+    """
+    tenant_id = seat_tenant_id(exchange)
+    # An agent buys through the Broker, which re-packages the purchase and signs
+    # it with its own key; authorizeForAgent honours that only on a seat that
+    # accepts the relay. Every seat does except the ones RELAY_REFUSING_EXCHANGES
+    # names, which exist to be refused.
+    provision_seat(
         dsn,
-        agent_id=_BROKER_RELAY_KID,
-        pubkey=_broker_relay_pubkey_bytes(),
-        requester_type="BROKER",
-    )
-
-
-def _register_exchange_registry(broker_dsn: str) -> None:
-    """Write the 3 broker.exchanges routing rows into the BROKER DB (fora).
-
-    One row per exchange; each endpoint equals that exchange's
-    EXCHANGE_PUBLIC_ORIGIN so the broker's relay SSRF-equality gate passes.
-    """
-    _upsert_exchange(
-        broker_dsn, exchange_id="ex-demo", domain=EXCHANGE_DOMAIN, endpoint=EXCHANGE_INTERNAL_URL
-    )
-    _upsert_exchange(
-        broker_dsn,
-        exchange_id="ex-demo-b",
-        domain=EXCHANGE_B_DOMAIN,
-        endpoint=EXCHANGE_B_INTERNAL_URL,
-    )
-    _upsert_exchange(
-        broker_dsn,
-        exchange_id="ex-demo-c",
-        domain=EXCHANGE_C_DOMAIN,
-        endpoint=EXCHANGE_C_INTERNAL_URL,
-    )
-
-
-# ───── Ingest via the REAL production binary ────────────────────────────────
-
-
-def _ingest_binary_path() -> str:
-    """Locate the fora-ingest binary.
-
-    In the runner image the Go builder stage installs it at
-    ``/usr/local/bin/fora-ingest``; a ``FORA_INGEST_BIN`` override
-    lets a host run point at a locally-built or ``go run`` shim.
-    """
-    return os.environ.get("FORA_INGEST_BIN", "/usr/local/bin/fora-ingest")
-
-
-def _ingest_feed(
-    *,
-    exchange_url: str,
-    exchange: str,
-    tenant_id: str,
-    feed_abspath: Path,
-    binary: str,
-    key_path: Path,
-) -> None:
-    """Shell out to the production fora-ingest binary for one feed.
-
-    The binary signs (RFC 9421) and sends ``PushResources`` RPCs — one per
-    submission of at most the wire bound; every e2e feed fits in one — the only
-    catalog write. ``key_path`` is the publisher's SELF-PUBLISH key (kid ==
-    domain); the binary's caller_id is that kid, so Gate-1 self-signup resolves
-    it from the publisher's edge well-known and Gate-2 passes caller==domain — no
-    DB pre-seed. A non-zero exit fails the seed: the Exchange stores or refuses
-    a submission whole and the binary exits non-zero on the first submission
-    that did not store — refused, or never answered — so the exit code is the
-    whole verdict.
-
-    ``exchange`` overrides the recipient the binary would otherwise take from
-    ``exchange_url``'s host. The harness needs the override because a host run
-    reaches the exchange through a mapped 127.0.0.1 port, which names no
-    exchange at all; a deployment dialling the exchange's own origin needs
-    nothing here.
-    """
-    proc = run_ingest(
-        argv_prefix=[binary],
-        exchange_url=exchange_url,
-        exchange=exchange,
         tenant_id=tenant_id,
-        key_path=key_path,
-        feed=feed_abspath,
+        domain=exchange,
+        allow_broker_relay=exchange not in RELAY_REFUSING_EXCHANGES,
     )
-    if not ingest_succeeded(proc):
-        msg = (
-            f"fora-ingest failed for {feed_abspath} (tenant={tenant_id}): "
-            f"rc={proc.returncode}\nSTDERR:\n{proc.stderr}\nSTDOUT:\n{proc.stdout}"
-        )
-        raise RuntimeError(msg)
+    # The payee first: the site row references it, and so does every catalog row
+    # the ingest writes.
+    register_publisher(dsn, publisher_id=DEMO_PUBLISHER_ID, display_name=DEMO_PUBLISHER_NAME)
+    for domain, site_exchange, scheme, _feed, _key in E2E_PUBLISHERS:
+        if site_exchange != exchange:
+            continue
+        register_site(dsn, domain=domain, publisher_id=DEMO_PUBLISHER_ID, scheme=scheme)
+        list_site_on_seat(dsn, tenant_id=tenant_id, domain=domain)
 
 
-def _ingest_all_feeds(exchange_by_domain: dict[str, tuple[str, str]]) -> None:
-    """Ingest each e2e feed into its OWNING exchange's catalog DB.
+# The absence reason the Broker answers a resolve with while the Exchange that
+# sells the resource is not routable: its registry row is not LIVE.
+_NOT_ROUTABLE = "OFFER_ABSENCE_REASON_TEMPORARILY_UNAVAILABLE"
+# Long enough for one full pass of the Broker's health refresher, which runs
+# every 30 seconds, after an Exchange starts answering, with margin.
+_ROUTES_DEADLINE_SEC = 90.0
 
-    ``exchange_by_domain`` maps each publisher domain to the ``(url, domain)``
-    of the exchange that owns it — where to send the push, and who to address it
-    to. The music catalog lands in exchange-b's DB and the sfx catalog in
-    exchange-c's DB — the catalog isolation the separate-DB topology guarantees.
+
+def _first_uri(feed: Path) -> str:
+    """The catalog URI of the first entry in ``feed``."""
+    with feed.open() as lines:
+        entry = json.loads(next(lines))
+    return f"http://{entry['domain']}{entry['path']}"
+
+
+def wait_until_broker_routes(stack: StackURLs, broker: BrokerClient | None = None) -> None:
+    """Wait until the Broker routes a resolve to every Exchange the seed put a catalog on.
+
+    The Broker learns its Exchanges from its registry file at boot and probes each
+    one at once. An Exchange that is still starting at that moment is held not
+    routable until the refresher's next pass, and a resolve of anything it sells
+    is answered with no offer and ``TEMPORARILY_UNAVAILABLE``. So the stack is
+    ready for the suites only once a resolve of one resource per Exchange stops
+    getting that answer, observed through the Broker's own resolve.
+
+    It is also the wait ``edge_runtimes.key_directory_unreachable`` and the
+    transient-retry test use after they stop and restart an Exchange: a probe pass
+    that ran while the container was down holds it not routable the same way.
+
+    ``broker`` is the client the resolves go through. A test passes its own agent's
+    (``fresh_agent.broker``), which is left open; with none, the seed's buyer
+    resolves, through a client opened and closed here.
     """
-    binary = _ingest_binary_path()
-    for tenant_id, domain, _scheme, feed_abspath, key_path in E2E_PUBLISHERS:
-        url, exchange = exchange_by_domain[domain]
-        _ingest_feed(
-            exchange_url=url,
-            exchange=exchange,
-            tenant_id=tenant_id,
-            feed_abspath=feed_abspath,
-            binary=binary,
-            key_path=key_path,
+    pending = {exchange: _first_uri(feed) for _d, exchange, _s, feed, _k in E2E_PUBLISHERS}
+    last: dict[str, str | None] = {}
+    client = closing(sdk_broker_client(stack)) if broker is None else nullcontext(broker)
+    with client as resolver:
+
+        def routed() -> bool:
+            for exchange, uri in list(pending.items()):
+                result = resolver.resolve(resolve_request([uri]))
+                last[exchange] = result.absence_reason
+                if result.groups or result.absence_reason != _NOT_ROUTABLE:
+                    del pending[exchange]
+            return not pending
+
+        poll_until(
+            routed,
+            _ROUTES_DEADLINE_SEC,
+            interval_s=1.0,
+            failure=lambda: f"the Broker still does not route to {sorted(pending)}: {last}",
         )
 
 
@@ -519,181 +355,65 @@ def seed_stack(
     *,
     exchange_b_host_url: str | None = None,
     exchange_c_host_url: str | None = None,
+    exchange_d_host_url: str | None = None,
 ) -> SeededFixture:
-    """Seed the 3-exchange E2E stack with the demo catalogs.
+    """Seed the 4-exchange E2E stack with the demo catalogs.
 
-    Multi-exchange topology: tenants + buyers + the broker-relay agent are
-    registered into EACH exchange's OWN catalog DB (fora / fora_b / fora_c) — the
-    execute caller-authz resolves the requester via agents.ByID against the
-    exchange's own DB, so all 3 DBs need the buyer/relay rows. The broker.exchanges
-    registry (3 rows, one per exchange) is written ONCE into the broker DB (fora).
-    Each demo feed is ingested into its owning exchange's DB.
+    Multi-exchange topology: each exchange's OWN catalog DB (fora / fora_b /
+    fora_c / fora_d) gets that exchange's seat and the publisher and site rows for
+    the catalogs it sells. The buyers then register at every exchange, which is
+    also where each exchange learns their identities, and each demo feed is
+    ingested at the exchange that sells it. The Broker's registry is not written
+    here: the Broker reads it from its configuration file at boot.
 
-    ``exchange_b_host_url`` / ``exchange_c_host_url`` default to the docker-DNS
+    ``exchange_b_host_url`` / ``exchange_c_host_url`` / ``exchange_d_host_url``
+    default to the docker-DNS
     in-network URLs (the runner path); a host run passes the host-mapped URLs.
 
-    Idempotent: tenant/agent/exchange registration is upsert/check-before-insert,
-    and re-ingesting a feed re-pushes the same entries (the catalog is keyed by
-    tenant+URI, so a repeat push is a no-op overwrite).
+    Idempotent: seat, publisher, site and listing writes are upserts, a buyer's
+    repeat Register returns its existing account and grants nothing, approving
+    an account already approved changes nothing, and re-ingesting a feed
+    re-pushes the same entries (the catalog is keyed by tenant+URI, so a repeat
+    push is a no-op overwrite).
     """
-    ex_b_url = exchange_b_host_url or EXCHANGE_B_INTERNAL_URL
-    ex_c_url = exchange_c_host_url or EXCHANGE_C_INTERNAL_URL
+    url_by_exchange = {
+        EXCHANGE_A_DOMAIN: exchange_host_url,
+        EXCHANGE_B_DOMAIN: exchange_b_host_url or EXCHANGE_B_INTERNAL_URL,
+        EXCHANGE_C_DOMAIN: exchange_c_host_url or EXCHANGE_C_INTERNAL_URL,
+        EXCHANGE_D_DOMAIN: exchange_d_host_url or EXCHANGE_D_INTERNAL_URL,
+    }
+    dsn_by_exchange = {
+        exchange: pg_dsn(compose_file, db) for exchange, db in CATALOG_DB_BY_EXCHANGE.items()
+    }
+    # A healthy Exchange has reached its database, so the writes below have a
+    # database to land in.
+    for url in url_by_exchange.values():
+        _wait_exchange_ready(url)
 
-    broker_dsn = _resolve_pg_dsn(compose_file)  # the broker schema lives in `fora`
-    dsn_a = broker_dsn
-    dsn_b = _resolve_pg_dsn_for_db(compose_file, "fora_b")
-    dsn_c = _resolve_pg_dsn_for_db(compose_file, "fora_c")
-
-    for dsn in (dsn_a, dsn_b, dsn_c):
-        _wait_pg(dsn)
-    _wait_exchange_ready(exchange_host_url)
-    _wait_exchange_ready(ex_b_url)
-    _wait_exchange_ready(ex_c_url)
-
-    # Tenants + buyers + broker-relay into EACH exchange's catalog DB.
-    for dsn in (dsn_a, dsn_b, dsn_c):
-        _register_tenants_and_buyers(dsn)
-    # Active SoR accounts for the buyers in EACH exchange's OWN SoR database
-    # (fora_sor / fora_sor_b / fora_sor_c), keyed by billing_ref == agent_id.
-    # Without these the now-live SoR active check (checkAccountActive) denies
-    # every paid transaction ACCOUNT_INACTIVE before Authorize.
-    buyer_ids = (USD_AGENT_ID, EUR_AGENT_ID, NOBILLING_AGENT_ID)
-    for sor_db in ("fora_sor", "fora_sor_b", "fora_sor_c"):
-        sor_dsn = _resolve_pg_dsn_for_db(compose_file, sor_db)
-        _wait_pg(sor_dsn)
-        _register_sor_accounts(sor_dsn, buyer_ids)
-    # Broker → Exchange routing rows (3) in the broker DB.
-    _register_exchange_registry(broker_dsn)
-
-    _ingest_all_feeds(
-        {
-            DEMO_PHILOSOPHY_DOMAIN: (exchange_host_url, EXCHANGE_A_DOMAIN),
-            DEMO_MUSIC_DOMAIN: (ex_b_url, EXCHANGE_B_DOMAIN),
-            DEMO_SFX_DOMAIN: (ex_c_url, EXCHANGE_C_DOMAIN),
-        },
+    for exchange, dsn in dsn_by_exchange.items():
+        _provision_seat_and_sites(dsn, exchange=exchange)
+    # exchange-a also holds a seat it does not sell as, for the tenant-isolation
+    # suite to name from exchange-a's own surfaces.
+    boot_fixture_second_seat(
+        dsn_by_exchange[EXCHANGE_A_DOMAIN],
+        tenant_id=SECOND_SEAT_OF_EXCHANGE_A,
+        domain=SECOND_SEAT_OF_EXCHANGE_A_DOMAIN,
     )
+    # The buyers' accounts, opened by their own signed Register at every
+    # exchange. The credit-less buyer goes first, while every seat holds new
+    # agents for review, so its account opens inactive and is granted nothing;
+    # the seed then approves it in each exchange's account registry. The seats
+    # then activate new agents, and the funded buyers register and receive the
+    # welcome credit each exchange is configured with. See seed_accounts for why
+    # the order carries the meaning.
+    held = register_credit_less_buyer(url_by_exchange)
+    for exchange, billing_ref in held.items():
+        approve_held_account(
+            pg_dsn(compose_file, SOR_DB_BY_EXCHANGE[exchange]), billing_ref=billing_ref
+        )
+    for exchange, dsn in dsn_by_exchange.items():
+        activate_new_agents(dsn, tenant_id=seat_tenant_id(exchange))
+    register_buyers(url_by_exchange, FUNDED_BUYERS)
+
+    ingest_all_feeds(url_by_exchange, E2E_PUBLISHERS)
     return _build_fixture()
-
-
-def _agent_public_key(agent_id: str) -> bytes:
-    """Real Ed25519 pubkey for a known signing identity, else a zero placeholder.
-
-    The Exchange's ``resolveCaller`` looks the *signing* keyID up in
-    ``fora.agents`` and ``authorizeForAgent`` requires keyID == requester.id,
-    so any agent that signs ExecuteTransaction MUST carry its real pubkey
-    (kid == agent_id). Identities that never sign (pure transaction_log FK
-    targets) keep the zero placeholder.
-    """
-    key_file = _SIGNING_AGENT_KEY_FILES.get(agent_id)
-    if key_file is None:
-        return b"\x00" * 32
-    return load_public_key_bytes(key_file)
-
-
-def _upsert_tenant_ed25519(dsn: str, *, tenant_id: str, domain: str) -> None:
-    """Idempotent tenant insert for the ed25519-signed-URL scheme.
-
-    ``fora.tenants`` has UNIQUE constraints on BOTH ``tenant_id`` and
-    ``domain``. Tests that share a domain under different tenant_ids
-    would collide on the domain key before the tenant_id ON CONFLICT
-    clause fires. We check-before-insert to keep the helper idempotent
-    against either collision — the first caller wins the domain, later
-    callers with the same domain-different-tenant_id become no-ops.
-    """
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM fora.tenants WHERE domain = %s", (domain,))
-        if cur.fetchone() is not None:
-            return
-        cur.execute(
-            """
-            INSERT INTO fora.tenants (
-                tenant_id, domain, ed25519_key_ref,
-                reporting_policy, signing_scheme
-            ) VALUES (%s, %s, %s, '{}', 'ED25519')
-            ON CONFLICT (tenant_id) DO UPDATE SET
-                domain = EXCLUDED.domain,
-                signing_scheme = EXCLUDED.signing_scheme,
-                ed25519_key_ref = EXCLUDED.ed25519_key_ref
-            """,
-            (tenant_id, domain, ED25519_KEY_REF),
-        )
-        conn.commit()
-
-
-def _upsert_tenant_cf_rsa(dsn: str, *, tenant_id: str, domain: str) -> None:
-    """Idempotent tenant insert for the AWS CloudFront RSA scheme."""
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO fora.tenants (
-                tenant_id, domain, ed25519_key_ref,
-                reporting_policy, signing_scheme,
-                rsa_key_ref, cloudfront_key_pair_id
-            ) VALUES (%s, %s, %s, '{}', 'AWS_CLOUDFRONT_RSA', %s, %s)
-            ON CONFLICT (tenant_id) DO UPDATE SET
-                domain = EXCLUDED.domain,
-                signing_scheme = EXCLUDED.signing_scheme,
-                rsa_key_ref = EXCLUDED.rsa_key_ref,
-                cloudfront_key_pair_id = EXCLUDED.cloudfront_key_pair_id
-            """,
-            (tenant_id, domain, ED25519_KEY_REF, RSA_KEY_REF, CLOUDFRONT_KEY_PAIR_ID),
-        )
-        conn.commit()
-
-
-def _upsert_catalog_contributor(dsn: str, *, pubkey_bytes: bytes) -> None:
-    """Pre-register the catalog contributor's Ed25519 pubkey for Gate 1.
-
-    The Exchange's agent registry (``src/exchange/internal/agentreg/``) looks
-    keys up from ``fora.agents`` and only falls back to the lazy
-    ``fora.json`` fetch when ``LookupPublicKey`` returns
-    ``ErrUnknown``. Pre-inserting the row lets the harness skip standing
-    up a second static HTTP server without weakening Gate 1 —
-    ``httpsig.Verify`` still covers the request end-to-end.
-
-    This reuses ``fora.agents`` for a contributor identity; see the module
-    docstring for the piggy-back rationale.
-    """
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO fora.agents (agent_id, public_key, requester_type)
-            VALUES (%s, %s, 'AGENT')
-            ON CONFLICT (agent_id) DO UPDATE SET
-                public_key = EXCLUDED.public_key
-            """,
-            (CATALOG_CONTRIBUTOR_ID, pubkey_bytes),
-        )
-        conn.commit()
-
-
-def _upsert_broker_relay(dsn: str) -> None:
-    """Register the Broker's outbound-relay identity as a BROKER caller.
-
-    The full-stack test drives MCP → Broker → Exchange; the Broker signs the
-    relayed ExecuteTransaction with its relay key (kid ``broker.broker-local.v1``),
-    so the Exchange's ``resolveCaller`` must find that kid classified as BROKER.
-    ``authorizeForAgent`` then honours the relay on tenants opted in via
-    :func:`_set_allow_broker_relay`.
-    """
-    pub = b64url_decode(_BROKER_RELAY_PUBKEY_B64)
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO fora.agents (agent_id, public_key, requester_type)
-            VALUES (%s, %s, 'BROKER')
-            ON CONFLICT (agent_id) DO UPDATE SET
-                public_key = EXCLUDED.public_key,
-                requester_type = EXCLUDED.requester_type
-            """,
-            (_BROKER_RELAY_KID, pub),
-        )
-        conn.commit()
-
-
-_SIGNING_AGENT_KEY_FILES = {
-    "agent-e2e": _FIXTURES_DIR / "agent_e2e_key.json",
-    "agent-nobilling-e2e": _FIXTURES_DIR / "agent_nobilling_e2e_key.json",
-}
-
-_BROKER_RELAY_PUBKEY_B64 = "gCX76Qe6aRTjVWd2WIFaLtfTzBjA9EFFHUg3pz5AE9s"

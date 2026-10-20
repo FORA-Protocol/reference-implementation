@@ -3,6 +3,7 @@ package resolve
 import (
 	"context"
 	"errors"
+	"slices"
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"github.com/google/uuid"
@@ -19,16 +20,15 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/probe"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/repo"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/selection"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/signing"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/xclient"
 )
 
 // endpointResolver resolves a registered exchange DOMAIN to the ExchangeService
 // origin the exchange advertises in its OWN /.well-known/fora.json (the same
-// resolution mechanism the execute relay uses). *resolvers.WellKnownEndpoint
+// resolution mechanism the purchase service uses). *resolvers.WellKnownEndpoint
 // Resolver satisfies it. The interface is declared here (not imported from
 // transport) so the resolve core owns its own port and never depends on the
-// transport package — the transport relay handler declares its own structurally
+// transport package — the purchase service declares its own structurally
 // identical port and both are satisfied by the shared concrete resolver at wiring.
 type endpointResolver interface {
 	ResolveEndpoint(ctx context.Context, host string) (string, error)
@@ -42,15 +42,18 @@ type Deps struct {
 	Prober    *probe.Prober
 	Exchange  xclient.ExchangeCaller
 	Budget    budget.Service
-	Signer    *signing.CoSigner
 	// Endpoints resolves a registered exchange DOMAIN to the ExchangeService
 	// origin the exchange advertises in its OWN /.well-known/fora.json — the SAME
-	// resolver the execute relay uses (resolvers.WellKnownEndpointResolver). The
+	// resolver the purchase service uses (resolvers.WellKnownEndpointResolver). The
 	// broker registry is a TRUST allowlist only: it gates WHICH exchange domains
 	// may be queried, never WHERE they live. Discovery and execute therefore share
 	// one endpoint-resolution mechanism — no backfilled registry endpoints.
 	Endpoints endpointResolver
-	Clk       clock.Clock
+	// Query resolves a free-text query to catalog URIs before any
+	// candidate-domain probing. Nil when query discovery is not enabled: the
+	// query then goes to Discovery, as before.
+	Query QuerySearcher
+	Clk   clock.Clock
 	// Verifier sorts every discovered offer into {verified, rejected} BEFORE it
 	// can reach selection (sdk/go/core.Verifier under Strict in production; the
 	// seam is an interface so tests inject mode/keys). Fail-closed: nil is
@@ -110,6 +113,12 @@ func NewService(d Deps) *Service {
 // DiscoveryResponse. The caller (transport.BrokerConnectHandler) has already
 // validated the request and authorized the caller before this runs.
 func (h *Service) Resolve(ctx context.Context, requestID string, req Request) (*Response, error) {
+	if err := h.requireCatalogSearch(req); err != nil {
+		return nil, err
+	}
+	if refusal := h.searchQuery(ctx, &req); refusal != nil {
+		return refusal, nil
+	}
 	domains, err := h.candidateDomains(ctx, req)
 	if err != nil {
 		return nil, err
@@ -119,10 +128,7 @@ func (h *Service) Resolve(ctx context.Context, requestID string, req Request) (*
 		return probeRefusalResponse(probeOutcome), nil
 	}
 
-	groups, flags, refusal, err := h.discover(ctx, req, manifests)
-	if err != nil {
-		return nil, err
-	}
+	groups, flags, refusal := h.discover(ctx, req, manifests)
 	if refusal != nil {
 		return refusal, nil
 	}
@@ -146,12 +152,9 @@ func (h *Service) Resolve(ctx context.Context, requestID string, req Request) (*
 	}
 
 	// The cost guard is a true PER-AGENT cap. It keys on the authenticated agent
-	// identity — req.AgentID, which the transport adapter canonicalized in
-	// validateAndCanonicalizeRequest and authorizeAgentSelfAct then verified against the signed
-	// Signature-Agent. Per-agent is a claim about the KEY, so it holds only while
-	// that key is one string per agent: were the comparison widened to accept
-	// several spellings without rewriting the field, one agent would hold one
-	// counter per spelling, each with the full period cap. Here — on the admitted,
+	// identity — req.AgentID, which the transport adapter derived from the verified
+	// Signature-Agent directory, never from the caller-written requester.id. So one
+	// agent holds one counter whatever labels it sends. Here — on the admitted,
 	// licensed-discovery path — it Records the winner's
 	// projected value against that agent's period counter so spend ACCUMULATES
 	// across the agent's requests (per-agent, not per-request). Recording here is
@@ -259,9 +262,14 @@ func (h *Service) probeDomains(
 			out[d] = res.Manifest
 		case errors.Is(err, probe.ErrManifestMissing):
 			outcome.missing++
-		case errors.Is(err, probe.ErrManifestVersionRefused):
-			// A verdict, counted beside missing rather than transient: the
-			// document was read and will say the same thing on every retry.
+		case errors.Is(err, probe.ErrManifestVersionRefused),
+			errors.Is(err, probe.ErrManifestUnusable):
+			// Verdicts, counted beside missing rather than transient: the
+			// document was read and will say the same thing on every retry. One
+			// carries a document version this build does not accept, the other a
+			// document that broke a rule -- the wire shape the schema decides, or
+			// a role that is not the publisher one. Neither is repaired by asking
+			// again.
 			outcome.refused++
 			// Its own event, not the transient line: an operator separating a
 			// publisher this Broker will never read from one that is momentarily
@@ -375,7 +383,7 @@ func buildResourceQuery(
 		Requester: buildRequester(ctx, req, clk),
 	}
 	// uris and acceptable_restrictions ride on the ResourceQuery message itself
-	// post-overhaul; the requester is identity-only. IntendedUse is relayed as an
+	// post-overhaul; the requester carries identity and scopes only. IntendedUse is relayed as an
 	// advisory FUNCTION-axis restriction — the Exchange filters by resource_id +
 	// scopes only (ADR-014) and never matches it, so this is a faithful
 	// passthrough, not an enforcement input.
@@ -391,16 +399,27 @@ func buildResourceQuery(
 	return q
 }
 
-// buildRequester populates the identity-only Requester message from the inbound
-// request. uris ride on the enclosing ResourceQuery; intended_use was removed
-// from the selection path (ADR-014 scope-only). The Requester carries no
-// caller-written billing field — the Exchange resolves the account from the
-// verified request signature, never from anything the caller sends.
+// buildRequester populates the Requester message, identity and entitlements,
+// from the inbound request. Id is the requester.id label the agent supplied,
+// forwarded unchanged: the Broker does not replace it with the canonical host,
+// and the Exchange keeps it as evidence only. Scopes are the agent's
+// requester.scopes, forwarded unchanged and in order: the Exchange selects terms
+// by them, so a Broker that dropped them would hide every scope-gated term from
+// an agent that holds the scope. The Broker neither adds, removes nor checks a
+// scope. uris ride on the enclosing ResourceQuery; intended_use was removed from
+// the selection path (ADR-014 scope-only). Domain is the requester.domain the
+// agent wrote, copied unchanged; nothing here checks it against the agent the
+// Broker verified. The Requester carries no caller-written billing field, and a
+// query the Broker originates authenticates no account: an Exchange resolves an
+// agent's account only from what authenticates the agent (its own request
+// signature, or its acceptances on a relayed purchase), never from anything a
+// request names.
 func buildRequester(_ context.Context, req Request, _ clock.Clock) *forav1.Requester {
 	return &forav1.Requester{
-		Id:     req.AgentID,
+		Id:     req.RequesterID,
 		Domain: req.RequesterDom,
 		Type:   forav1.RequesterType_REQUESTER_TYPE_AGENT,
+		Scopes: slices.Clone(req.Scopes),
 	}
 }
 

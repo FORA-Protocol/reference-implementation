@@ -8,25 +8,38 @@
 package resolve
 
 import (
+	"context"
+
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/selection"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/tagsearch"
 )
 
 // Request is the Broker's internal resolve input, mapped from the
 // canonical forav1.DiscoveryRequest by the transport adapter's foraRequestToInput.
-// Callers provide either a free-form query (EXA search) or a direct URI
-// (single-domain probe); when both are present the URI takes precedence.
+// Callers provide a free-form query, search filters, or a direct URI
+// (single-domain probe); when a URI is present it takes precedence. A query and
+// filters go to the Broker's catalog search when that is enabled. Otherwise a
+// query goes to EXA search, and filters are refused.
 type Request struct {
+	// AgentID is the AUTHENTICATED agent identity: the canonical host of the
+	// verified Signature-Agent directory, set by the transport adapter. The
+	// budget counter and the selection_log row key on it.
 	AgentID string `json:"agent_id"`
-	Query   string `json:"query,omitempty"`
+	// RequesterID is the requester.id label exactly as the agent sent it. It is
+	// forwarded to the Exchange unchanged and never used for authorization,
+	// accounting or directory fetching.
+	RequesterID string `json:"requester_id"`
+	Query       string `json:"query,omitempty"`
 	// URI is the FIRST requested uri (== URIs[0]), retained as a scalar so the
 	// single-uri call sites (validation, domain derivation fallback, audit) read
 	// unchanged. The fan-out reads URIs.
 	URI string `json:"uri,omitempty"`
 	// URIs is the full requested batch. A single-uri request carries a
 	// one-element slice; an EXA query carries none (the domains are derived from
-	// the search results). candidateDomains maps EVERY uri to its publisher
+	// the search results); a query resolved by the catalog search carries the
+	// matched URIs, best first. candidateDomains maps EVERY uri to its publisher
 	// domain so a multi-publisher batch probes every manifest, and
 	// buildResourceQuery forwards the whole batch to each named exchange.
 	URIs []string `json:"uris,omitempty"`
@@ -38,16 +51,22 @@ type Request struct {
 	// name is retained to avoid churn; the unit is fixed-point 1e8, not minor units.
 	BudgetMinor  int64  `json:"budget_minor,omitempty"`
 	RequesterDom string `json:"requester_domain,omitempty"`
+	// Scopes is requester.scopes exactly as the agent sent it. The Broker
+	// forwards it unchanged on every per-Exchange query and does not read it:
+	// the Exchange selects terms by it and is the party that judges it.
+	Scopes []string `json:"scopes,omitempty"`
 	// IntendedUse rides on the native Requester.intended_use proto field. The
 	// Exchange filters by resource_id and scopes only (ADR-014), so there are no
 	// user_type / geography fields — self-declared requester attributes are not a
 	// filtering input.
 	IntendedUse string `json:"intended_use,omitempty"`
-	// MaxHops is the agent's RequestConstraints.max_hops self-cap on the number
-	// of intermediaries permitted in its request chain. Absent = no cap. The
-	// Broker enforces it before relaying (see the transport adapter's
-	// enforceHopBudget).
-	MaxHops *int32 `json:"max_hops,omitempty"`
+	// Filters are the request's fora-music-v1 search filters, parsed by the
+	// transport adapter. They are set only when the request names no URI:
+	// explicit URIs take precedence, and their filters are ignored.
+	Filters tagsearch.Filters `json:"-"`
+	// searched marks URIs the Broker chose by searching its catalog for Query,
+	// rather than URIs the agent named. It decides the discovery method.
+	searched bool
 }
 
 // Response is the Broker's internal assembly DTO for a resolve outcome.
@@ -117,12 +136,12 @@ type OfferGroup struct {
 // finalize collapses the collected candidates into the ranked Offers slice
 // (Dedup+Rank WITHIN the group — never cross-ranked against another URL). A group
 // with no candidate keeps its AbsenceReason (the typed-absence shape).
-func (g OfferGroup) finalize() OfferGroup {
+func (g OfferGroup) finalize(ctx context.Context) OfferGroup {
 	if len(g.cands) == 0 {
 		g.cands = nil
 		return g
 	}
-	g.Offers = selection.Rank(selection.Dedup(g.cands))
+	g.Offers = selection.Rank(selection.Dedup(ctx, g.cands))
 	g.AbsenceReason = forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_UNSPECIFIED
 	g.cands = nil
 	return g

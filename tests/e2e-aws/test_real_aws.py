@@ -1,17 +1,31 @@
 """Real-AWS acceptance tests for the demo deployment.
 
 Gated by ``FORA_E2E_AWS=1`` so the suite stays no-op by default. Drives the
-deployed stack via its public HTTPS surface — Broker resolve → CloudFront
-RSA-signed URL → native CloudFront verification → origin bytes.
+deployed stack via its public HTTPS surface: the agent discovers an offer with
+``BrokerService/Resolve``, buys it with ``BrokerService/ExecuteTransaction``,
+and receives a CloudFront RSA-signed URL that CloudFront verifies natively
+before serving the origin bytes.
+
+Both Broker calls go through the SDK's own ``BrokerClient``, signed with the
+agent's key, exactly as the compose harness buys (``harness.broker_purchase``).
+Discovery no longer hands out a signed URL: a delivery URL exists only on the
+result of a purchase, so every test that needs one buys first.
 
 Prereqs:
     FORA_E2E_AWS=1
-    FORA_E2E_BROKER_URL      e.g. https://broker.demo.fora-protocol.org
-    FORA_E2E_CLOUDFRONT_URL  e.g. https://demo.fora-protocol.org
-    FORA_E2E_AGENT_ID        agent_id the Broker expects
-    FORA_E2E_RESOURCE_URI    catalog URI seeded on the Exchange for an
-                             AWS_CLOUDFRONT_RSA tenant, reachable via
-                             FORA_E2E_CLOUDFRONT_URL
+    FORA_E2E_BROKER_URL       e.g. https://broker.example
+    FORA_E2E_CLOUDFRONT_URL   e.g. https://cdn.example
+    FORA_E2E_AGENT_ID         the label the agent puts in requester.id
+    FORA_E2E_AGENT_KEY_PATH   the agent's keyfile, in the format
+                              scripts/gen-e2e-keys.sh writes; its kid is the
+                              agent's Web Bot Auth directory, which the deployed
+                              Broker and Exchange must be able to fetch
+    FORA_E2E_EXCHANGE_DOMAIN  the Exchange that sells the resource; its offer
+                              key is read from its Web Bot Auth directory over
+                              https, so the offer can be verified before buying
+    FORA_E2E_RESOURCE_URI     catalog URI seeded on that Exchange for an
+                              AWS_CLOUDFRONT_RSA site, reachable via
+                              FORA_E2E_CLOUDFRONT_URL
 """
 
 from __future__ import annotations
@@ -19,20 +33,19 @@ from __future__ import annotations
 import os
 import re
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import httpx
 import pytest
 
 # The e2e-aws suite lives outside the harness package; mirror demo_proof.py and
-# put tests/e2e on sys.path so the canonical response carriers import resolves.
+# put tests/e2e on sys.path so the harness helpers import.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "e2e"))
 
+from harness.broker_purchase import only_item, resolve_offer  # noqa: E402
 from harness.constants import AI_BOT_UA  # noqa: E402
-from harness.resolve_carriers import (  # noqa: E402
-    licensed_of,
-    retrieval_endpoint_of,
-)
+from harness.sdk_client import deployed_broker_client  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("FORA_E2E_AWS") != "1",
@@ -47,77 +60,59 @@ def _env(name: str) -> str:
     return value
 
 
-@pytest.fixture(scope="session")
-def broker_url() -> str:
-    return _env("FORA_E2E_BROKER_URL")
+@pytest.fixture(scope="module")
+def signed_url() -> str:
+    """Buy the resource once through the Broker and return its delivery URL.
 
-
-@pytest.fixture(scope="session")
-def resource_uri() -> str:
-    return _env("FORA_E2E_RESOURCE_URI")
-
-
-@pytest.fixture(scope="session")
-def agent_id() -> str:
-    return _env("FORA_E2E_AGENT_ID")
-
-
-def test_resolve_returns_cloudfront_signed_url(
-    broker_url: str, resource_uri: str, agent_id: str
-) -> None:
-    """Broker should return a CloudFront canned-policy signed URL."""
-    resp = httpx.post(
-        f"{broker_url}/broker/v1/resolve",
-        json={"agent_id": agent_id, "uri": resource_uri},
-        timeout=30.0,
+    One purchase serves every test in this module: each reads the same URL, and
+    a purchase per test would bill the agent three times for one resource.
+    """
+    broker_url = _env("FORA_E2E_BROKER_URL")
+    agent_id = _env("FORA_E2E_AGENT_ID")
+    key_path = Path(_env("FORA_E2E_AGENT_KEY_PATH"))
+    exchange = _env("FORA_E2E_EXCHANGE_DOMAIN")
+    uri = _env("FORA_E2E_RESOURCE_URI")
+    # The harness's deployed client: https resolvers. The resource is sold on the
+    # CloudFront RSA scheme, whose signed URL CloudFront verifies natively, which
+    # the tests below drive.
+    client = deployed_broker_client(
+        broker_url, agent_id=agent_id, key_path=key_path, exchange=exchange
     )
-    assert resp.status_code == httpx.codes.OK, resp.text
-    payload = resp.json()
-    assert licensed_of(payload) is True, payload
-    signed = retrieval_endpoint_of(payload)
-    assert signed is not None, payload
+    with closing(client):
+        offer = resolve_offer(client, uri)
+        response = client.execute([offer])
+    item = only_item(response, f"broker purchase of {uri}")
+    assert item.denial_reason is None, f"the Exchange denied the purchase: {item}"
+    assert item.retrieval_endpoint, f"a delivered item carries no retrieval_endpoint: {item}"
+    return item.retrieval_endpoint
+
+
+def test_purchase_returns_cloudfront_signed_url(signed_url: str) -> None:
+    """The purchase answers with a CloudFront canned-policy signed URL."""
     for name in ("Expires", "Signature", "Key-Pair-Id"):
-        assert name in signed, f"{name} missing in {signed}"
+        assert name in signed_url, f"{name} missing in {signed_url}"
 
 
-def test_signed_url_delivers_content_via_cloudfront(
-    broker_url: str, resource_uri: str, agent_id: str
-) -> None:
+def test_signed_url_delivers_content_via_cloudfront(signed_url: str) -> None:
     """Real CloudFront natively verifies the signed URL and serves the origin."""
-    resp = httpx.post(
-        f"{broker_url}/broker/v1/resolve",
-        json={"agent_id": agent_id, "uri": resource_uri},
-        timeout=30.0,
-    )
-    signed = retrieval_endpoint_of(resp.json())
-    assert signed is not None, resp.text
-    content_resp = httpx.get(signed, timeout=30.0)
+    content_resp = httpx.get(signed_url, timeout=30.0)
     assert content_resp.status_code == httpx.codes.OK, content_resp.text
     assert len(content_resp.content) > 0
 
 
-def test_tampered_signature_is_rejected_by_cloudfront(
-    broker_url: str, resource_uri: str, agent_id: str
-) -> None:
+def test_tampered_signature_is_rejected_by_cloudfront(signed_url: str) -> None:
     """CloudFront native verify returns 403 on a mutated Signature param."""
-    resp = httpx.post(
-        f"{broker_url}/broker/v1/resolve",
-        json={"agent_id": agent_id, "uri": resource_uri},
-        timeout=30.0,
-    )
-    signed = retrieval_endpoint_of(resp.json())
-    assert signed is not None, resp.text
-    match = re.search(r"Signature=([^&]+)", signed)
-    assert match, signed
+    match = re.search(r"Signature=([^&]+)", signed_url)
+    assert match, signed_url
     sig = match.group(1)
     mid = len(sig) // 2
     tampered_sig = sig[:mid] + ("B" if sig[mid] != "B" else "C") + sig[mid + 1 :]
-    tampered = signed.replace(f"Signature={sig}", f"Signature={tampered_sig}")
+    tampered = signed_url.replace(f"Signature={sig}", f"Signature={tampered_sig}")
     bad = httpx.get(tampered, timeout=30.0)
     assert bad.status_code == httpx.codes.FORBIDDEN, bad.text
 
 
-def test_bot_redirect_without_signature(broker_url: str) -> None:
+def test_bot_redirect_without_signature() -> None:
     """Lambda@Edge should 403 + X-Content-Rules when a bot UA hits unsigned URL."""
     cloudfront_url = _env("FORA_E2E_CLOUDFRONT_URL")
     resp = httpx.get(

@@ -50,7 +50,7 @@ func TestExecuteRelayReplay_RefusedForDisallowedRelay(t *testing.T) {
 	// admission must refuse before serving the stored response.
 	relayClient := h.brokerRelayClient(t, "broker.replay-denied.v1")
 	_, replayErr := executeBrokerRelay(t, h, relayClient, idem, offer)
-	assertConnectCode(t, replayErr, connect.CodePermissionDenied)
+	assertRelayNotAccepted(t, replayErr)
 }
 
 // TestExecuteRelayReplay_AllowedRelayReplaysOriginal is the positive companion:
@@ -107,7 +107,7 @@ func TestExecuteRelayReplay_ExpiredOfferStillReachesRelayVerdict(t *testing.T) {
 	if first.Msg.GetItems()[0].GetRetrievalEndpoint() == "" {
 		t.Fatal("original response carries no retrieval endpoint")
 	}
-	balAfterOriginal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	balAfterOriginal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after original: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestExecuteRelayReplay_ExpiredOfferStillReachesRelayVerdict(t *testing.T) {
 	assertConnectCode(t, replayErr, connect.CodePermissionDenied)
 
 	// No further charge landed from the refused relay.
-	balAfterReplay, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	balAfterReplay, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after refused relay: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestExecuteRelayDisallowed_LeavesNoClaim(t *testing.T) {
 	}
 	// And nothing was persisted or charged by the refused relay: the balance
 	// reflects exactly the one agent-direct charge (0.05 → 9.95).
-	bal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	bal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}

@@ -1,6 +1,18 @@
 # ADR-020 — FORA SDK: Layered Protocol Libraries, Co-located with the Contract, Consumed Off-Commit
 
-**Status:** Accepted
+**Status:** Accepted · **§6 amended (2026-09-10)** — the SDK now ships as tagged
+releases on npm and PyPI, and a consumer installs a release rather than pinning a
+commit. §6's heading, its "no registry publish and no semver tag are required",
+and the Alternatives entry rejecting publication describe the period before the
+`v1.0.3` release; §6's own closing sentence anticipated the change and nothing
+about the repository layout moved. See the
+[Addendum (2026-09-10)](#addendum-2026-09-10--the-sdk-ships-as-tagged-releases-6s-pin-a-commit-is-superseded).
+
+**Further amended (2026-09-11)** — the last git pin is gone. The two edge
+manifests install the published `@fora-protocol/sdk` by name at an exact release
+version, so all four pins now name a release and the 2026-09-10 addendum's "three
+of the four" no longer describes the tree. See the
+[Addendum (2026-09-11)](#addendum-2026-09-11--the-edge-installs-the-published-package-so-no-pin-names-a-commit).
 
 ---
 
@@ -61,13 +73,13 @@ The rule of thumb: **if there is a long-running process, the application owns it
 
 Today the agent selects and commits on **unverified** offers. Servers verify their inbound traffic (Exchange: RFC 9421 + offer signature, but only *at execute* — too late to inform selection; Edge: signed-URL + PoP), but the **Broker does not verify the offers it relays** from the Exchange, and the **MCP/agent verifies nothing it receives**. A malicious broker or a MITM can therefore steer the agent's selection with doctored terms that only fail much later at execute. The SDK closes this gap structurally:
 
-- **Split logic from resolution.** The verification **logic** is L1 — pure `(message, pubkey) → ok`. The key **resolution** is an injected `KeyResolver` ("give me the verifying key for this Exchange/keyid"). The SDK ships `WBAKeyResolver` for this — per-host Web Bot Auth directory fetch, RFC 7638 thumbprint match, validity windows, revocation, guarded client (corrected 2026-08-07: this originally named `WellKnownKeyResolver` fetching `fora.json`, which is the fixed-URL `kid`-matched JWKS face and resolves nothing against a WBA directory; identity keys left `fora.json` after this was written); the application injects its own for a private registry, a preloaded set, a proxy, or mTLS. The same interface serves the client `Verifier` and the server's verify interceptor. The server-side pieces already exist to reuse (`internal/httpsig` — incl. `keyresolver.go`, `internal/forawellknown`, `src/exchange/internal/signing`; on the TS side the edge now consumes `@fora-protocol/sdk-l1/verify` and `/pop`).
+- **Split logic from resolution.** The verification **logic** is L1 — pure `(message, pubkey) → ok`. The key **resolution** is an injected `KeyResolver` ("give me the verifying key for this Exchange/keyid"). The SDK ships `WBAKeyResolver` for this — per-host Web Bot Auth directory fetch, RFC 7638 thumbprint match, validity windows, revocation, guarded client (corrected 2026-08-07: this originally named `WellKnownKeyResolver` fetching `fora.json`, which is the fixed-URL `kid`-matched JWKS face and resolves nothing against a WBA directory; identity keys left `fora.json` after this was written); the application injects its own for a private registry, a preloaded set, a proxy, or mTLS. The same interface serves the client `Verifier` and the server's verify interceptor. The server-side pieces already exist to reuse (`internal/httpsig` — incl. `keyresolver.go`, `internal/forawellknown`, `src/exchange/internal/signing`; on the TS side the edge now consumes `@fora-protocol/sdk/verify` and `/pop`).
 - **Verify-everything, fail-closed, by default strict.** The SDK verifies each returned object **before** handing it back. "Can't consume an unverified offer" is made structural: `discover`/`resolve` return `{ verified, rejected }` — the application acts on `verified`; `rejected` (offer + reason) is *visible* but the execute path refuses it. Strictness is configurable, but turning verification **off is a loud, named opt-out** (`WithVerification(Off)`), never silent; acting on a rejected offer requires an explicit `.unsafe()`.
 - **One `Verifier` + one `KeyResolver` serves all three roles** — server inbound, edge delivery, client received-offers — and closes the missing one. It *unifies* existing verification surface rather than adding a new one. Scope of "everything": (1) offer signatures (*the gap*), (2) signed-URL (the client can pre-check), (3) content attestations (hash / third-party — a *separate* guarantee: content integrity vs offer authenticity).
 
 ### 5. Scopes / entitlements are a supplied credential
 
-"Scopes" — the subscriptions/entitlements the caller holds — follow the **same injection pattern as the signing key**: the application supplies them, the SDK plumbs them into `FORARequest`/`ResourceQuery` (requester scopes / delegation / `subscription_id`). The proto already carries the denial vocabulary (`ENTITLEMENT_*`, `SUBSCRIPTION_LAPSED`, `SCOPE_INSUFFICIENT`). **Today the Exchange trusts what is supplied** (no JWT/biscuit issuance yet). When issuance lands, **only the L1 verify implementation changes** — the surface above (`discover(uri, scopes=…)`) does not move. The change is additive.
+"Scopes" — the subscriptions/entitlements the caller holds — follow the **same injection pattern as the signing key**: the application supplies them, the SDK plumbs them into `FORARequest`/`ResourceQuery` (requester scopes / delegation / `subscription_id`). A scope shortfall is never answered with a reason: the Exchange answers a resource outside the requester's scopes with no offers and no absence reason, so the requester never learns it exists, and it never sends `SCOPE_INSUFFICIENT`. **Today the Exchange trusts what is supplied** (no JWT/biscuit issuance yet). When issuance lands, **only the L1 verify implementation changes** — the surface above (`discover(uri, scopes=…)`) does not move. The change is additive.
 
 ### 6. The contract repo hosts the SDK; consumers pin a commit
 
@@ -234,3 +246,149 @@ one that travels.
 This refines §1 and §2: the low tier's scope is "every role can do its whole job
 through the SDK without re-deriving protocol mechanics", and the verb list in §1
 is one role's instance of that, not the definition.
+
+---
+
+## Addendum (2026-09-10) — the SDK ships as tagged releases; §6's "pin a commit" is superseded
+
+**Context.** §6 is headed "The contract repo hosts the SDK; consumers pin a
+commit", and it says consumption is off-commit because "no registry publish and
+no semver tag are required". The Alternatives section lists "Publish to npm/PyPI
+now" as rejected and premature. That was the right call while the contract was in
+flux, and §6 anticipated the change in its own last sentence: "When the contract
+stabilizes, the same repo can be semver-tagged and the packages optionally
+published to npm/PyPI for external integrators — no restructure."
+
+That has now happened. The `v1.0.3` release tags the protocol repository and
+publishes from it: `@fora-protocol/sdk` on npm, and two PyPI distributions,
+`fora-protocol-sdk` for the SDK and `fora-protocol` for the generated wire types,
+whose versions always move together. No restructure was needed, as §6 predicted.
+
+**Decision — a consumer installs a release, not a commit.** The platform pins the
+Go module at a release tag and both Python distributions at that same version; the
+tag in force is whatever `go.mod` and the harness pyproject name, which move
+together at every re-pin. The two edge manifests still install from git, at the
+commit that same tag points at,
+because renaming the private `@fora-protocol/sdk-l1` package to the published one
+would mean rewriting import specifiers across the edge worker for no benefit this
+change needs. So three of the four pins name a release and one names the commit a
+release resolves to.
+
+**What this changes in the body above.** §6's heading and its "no registry publish
+and no semver tag are required" now describe the period before the release rather
+than current practice. The Consequences entry "One pin per consumer (the protocol
+commit)" reads the same way — there is still one pin per consumer, and for three
+of the four it is a version rather than a commit. The Alternatives entry rejecting
+publication was scoped to "now" and that "now" has passed; it is a record of the
+sequencing decision, not a standing prohibition.
+
+Two more places in the body, both of which a reader is more likely to act on than
+any of the above. §6's three per-language install lines show a commit SHA in every
+one, and two of the three are no longer how anything installs the SDK. These are
+the current forms:
+
+- Go: `go get github.com/FORA-Protocol/protocol@v<version>`
+- Python: `pip install fora-protocol-sdk==<version>` (and
+  `fora-protocol==<version>` for the generated wire types, whose version always
+  moves with it)
+- TS: unchanged in shape — `"@fora-protocol/sdk-l1":
+  "git+https://github.com/FORA-Protocol/protocol.git#<sha>"`, at the commit the
+  release tag points at. `@fora-protocol/sdk` is published on npm and is what an
+  external integrator installs; the edge manifests stay on git for the reason the
+  Decision paragraph above gives.
+
+And the Consequences entry "types + signing + client + interceptors from one
+pinned commit" — the four things it names still arrive together, from one release
+for three of the four consumers and from the commit that release resolves to for
+the fourth.
+
+**What it does not change.** Everything §6 says about the repository layout, the
+per-language package shape, and a Go consumer pulling only the Go subtree still
+holds. Publishing changed how a consumer names the dependency, not how the
+repository is organised — which was §6's actual claim.
+
+**Enforcement.** `scripts/check-sdk-pin-consistency.sh` holds the four pins on one
+revision across the two spellings, resolving the release version to the commit its
+tag points at before comparing. It rejects a `replace` on the module, a
+`[tool.uv.sources]` override, and any remaining git reference in the Python lock,
+because each of those re-establishes off-commit consumption while every version
+string still agrees. `tests/e2e/harness/test_guards_sdk_pin.py` is that guard's own
+test suite.
+
+---
+
+## Addendum (2026-09-11) — the edge installs the published package, so no pin names a commit
+
+**Context.** The 2026-09-10 addendum recorded three of the four pins moving onto
+the `v1.0.3` release and the two TypeScript manifests staying on git, "at the
+commit that same tag points at", because renaming the package they imported would
+mean rewriting import specifiers across the edge worker.
+
+Two packages were involved and the distinction is what made that reasoning look
+smaller than it was. `@fora-protocol/sdk-l1` is the protocol repository's ROOT
+manifest. It exists only so that plain npm, which cannot pin a subdirectory of a
+git repository the way `go get` and pip can, could install the TypeScript SDK as a
+whole-repo git dependency. It is marked private and is not published.
+`@fora-protocol/sdk` is the package the release workflow builds from `sdk/ts` and
+publishes: the same subpaths, compiled, with declaration files.
+
+**Decision — every TypeScript consumer installs the published release by name.**
+`src/edge` and `tests/e2e/fastly-edge` pin `"@fora-protocol/sdk": "<version>"`, an
+exact version with no range operator. All four pins name the same release.
+
+What this bought, beyond one spelling:
+
+- **The bytes are verified.** npm computes no integrity for a git dependency and
+  checks none at install; for a registry dependency it records a sha512 SRI and
+  verifies it against the downloaded tarball on every install. Flipping one
+  character of that hash fails `npm ci` with `EINTEGRITY`. The Python half of this
+  property was closed at the same time, by copying `uv.lock` into the e2e runner
+  image and installing with `uv sync --locked`.
+- **The registry is named and checked.** A lock resolving the SDK from some other
+  registry is now a failure, which is the npm counterpart of the check the guard
+  already made on `uv.lock`'s PyPI index: a registry that happens to serve a
+  package of that name and version serves different bytes.
+- **The guard got smaller.** Resolving the Go release tag to the commit it points
+  at existed only so a version could be compared with a revision. With four
+  versions it is one string compared four ways. The "go.mod's pin is a released
+  tag, not a pseudo-version" property was kept as a check of its own rather than
+  left to fall out of a comparison, because as a mismatch it would have named the
+  wrong fix.
+- **`npm ci` stops cloning the whole repository** — the protocol tree, all three
+  SDKs and the website — to obtain the TypeScript one.
+
+**What it does not change.** The import subpaths are identical; only the package
+name in the specifier moved. The published package serves compiled JavaScript with
+declaration files where the git dependency served TypeScript source, which the
+edge worker's bundler and its strict typecheck both accept unchanged.
+
+**Still open.** The consolidation the design notes describe — one `@fora/sdk` with
+`./client` and `./agent` entry points, and separate framework-adapter packages —
+is unaffected by this and has not happened.
+
+## Addendum (2026-10-05) — between releases, the edge pins the same commit as Go and the harness
+
+The 2026-09-11 addendum left the edge on the last npm release while go.mod and the
+harness moved to a commit of the protocol's integration branch (the pre-release
+form of the pin guard). That was coherent only while the edge used none of the
+surface added since the release. The Web Bot Auth profile ended that: the
+retrieval proof of possession the edge verifies, the key-directory checks its
+Exchange-directory fetch applies and the refusal it answers with all come from
+the new TypeScript SDK, and a verifier on the old release refuses the proofs and
+directories every other party now produces.
+
+So in the pre-release form all three SDKs name one commit. Both edge manifests pin
+`@fora-protocol/sdk` as `github:FORA-Protocol/protocol#<40-hex commit>`; npm
+installs the repository root, whose package presents `sdk/ts` under the same
+import subpaths, into `node_modules/@fora-protocol/sdk`, so no import specifier
+changes. `scripts/check-sdk-pin-consistency.sh` checks that the commit is the one
+go.mod's pseudo-version and the harness's `[tool.uv.sources]` name, that each lock
+resolves exactly that commit, and that the two locks agree with each other and with
+the installed copy. The release form is unchanged.
+
+What the pre-release form gives up, for as long as it lasts, is the property the
+2026-09-11 addendum bought: npm does not verify an integrity for a git dependency,
+so nothing on the machine witnesses the bytes of the commit beyond git's own
+content addressing of the commit it fetched. The images that run `npm ci` carry
+git again for the same reason. At the next protocol release the manifests go back
+to the exact npm version and the guard back to the release form.

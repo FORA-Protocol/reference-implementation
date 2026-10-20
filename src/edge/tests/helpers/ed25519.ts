@@ -1,7 +1,12 @@
-import { decodeBase64Url, encodeBase64Url } from '@fora-protocol/sdk-l1/base64url';
-import { signatureBase } from '@fora-protocol/sdk-l1/pop';
-import { thumbprint } from '@fora-protocol/sdk-l1/thumbprint';
-import { canonicalMessage } from '@fora-protocol/sdk-l1/verify';
+import { decodeBase64Url, encodeBase64Url } from '@fora-protocol/sdk/base64url';
+import {
+  buildSignatureBase,
+  requestComponentValue,
+  signatureInputInner,
+} from '@fora-protocol/sdk/core/sign-request';
+import { newNonce } from '@fora-protocol/sdk/core/signing-transport';
+import { thumbprint } from '@fora-protocol/sdk/thumbprint';
+import { canonicalMessage } from '@fora-protocol/sdk/verify';
 
 export interface TestKeypair {
   publicKey: CryptoKey;
@@ -28,7 +33,7 @@ interface SubtleLike {
 
 // rawPublicKey extracts the raw 32-byte Ed25519 public key from a test keypair's
 // JWK (the `x` member is its base64url encoding).
-export function rawPublicKey(kp: TestKeypair): Uint8Array {
+export function rawPublicKey(kp: TestKeypair): Uint8Array<ArrayBuffer> {
   const x = decodeBase64Url(kp.publicJwk.x ?? '');
   if (!x) throw new Error('keypair JWK missing x');
   return x;
@@ -45,8 +50,18 @@ export function pastExp(secondsAgo = 60): number {
   return Math.floor(Date.now() / 1000) - secondsAgo;
 }
 
+// The https origin of the agent key directory every test proof names in its
+// Signature-Agent member. The edge verifies offline with the presented key and
+// never fetches this directory, so any https origin serves.
+export const AGENT_DIRECTORY = 'https://agent.example';
+
+// The Web Bot Auth limit on a signature's lifetime, in seconds.
+const MAX_PROOF_LIFETIME_SEC = 300;
+
 export interface GetSignOptions {
-  keyid: string;
+  // The keyid the proof names. Defaults to the signer's own thumbprint; a suite
+  // that drives keyid_mismatch passes another value.
+  keyid?: string;
   created: number;
   expires: number;
   // HTTP method the proof covers (RFC 9421 @method). Defaults to GET — the
@@ -54,22 +69,44 @@ export interface GetSignOptions {
   method?: string;
 }
 
-// signGetHeaders produces the RFC 9421 proof-of-possession headers for a fetch
-// of fullUrl (GET unless opts.method says otherwise), signed by kp over the
-// covered set ADR-013 D2 fixes (@method,
-// @target-uri). The signature base comes from the SDK's signatureBase — the SAME
-// builder the verifier parses against — so the test signer cannot drift from the
-// verifier's byte contract. The Signature byte string is STANDARD base64 inside
-// `:...:` (matching the Python agent signer in src/mcp httpsig.py).
+// signGetHeaders produces the delivery proof of possession for a fetch of fullUrl
+// (GET unless opts.method says otherwise), signed by kp under the Web Bot Auth
+// profile: covered ("@method" "@target-uri" "signature-agent";key="sig1"), a
+// 64-byte nonce and tag="web-bot-auth". The signature base and the
+// Signature-Input value come from the SDK's own builders — the SAME ones the
+// verifier rebuilds with — so the test signer cannot drift from the verifier's
+// byte contract. The SDK's signInbound signs only a GET and always names the
+// signer's own thumbprint, so this helper composes the builders directly: it
+// also signs other methods and a mismatched keyid.
 export async function signGetHeaders(
   fullUrl: string,
   kp: TestKeypair,
   opts: GetSignOptions,
 ): Promise<Record<string, string>> {
-  const rawParams =
-    `("@method" "@target-uri");keyid="${opts.keyid}";` +
-    `alg="ed25519";created=${opts.created};expires=${opts.expires}`;
-  const base = signatureBase(opts.method ?? 'GET', fullUrl, rawParams);
+  const member = `sig1="${AGENT_DIRECTORY}"`;
+  const covered = [
+    { name: '@method', params: [] },
+    { name: '@target-uri', params: [] },
+    { name: 'signature-agent', params: [{ key: 'key', value: 'sig1' }] },
+  ];
+  const inner = signatureInputInner({
+    covered,
+    keyid: opts.keyid ?? (await keyThumbprint(kp)),
+    alg: 'ed25519',
+    created: opts.created,
+    expires: opts.expires,
+    nonce: newNonce(),
+    tag: 'web-bot-auth',
+  });
+  const base = buildSignatureBase(
+    covered,
+    requestComponentValue({
+      method: opts.method ?? 'GET',
+      url: fullUrl,
+      header: (name) => (name === 'signature-agent' ? member : undefined),
+    }),
+    inner,
+  );
   const sig = new Uint8Array(
     await subtle().sign('Ed25519', kp.privateKey, new TextEncoder().encode(base)),
   );
@@ -77,22 +114,29 @@ export async function signGetHeaders(
   for (let i = 0; i < sig.length; i += 1) bin += String.fromCharCode(sig[i] as number);
   return {
     'X-FORA-Agent-Key': encodeBase64Url(rawPublicKey(kp)),
-    'Signature-Input': `sig1=${rawParams}`,
+    'Signature-Agent': member,
+    'Signature-Input': `sig1=${inner}`,
     Signature: `sig1=:${btoa(bin)}:`,
   };
 }
 
 // popHeaders wraps signGetHeaders with the proof window every suite uses:
-// created slightly in the past (tolerates clock skew), expiring shortly. The
-// skew convention lives here once, so a change to it is a single edit.
+// created slightly in the past (tolerates clock skew), lasting the profile's
+// five-minute maximum. The skew convention lives here once, so a change to it is
+// a single edit.
 export function popHeaders(
   fullUrl: string,
   kp: TestKeypair,
-  keyid: string,
+  keyid?: string,
   method = 'GET',
 ): Promise<Record<string, string>> {
   const now = Math.floor(Date.now() / 1000);
-  return signGetHeaders(fullUrl, kp, { keyid, created: now - 5, expires: now + 300, method });
+  return signGetHeaders(fullUrl, kp, {
+    ...(keyid !== undefined ? { keyid } : {}),
+    created: now - 5,
+    expires: now - 5 + MAX_PROOF_LIFETIME_SEC,
+    method,
+  });
 }
 
 // boundUrl signs a delivery URL bound to an agent: agent_id is the agent
@@ -109,12 +153,14 @@ export async function boundUrl(
   return { url, agentId };
 }
 
-// tamperSignature replaces the sig param with 64 zero bytes: valid length and
-// encoding, wrong bytes. The verifier resolves the key and fails on the
-// signature check itself — the signature_mismatch path, never a parse error.
-export function tamperSignature(url: string): string {
+// tamperSignature replaces the sig param with `bytes` zero bytes. The default,
+// 64, is a valid length and encoding with the wrong bytes: the verifier resolves
+// the key and fails on the signature check itself — the signature_mismatch path,
+// never a parse error. Any other length is a signature no Ed25519 key can make,
+// which must take that same path.
+export function tamperSignature(url: string, bytes = 64): string {
   const tampered = new URL(url);
-  tampered.searchParams.set('sig', encodeBase64Url(new Uint8Array(64)));
+  tampered.searchParams.set('sig', encodeBase64Url(new Uint8Array(bytes)));
   return tampered.toString();
 }
 

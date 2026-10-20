@@ -13,11 +13,13 @@ private tree and an irreversible public push, and it carries nine gates. The
 tool itself is deliberately not part of the published set, which is why the
 suites that drive it skip when they cannot find it.
 
-Two suites use what is here. ``test_guards_publish_gates.py`` asserts what the
+Three suites use what is here. ``test_guards_publish_gates.py`` asserts what the
 gates refuse and what the allowlist carries into the snapshot;
-``test_guards_publish_worktree.py`` asserts who is allowed to own the staging
-worktree and branch the tool destroys on every run. They were one module until
-their combined length passed the cap this repository puts on a test file.
+``test_guards_publish_held_back.py`` asserts that what DENY_PATHS names stays
+out of it; ``test_guards_publish_worktree.py`` asserts who is allowed to own the
+staging worktree and branch the tool destroys on every run. The first and the
+last were one module until their combined length passed the cap this repository
+puts on a test file.
 
 Every case drives the real script against a scratch repository. The fixture repo
 is a miniature of the published set: enough for the allowlists to resolve, small
@@ -46,8 +48,10 @@ from .guard_harness import (
     GITLEAKS_ABSENT,
     SECRET_SCAN_CONFIG,
     commit_all,
+    fixture_env,
     git,
     guard_marks,
+    hold_back,
     init_scratch_repo,
     run_git,
 )
@@ -60,8 +64,9 @@ _PUBLISH = REPO_ROOT / "publish-public.sh"
 
 # The publish tool is local-only and deliberately absent from the published tree,
 # so it is not in the runner image either. gitleaks is a hard requirement of the
-# secret gate and not installed everywhere. Skipping keeps both suites honest
-# where they cannot run; the host per-commit tier is where they do.
+# secret gate and not installed everywhere. Skipping keeps every suite that
+# drives the tool honest where it cannot run; the host per-commit tier is where
+# they do.
 PUBLISH_GUARD_MARKS = [
     *guard_marks(
         skip_when=not _PUBLISH.is_file(),
@@ -88,7 +93,7 @@ def make_source_repo(root: Path) -> None:
     publish asserts each one reached the staged tree, so an absent one fails even
     if the checkout somehow succeeded without it.
     """
-    init_scratch_repo(root, branch="source", committer="publish guard")
+    init_scratch_repo(root, branch="source")
 
     for directory in _shared_array("ALLOW_DIRS"):
         (root / directory).mkdir(parents=True, exist_ok=True)
@@ -122,10 +127,20 @@ def make_source_repo(root: Path) -> None:
         dest = root / script
         dest.parent.mkdir(parents=True, exist_ok=True)
         src = REPO_ROOT / script
-        # The reference gate and the definition it reads are copied verbatim,
-        # because gate 9 runs them against the staged tree. The rest only need to
-        # exist for the allowlist checkout to succeed.
+        # Every allowlisted script that exists here is copied verbatim. Gate 9 runs
+        # the reference gate and the definition it reads against the staged tree,
+        # so those two have to be the real ones; the rest only have to exist for
+        # the allowlist checkout to succeed.
         dest.write_bytes(src.read_bytes() if src.is_file() else b"")
+
+    # Every held-back path the real definition names, because the publish refuses
+    # an entry the source ref does not carry. A directory gets one file inside it:
+    # git tracks no empty directory, and the hold-back needs something to remove.
+    for entry in _shared_array("DENY_PATHS"):
+        target = root / entry / "held-back.txt" if entry.endswith("/") else root / entry
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            target.write_text("held back from the publish\n")
 
     # The gate derives bare-name patterns from unpublished docs, and the publish
     # inherits this one onto the public branch rather than building it here.
@@ -162,6 +177,44 @@ def edit_fixture_definition(source: Path, pattern: str, replacement: str, messag
     commit_all(source, message)
 
 
+def hold_back_in_fixture(source: Path, *entries: str) -> None:
+    """Add ``entries`` to the fixture's DENY_PATHS and commit the definition.
+
+    The same seam as ``edit_fixture_definition``: the tool sources the fixture's
+    own copy of the definition, so the entries are read exactly as real ones are.
+    """
+    hold_back(source / "scripts" / "published-paths.sh", *entries)
+    commit_all(source, "hold back " + " ".join(entries))
+
+
+# The one line of the tool that removes the held-back paths from the staged tree.
+_HOLD_BACK_LINE = re.compile(r'^[^\n]*git -C "\$WT" rm [^\n]*DENY_PATHS[^\n]*\n', re.MULTILINE)
+
+
+def publish_without_hold_back(directory: Path) -> Path:
+    """Write a copy of the tool with its hold-back line removed, and return its path.
+
+    The forbidden-path scan and the hold-back step read one array, so no edit of
+    the definition can put a held-back path in front of the scan while the
+    hold-back works. A copy without that line can, which is the only way to show
+    the scan refuses such a path on its own.
+
+    Raises unless exactly one line matched. A pattern that matched nothing would
+    leave the copy identical to the tool, and the case would then pass against the
+    very step it means to remove.
+    """
+    stripped, removed = _HOLD_BACK_LINE.subn("", _PUBLISH.read_text())
+    if removed != 1:
+        raise AssertionError(
+            f"expected exactly one hold-back line in {_PUBLISH.name}, found {removed}. "
+            "The scan-alone case needs the line that removes DENY_PATHS from the staged "
+            "tree to be a single line; check how the tool writes it."
+        )
+    copy = directory / "publish-without-hold-back.sh"
+    copy.write_text(stripped)
+    return copy
+
+
 def make_public_remote(bare: Path, source: Path) -> None:
     """A bare repo standing in for the public remote, seeded with the scaffolding.
 
@@ -170,7 +223,7 @@ def make_public_remote(bare: Path, source: Path) -> None:
     public repository does.
     """
     seed = source.parent / "public-seed"
-    init_scratch_repo(seed, branch="v1", committer="publish guard")
+    init_scratch_repo(seed, branch="v1")
     for inherited in _shared_array("INHERIT_FROM_MAIN"):
         target = seed / inherited
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -187,18 +240,25 @@ def make_public_remote(bare: Path, source: Path) -> None:
 
 
 def run_publish(
-    source: Path, bare: Path, worktree: Path | str, *, cwd: Path | None = None
+    source: Path,
+    bare: Path,
+    worktree: Path | str,
+    *,
+    cwd: Path | None = None,
+    script: Path = _PUBLISH,
 ) -> subprocess.CompletedProcess[str]:
     """Dry run — no --push, so nothing is ever committed to the fixture remote.
 
     ``cwd`` defaults to the source repository, which is how the tool is normally
     invoked. One case runs it from a linked worktree instead, because the tool
-    derives its repository root from the invocation directory.
+    derives its repository root from the invocation directory. ``script`` is the
+    tool itself unless a case runs a modified copy of it, which only
+    ``publish_without_hold_back`` produces.
     """
     return subprocess.run(
         [
             "bash",
-            str(_PUBLISH),
+            str(script),
             "--source",
             "source",
             "--branch",
@@ -214,6 +274,7 @@ def run_publish(
         text=True,
         check=False,
         timeout=600,
+        env=fixture_env(),
     )
 
 

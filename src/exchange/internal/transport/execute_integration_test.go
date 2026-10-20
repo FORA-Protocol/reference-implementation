@@ -9,8 +9,11 @@ import (
 
 	connect "connectrpc.com/connect"
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 )
 
 // TestExecuteTransaction_SignatureInvalid asserts that a tampered offer
@@ -23,25 +26,9 @@ func TestExecuteTransaction_SignatureInvalid(t *testing.T) {
 
 	seedCatalog(t, h)
 	offers := discoverFirst(t, h)
-	bogus := offers[0].GetSignature() + "00"
-	offerID := offers[0].GetOfferId()
-
-	// The offer names this Exchange and carries a canonical URL, as a real one
-	// would. Both are checked before the signature guard under test — the
-	// recipient check is a whole-request admission gate and the canonical URL is
-	// an envelope presence check — so an offer missing either would be refused
-	// earlier and this case would never reach the behaviour it names. The URL is
-	// the seeded resource's own, so the denial can only come from the signature.
-	canonicalURL := offers[0].GetIdentity().GetCanonicalUrl()
-	bogusOffer := &forav1.Offer{
-		OfferId:   offerID,
-		Exchange:  harnessExchangeDomain,
-		Signature: bogus,
-		Identity: &forav1.ResourceIdentity{
-			CanonicalUrl:       &canonicalURL,
-			ResourceMutability: forav1.ResourceMutability_RESOURCE_MUTABILITY_STATIC,
-		},
-	}
+	// Preserve the valid discovered offer so only its signature is invalid.
+	bogusOffer := proto.Clone(offers[0]).(*forav1.Offer)
+	bogusOffer.Signature += "00"
 	resp, err := executeSingleItem(t, h, "tx-bad", bogusOffer)
 	// The offer-signature guard fires in resolveOfferForTx (KindSignatureInvalid),
 	// before the body acceptance is verified; the kind is in the denial map.
@@ -157,7 +144,7 @@ func TestExecuteTransaction_BindsAgentIdentity(t *testing.T) {
 func seedCatalog(t *testing.T, h *testHarness) {
 	t.Helper()
 	_, err := h.catalogClient.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, "agent-test", []*forav1.ResourceEntry{{
-		Domain: h.tenantDomain,
+		Domain: h.siteDomain,
 		Path:   "/articles/hello",
 		// Pricing is derived from the selected term: an entry needs
 		// at least one eligible priced term to yield an offer. This unrestricted
@@ -172,27 +159,16 @@ func seedCatalog(t *testing.T, h *testHarness) {
 // seedPricedTerm is the minimal unrestricted, priced LicenseTerm the
 // catalog-seeding helpers attach so an offer is produced under term-derived
 // pricing. It carries no restrictions, so it projects for every
-// requester, and a concrete PER_UNIT price the billing path can charge.
-func seedPricedTerm() *forav1.LicenseTerm { return seedPricedTermEst(0) }
+// requester, and a concrete PER_UNIT price the billing path can charge. Its
+// estimate is one access: a metered offer must carry a positive estimate at the
+// pinned protocol, and one unit is what the biller charges an unset estimate.
+func seedPricedTerm() *forav1.LicenseTerm { return seedPricedTermEst(1) }
 
 // seedPricedTermEst is seedPricedTerm with an estimated_quantity on the term's
 // Pricing (the source the reporting-tolerance check reads now that pricing is
 // term-derived). est <= 0 omits the field.
 func seedPricedTermEst(est int32) *forav1.LicenseTerm {
-	unit := "accesses"
-	p := &forav1.Pricing{
-		Model:    forav1.PricingModel_PRICING_MODEL_PER_UNIT,
-		Rate:     "0.05",
-		Currency: "USD",
-		Unit:     &unit,
-	}
-	if est > 0 {
-		p.EstimatedQuantity = &est
-	}
-	return &forav1.LicenseTerm{
-		Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
-		Pricing:   p,
-	}
+	return exchangetest.PerUnitTerm("0.05", est)
 }
 
 // seedFreeTerm is the unrestricted FREE LicenseTerm the free-resource-path suite
@@ -202,13 +178,7 @@ func seedPricedTermEst(est int32) *forav1.LicenseTerm {
 // bypass (ADR-009 D2). FREE requires no unit (only PER_UNIT does). It carries no
 // restrictions, so it projects for every requester.
 func seedFreeTerm() *forav1.LicenseTerm {
-	return &forav1.LicenseTerm{
-		Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
-		Pricing: &forav1.Pricing{
-			Model:    forav1.PricingModel_PRICING_MODEL_FREE,
-			Currency: "USD",
-		},
-	}
+	return exchangetest.FreeTerm()
 }
 
 // seedZeroRatePerUnitTerm is a PER_UNIT term priced at rate 0.00 — a non-FREE
@@ -217,15 +187,4 @@ func seedFreeTerm() *forav1.LicenseTerm {
 // bypass keys off unit_cost, not the pricing model. PER_UNIT requires a unit
 // (proto pricing.per_unit.requires_unit); rate "0.00" is valid (no positive-rate
 // rule) and parses to zero. Unrestricted, so it projects for every requester.
-func seedZeroRatePerUnitTerm() *forav1.LicenseTerm {
-	unit := "accesses"
-	return &forav1.LicenseTerm{
-		Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
-		Pricing: &forav1.Pricing{
-			Model:    forav1.PricingModel_PRICING_MODEL_PER_UNIT,
-			Rate:     "0.00",
-			Currency: "USD",
-			Unit:     &unit,
-		},
-	}
-}
+func seedZeroRatePerUnitTerm() *forav1.LicenseTerm { return exchangetest.PerUnitTerm("0.00", 1) }

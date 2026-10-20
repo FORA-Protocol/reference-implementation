@@ -28,23 +28,12 @@ var emitUnpopulatedLiteral = regexp.MustCompile(`(?s)MarshalOptions\{[^}]*EmitUn
 // canonical transport may do this.
 var signHelperCall = regexp.MustCompile(`helpers\.(SignRequest|AppendSignature)\(`)
 
-// signHelperAllowlist names the non-test files sanctioned to call the sign
-// helpers. The app otherwise collapsed onto sdk/go/core.NewSigningTransport;
-// each entry below is a justified exception, not a general licence.
-var signHelperAllowlist = map[string]bool{
-	// The identity service signs one outbound leg per AGENT, with the key
-	// custody resolves for that request. core.NewSigningTransport binds ONE
-	// helpers.Signer for the life of the transport and Signer.KeyID() takes
-	// neither a request nor a context, so a per-request keyid cannot be expressed
-	// through it — and one transport per agent is not an option for a service that
-	// fronts every agent. This file therefore calls the sign helpers directly.
-	//
-	// It does NOT re-derive a signature base: the FORA covered set, the canonical
-	// bytes and the chain linkage are all the SDK's. The one thing that stays local
-	// is the Web Bot Auth profile, which signs @authority instead of @target-uri —
-	// SignOptions exposes no covered-set control, so the SDK cannot express it.
-	"internal/forahttpsig/transport.go": true,
-}
+// signHelperAllowlist is EMPTY: no app file is sanctioned to call the sign
+// helpers directly. Every outbound signer, the per-request key source included,
+// builds on sdk/go/core.NewSigningTransport (core.WithSignerSource covers a key
+// chosen per request). The mechanism stays so a future, justified exception is a
+// one-line entry.
+var signHelperAllowlist = map[string]bool{}
 
 // ed25519SignCall matches production code calling the stdlib Ed25519 signer
 // directly — the load-bearing token of every hand-rolled signature production
@@ -54,13 +43,10 @@ var signHelperAllowlist = map[string]bool{
 // without this call anyway.
 var ed25519SignCall = regexp.MustCompile(`ed25519\.Sign\(`)
 
-// ed25519SignAllowlist names the non-test files sanctioned to call
-// ed25519.Sign directly. cosign.go is the broker's detached forwarding-chain
-// signature — a distinct wire contract (X-FORA-Broker-Signature) with no SDK
-// equivalent face.
-var ed25519SignAllowlist = map[string]bool{
-	"src/broker/internal/signing/cosign.go": true,
-}
+// ed25519SignAllowlist is EMPTY: no app file is sanctioned to call ed25519.Sign
+// directly. Every signature the services produce goes through an SDK face. The
+// mechanism stays so a future, justified exception is a one-line entry.
+var ed25519SignAllowlist = map[string]bool{}
 
 // jcsTransformCall matches production code invoking RFC 8785 canonicalization
 // directly — the body of a hand-rolled canonical-signing payload. The JCS
@@ -139,7 +125,7 @@ func appGoFiles(t *testing.T, root string, includeTests bool) []string {
 // assertNoMatchOutsideAllowlist fails for every app source file outside
 // allowlist whose bytes match re, reporting msg with the offending path.
 //
-// Five guards in this package scan the same way — walk appSourceFiles, skip the
+// Six guards in this package scan the same way — walk appSourceFiles, skip the
 // allowlist, read, match, report — and three values are all that differ between
 // them. Written out per guard, the copies drift in ways that mean nothing: one
 // of them converted an already-slash-form path again before indexing its
@@ -262,13 +248,12 @@ func TestMeta_Ed25519SignDetectorFlagsRawCall(t *testing.T) {
 	}
 }
 
-// TestMeta_Ed25519SignDetectorPassesAllowlistedFile ensures that the
-// allowlisted path (cosign.go) is exempted from the guard. Meta-test
-// confirms the allowlist map contains exactly that path.
-func TestMeta_Ed25519SignDetectorPassesAllowlistedFile(t *testing.T) {
+// TestMeta_Ed25519SignAllowlistIsEmpty pins the allowlist at zero entries: the
+// last direct caller was removed, and an allowlist may only shrink.
+func TestMeta_Ed25519SignAllowlistIsEmpty(t *testing.T) {
 	t.Parallel()
-	if !ed25519SignAllowlist["src/broker/internal/signing/cosign.go"] {
-		t.Fatal("ed25519SignAllowlist must contain src/broker/internal/signing/cosign.go")
+	if len(ed25519SignAllowlist) != 0 {
+		t.Fatalf("ed25519SignAllowlist must stay empty, got %v", ed25519SignAllowlist)
 	}
 }
 

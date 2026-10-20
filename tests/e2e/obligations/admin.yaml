@@ -1,0 +1,355 @@
+# The Exchange's operator plane and the isolation between tenants.
+#
+# ADMIN: fora.admin.v1.AdminService on each Exchange's internal admin listener,
+# reached through the SDK's AdminClient (harness/admin_plane.py). What the pinned
+# protocol states about the plane: it is not on the public listener, a source
+# allowlist is its only gate, each setter is a full replace echoing what it
+# persisted, and each field rule of its payloads. The fee-rate bounds are
+# SETTLE-005's; the deprecated quantity_tolerance is MONEY-029's; the reporting
+# window's forward-only effect is MONEY-031's.
+#
+# TENANT: what one tenant can read or change of another through the protocol's
+# RPCs, on three axes.
+#
+# * Two seats on two Exchanges (TENANT-001 to TENANT-003): a call made at one
+#   seat's Exchange, naming the other seat's data. The push naming another
+#   seat's tenant is CATALOG-005; an idempotency key reused at another tenant is
+#   MONEY-009.
+# * Two seats on ONE Exchange (TENANT-004, TENANT-005). exchange-a holds a second
+#   seat it does not sell as. The reference Exchange sells as exactly one seat
+#   per deployment (ADR-026 D1), so no catalog entry, offer, purchase or report
+#   can exist under the second seat. What one instance can prove is that a
+#   catalog call naming it is refused, and that an operator setting naming it
+#   reaches it alone.
+# * Two publishers on ONE seat (TENANT-006 to TENANT-009). The pinned protocol
+#   calls each provider a tenant, resolved from the domain of the URI a call
+#   names. Here a provider is a publisher listed on a seat, and everything
+#   tenant-specific about it lives on a (seat, publisher) relationship, so the
+#   protocol's isolation between providers on one node is isolation between two
+#   publishers on one seat. Each run registers its two publishers fresh, through
+#   the console.
+#
+# Sources: admin.proto, fora.proto and the multi-tenant page of the pinned
+# protocol module. One entry the protocol leaves open is a DECISION quoting the
+# reference's code, for the protocol author to confirm.
+# Registry entries (ADR-028 D1); the tests that prove them say so on themselves.
+#
+# A "negative:" case is a refusal with a typed error response (ADR-028 D1). What
+# an answer that refuses nothing must leave out is a "must not" in "positive:".
+
+- id: ADMIN-001
+  title: AdminService is not served on the Exchange's public agent-facing listener
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/admin/v1/admin.proto
+    quote: >-
+      Trust model: deployments MUST NOT expose AdminService on the public agent-facing
+      listener.
+  positive: >-
+    SetReportingPolicy sent to the Exchange's admin listener is answered with the
+    policy it persisted.
+  negative:
+    - code: non-OK; the protocol names no code for a service a listener does not serve
+      reason: none
+      side_effect: >-
+        the same SetReportingPolicy sent to the public listener changes nothing: a
+        purchase made after it carries the seat's default reporting window, not the
+        window the call named
+
+- id: ADMIN-002
+  title: The admin listener admits only the addresses its allowlist names
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/admin/v1/admin.proto
+    quote: >-
+      Reachability is restricted at the network layer (an internal listener plus a
+      source allowlist); there is no per-operator identity inside the service in v1.
+  positive: >-
+    Every Exchange's allowlist covers the runner's address, and a request from the
+    runner gets past it.
+  negative:
+    - code: "403"
+      reason: the address allowlist
+      side_effect: >-
+        a request from another container on the stack's network is refused before the
+        route answers, and no allowlist covers any container but the runner
+
+- id: ADMIN-003
+  title: Each admin setter answers with the payload as persisted
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/admin/v1/admin.proto
+    quote: >-
+      Responses echo the payload as persisted, giving operator tooling a read-back
+      confirmation of the applied values.
+  positive: >-
+    SetTenantFeeRate with a rate and a note answers that rate and note, and the next one
+    without a note answers no note. SetReportingPolicy with required fields and a
+    window answers those fields and that window.
+  negative: []
+
+- id: ADMIN-004
+  title: SetReportingPolicy replaces the whole policy, so an omitted field falls back to the Exchange's default
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/admin/v1/admin.proto
+    quote: >-
+      Full replace: omitted optional fields clear their value so the receiving
+      Exchange's defaults apply.
+  positive: >-
+    A purchase after a policy naming a window and a required field carries that window
+    and that field in its reporting obligation. A purchase after the next policy, which
+    names neither, carries the window and the required fields a purchase carried
+    before either call.
+  negative: []
+
+- id: ADMIN-005
+  title: A reporting policy naming one required field twice is refused, and the policy in force stays
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/admin/v1/admin.proto
+    quote: >-
+      Names are a set: repeats are rejected.
+  positive: The same policy naming the field once is persisted.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        none: a request that fails a field rule is a generic validation failure and
+        carries no typed reason
+      side_effect: >-
+        a purchase made after the refusal carries the window of the policy in force
+        before it, not the window the refused call named
+
+- id: ADMIN-006
+  title: A reporting window must be positive and at most one year
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/admin/v1/admin.proto
+    quote: >-
+      Capped at one year.
+  positive: >-
+    A window of exactly one year (31536000 seconds) is persisted, and a purchase after
+    it carries that window.
+  negative:
+    - code: invalid_argument
+      reason: >-
+        none: a request that fails a field rule is a generic validation failure and
+        carries no typed reason
+      side_effect: >-
+        a purchase made after the refusal carries the window of the policy in force
+        before it, for a window of zero and for a window one second over a year
+
+- id: ADMIN-007
+  title: An admin setter naming a tenant the Exchange does not hold is refused not_found and persists nothing
+  level: DECISION
+  actor: exchange
+  surface: sdk
+  source:
+    cite: src/exchange/internal/service/admin.go
+    quote: >-
+      write returns rows-affected; a 0 becomes KindNotFound and rolls back, so no audit
+      row is written for a missing tenant.
+  positive: The same setter naming the Exchange's own seat is persisted.
+  negative:
+    - code: not_found
+      reason: none
+      side_effect: >-
+        no seat's policy changes: the seat the call named, at its own Exchange, keeps
+        its window
+
+- id: TENANT-001
+  title: No tenant can read or change another tenant's catalog, transaction records or settings
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/exchange/multi-tenant.mdx
+    quote: >-
+      No tenant can access another tenant's catalog, keys, or transaction records.
+  positive: >-
+    A resource pushed to one seat is offered by that seat's Exchange, and the other
+    seat's Exchange offers nothing for it. A usage report for a transaction filed at
+    the seat that sold it is accepted. A reporting policy set at a seat's own admin
+    listener reaches that seat's purchases.
+  negative:
+    - code: not_found
+      reason: USAGE_REPORT_REJECTION_REASON_TRANSACTION_NOT_FOUND
+      side_effect: >-
+        a report filed at one seat for a transaction the other seat sold is refused, and
+        the selling seat then accepts the report as the transaction's first
+    - code: non-OK
+      reason: none
+      side_effect: >-
+        a reporting policy naming the other seat's tenant, sent to the first seat's
+        admin listener, leaves the other seat's purchases on their own window
+
+- id: TENANT-002
+  title: Offers are signed with a key of their own tenant, which no other tenant's key verifies
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/exchange/multi-tenant.mdx
+    quote: >-
+      Offer signatures are per-tenant (different Ed25519 key pairs).
+  positive: >-
+    An offer one seat issues verifies under the key that seat's Exchange publishes in
+    its directory, and the same offer checked against the other seat's published key
+    is rejected and never reaches the agent as a verified offer.
+  negative: []
+
+- id: TENANT-003
+  title: RemoveResources and RefreshCatalog naming a tenant the caller may not act for are refused
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/exchange/multi-tenant.mdx
+    quote: >-
+      The same authentication mechanism applies to RemoveResources and RefreshCatalog
+      calls.
+  positive: >-
+    The contributor's RemoveResources naming the seat of the Exchange it is sent to
+    removes the entry it pushed there.
+  negative:
+    - code: permission_denied
+      reason: catalog_rejection TENANT_MISMATCH, tenant_id naming another Exchange's seat
+      side_effect: the entry stays and is still offered
+    - code: permission_denied
+      reason: catalog_rejection TENANT_MISMATCH, tenant_id naming another Exchange's seat
+      side_effect: >-
+        RefreshCatalog naming another Exchange's seat starts no refresh: the answer is
+        the refusal, never a RefreshCatalogResponse
+
+- id: TENANT-004
+  title: On one Exchange, a catalog call naming another seat that Exchange holds is refused and changes nothing
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/exchange/multi-tenant.mdx
+    quote: >-
+      Unauthorized tenant access is rejected with `CodePermissionDenied`.
+  positive: >-
+    The same push naming the seat exchange-a sells as is stored and offered.
+  negative:
+    - code: permission_denied
+      reason: catalog_rejection TENANT_MISMATCH, tenant_id naming the second seat exchange-a holds
+      side_effect: the entry is not stored, and exchange-a offers nothing for it
+    - code: permission_denied
+      reason: catalog_rejection TENANT_MISMATCH, tenant_id naming the second seat exchange-a holds
+      side_effect: a RemoveResources naming the second seat leaves the entry stored and offered
+    - code: permission_denied
+      reason: catalog_rejection TENANT_MISMATCH, tenant_id naming the second seat exchange-a holds
+      side_effect: >-
+        a RefreshCatalog naming the second seat starts no refresh: the answer is the
+        refusal, never a RefreshCatalogResponse
+
+- id: TENANT-005
+  title: On one Exchange, an operator setting naming one seat changes that seat and no other
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/admin/v1/admin.proto
+    quote: >-
+      Replaces the tenant's reporting policy (required report fields, reporting
+      window).
+  positive: >-
+    SetReportingPolicy and SetTenantFeeRate naming the second seat, sent to
+    exchange-a's admin listener, are each answered with the payload persisted for the
+    second seat. While the second seat has a reporting window of its own, a purchase
+    at exchange-a still carries the window of the seat exchange-a sells as.
+  negative: []
+
+- id: TENANT-006
+  title: A publisher's catalog calls reach only its own domains, not another publisher's on the same seat
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/exchange/multi-tenant.mdx
+    quote: >-
+      For each entry, the Exchange resolves `/.well-known/fora.json` from the entry's
+      domain and verifies that the signer is that domain's publisher or one of its
+      `catalog_contributors`. Unauthorized tenant access is rejected with
+      `CodePermissionDenied`.
+  positive: >-
+    Each publisher's push of an entry on its own domain, signed with the key its own
+    domain publishes, is stored and offered.
+  negative:
+    - code: permission_denied
+      reason: catalog_rejection NOT_CATALOG_CONTRIBUTOR, an entry on the other publisher's domain
+      side_effect: the entry is not stored, and the other publisher's domain offers nothing for it
+    - code: permission_denied
+      reason: catalog_rejection NOT_CATALOG_CONTRIBUTOR, a removal naming the other publisher's page
+      side_effect: the other publisher's page stays stored and offered at its own price
+
+- id: TENANT-007
+  title: An offer for a URI comes from its own domain's publisher, whatever another publisher on the seat pushed
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/exchange/multi-tenant.mdx
+    quote: >-
+      The URI's domain is matched against a domain-to-tenant lookup map.
+  positive: >-
+    Two publishers push the same path and the same content id on their own domains at
+    different prices; each URI is offered at its own publisher's price. The second
+    push, with the first publisher's path and content id, leaves the first
+    publisher's URI offered at the first publisher's price.
+  negative:
+    - code: ok
+      reason: OFFER_ABSENCE_REASON_NOT_IN_CATALOG
+      side_effect: >-
+        a path only one publisher pushed, asked for under the other publisher's domain,
+        is offered by no one
+
+- id: TENANT-008
+  title: Each publisher on a seat reads its own catalog and transaction records, and none of the other's
+  level: MUST
+  actor: exchange
+  surface: console
+  source:
+    cite: github.com/FORA-Protocol/protocol/website/src/content/docs/components/exchange/multi-tenant.mdx
+    quote: >-
+      No tenant can access another tenant's catalog, keys, or transaction records.
+  positive: >-
+    After one sale of each publisher's page, each publisher's console lists its own
+    catalog entries, its own sale, an income total of its own sale alone, and opens
+    its own sale's page, whose evidence verifies against the published keys.
+    Neither publisher's catalog or transaction list carries a row of the other's, and
+    neither income total counts the other's sale.
+  negative:
+    - code: not_found
+      reason: each publisher opens the other's transaction page and is answered 404
+      side_effect: the page carries none of the other sale's evidence
+
+- id: TENANT-009
+  title: A usage report for one publisher's sale changes that sale's record and no other publisher's
+  level: MUST
+  actor: exchange
+  surface: console
+  source:
+    cite: docs/architecture/adr-026-publisher-registration-model.md
+    quote: >-
+      Per-relationship configuration and permissions key on `(tenant, publisher)`
+  positive: >-
+    The buyer's report of its purchase from the first publisher is accepted, and the
+    first publisher's console then shows that sale's report as received. The second
+    publisher's sale, bought by the same agent on the same seat, still shows its
+    report as pending.
+  negative: []

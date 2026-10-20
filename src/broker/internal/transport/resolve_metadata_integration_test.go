@@ -23,8 +23,9 @@ package transport_test
 // Round-trip honesty: each leg is a genuine PROTOCOL round-trip — signed Connect
 // client → real RFC 9421 signature → real httpsig middleware → registered Connect
 // handler → validateResolveRequest / authorize / resolve core → the typed Connect
-// transport error the client decodes. The mockExchange (a true external) is the
-// only mock; its call counters pin the absence of upstream side effects.
+// transport error the client decodes. The Exchange address is a sink that fails
+// the test if the Broker sends it anything, which pins the absence of upstream
+// side effects without emulating an Exchange.
 
 import (
 	"context"
@@ -34,33 +35,40 @@ import (
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	foraconnect "github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
 )
 
-// signedResolveFault spins up the signed Connect harness for callerID (its key
-// is registered in the resolver), issues the given DiscoveryRequest, and returns
-// the server fixture plus the transport error. It asserts the call DID fault
-// (the negative-path tests expect a non-nil error). Mirrors resolveOverConnect's
-// wiring but returns the error rather than fatal-ing on it.
-func signedResolveFault(t *testing.T, fx *fixture, callerID string, req *forav1.DiscoveryRequest) (*brokerConnectFixture, error) {
+// faultCallerID is the signer of every signedResolveFault call. A test whose
+// fault depends on requester.id matching the signer names it for that field.
+const faultCallerID = "agent-1"
+
+// signedResolveFault spins up the signed Connect harness for faultCallerID (its
+// key is registered in the resolver), issues the given DiscoveryRequest, and returns
+// the transport error. It asserts the call DID fault (the negative-path tests
+// expect a non-nil error). Mirrors resolveOverConnect's wiring but returns the
+// error rather than fatal-ing on it.
+func signedResolveFault(t *testing.T, fx *fixture, req *forav1.DiscoveryRequest) error {
 	t.Helper()
 	pub, priv := newBrokerKeyPair(t)
-	srv := startBrokerConnectServer(t, fx, callerID, pub)
-	client := signingBrokerClient(srv.base, srv.server.URL, callerID, priv)
+	srv := startBrokerConnectServer(t, fx, pub)
+	client := signingBrokerClient(srv.base, srv.server.URL, faultCallerID, priv)
 	_, err := client.Resolve(context.Background(), connect.NewRequest(req))
 	if err == nil {
 		t.Fatal("expected a fault, got nil error")
 	}
-	return srv, err
+	return err
 }
 
-// TestResolve_AgentIDMissing_CarriesFieldMetadata pins resolve.go:401: an empty
-// requester.id is rejected InvalidArgument with metadata["field"]=="agent_id".
-// validateResolveRequest runs before authorizeAgentSelfAct, so the empty-id guard
-// fires before the verified-key/id binding — the request is signed with a valid
-// registered key but names no requester.
-func TestResolve_AgentIDMissing_CarriesFieldMetadata(t *testing.T) {
+// TestResolve_RequesterIDMissing_CarriesFieldMetadata pins the empty-id refusal.
+// At the pinned protocol Requester.id is a wire rule (1 to 255 characters), so
+// the validate interceptor refuses an empty requester.id as InvalidArgument with
+// a violation on requester.id under string.min_len, before any handler guard or
+// the caller derivation runs. The request is signed with a valid registered key
+// but names no requester, and nothing is sent on.
+func TestResolve_RequesterIDMissing_CarriesFieldMetadata(t *testing.T) {
 	ctx := context.Background()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
+	fx := newSinkFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
 
 	// requester.id deliberately empty; sign with a valid registered key.
 	req := &forav1.DiscoveryRequest{
@@ -68,42 +76,48 @@ func TestResolve_AgentIDMissing_CarriesFieldMetadata(t *testing.T) {
 		Requester: &forav1.Requester{Domain: requesterDomain, Type: forav1.RequesterType_REQUESTER_TYPE_AGENT},
 		Query:     ptr("FORA intro"),
 	}
-	srv, err := signedResolveFault(t, fx, "agent-1", req)
+	err := signedResolveFault(t, fx, req)
 
 	assertConnectCodeLocal(t, err, connect.CodeInvalidArgument)
-	assertBrokerErrorField(t, err, "field", "agent_id")
-	if srv.exchange.discoverCalls != 0 || srv.exchange.executeCalls != 0 {
-		t.Errorf("agent_id reject must not reach upstream: discover=%d execute=%d",
-			srv.exchange.discoverCalls, srv.exchange.executeCalls)
-	}
+	assertRequesterIDViolation(t, err)
+	assertNothingSent(t, fx.wire)
 }
 
-// TestResolve_QueryAndURIBothEmpty_CarriesRequiredOneOfMetadata pins
-// resolve.go:404: a request with neither query nor uri is rejected
-// InvalidArgument carrying metadata["required_one_of"]=="query,uri" (the settled
+// assertRequesterIDViolation requires the wire tier's violation of the
+// Requester.id length rule, read from the refusal's Violations detail.
+func assertRequesterIDViolation(t *testing.T, err error) {
+	t.Helper()
+	for _, v := range testutil.ValidationViolations(t, err) {
+		if testutil.ViolationFieldPath(v) == "requester.id" && v.GetRuleId() == "string.min_len" {
+			return
+		}
+	}
+	t.Fatalf("no wire violation on requester.id under string.min_len (err=%v)", err)
+}
+
+// TestResolve_QueryAndURIBothEmpty_CarriesRequiredOneOfMetadata pins the
+// search-input guard: a request with no query, no uri and no search filter is
+// rejected InvalidArgument carrying
+// metadata["required_one_of"]=="query,uri,search_filters" (the settled
 // composite key — there is no single offending field, so no "field" key; ADR-019
 // §1 metadata is a free map of axes). requester.id == the signing key so the
 // query/uri guard (before authorize) is the cause, not impersonation.
 func TestResolve_QueryAndURIBothEmpty_CarriesRequiredOneOfMetadata(t *testing.T) {
 	ctx := context.Background()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
+	fx := newSinkFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
 
-	const callerID = "agent-1"
 	req := &forav1.DiscoveryRequest{
 		Ver: helpers.ProtocolVersion,
 		Requester: &forav1.Requester{
-			Id: callerID, Domain: requesterDomain, Type: forav1.RequesterType_REQUESTER_TYPE_AGENT,
+			Id: faultCallerID, Domain: requesterDomain, Type: forav1.RequesterType_REQUESTER_TYPE_AGENT,
 		},
 		// no Query, no Uris
 	}
-	srv, err := signedResolveFault(t, fx, callerID, req)
+	err := signedResolveFault(t, fx, req)
 
 	assertConnectCodeLocal(t, err, connect.CodeInvalidArgument)
-	assertBrokerErrorField(t, err, "required_one_of", "query,uri")
-	if srv.exchange.discoverCalls != 0 || srv.exchange.executeCalls != 0 {
-		t.Errorf("query|uri reject must not reach upstream: discover=%d execute=%d",
-			srv.exchange.discoverCalls, srv.exchange.executeCalls)
-	}
+	assertBrokerErrorField(t, err, "required_one_of", "query,uri,search_filters")
+	assertNothingSent(t, fx.wire)
 }
 
 // TestResolve_UnparseableURI_CarriesFieldMetadata pins resolve.go:198
@@ -114,24 +128,20 @@ func TestResolve_QueryAndURIBothEmpty_CarriesRequiredOneOfMetadata(t *testing.T)
 // so the uri-parse fault is the cause.
 func TestResolve_UnparseableURI_CarriesFieldMetadata(t *testing.T) {
 	ctx := context.Background()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
+	fx := newSinkFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
 
-	const callerID = "agent-1"
 	req := &forav1.DiscoveryRequest{
 		Ver: helpers.ProtocolVersion,
 		Requester: &forav1.Requester{
-			Id: callerID, Domain: requesterDomain, Type: forav1.RequesterType_REQUESTER_TYPE_AGENT,
+			Id: faultCallerID, Domain: requesterDomain, Type: forav1.RequesterType_REQUESTER_TYPE_AGENT,
 		},
 		Uris: []string{"http://[::1"},
 	}
-	srv, err := signedResolveFault(t, fx, callerID, req)
+	err := signedResolveFault(t, fx, req)
 
 	assertConnectCodeLocal(t, err, connect.CodeInvalidArgument)
 	assertBrokerErrorField(t, err, "field", "uri")
-	if srv.exchange.discoverCalls != 0 || srv.exchange.executeCalls != 0 {
-		t.Errorf("unparseable uri reject must not reach upstream: discover=%d execute=%d",
-			srv.exchange.discoverCalls, srv.exchange.executeCalls)
-	}
+	assertNothingSent(t, fx.wire)
 }
 
 // TestResolve_BareFault_CarriesNoMetadata is the negative control for the
@@ -144,11 +154,11 @@ func TestResolve_UnparseableURI_CarriesFieldMetadata(t *testing.T) {
 // against a future over-eager stamp.
 func TestResolve_BareFault_CarriesNoMetadata(t *testing.T) {
 	ctx := context.Background()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
+	fx := newSinkFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
 
 	const callerID = "agent-1"
 	pub, _ := newBrokerKeyPair(t)
-	srv := startBrokerConnectServer(t, fx, callerID, pub)
+	srv := startBrokerConnectServer(t, fx, pub)
 
 	// PLAIN unsigned client — no httpsig context → Unauthenticated, a field-less
 	// fault.

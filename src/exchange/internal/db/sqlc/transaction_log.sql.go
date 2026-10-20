@@ -15,28 +15,26 @@ const createTransaction = `-- name: CreateTransaction :one
 INSERT INTO fora.transaction_log (
     transaction_id, idempotency_key, tenant_id, agent_id, resource_id,
     offer_id, agent_identity_hash, signed_url_hash, expiry,
-    billing_id, unit_cost, currency, consumed_unit, denial_reason,
-    result_payload
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-RETURNING transaction_id, idempotency_key, tenant_id, agent_id, resource_id, offer_id, agent_identity_hash, signed_url_hash, expiry, billing_id, unit_cost, currency, consumed_unit, denial_reason, created_at, result_payload
+    billing_id, unit_cost, currency, consumed_unit, result_payload
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+RETURNING transaction_id, idempotency_key, tenant_id, agent_id, resource_id, offer_id, agent_identity_hash, signed_url_hash, expiry, billing_id, unit_cost, currency, consumed_unit, created_at, result_payload
 `
 
 type CreateTransactionParams struct {
-	TransactionID     string               `json:"transaction_id"`
-	IdempotencyKey    string               `json:"idempotency_key"`
-	TenantID          string               `json:"tenant_id"`
-	AgentID           string               `json:"agent_id"`
-	ResourceID        string               `json:"resource_id"`
-	OfferID           string               `json:"offer_id"`
-	AgentIdentityHash []byte               `json:"agent_identity_hash"`
-	SignedUrlHash     []byte               `json:"signed_url_hash"`
-	Expiry            pgtype.Timestamptz   `json:"expiry"`
-	BillingID         pgtype.Text          `json:"billing_id"`
-	UnitCost          pgtype.Numeric       `json:"unit_cost"`
-	Currency          string               `json:"currency"`
-	ConsumedUnit      pgtype.Text          `json:"consumed_unit"`
-	DenialReason      NullForaDenialReason `json:"denial_reason"`
-	ResultPayload     []byte               `json:"result_payload"`
+	TransactionID     string             `json:"transaction_id"`
+	IdempotencyKey    string             `json:"idempotency_key"`
+	TenantID          string             `json:"tenant_id"`
+	AgentID           string             `json:"agent_id"`
+	ResourceID        string             `json:"resource_id"`
+	OfferID           string             `json:"offer_id"`
+	AgentIdentityHash []byte             `json:"agent_identity_hash"`
+	SignedUrlHash     []byte             `json:"signed_url_hash"`
+	Expiry            pgtype.Timestamptz `json:"expiry"`
+	BillingID         pgtype.Text        `json:"billing_id"`
+	UnitCost          pgtype.Numeric     `json:"unit_cost"`
+	Currency          string             `json:"currency"`
+	ConsumedUnit      pgtype.Text        `json:"consumed_unit"`
+	ResultPayload     []byte             `json:"result_payload"`
 }
 
 // Writes the full transaction row. The handler MUST await this commit before
@@ -56,7 +54,6 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 		arg.UnitCost,
 		arg.Currency,
 		arg.ConsumedUnit,
-		arg.DenialReason,
 		arg.ResultPayload,
 	)
 	var i ForaTransactionLog
@@ -74,7 +71,6 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 		&i.UnitCost,
 		&i.Currency,
 		&i.ConsumedUnit,
-		&i.DenialReason,
 		&i.CreatedAt,
 		&i.ResultPayload,
 	)
@@ -82,7 +78,7 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 }
 
 const getTransactionByID = `-- name: GetTransactionByID :one
-SELECT transaction_id, idempotency_key, tenant_id, agent_id, resource_id, offer_id, agent_identity_hash, signed_url_hash, expiry, billing_id, unit_cost, currency, consumed_unit, denial_reason, created_at, result_payload FROM fora.transaction_log WHERE transaction_id = $1
+SELECT transaction_id, idempotency_key, tenant_id, agent_id, resource_id, offer_id, agent_identity_hash, signed_url_hash, expiry, billing_id, unit_cost, currency, consumed_unit, created_at, result_payload FROM fora.transaction_log WHERE transaction_id = $1
 `
 
 // Read a transaction by its public transaction_id (the value the resolve /
@@ -107,7 +103,6 @@ func (q *Queries) GetTransactionByID(ctx context.Context, transactionID string) 
 		&i.UnitCost,
 		&i.Currency,
 		&i.ConsumedUnit,
-		&i.DenialReason,
 		&i.CreatedAt,
 		&i.ResultPayload,
 	)
@@ -115,7 +110,7 @@ func (q *Queries) GetTransactionByID(ctx context.Context, transactionID string) 
 }
 
 const getTransactionByIdempotencyKey = `-- name: GetTransactionByIdempotencyKey :one
-SELECT transaction_id, idempotency_key, tenant_id, agent_id, resource_id, offer_id, agent_identity_hash, signed_url_hash, expiry, billing_id, unit_cost, currency, consumed_unit, denial_reason, created_at, result_payload FROM fora.transaction_log WHERE idempotency_key = $1
+SELECT transaction_id, idempotency_key, tenant_id, agent_id, resource_id, offer_id, agent_identity_hash, signed_url_hash, expiry, billing_id, unit_cost, currency, consumed_unit, created_at, result_payload FROM fora.transaction_log WHERE idempotency_key = $1
 `
 
 // Idempotency lookup: return a prior transaction for the same idempotency_key.
@@ -136,7 +131,41 @@ func (q *Queries) GetTransactionByIdempotencyKey(ctx context.Context, idempotenc
 		&i.UnitCost,
 		&i.Currency,
 		&i.ConsumedUnit,
-		&i.DenialReason,
+		&i.CreatedAt,
+		&i.ResultPayload,
+	)
+	return i, err
+}
+
+const getTransactionByTenantAndID = `-- name: GetTransactionByTenantAndID :one
+SELECT transaction_id, idempotency_key, tenant_id, agent_id, resource_id, offer_id, agent_identity_hash, signed_url_hash, expiry, billing_id, unit_cost, currency, consumed_unit, created_at, result_payload FROM fora.transaction_log WHERE tenant_id = $1 AND transaction_id = $2
+`
+
+type GetTransactionByTenantAndIDParams struct {
+	TenantID      string `json:"tenant_id"`
+	TransactionID string `json:"transaction_id"`
+}
+
+// Reads one tenant's transaction. A caller that reads on behalf of a tenant
+// uses this rather than GetTransactionByID, so the tenant predicate is part of
+// the query and not a check every such caller has to remember.
+func (q *Queries) GetTransactionByTenantAndID(ctx context.Context, arg GetTransactionByTenantAndIDParams) (ForaTransactionLog, error) {
+	row := q.db.QueryRow(ctx, getTransactionByTenantAndID, arg.TenantID, arg.TransactionID)
+	var i ForaTransactionLog
+	err := row.Scan(
+		&i.TransactionID,
+		&i.IdempotencyKey,
+		&i.TenantID,
+		&i.AgentID,
+		&i.ResourceID,
+		&i.OfferID,
+		&i.AgentIdentityHash,
+		&i.SignedUrlHash,
+		&i.Expiry,
+		&i.BillingID,
+		&i.UnitCost,
+		&i.Currency,
+		&i.ConsumedUnit,
 		&i.CreatedAt,
 		&i.ResultPayload,
 	)

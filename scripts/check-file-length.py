@@ -18,6 +18,10 @@ SRC_CAPS: dict[str, int] = {
     "**/*.go": 500,
     "**/*.py": 500,
     "**/*.ts": 400,
+    # JavaScript takes TypeScript's cap: the console's browser scripts and the
+    # edge's build scripts are the same kind of code, only untyped.
+    "**/*.js": 400,
+    "**/*.mjs": 400,
 }
 
 # Test files: uniform cap regardless of language.
@@ -25,9 +29,11 @@ TEST_CAP = 800
 TEST_GLOBS = [
     "**/*_test.go",
     "**/*.test.ts",
+    "**/*.test.js",
     "**/test_*.py",
     "**/tests/**/*.py",
     "**/tests/**/*.ts",
+    "**/tests/**/*.js",
     "**/__tests__/**/*.ts",
     # Top-level tests/ tree: paths relative to the repo root start with "tests/",
     # so the "**/tests/**" globs above — which require a leading path segment

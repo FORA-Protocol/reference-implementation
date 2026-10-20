@@ -1,32 +1,71 @@
 """Meta-guard — the harness and the compose stack agree about the exchanges.
 
-Three things have to line up between ``harness/exchanges.py``, the seed, and
+Several things have to line up between ``harness/exchanges.py``, the seed, and
 ``docker-compose.e2e.yml``, and each of them fails in a way that reads as the
 platform being broken rather than as the configuration mistake it is.
 
-IDENTITY. Three constants say who the three exchanges are, and every addressed
+IDENTITY. One constant per exchange says who it is, and every addressed
 request this suite sends carries one of them as its recipient. An exchange
 refuses a request naming anything else, so a renamed service or a retyped
 ``EXCHANGE_DOMAIN`` has every request in the suite refused at once.
 
 THE DEFAULT TENANT. A registration reads its "activate new agents
-automatically" policy from the tenant named by ``EXCHANGE_DEFAULT_TENANT``,
-which falls back to ``EXCHANGE_DOMAIN`` — a name no tenant row ever carries. An
-exchange left on that fallback refuses every ``fora_register`` with a
-failed-precondition, and warns about it at boot where nobody reads it. That is
-the state this stack was in until the account tools were exercised at all.
+automatically" policy from the tenant named by ``EXCHANGE_DEFAULT_TENANT``. A
+tenant row is the Exchange SEAT, so the only name that matches one is the
+exchange's own hostname — its ``EXCHANGE_DOMAIN``. Point the setting anywhere
+else, at a publisher's domain the way it read while a tenant meant a publisher,
+and it matches no row: every ``fora_register`` there is refused with a
+failed-precondition, and the exchange says so only in a boot warning nobody
+reads. The stack states the value rather than leaving the binary to fall back to
+``EXCHANGE_DOMAIN`` on its own, so the seat each exchange reads is written where
+this guard and the seed can be compared against it.
 
 THE EXCHANGE POLICY. The identity service refuses to sign and send to a domain
-outside ``IDENTITY_MCP_EXCHANGE_ALLOWLIST``. It names all three exchanges here
-so the lever runs in its production posture rather than sitting empty; a fourth
-exchange added to the stack and not to the list is refused by policy, which
-reads as a routing failure.
+outside ``IDENTITY_MCP_EXCHANGE_ALLOWLIST``. It names every exchange here so
+the lever runs in its production posture rather than sitting empty; an exchange
+added to the stack and not to the list is refused by policy, which reads as a
+routing failure.
+
+THE RELAY OPT-OUT. The seed writes ``allow_broker_relay = FALSE`` on the seats
+``RELAY_REFUSING_EXCHANGES`` names and TRUE on every other. A name there that the
+stack does not run would leave the money-path suite asserting a refusal from an
+exchange that does not exist, and every other exchange accepting the relay is
+what the rest of the suite buys through.
+
+THE LEDGERS. Each exchange bills on its own TigerBeetle replica. The ledger
+derives its platform and publisher revenue accounts with no per-Exchange salt,
+so two exchanges pointed at one replica would post into the same accounts, and
+every balance test would still pass. The address is an IP written in two places
+— the ledger's static address and the exchange's setting — because the client
+takes no hostname, so each exchange's address is checked against the ledger it
+waits for.
+
+THE ACCOUNT REGISTRIES. The credit-less buyer registers while the seats hold
+new agents for review, so it is granted no welcome credit, and the seed then
+switches its account on in each exchange's own account registry. The seed names
+those databases itself; one that names another exchange's registry matches no
+row there, and the buyer stays switched off at an exchange the money suites buy
+from, which reads as a billing failure.
+
+THE BROKER REGISTRY. The Broker reads the exchanges it routes to from its
+registry file (``fixtures/broker_registry.yml``) at boot. An exchange missing
+from it is never routed to, and an endpoint that is not the exchange's
+``EXCHANGE_PUBLIC_ORIGIN`` fails the relay's endpoint check, which reads as the
+relay being broken.
+
+THE EXCHANGE IMPOSTOR. The same file names two identities of the
+``misbehaving-exchange`` service, each at the trust level the fault-path suites
+rely on: one the Broker pays, one it only knows. Its third identity must stay out
+of the file, because the suite uses it as the Exchange the Broker has never heard
+of. The service answers as exactly the identities ``harness/misbehaving_exchange.py``
+names, and the compose network resolves each of their hosts to it. A drift in any
+of those reads as a Broker that refuses, or buys, for the wrong reason.
 
 THE SHIPPED BUNDLE. The Terraform module renders one more compose file, for a
 deployment, and its identity service is bound by the same policy. That file is a
 template rather than YAML, so it is read line by line, and the same line reader
 is turned on the e2e compose file too: one exchange there is read the same way as
-three here, and the reader is proven below to see every ``EXCHANGE_DOMAIN`` a
+the four here, and the reader is proven below to see every ``EXCHANGE_DOMAIN`` a
 file declares rather than the first one only.
 
 Pure file reading: no stack, no Docker, no database.
@@ -36,17 +75,13 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 import yaml
 
 from .conftest import REPO_ROOT
-from .e2e_catalog import (
-    DEMO_MUSIC_DOMAIN,
-    DEMO_PHILOSOPHY_DOMAIN,
-    DEMO_SFX_DOMAIN,
-)
-from .seed import E2E_PUBLISHERS
+from .seed import SEEDED_SEAT_DOMAINS, SOR_DB_BY_EXCHANGE
 from .exchanges import (
     SERVICE_IDENTITIES,
     EXCHANGE_A_DOMAIN,
@@ -55,8 +90,14 @@ from .exchanges import (
     EXCHANGE_B_INTERNAL_URL,
     EXCHANGE_C_DOMAIN,
     EXCHANGE_C_INTERNAL_URL,
+    EXCHANGE_D_DOMAIN,
+    EXCHANGE_D_INTERNAL_URL,
+    RELAY_REFUSING_EXCHANGES,
 )
 from .guard_harness import guard_marks
+from .misbehaving_exchange import IDENTITIES as IMPOSTOR_IDENTITIES
+from .misbehaving_exchange import REGISTERED_TRUST as IMPOSTOR_TRUST
+from .misbehaving_exchange import SERVICE as IMPOSTOR_SERVICE
 
 _COMPOSE = REPO_ROOT / "docker-compose.e2e.yml"
 _TEMPLATE = REPO_ROOT / "deploy/terraform/modules/compose-stack/templates/docker-compose.yml.tftpl"
@@ -64,24 +105,6 @@ _TEMPLATE = REPO_ROOT / "deploy/terraform/modules/compose-stack/templates/docker
 # The scalar assignments the line reader collects. EXCHANGE_DOMAIN occurs once per
 # exchange service; the identity service's allowlist occurs once.
 _IDENTITY_LINE = re.compile(r"\s*(EXCHANGE_DOMAIN|IDENTITY_MCP_EXCHANGE_ALLOWLIST)\s*:\s*(.+)")
-
-# The publisher tenant each exchange fronts, which is the tenant a registration
-# there reads its activation policy from.
-#
-# Keyed on the exchange IDENTITY rather than on the compose service name. The
-# service names belong to exchanges.py, and this guard reads them from
-# SERVICE_IDENTITIES rather than restating them — its header says to read from the
-# module that owns a value rather than restate it, and this table was the third
-# copy of the same three service names. What is genuinely this guard's own is the
-# pairing of an exchange with a publisher, so that is all it writes down.
-#
-# A fourth exchange added to exchanges.py and not here fails the coverage test
-# below, rather than dropping out of this guard's reach unnoticed.
-_TENANT_BY_IDENTITY = {
-    EXCHANGE_A_DOMAIN: DEMO_PHILOSOPHY_DOMAIN,
-    EXCHANGE_B_DOMAIN: DEMO_MUSIC_DOMAIN,
-    EXCHANGE_C_DOMAIN: DEMO_SFX_DOMAIN,
-}
 
 pytestmark = guard_marks(
     skip_when=not _COMPOSE.is_file(),
@@ -129,6 +152,7 @@ def test_the_in_network_url_of_each_exchange_names_that_exchange() -> None:
         (EXCHANGE_A_INTERNAL_URL, EXCHANGE_A_DOMAIN),
         (EXCHANGE_B_INTERNAL_URL, EXCHANGE_B_DOMAIN),
         (EXCHANGE_C_INTERNAL_URL, EXCHANGE_C_DOMAIN),
+        (EXCHANGE_D_INTERNAL_URL, EXCHANGE_D_DOMAIN),
     ):
         assert url == f"http://{domain}", (
             f"the in-network URL {url!r} does not name the exchange {domain!r} it "
@@ -136,46 +160,46 @@ def test_the_in_network_url_of_each_exchange_names_that_exchange() -> None:
         )
 
 
-def test_every_exchange_in_the_stack_has_an_expected_tenant() -> None:
-    """The pairing table covers every exchange exchanges.py declares.
+def test_the_seed_creates_a_seat_for_every_exchange_in_the_stack() -> None:
+    """The seed's seat list covers every exchange exchanges.py declares.
 
-    This is what makes deriving the keys safe. The tenant check below iterates
-    SERVICE_IDENTITIES and looks each identity up here, so a fourth exchange added
-    to exchanges.py without a pairing would raise mid-loop as a KeyError — legible
-    only to someone who reads the traceback. Checked here instead, as the sentence
-    a reader needs.
+    The default-tenant check below compares each service's setting against the
+    set of domains the seed creates seat rows under. If the seed stopped creating
+    one, that check would report the setting as unseeded rather than say which
+    side moved. Checked here instead, as the sentence a reader needs.
     """
-    missing = sorted(set(SERVICE_IDENTITIES.values()) - set(_TENANT_BY_IDENTITY))
+    missing = sorted(set(SERVICE_IDENTITIES.values()) - SEEDED_SEAT_DOMAINS)
     assert not missing, (
-        f"exchanges.py declares {missing}, which this guard has no publisher tenant "
-        f"for — it would stop checking those exchanges rather than fail"
+        f"exchanges.py declares {missing}, which the seed creates no seat row for — "
+        f"every fora_register on those exchanges would be refused"
     )
-    extra = sorted(set(_TENANT_BY_IDENTITY) - set(SERVICE_IDENTITIES.values()))
-    assert not extra, f"this guard pairs a tenant with {extra}, which the stack no longer runs"
+    extra = sorted(SEEDED_SEAT_DOMAINS - set(SERVICE_IDENTITIES.values()))
+    assert not extra, f"the seed creates a seat for {extra}, which the stack no longer runs"
 
 
-def test_each_exchange_names_a_tenant_the_seed_creates() -> None:
-    """A registration needs a tenant row, and the fallback names one that never exists."""
-    # Named for what it holds, not "seeded": that is the name of the session
-    # fixture that brings the stack up and runs the ingest, and this module reads
-    # files only — a reader seeing it here would have to check whether the stack
-    # got involved.
-    tenant_domains = {domain for _, domain, _, _, _ in E2E_PUBLISHERS}
+def test_each_exchange_names_its_own_seat_as_the_default_tenant() -> None:
+    """A registration needs a tenant row, and only the exchange's own seat is one."""
     for service, identity in SERVICE_IDENTITIES.items():
-        expected = _TENANT_BY_IDENTITY[identity]
         configured = _compose_environment(service).get("EXCHANGE_DEFAULT_TENANT")
         assert configured, (
-            f"{service!r} sets no EXCHANGE_DEFAULT_TENANT, so it falls back to its own "
-            f"EXCHANGE_DOMAIN — a name no tenant row carries. Every fora_register there "
-            f"is refused with a failed-precondition, and the exchange says so only in a "
-            f"boot warning"
+            f"{service!r} sets no EXCHANGE_DEFAULT_TENANT. The binary then falls back to "
+            f"its own EXCHANGE_DOMAIN, so nothing in the compose file states which seat "
+            f"this exchange reads and neither this guard nor the seed can be compared "
+            f"against it. State it"
         )
-        assert configured == expected, (
-            f"{service!r} names tenant {configured!r} while it fronts {expected!r}'s catalog"
+        assert configured == identity, (
+            f"{service!r} names tenant {configured!r} while its own seat is {identity!r}. "
+            f"A tenant row is the Exchange seat, keyed on the exchange's own hostname, so "
+            f"{configured!r} matches no row: every fora_register there is refused with a "
+            f"failed-precondition, and the exchange says so only in a boot warning"
         )
-        assert configured in tenant_domains, (
-            f"{service!r} names tenant {configured!r}, which the seed never creates; "
-            f"it seeds {sorted(tenant_domains)}"
+        # Named for what it holds, not "seeded": that is the name of the session
+        # fixture that brings the stack up and runs the ingest, and this module
+        # reads files only — a reader seeing it here would have to check whether
+        # the stack got involved.
+        assert configured in SEEDED_SEAT_DOMAINS, (
+            f"{service!r} names seat {configured!r}, which the seed never creates; "
+            f"it seeds {sorted(SEEDED_SEAT_DOMAINS)}"
         )
 
 
@@ -192,6 +216,155 @@ def test_the_identity_policy_names_every_exchange_in_the_stack() -> None:
         f"the identity policy lists {sorted(listed)} while the stack runs "
         f"{sorted(SERVICE_IDENTITIES.values())}. An exchange missing from the list is refused "
         f"before anything is dialled, which reads as a routing failure"
+    )
+
+
+def test_every_relay_refusing_exchange_runs_in_the_stack() -> None:
+    """The seats the seed opts out of the Broker relay belong to exchanges the stack runs."""
+    unknown = sorted(RELAY_REFUSING_EXCHANGES - set(SERVICE_IDENTITIES.values()))
+    assert not unknown, (
+        f"RELAY_REFUSING_EXCHANGES names {unknown}, which the stack does not run; the seed "
+        f"would opt out a seat nobody serves and the refusal under test could not happen"
+    )
+    accepting = set(SERVICE_IDENTITIES.values()) - RELAY_REFUSING_EXCHANGES
+    assert accepting, "every exchange refuses the Broker relay, so nothing can be bought through it"
+
+
+def _compose_services() -> dict:
+    services: dict = yaml.safe_load(_COMPOSE.read_text())["services"]
+    return services
+
+
+def _ledger_ip(service: dict) -> str | None:
+    """The static address a ledger service holds on the default network."""
+    networks = service.get("networks") or {}
+    default = networks.get("default") if isinstance(networks, dict) else None
+    return default.get("ipv4_address") if isinstance(default, dict) else None
+
+
+def test_each_exchange_bills_on_its_own_ledger() -> None:
+    """One TigerBeetle replica per exchange, and each address names its own."""
+    services = _compose_services()
+    used: dict[str, str] = {}
+    for service in SERVICE_IDENTITIES:
+        env = _compose_environment(service)
+        assert env.get("FORA_BILLING_ADAPTER") == "tigerbeetle", (
+            f"{service!r} bills with {env.get('FORA_BILLING_ADAPTER')!r}; the stack's "
+            f"balance suites assert on a real ledger"
+        )
+        address = env.get("EXCHANGE_BILLING_TB_ADDRESS", "")
+        host, _, port = address.rpartition(":")
+        deps = services[service].get("depends_on") or {}
+        ledgers = [
+            name
+            for name in deps
+            if services.get(name, {}).get("image", "").startswith("ghcr.io/tigerbeetle/")
+        ]
+        assert len(ledgers) == 1, (
+            f"{service!r} waits for ledgers {ledgers}; it must wait for exactly one, "
+            f"because it refuses to boot when its ledger does not answer"
+        )
+        assert deps[ledgers[0]].get("condition") == "service_healthy", (
+            f"{service!r} must wait for {ledgers[0]!r} to be healthy, not merely started"
+        )
+        assert host == _ledger_ip(services[ledgers[0]]) and port == "3000", (
+            f"{service!r} dials {address!r}, but the ledger it waits for, "
+            f"{ledgers[0]!r}, listens on {_ledger_ip(services[ledgers[0]])}:3000"
+        )
+        assert address not in used, (
+            f"{service!r} and {used.get(address)!r} share the ledger at {address}; "
+            f"their revenue and liquidity accounts would merge"
+        )
+        used[address] = service
+
+
+def test_the_seed_approves_accounts_in_each_exchanges_own_registry() -> None:
+    """SOR_DB_BY_EXCHANGE names the database each exchange's EXCHANGE_SOR_DSN opens."""
+    assert set(SOR_DB_BY_EXCHANGE) == set(SERVICE_IDENTITIES.values()), (
+        f"the seed names account registries for {sorted(SOR_DB_BY_EXCHANGE)}, but the "
+        f"stack runs {sorted(SERVICE_IDENTITIES.values())}"
+    )
+    for service, domain in SERVICE_IDENTITIES.items():
+        dsn = _compose_environment(service).get("EXCHANGE_SOR_DSN", "")
+        database = urlsplit(dsn).path.lstrip("/")
+        assert SOR_DB_BY_EXCHANGE[domain] == database, (
+            f"{service!r} keeps its accounts in {database!r}, but the seed approves the "
+            f"credit-less buyer's account in {SOR_DB_BY_EXCHANGE[domain]!r}"
+        )
+
+
+_BROKER_REGISTRY = Path(__file__).resolve().parent / "fixtures" / "broker_registry.yml"
+
+
+def test_the_broker_registry_routes_to_each_exchange_at_its_public_origin() -> None:
+    """The Broker's registry file names every exchange, at the origin that exchange publishes.
+
+    The Broker reads its registry from that file at boot, and its relay compares
+    the endpoint an exchange's well-known advertises against the registered one.
+    An exchange missing from the file is one the Broker never routes to; an
+    endpoint that is not the exchange's EXCHANGE_PUBLIC_ORIGIN fails that check
+    on every relayed purchase.
+    """
+    broker = yaml.safe_load(_COMPOSE.read_text())["services"]["broker"]
+    path = _compose_environment("broker").get("BROKER_REGISTRY_FILE")
+    mounts = [str(v) for v in broker.get("volumes") or []]
+    assert path and any(
+        m.startswith("./tests/e2e/harness/fixtures/broker_registry.yml:" + path) for m in mounts
+    ), f"the broker reads its registry from {path!r}, which is not the registry file: {mounts}"
+    entries = yaml.safe_load(_BROKER_REGISTRY.read_text())["exchanges"]
+    assert len({entry["domain"] for entry in entries}) == len(entries), (
+        f"an exchange is registered twice: {entries}"
+    )
+    registered = {
+        entry["domain"]: entry["endpoint"]
+        for entry in entries
+        if entry["domain"] not in IMPOSTOR_IDENTITIES
+    }
+    assert set(registered) == set(SERVICE_IDENTITIES.values()), (
+        f"the broker registry names {sorted(registered)}, but the stack runs "
+        f"{sorted(SERVICE_IDENTITIES.values())}"
+    )
+    for service, domain in SERVICE_IDENTITIES.items():
+        origin = _compose_environment(service).get("EXCHANGE_PUBLIC_ORIGIN")
+        assert registered[domain] == origin, (
+            f"the broker registry routes {domain} to {registered[domain]!r}, but {service!r} "
+            f"publishes EXCHANGE_PUBLIC_ORIGIN={origin!r}"
+        )
+
+
+def test_the_broker_registry_names_the_impostor_identities_at_their_trust_levels() -> None:
+    """The registry names the impostor's paid and known identities, and not its unknown one.
+
+    Each named identity is registered at the impostor's own origin for it, at the
+    trust level the fault-path suites assume. The identity the registry leaves
+    out is the one the suite buys from as an Exchange the Broker never heard of.
+    """
+    entries = yaml.safe_load(_BROKER_REGISTRY.read_text())["exchanges"]
+    named = {
+        entry["domain"]: (entry["endpoint"], entry["trust_level"])
+        for entry in entries
+        if entry["domain"] in IMPOSTOR_IDENTITIES
+    }
+    want = {domain: (f"http://{domain}", trust) for domain, trust in IMPOSTOR_TRUST.items()}
+    assert named == want, (
+        f"the broker registry names the impostor as {named}, but the fault-path suites "
+        f"rely on {want} and on every other impostor identity being absent"
+    )
+
+
+def test_the_impostor_answers_as_every_identity_the_harness_names() -> None:
+    """The service answers as the harness's identities, and the network resolves each to it."""
+    identities = _compose_environment(IMPOSTOR_SERVICE).get("IMPOSTOR_IDENTITIES", "")
+    assert tuple(identities.split(",")) == IMPOSTOR_IDENTITIES, (
+        f"{IMPOSTOR_SERVICE!r} answers as {identities!r}, but the harness names "
+        f"{IMPOSTOR_IDENTITIES}"
+    )
+    service = yaml.safe_load(_COMPOSE.read_text())["services"][IMPOSTOR_SERVICE]
+    aliases = set(service["networks"]["default"]["aliases"]) | {IMPOSTOR_SERVICE}
+    hosts = {str(urlsplit(f"http://{identity}").hostname) for identity in IMPOSTOR_IDENTITIES}
+    assert hosts <= aliases, (
+        f"the compose network resolves {sorted(aliases)} to {IMPOSTOR_SERVICE!r}, "
+        f"but the harness reaches it as {sorted(hosts)}"
     )
 
 

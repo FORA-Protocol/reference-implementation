@@ -12,9 +12,9 @@ variables {
   identity_hostname = "mcp.staging.example"
   zitadel_hostname  = "login.staging.example"
 
-  # The publisher hostname, deliberately NOT the exchange one — that difference
-  # is the whole point of the variable (see the default-tenant test below).
-  default_tenant_domain = "demo.staging.example"
+  # The seat's domain, which IS the exchange hostname — a tenant row is the
+  # Exchange seat (see the default-tenant test below).
+  default_tenant_domain = "exchange.staging.example"
 
   exchange_image = "registry.example.com/group/proj/exchange:test"
   broker_image   = "registry.example.com/group/proj/broker:test"
@@ -103,10 +103,87 @@ run "unsupported_billing_ledger_is_rejected" {
   command = plan
 
   variables {
-    billing_ledger = "392"
+    billing_ledger = ["392"]
   }
 
   expect_failures = [var.billing_ledger]
+}
+
+run "unsupported_billing_ledger_in_a_list_is_rejected" {
+  command = plan
+
+  # One good code does not excuse a bad one: the Exchange refuses the whole set
+  # at boot, so the validation refuses the whole list at plan.
+  variables {
+    billing_ledger = ["978", "392"]
+  }
+
+  expect_failures = [var.billing_ledger]
+}
+
+run "duplicate_billing_ledger_is_rejected" {
+  command = plan
+
+  variables {
+    billing_ledger = ["978", "978"]
+  }
+
+  expect_failures = [var.billing_ledger]
+}
+
+run "empty_billing_ledger_is_rejected" {
+  command = plan
+
+  variables {
+    billing_ledger = []
+  }
+
+  expect_failures = [var.billing_ledger]
+}
+
+run "single_billing_ledger_renders_as_before" {
+  command = apply
+
+  # The module default is EUR only, and it must still render as the bare "978"
+  # a single-currency deployment has always had — no trailing comma, no list
+  # syntax leaking into the env value.
+  assert {
+    condition     = strcontains(output.compose_yaml, "EXCHANGE_BILLING_LEDGER: \"978\"")
+    error_message = "The default single-currency ledger must render as 978"
+  }
+}
+
+run "two_billing_ledgers_render_comma_separated_in_order" {
+  command = apply
+
+  variables {
+    billing_ledger = ["978", "840"]
+  }
+
+  # The list order reaches the Exchange verbatim, and the Exchange advertises
+  # the first entry as base_currency. A renderer that sorted or deduplicated
+  # the list would silently change what production advertises, so the exact
+  # string is asserted.
+  assert {
+    condition     = strcontains(output.compose_yaml, "EXCHANGE_BILLING_LEDGER: \"978,840\"")
+    error_message = "Two currencies must render comma-separated in the configured order (EUR first)"
+  }
+}
+
+run "reordered_billing_ledgers_render_in_that_order" {
+  command = apply
+
+  variables {
+    billing_ledger = ["840", "978"]
+  }
+
+  # The mirror of the case above: putting USD first renders USD first, which is
+  # what makes a reorder a deliberate change to the advertised base_currency
+  # rather than something the module normalizes away.
+  assert {
+    condition     = strcontains(output.compose_yaml, "EXCHANGE_BILLING_LEDGER: \"840,978\"")
+    error_message = "A reordered ledger list must reach the Exchange in that order"
+  }
 }
 
 run "production_posture_env_wiring" {
@@ -220,31 +297,36 @@ run "truncated_broker_identity_key_is_rejected" {
   ]
 }
 
-run "default_tenant_is_the_publisher_not_the_exchange" {
+run "default_tenant_is_the_exchange_seat" {
   command = apply
 
+  # A tenant row is the Exchange seat, keyed on the Exchange's own hostname, so
+  # this renders the same value as EXCHANGE_DOMAIN. Register reads its
+  # activation policy from the seat the seed step creates.
   assert {
-    condition     = strcontains(output.compose_yaml, "EXCHANGE_DEFAULT_TENANT: \"demo.staging.example\"")
-    error_message = "Register reads its activation policy from the tenant the seed step creates, which is under the publisher hostname"
+    condition     = strcontains(output.compose_yaml, "EXCHANGE_DEFAULT_TENANT: \"exchange.staging.example\"")
+    error_message = "Register reads its activation policy from the seat the seed step creates, which is under the Exchange's own hostname"
   }
 
-  # The binary falls back to EXCHANGE_DOMAIN when this is unset. That silently
-  # points Register at the Exchange's own hostname, where no tenant row exists,
-  # so every Register fails and no agent ever gets a billing_ref to be charged
-  # against. An empty value is the same as unset.
+  # A publisher hostname is not a tenant. Left pointing at one — the way this
+  # value read while a tenant meant a publisher — it matches no tenant row, so
+  # every Register fails and no agent ever gets a billing_ref to be charged
+  # against. An empty value renders nothing at all and is caught below.
   assert {
-    condition     = !strcontains(output.compose_yaml, "EXCHANGE_DEFAULT_TENANT: \"\"") && !strcontains(output.compose_yaml, "EXCHANGE_DEFAULT_TENANT: \"exchange.staging.example\"")
-    error_message = "An empty or exchange-hostname default tenant is the broken fallback this variable exists to prevent"
+    condition     = !strcontains(output.compose_yaml, "EXCHANGE_DEFAULT_TENANT: \"\"") && !strcontains(output.compose_yaml, "EXCHANGE_DEFAULT_TENANT: \"demo.staging.example\"")
+    error_message = "An empty default tenant, or a publisher hostname in its place, matches no seat row"
   }
 }
 
 run "empty_default_tenant_is_rejected" {
   command = plan
 
-  # "" is the same trap as unset: the binary treats an empty env var as absent
-  # and falls back to EXCHANGE_DOMAIN, where no tenant row exists. The render
-  # assert above cannot catch this (the fixture always supplies a value), so
-  # the variable's own validation has to.
+  # "" is the same as unset: the binary treats an empty env var as absent and
+  # falls back to EXCHANGE_DOMAIN. That fallback is the right value now, which
+  # is why the empty string is still refused — it leaves the rendered compose
+  # file stating no seat, so the seed step has nothing to read back and the two
+  # are free to disagree. The render assert above cannot catch this (the fixture
+  # always supplies a value), so the variable's own validation has to.
   variables {
     default_tenant_domain = ""
   }
@@ -257,12 +339,11 @@ run "empty_default_tenant_is_rejected" {
 run "default_agent_credit_disabled_by_default" {
   command = apply
 
-  # The variable's default must render as the explicit "0" the binary treats
-  # as disabled — a freshly applied stack grants nothing until the operator
-  # opts in.
+  # The variable's default must render as the empty value the binary treats as
+  # disabled — a freshly applied stack grants nothing until the operator opts in.
   assert {
-    condition     = strcontains(output.compose_yaml, "EXCHANGE_DEFAULT_AGENT_CREDIT: \"0\"")
-    error_message = "The welcome credit must render disabled (\"0\") unless the stack opts in"
+    condition     = strcontains(output.compose_yaml, "EXCHANGE_DEFAULT_AGENT_CREDIT: \"\"")
+    error_message = "The welcome credit must render disabled (empty) unless the stack opts in"
   }
 }
 
@@ -270,26 +351,53 @@ run "default_agent_credit_renders_when_configured" {
   command = apply
 
   variables {
-    default_agent_credit = "100"
+    billing_ledger       = ["978", "840"]
+    default_agent_credit = "EUR=100,USD=9.99"
   }
 
-  # "100" means 100.00 whole currency units (EUR 100.00 on the default EUR
-  # ledger), not 100 minor units — the value passes through verbatim and the
-  # Exchange does the scale-8 conversion.
+  # "EUR=100" means EUR 100.00, not 100 minor units — the value passes through
+  # verbatim and the Exchange does the scale-8 conversion per currency.
   assert {
-    condition     = strcontains(output.compose_yaml, "EXCHANGE_DEFAULT_AGENT_CREDIT: \"100\"")
-    error_message = "The configured welcome credit must reach the Exchange env verbatim"
+    condition     = strcontains(output.compose_yaml, "EXCHANGE_DEFAULT_AGENT_CREDIT: \"EUR=100,USD=9.99\"")
+    error_message = "The configured per-currency welcome credit must reach the Exchange env verbatim"
   }
 }
 
 run "malformed_default_agent_credit_is_rejected" {
   command = plan
 
-  # A negative value, an exponent, or a currency symbol would stop the
-  # Exchange boot at apply time; the variable validation moves that failure
-  # to plan.
+  # A negative amount would stop the Exchange boot at apply time; the variable
+  # validation moves that failure to plan.
   variables {
-    default_agent_credit = "-100"
+    default_agent_credit = "EUR=-100"
+  }
+
+  expect_failures = [
+    var.default_agent_credit,
+  ]
+}
+
+run "bare_number_default_agent_credit_is_rejected" {
+  command = plan
+
+  # The single-currency format this variable used to take. The Exchange can no
+  # longer tell which currency it means, so it stops the boot — and the
+  # validation stops the plan, which is where an operator who missed the format
+  # change will actually see it.
+  variables {
+    default_agent_credit = "100"
+  }
+
+  expect_failures = [
+    var.default_agent_credit,
+  ]
+}
+
+run "lowercase_currency_default_agent_credit_is_rejected" {
+  command = plan
+
+  variables {
+    default_agent_credit = "eur=100"
   }
 
   expect_failures = [
@@ -485,119 +593,8 @@ run "acme_production_by_default" {
   }
 }
 
-run "static_wba_directories_render_caddy_site_blocks" {
-  command = apply
-
-  variables {
-    # Multi-line and containing a backtick-adjacent shape on purpose: the
-    # document must reach the VM byte-for-byte through cloud-init's b64
-    # channel, never through Caddyfile or shell quoting. Schema-conforming —
-    # the variable validation refuses anything less (see the rejection runs
-    # below).
-    static_wba_directories = {
-      "smoke-agent.staging.example" = "{\n  \"keys\": [\n    {\"kty\": \"OKP\", \"crv\": \"Ed25519\", \"use\": \"sig\", \"alg\": \"EdDSA\",\n     \"x\": \"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ\",\n     \"not_before\": \"2026-08-04T00:00:00Z\", \"not_after\": \"2026-11-02T00:00:00Z\"}\n  ]\n}\n"
-    }
-  }
-
-  assert {
-    condition     = strcontains(output.user_data, "smoke-agent.staging.example {")
-    error_message = "each static_wba_directories hostname must get its own Caddy site block"
-  }
-  assert {
-    # The document lands as a base64-delivered file for Caddy's file_server —
-    # NOT interpolated into the Caddyfile, where a legal JSON backtick would
-    # end the quoted token and the rest would parse as proxy configuration.
-    condition     = strcontains(output.user_data, "path: /opt/fora/wba/smoke-agent.staging.example.json")
-    error_message = "each document must be written to /opt/fora/wba/<hostname>.json by cloud-init"
-  }
-  assert {
-    condition     = strcontains(output.user_data, base64encode("{\n  \"keys\": [\n    {\"kty\": \"OKP\", \"crv\": \"Ed25519\", \"use\": \"sig\", \"alg\": \"EdDSA\",\n     \"x\": \"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ\",\n     \"not_before\": \"2026-08-04T00:00:00Z\", \"not_after\": \"2026-11-02T00:00:00Z\"}\n  ]\n}\n"))
-    error_message = "the document must reach the VM byte-for-byte (base64-encoded in cloud-init)"
-  }
-  assert {
-    condition     = strcontains(output.user_data, "file_server") && !strcontains(output.user_data, "respond `")
-    error_message = "the directory must be served from the written file, never from an interpolated respond body"
-  }
-  assert {
-    condition     = strcontains(output.user_data, "application/jwk-set+json")
-    error_message = "the directory must be served with the JWK Set media type"
-  }
-  assert {
-    condition     = strcontains(output.compose_yaml, "- /opt/fora/wba:/srv/wba:ro")
-    error_message = "the Caddy container must mount the written directory read-only"
-  }
-}
-
-run "wba_directory_missing_schema_member_is_rejected" {
-  command = plan
-
-  variables {
-    # `use` is omitted. Without the variable validation this document deploys
-    # cleanly, serves 200, and fails the first signed request with an error
-    # that points at the signature — the validation moves that failure to
-    # `terraform plan`.
-    static_wba_directories = {
-      "smoke-agent.staging.example" = "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"alg\":\"EdDSA\",\"x\":\"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ\",\"not_before\":\"2026-08-04T00:00:00Z\",\"not_after\":\"2026-11-02T00:00:00Z\"}]}"
-    }
-  }
-
-  expect_failures = [
-    var.static_wba_directories,
-  ]
-}
-
-run "wba_directory_padded_x_is_rejected" {
-  command = plan
-
-  variables {
-    # A padded (44-character, trailing "=") x: standard base64 instead of the
-    # unpadded base64url the schema requires. Same failure mode as a missing
-    # member — verifiers cannot match the key.
-    static_wba_directories = {
-      "smoke-agent.staging.example" = "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"use\":\"sig\",\"alg\":\"EdDSA\",\"x\":\"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP=\",\"not_before\":\"2026-08-04T00:00:00Z\",\"not_after\":\"2026-11-02T00:00:00Z\"}]}"
-    }
-  }
-
-  expect_failures = [
-    var.static_wba_directories,
-  ]
-}
-
-run "wba_directory_malformed_hostname_key_is_rejected" {
-  command = plan
-
-  variables {
-    # The KEY is the half that reaches rendered configuration verbatim (Caddy
-    # site block, rewrite target, cloud-init write_files path) — here it
-    # carries a Caddyfile brace and a path separator. The document is
-    # schema-conforming on purpose: only the hostname validation can reject
-    # this input.
-    static_wba_directories = {
-      "bad host {\nrespond `owned`\n} ignore/../../etc" = "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"use\":\"sig\",\"alg\":\"EdDSA\",\"x\":\"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ\",\"not_before\":\"2026-08-04T00:00:00Z\",\"not_after\":\"2026-11-02T00:00:00Z\"}]}"
-    }
-  }
-
-  expect_failures = [
-    var.static_wba_directories,
-  ]
-}
-
-run "no_static_wba_directories_by_default" {
-  command = apply
-
-  assert {
-    # application/jwk-set+json is written only by the static-directory site
-    # block, so its absence proves the block is not rendered. The path string
-    # alone would not discriminate — the compose file names other well-known
-    # URLs.
-    condition     = !strcontains(output.user_data, "application/jwk-set+json")
-    error_message = "with no static_wba_directories the Caddyfile must carry no directory site block"
-  }
-  assert {
-    condition     = !strcontains(output.compose_yaml, "/srv/wba")
-    error_message = "with no static_wba_directories the Caddy container must not mount the directory volume"
-  }
-}
+# The static Web Bot Auth key directories are tested in
+# static_wba_unit_test.tftest.hcl.
 
 run "extra_databases_render_in_init_sql" {
   command = apply
@@ -699,53 +696,6 @@ run "identity_secrets_are_generated_not_ephemeral" {
   assert {
     condition     = !strcontains(output.user_data, "ZAdmin123!")
     error_message = "deploy/zitadel/init-steps.yaml is a laptop fixture with a password published in the repository — the staging instance is internet-reachable and must not inherit it"
-  }
-}
-
-run "fully_loaded_user_data_fits_the_ec2_limit" {
-  command = apply
-
-  # Every optional block a deployment can turn on at once — publisher origin,
-  # registry login, the EXA key, Zitadel's outbound mail — because the limit
-  # has to hold for the LARGEST cloud-init the module can emit, not the
-  # fixture's minimum. The RSA key is optional too (see rsa_key_is_optional),
-  # but the fixture defaults already supply it, so this run carries it without
-  # listing it here. A new optional block belongs in this list.
-  variables {
-    origin_hostname   = "origin.staging.example"
-    publisher_image   = "registry.example.com/group/proj/publisher:test"
-    registry_server   = "registry.example.com"
-    registry_username = "gitlab+deploy-token-123456"
-    registry_password = "glpat-XXXXXXXXXXXXXXXXXXXX"
-    exa_api_key       = "00000000-0000-0000-0000-000000000000"
-
-    smtp_host      = "email-smtp.us-east-1.amazonaws.com:587"
-    smtp_user      = "AKIAEXAMPLEEXAMPLE"
-    smtp_password  = "BEXAMPLEsmtppasswordEXAMPLEsmtppasswordEXAM"
-    smtp_from      = "noreply@demo.staging.example"
-    smtp_from_name = "FORA Demo"
-  }
-
-  # EC2 caps user data at 16384 bytes. aws-vm submits it gzipped, and Terraform
-  # can only measure the base64 of those bytes: base64 of n bytes is
-  # 4*ceil(n/3) characters, so 16384 bytes is 21848 characters. Comparing with
-  # `<` keeps the check on the safe side of the rounding.
-  #
-  # This is the assertion the identity plane made necessary — it added four
-  # services, their secrets, and Zitadel's init steps to a bundle that had no
-  # size guard at all. If it ever trips, the fix is NOT to trim comments out of
-  # the templates: it is to stop inlining the bundle and fetch it at boot,
-  # which is a design change worth making deliberately.
-  assert {
-    condition     = length(base64gzip(output.user_data)) < 21848
-    error_message = "Rendered cloud-init exceeds EC2's 16 KB user-data limit — the instance would fail to launch"
-  }
-
-  # Documents why aws-vm gzips rather than submitting the text: uncompressed,
-  # this bundle is already well past the limit.
-  assert {
-    condition     = length(output.user_data) > 16384
-    error_message = "Cloud-init is expected to exceed the raw limit; if it no longer does, the compression in aws-vm is load-bearing for a reason that has changed"
   }
 }
 

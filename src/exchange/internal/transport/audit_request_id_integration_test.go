@@ -15,6 +15,7 @@ import (
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 
 	rwtestutil "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/testutil"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/signing"
 )
@@ -70,6 +71,11 @@ func TestExecuteTransaction_AuditLogCarriesRequestID(t *testing.T) {
 	if got := line["outcome"]; got != "VALIDATED" {
 		t.Fatalf("execute_transaction audit line outcome = %v, want VALIDATED", got)
 	}
+	// An accepted attempt is the per-call audit trail, at INFO; refusals are
+	// WARN, so an operator running at WARN keeps them and drops this line.
+	if got := line["level"]; got != "INFO" {
+		t.Errorf("execute_transaction audit line level = %v, want INFO", got)
+	}
 }
 
 // auditHarness is a minimal transport-layer fixture whose middleware AND
@@ -80,12 +86,12 @@ func TestExecuteTransaction_AuditLogCarriesRequestID(t *testing.T) {
 // startExchangeServer / signing-transport plumbing so the request still
 // traverses the production middleware chain.
 type auditHarness struct {
-	ctx          context.Context
-	client       foraconnect.ExchangeServiceClient
-	catalog      foraconnect.CatalogServiceClient
-	tenantID     string
-	tenantDomain string
-	callerPriv   ed25519.PrivateKey
+	ctx        context.Context
+	client     foraconnect.ExchangeServiceClient
+	catalog    foraconnect.CatalogServiceClient
+	tenantID   string
+	siteDomain string
+	callerPriv ed25519.PrivateKey
 }
 
 func newAuditHarness(t *testing.T, logger *slog.Logger) *auditHarness {
@@ -96,8 +102,8 @@ func newAuditHarness(t *testing.T, logger *slog.Logger) *auditHarness {
 	// Sign with the seeded agent's key so the verified key matches the pinned
 	// agents-row key for callerID (identity↔key binding).
 	callerPub, callerPriv := fx.agentPub, fx.agentPriv
-	registry := newAllowAllRegistry()
-	registry.put(callerID, callerPub)
+	registry := exchangetest.NewRegistry()
+	registry.Put(callerID, callerPub)
 	manifests := newAllowAllManifestCache(callerID)
 
 	// Seed under the billing_ref the caller will register under: the
@@ -116,7 +122,7 @@ func newAuditHarness(t *testing.T, logger *slog.Logger) *auditHarness {
 		pool: fx.pool, queries: fx.queries, registry: registry, manifests: manifests,
 		bill: bill, signer: offerSigner, keystore: fx.keystore, logger: logger,
 		httpsigKeys:         map[string]ed25519.PublicKey{rwtestutil.MustThumbprintPriv(callerPriv): callerPub},
-		defaultTenantDomain: fx.tenantDomain,
+		defaultTenantDomain: harnessExchangeDomain,
 		billingRefGen:       func() string { return defaultCallerBillingRef },
 	})
 	if err := srv.catalogSvc.Bootstrap(fx.ctx); err != nil {
@@ -129,12 +135,12 @@ func newAuditHarness(t *testing.T, logger *slog.Logger) *auditHarness {
 	// account, through the same public Register RPC production uses.
 	registerDefaultCaller(t, fx.ctx, client)
 	return &auditHarness{
-		ctx:          fx.ctx,
-		client:       client,
-		catalog:      foraconnect.NewCatalogServiceClient(signingClient, srv.server.URL, connect.WithGRPC()),
-		tenantID:     fx.tenantID,
-		tenantDomain: fx.tenantDomain,
-		callerPriv:   callerPriv,
+		ctx:        fx.ctx,
+		client:     client,
+		catalog:    foraconnect.NewCatalogServiceClient(signingClient, srv.server.URL, connect.WithGRPC()),
+		tenantID:   fx.tenantID,
+		siteDomain: fx.siteDomain,
+		callerPriv: callerPriv,
 	}
 }
 
@@ -145,13 +151,13 @@ func newAuditHarness(t *testing.T, logger *slog.Logger) *auditHarness {
 func (h *auditHarness) seedAndDiscover(t *testing.T) *forav1.Offer {
 	t.Helper()
 	if _, err := h.catalog.PushResources(h.ctx, connect.NewRequest(newPushRequest(h.tenantID, "agent-test", []*forav1.ResourceEntry{{
-		Domain: h.tenantDomain,
+		Domain: h.siteDomain,
 		Path:   "/articles/hello",
 		Terms:  []*forav1.LicenseTerm{seedPricedTerm()},
 	}}))); err != nil {
 		t.Fatalf("seed push: %v", err)
 	}
-	resp, err := h.client.DiscoverResources(h.ctx, connect.NewRequest(newResourceQuery(newRequester("agent-test", "agent.example"), []string{"https://" + h.tenantDomain + "/articles/hello"})))
+	resp, err := h.client.DiscoverResources(h.ctx, connect.NewRequest(newResourceQuery(newRequester("agent-test", "agent.example"), []string{"https://" + h.siteDomain + "/articles/hello"})))
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}

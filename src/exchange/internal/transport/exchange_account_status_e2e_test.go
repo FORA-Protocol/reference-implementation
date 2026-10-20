@@ -77,6 +77,9 @@ func TestExchangeGetAccountStatus_RegisteredInactive(t *testing.T) {
 	if resp.Msg.GetActive() {
 		t.Fatal("active = true, want false (registered under activation default OFF)")
 	}
+	// Switching an account off does not change what it holds, so an inactive
+	// account still reports its balance.
+	assertOnlyBalance(t, statusBalances(t, h.ctx, a.client), "0")
 }
 
 // TestExchangeGetAccountStatus_NeverRegistered proves an identity that has a

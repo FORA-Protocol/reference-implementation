@@ -3,6 +3,7 @@
 package lifecycle_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -145,7 +146,7 @@ func TestScheduler_PrunesRetiredKeysAfterTheirWindowCloses(t *testing.T) {
 	if keys[0].Ref.Thumbprint == orig.Ref.Thumbprint {
 		t.Error("prune kept the retired original instead of the fresh key")
 	}
-	if _, err := store.Signer(ctx, orig.Ref); err == nil {
-		t.Error("the pruned key can still sign; its material was not destroyed")
+	if _, err := store.Signer(ctx, orig.Ref); !errors.Is(err, keystore.ErrNotFound) {
+		t.Errorf("signer for the pruned key = %v, want ErrNotFound; its material was not destroyed", err)
 	}
 }

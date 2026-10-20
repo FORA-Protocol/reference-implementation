@@ -74,12 +74,11 @@ func resourceBlocks(res *mcpsdk.CallToolResult) []*mcpsdk.ResourceContents {
 	return out
 }
 
-// callToolRaw calls a tool and returns the whole result, so a test can assert on
-// the content blocks rather than only the structured projection.
-func callToolRaw(
-	t *testing.T, session *mcpsdk.ClientSession, name string, args map[string]any,
-) *mcpsdk.CallToolResult {
+// callExecuteRaw calls fora_execute and returns the whole result, so a test can
+// assert on the content blocks rather than only the structured projection.
+func callExecuteRaw(t *testing.T, session *mcpsdk.ClientSession, args map[string]any) *mcpsdk.CallToolResult {
 	t.Helper()
+	const name = "fora_execute"
 	res, err := session.CallTool(t.Context(), &mcpsdk.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
 		t.Fatalf("call %s: %v", name, err)
@@ -100,15 +99,15 @@ func TestExecute_DeliversContentThroughAnEnforcingEdge(t *testing.T) {
 
 	edge := testutil.NewEdgeDouble(t, time.Now().Unix())
 	edge.SetBody([]byte("<html>the licensed article</html>"), "text/html; charset=utf-8")
-	f.broker.relayResp = &forav1.TransactionResponse{
-		Ver:               helpers.ProtocolVersion,
-		AgentIdentityHash: a.Thumbprint,
-		Items:             []*forav1.TransactionResultItem{deliveredItem("offer-1", edge.URLFor(a.Thumbprint))},
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
+		Ver:       helpers.ProtocolVersion,
+		Exchanges: []*forav1.ExchangeOutcome{{AgentIdentityHash: a.Thumbprint}},
+		Items:     []*forav1.TransactionResultItem{deliveredItem("offer-1", f.exchange.SignDelivery(t, edge.URLFor(a.Thumbprint)))},
 	}
 
-	res := callToolRaw(t, f.connect(t, a.Token), "fora_execute", map[string]any{
+	res := callExecuteRaw(t, f.connect(t, a.Token), map[string]any{
 		"offers": []map[string]any{
-			offerWithCanonicalURL("offer-1", "exchange.example", canonicalArticle),
+			offerWithCanonicalURL("offer-1", f.exchange.Domain(t), canonicalArticle),
 		},
 	})
 
@@ -139,12 +138,16 @@ func TestExecute_DeliversContentThroughAnEnforcingEdge(t *testing.T) {
 // are indistinguishable, and a fetcher wired with a construction-time key would
 // pass every other test in this file.
 //
-// The relay returns a URL bound to agent A while agent B makes the call. B's
-// custodied key is what the fetch presents, so a correct edge refuses it. That
+// The relay returns a URL bound to agent A while agent B makes the call. That
 // refusal IS the property ADR-023 claims: a leaked delivery URL is useless even
-// to another registry user. The wiring it depends on is the one the app's own
-// comment calls the single place the acceptance key and the fetch key could be
-// made to disagree.
+// to another registry user. The protocol leaves verifying a delivery URL to the
+// edge that serves it, so the purchase answer is returned as issued and the
+// service fetches presenting the CALLER's key. The enforcing edge double then
+// refuses the fetch with keyid_mismatch (the proof's keyid is the caller's
+// thumbprint, not the agent_id the URL names), and the call reports that as a
+// delivery failure rather than failing, because the purchase has already been
+// paid for. A service resolving a construction-time key, or agent A's, would
+// present the bound key and the edge would serve the content.
 func TestExecute_FetchesAsTheCallingAgent(t *testing.T) {
 	f := newFixture(t)
 	bound := f.provision(t, "dev-one")
@@ -154,32 +157,30 @@ func TestExecute_FetchesAsTheCallingAgent(t *testing.T) {
 	}
 
 	edge := testutil.NewEdgeDouble(t, time.Now().Unix())
-	f.broker.relayResp = &forav1.TransactionResponse{
-		Ver:   helpers.ProtocolVersion,
-		Items: []*forav1.TransactionResultItem{deliveredItem("offer-1", edge.URLFor(bound.Thumbprint))},
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
+		Ver: helpers.ProtocolVersion,
+		Items: []*forav1.TransactionResultItem{
+			deliveredItem("offer-1", f.exchange.SignDelivery(t, edge.URLFor(bound.Thumbprint))),
+		},
 	}
 
-	res := callToolRaw(t, f.connect(t, caller.Token), "fora_execute", map[string]any{
-		"offers": []map[string]any{signedOffer("offer-1", "exchange.example")},
+	res := callExecuteRaw(t, f.connect(t, caller.Token), map[string]any{
+		"offers": []map[string]any{signedOffer("offer-1", f.exchange.Domain(t))},
 	})
-
-	if got := len(resourceBlocks(res)); got != 0 {
-		t.Errorf("got %d embedded resources, want none — the fetch must not have succeeded", got)
-	}
-	// Decoded off the SAME result, not a second call: two invocations would assert
-	// the blocks of one transaction against the structured view of another.
 	var out deliveryResult
 	decodeStructured(t, res, &out)
+
+	if got := len(resourceBlocks(res)); got != 0 {
+		t.Errorf("got %d embedded resources, want none: a URL bound to another agent is never served", got)
+	}
 	if len(out.DeliveryFailures) != 1 {
 		t.Fatalf("got %d delivery failures, want 1: %+v", len(out.DeliveryFailures), out.DeliveryFailures)
 	}
 	if got := out.DeliveryFailures[0].Reason; got != "keyid_mismatch" {
-		t.Errorf("reason = %q, want keyid_mismatch — the edge saw a key that was not the bound one", got)
+		t.Errorf("reason = %q, want the edge's keyid_mismatch: the fetch must sign with the caller's key", got)
 	}
-	// The request DID leave and the edge refused it. Without this the test would
-	// also pass if the service had declined to fetch for some reason of its own.
 	if hits := edge.Hits(); hits != 1 {
-		t.Errorf("edge saw %d requests, want exactly 1", hits)
+		t.Errorf("edge saw %d requests, want exactly the one refused fetch", hits)
 	}
 }
 
@@ -191,14 +192,14 @@ func TestExecute_KeepsTheStructuredTextBlock(t *testing.T) {
 	a := f.provision(t, "dev-one")
 
 	edge := testutil.NewEdgeDouble(t, time.Now().Unix())
-	endpoint := edge.URLFor(a.Thumbprint)
-	f.broker.relayResp = &forav1.TransactionResponse{
+	endpoint := f.exchange.SignDelivery(t, edge.URLFor(a.Thumbprint))
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
 		Ver:   helpers.ProtocolVersion,
 		Items: []*forav1.TransactionResultItem{deliveredItem("offer-1", endpoint)},
 	}
 
-	res := callToolRaw(t, f.connect(t, a.Token), "fora_execute", map[string]any{
-		"offers": []map[string]any{signedOffer("offer-1", "exchange.example")},
+	res := callExecuteRaw(t, f.connect(t, a.Token), map[string]any{
+		"offers": []map[string]any{signedOffer("offer-1", f.exchange.Domain(t))},
 	})
 
 	if len(res.Content) == 0 {
@@ -235,19 +236,19 @@ func TestExecute_PartialDeliveryFailureStillSucceeds(t *testing.T) {
 	broken := testutil.NewEdgeDouble(t, time.Now().Unix())
 	broken.SetRefusal(http.StatusForbidden,
 		`{"error":"Agent binding check failed","reason":"pop_expired"}`)
-	brokenURL := broken.URLFor(a.Thumbprint)
-	f.broker.relayResp = &forav1.TransactionResponse{
+	brokenURL := f.exchange.SignDelivery(t, broken.URLFor(a.Thumbprint))
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
 		Ver: helpers.ProtocolVersion,
 		Items: []*forav1.TransactionResultItem{
-			deliveredItem("offer-1", edge.URLFor(a.Thumbprint)),
+			deliveredItem("offer-1", f.exchange.SignDelivery(t, edge.URLFor(a.Thumbprint))),
 			deliveredItem("offer-2", brokenURL),
 		},
 	}
 
-	res := callToolRaw(t, f.connect(t, a.Token), "fora_execute", map[string]any{
+	res := callExecuteRaw(t, f.connect(t, a.Token), map[string]any{
 		"offers": []map[string]any{
-			signedOffer("offer-1", "exchange.example"),
-			signedOffer("offer-2", "exchange.example"),
+			signedOffer("offer-1", f.exchange.Domain(t)),
+			signedOffer("offer-2", f.exchange.Domain(t)),
 		},
 	})
 	// ONE call, both views. Two invocations would drive two purchases and assert
@@ -291,13 +292,13 @@ func TestExecute_AllDeliveriesFailingStillSucceeds(t *testing.T) {
 
 	broken := testutil.NewEdgeDouble(t, time.Now().Unix())
 	broken.SetRefusal(http.StatusInternalServerError, "upstream is down")
-	f.broker.relayResp = &forav1.TransactionResponse{
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
 		Ver:   helpers.ProtocolVersion,
-		Items: []*forav1.TransactionResultItem{deliveredItem("offer-1", broken.URLFor(a.Thumbprint))},
+		Items: []*forav1.TransactionResultItem{deliveredItem("offer-1", f.exchange.SignDelivery(t, broken.URLFor(a.Thumbprint)))},
 	}
 
 	out := callTool[deliveryResult](t, f.connect(t, a.Token), "fora_execute", map[string]any{
-		"offers": []map[string]any{signedOffer("offer-1", "exchange.example")},
+		"offers": []map[string]any{signedOffer("offer-1", f.exchange.Domain(t))},
 	})
 
 	if len(out.Items) != 1 {
@@ -327,18 +328,18 @@ func TestExecute_RefusedItemIsNeverFetched(t *testing.T) {
 
 	edge := testutil.NewEdgeDouble(t, time.Now().Unix())
 	denial := forav1.DenialReason_DENIAL_REASON_OFFER_EXPIRED
-	f.broker.relayResp = &forav1.TransactionResponse{
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
 		Ver: helpers.ProtocolVersion,
 		Items: []*forav1.TransactionResultItem{
 			{OfferId: "offer-1", DenialReason: &denial},
-			deliveredItem("offer-2", edge.URLFor(a.Thumbprint)),
+			deliveredItem("offer-2", f.exchange.SignDelivery(t, edge.URLFor(a.Thumbprint))),
 		},
 	}
 
-	res := callToolRaw(t, f.connect(t, a.Token), "fora_execute", map[string]any{
+	res := callExecuteRaw(t, f.connect(t, a.Token), map[string]any{
 		"offers": []map[string]any{
-			signedOffer("offer-1", "exchange.example"),
-			signedOffer("offer-2", "exchange.example"),
+			signedOffer("offer-1", f.exchange.Domain(t)),
+			signedOffer("offer-2", f.exchange.Domain(t)),
 		},
 	})
 	var out deliveryResult
@@ -363,13 +364,13 @@ func TestExecute_FallsBackToTheStrippedDeliveryURL(t *testing.T) {
 	a := f.provision(t, "dev-one")
 
 	edge := testutil.NewEdgeDouble(t, time.Now().Unix())
-	f.broker.relayResp = &forav1.TransactionResponse{
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
 		Ver:   helpers.ProtocolVersion,
-		Items: []*forav1.TransactionResultItem{deliveredItem("offer-1", edge.URLFor(a.Thumbprint))},
+		Items: []*forav1.TransactionResultItem{deliveredItem("offer-1", f.exchange.SignDelivery(t, edge.URLFor(a.Thumbprint)))},
 	}
 
-	res := callToolRaw(t, f.connect(t, a.Token), "fora_execute", map[string]any{
-		"offers": []map[string]any{signedOffer("offer-1", "exchange.example")},
+	res := callExecuteRaw(t, f.connect(t, a.Token), map[string]any{
+		"offers": []map[string]any{signedOffer("offer-1", f.exchange.Domain(t))},
 	})
 
 	resources := resourceBlocks(res)
@@ -399,8 +400,8 @@ func TestExecute_BudgetExhaustedIsReportedPerItem(t *testing.T) {
 
 	edge := testutil.NewEdgeDouble(t, time.Now().Unix())
 	edge.SetBody([]byte("tiny"), "text/plain")
-	endpoint := edge.URLFor(a.Thumbprint)
-	f.broker.relayResp = &forav1.TransactionResponse{
+	endpoint := f.exchange.SignDelivery(t, edge.URLFor(a.Thumbprint))
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
 		Ver: helpers.ProtocolVersion,
 		Items: []*forav1.TransactionResultItem{
 			deliveredItem("offer-1", endpoint),
@@ -408,10 +409,10 @@ func TestExecute_BudgetExhaustedIsReportedPerItem(t *testing.T) {
 		},
 	}
 
-	res := callToolRaw(t, f.connect(t, a.Token), "fora_execute", map[string]any{
+	res := callExecuteRaw(t, f.connect(t, a.Token), map[string]any{
 		"offers": []map[string]any{
-			signedOffer("offer-1", "exchange.example"),
-			signedOffer("offer-2", "exchange.example"),
+			signedOffer("offer-1", f.exchange.Domain(t)),
+			signedOffer("offer-2", f.exchange.Domain(t)),
 		},
 	})
 
@@ -458,8 +459,8 @@ func TestExecute_CallDeadlineIsReportedPerItem(t *testing.T) {
 		<-release
 		w.WriteHeader(http.StatusOK)
 	})
-	endpoint := edge.URLFor(a.Thumbprint)
-	f.broker.relayResp = &forav1.TransactionResponse{
+	endpoint := f.exchange.SignDelivery(t, edge.URLFor(a.Thumbprint))
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
 		Ver: helpers.ProtocolVersion,
 		Items: []*forav1.TransactionResultItem{
 			deliveredItem("offer-1", endpoint),
@@ -467,10 +468,10 @@ func TestExecute_CallDeadlineIsReportedPerItem(t *testing.T) {
 		},
 	}
 
-	res := callToolRaw(t, f.connect(t, a.Token), "fora_execute", map[string]any{
+	res := callExecuteRaw(t, f.connect(t, a.Token), map[string]any{
 		"offers": []map[string]any{
-			signedOffer("offer-1", "exchange.example"),
-			signedOffer("offer-2", "exchange.example"),
+			signedOffer("offer-1", f.exchange.Domain(t)),
+			signedOffer("offer-2", f.exchange.Domain(t)),
 		},
 	})
 
@@ -505,15 +506,15 @@ func TestExecute_DeliveryFailureMessageCarriesNoCredential(t *testing.T) {
 	// A closed listener, so the fetch fails at dial and the cause is the *url.Error
 	// that carries the URL — the exact path that used to leak.
 	edge := testutil.NewEdgeDouble(t, time.Now().Unix())
-	endpoint := edge.URLFor(a.Thumbprint)
+	endpoint := f.exchange.SignDelivery(t, edge.URLFor(a.Thumbprint))
 	edge.Close()
-	f.broker.relayResp = &forav1.TransactionResponse{
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
 		Ver:   helpers.ProtocolVersion,
 		Items: []*forav1.TransactionResultItem{deliveredItem("offer-1", endpoint)},
 	}
 
-	res := callToolRaw(t, f.connect(t, a.Token), "fora_execute", map[string]any{
-		"offers": []map[string]any{signedOffer("offer-1", "exchange.example")},
+	res := callExecuteRaw(t, f.connect(t, a.Token), map[string]any{
+		"offers": []map[string]any{signedOffer("offer-1", f.exchange.Domain(t))},
 	})
 
 	var out deliveryResult

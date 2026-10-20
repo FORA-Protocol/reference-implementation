@@ -116,6 +116,12 @@ variable "bot_ua_deny_json" {
   default     = null
 }
 
+variable "licensed_paths_json" {
+  description = "Optional JSON array of the path prefixes the publisher licenses. Unset = the whole site."
+  type        = string
+  default     = null
+}
+
 variable "rsl_body" {
   description = "Optional RSL document body."
   type        = string

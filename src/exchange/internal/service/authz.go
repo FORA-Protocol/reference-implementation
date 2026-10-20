@@ -1,9 +1,9 @@
 // Caller-identity authorization for the Exchange service.
 //
-// Authentication runs at the transport boundary via the httpsig middleware:
-// every /fora.* request must carry a valid RFC 9421 signature whose keyID
-// resolves against the configured key store. The middleware stashes the
-// verified principal under httpsig.FromContext.
+// Authentication runs at the transport boundary via the SDK's connectserver
+// verify gate: every /fora.* request must carry a valid Web Bot Auth request
+// signature whose keyID resolves in the directory its Signature-Agent member
+// names. The gate stashes the verified principal under helpers.FromContext.
 //
 // Authorization is what this file adds: the keyID alone is not enough — the
 // service must check that the keyID has the right to act on the specific
@@ -97,21 +97,50 @@ func (s *ExchangeService) resolveCaller(ctx context.Context) (Caller, error) {
 // agent record and classifying the caller type. It is the single source of
 // truth for caller classification on the single-sig caller-resolution path
 // (resolveCaller). Callers must guarantee s.agents != nil.
+func (s *ExchangeService) lookupCaller(
+	ctx context.Context,
+	v *helpers.VerifiedRequest,
+) (Caller, error) {
+	callerHost, agentRecord, err := s.callerAgentRecord(ctx, v)
+	if err != nil {
+		return Caller{}, err
+	}
+	caller := Caller{
+		KeyID:     v.KeyID,
+		PublicKey: v.PublicKey,
+	}
+	switch agentRecord.RequesterType {
+	case "BROKER":
+		caller.Kind = CallerBroker
+	default:
+		caller.Kind = CallerAgent
+		caller.AgentID = callerHost
+	}
+	return caller, nil
+}
+
+// callerAgentRecord turns a verified signature into the caller's canonical
+// directory host and the fora.agents row that host is registered under. It is
+// the shared half of caller resolution: lookupCaller adds the requester_type
+// classification on top, and the execute path (resolveAgent) uses the returned
+// row directly as the request's one key snapshot. Callers must guarantee
+// s.agents != nil.
 //
-// The lookup runs through resolveAgentLazily, so an unknown keyID triggers the
-// ADR-009 D2 pull -> verify -> persist registration before classification.
+// The lookup runs through resolveAgentLazily, so an unknown directory triggers
+// the ADR-009 D2 pull -> verify -> persist registration before anything keys on
+// it.
 //
 // The signed Signature-Agent directory is normalized to its host before anything
 // keys on it, so one host is one agent no matter which scheme the caller spelled
 // (internal/agentid). Normalizing HERE, at the one place a verified signature
 // becomes a caller identity, is what keeps the stored row, the re-pin, and the
-// returned AgentID from ever holding three spellings of the same agent. A value
+// returned host from ever holding three spellings of the same agent. A value
 // that names no host cannot be an identity and cannot be a fetch target, so it is
 // refused as an authentication failure rather than carried further.
-func (s *ExchangeService) lookupCaller(
+func (s *ExchangeService) callerAgentRecord(
 	ctx context.Context,
 	v *helpers.VerifiedRequest,
-) (Caller, error) {
+) (string, repo.Agent, error) {
 	// callerHost, not "directory". After FromDirectory this is the BARE canonical
 	// host ("a.example"), while "directory" in this codebase means the full origin
 	// the Signature-Agent header carries ("https://a.example") — what
@@ -127,12 +156,12 @@ func (s *ExchangeService) lookupCaller(
 		// different kinds of value under it.
 		reqctx.FromContext(ctx).WarnContext(ctx, "caller directory is not a usable identity",
 			"raw_signature_agent", v.SignatureAgent, "err", err)
-		return Caller{}, exchange.Newf(exchange.KindUnauthenticated,
+		return "", repo.Agent{}, exchange.Newf(exchange.KindUnauthenticated,
 			"caller directory %q does not name a host", v.SignatureAgent)
 	}
 	agentRecord, err := s.resolveAgentLazily(ctx, callerHost)
 	if err != nil {
-		return Caller{}, err
+		return "", repo.Agent{}, err
 	}
 
 	// Bind the verified key to the claimed identity. The RFC 9421 keyid is only
@@ -154,23 +183,11 @@ func (s *ExchangeService) lookupCaller(
 	if !bytes.Equal(agentRecord.PublicKey, v.PublicKey) {
 		agentRecord = s.repinAndReload(ctx, callerHost, agentRecord)
 		if !bytes.Equal(agentRecord.PublicKey, v.PublicKey) {
-			return Caller{}, exchange.Newf(exchange.KindUnauthenticated,
+			return "", repo.Agent{}, exchange.Newf(exchange.KindUnauthenticated,
 				"signing key is not published by caller directory %q", callerHost)
 		}
 	}
-
-	caller := Caller{
-		KeyID:     v.KeyID,
-		PublicKey: v.PublicKey,
-	}
-	switch agentRecord.RequesterType {
-	case "BROKER":
-		caller.Kind = CallerBroker
-	default:
-		caller.Kind = CallerAgent
-		caller.AgentID = callerHost
-	}
-	return caller, nil
+	return callerHost, agentRecord, nil
 }
 
 // repinAndReload attempts a bounded, debounced re-fetch + re-pin of directory's
@@ -248,9 +265,10 @@ func (s *ExchangeService) resolveAgentLazily(ctx context.Context, callerHost str
 // agentreg.IsCallerFault — the key directory is absent (404), does not anchor the
 // keyID, is malformed, or publishes no currently-valid key) resolves to
 // Unauthenticated: the keyID is simply not a registrable identity. A genuinely
-// transient transport/upstream failure (ErrFetch: connection refused, non-2xx
-// other than 404) is Unavailable so the caller can retry once the directory host
-// is reachable.
+// transient failure to read the directory (connection refused, a timeout, a
+// non-2xx other than 404 or a redirect, or a body that is not a key directory
+// at all: not JSON, JSON of another shape, or over 1 MiB) is Unavailable so the
+// caller can retry once the directory host is behaving.
 //
 // The message names the Web Bot Auth key directory because that is the only
 // document this path fetches. Naming fora.json instead told an operator to

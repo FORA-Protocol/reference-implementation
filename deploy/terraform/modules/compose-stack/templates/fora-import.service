@@ -1,0 +1,15 @@
+[Unit]
+Description=FORA catalog importer: import and refresh publisher catalogs from their sitemaps
+After=docker.service
+Requires=docker.service
+# The compose bundle is what the run needs. Before it is installed (a host
+# between its first boot and its first rollout) the run is skipped cleanly
+# instead of failing.
+ConditionPathExists=/opt/fora/docker-compose.yml
+
+[Service]
+Type=oneshot
+# The same command an operator runs by hand for a manual rerun. --rm so a
+# finished run leaves no container behind; the importer's own advisory lock is
+# what keeps an overlapping manual run from doing anything twice.
+ExecStart=/usr/bin/docker compose -p fora -f /opt/fora/docker-compose.yml --profile importer run --rm importer

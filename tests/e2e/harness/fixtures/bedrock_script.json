@@ -1,0 +1,45 @@
+{
+  "calm background music, no vocals, for my personal YouTube travel vlog": {
+    "text": {"include": ["mood:calm", "use:vlog"], "exclude": ["vocals:true"]}
+  },
+  "For my personal YouTube travel vlog, find calm music without vocals": {
+    "text": {"include": ["mood:calm", "use:vlog"], "exclude": ["vocals:true"]}
+  },
+  "I need calm music for a travel vlog, with no singing": {
+    "text": {"include": ["mood:calm", "use:vlog"], "exclude": ["vocals:true"]}
+  },
+  "music with no vocals": {
+    "text": {"include": [], "exclude": ["vocals:true"]}
+  },
+  "music at 100-120 BPM": {
+    "text": {"include": [], "exclude": [], "min_bpm": 100, "max_bpm": 120}
+  },
+  "epic soundtrack for a documentary trailer": {
+    "text": {"include": ["mood:epic", "genre:soundtrack", "use:documentary", "use:trailer"], "exclude": []}
+  },
+  "fast electronic track for a podcast intro": {
+    "text": {"include": ["tempo:fast", "genre:electronica", "use:podcast"], "exclude": []}
+  },
+  "calm music at 100-120 BPM, lasting 60-90 seconds": {
+    "text": {
+      "include": ["mood:calm"], "exclude": [],
+      "min_bpm": 100, "max_bpm": 120, "min_duration_seconds": 60, "max_duration_seconds": 90
+    }
+  },
+  "cheerful ukulele music": {
+    "text": {"include": ["mood:cheerful", "instrument:ukulele"], "exclude": []}
+  },
+  "news article about interest rates": {
+    "text": {"include": [], "exclude": []}
+  },
+  "the model fails for this query": {
+    "status": 500
+  },
+  "the model is too slow for this query": {
+    "sleep_seconds": 12,
+    "text": {"include": ["mood:calm"], "exclude": []}
+  },
+  "the model answers this query with prose": {
+    "raw": "Calm music would suit a travel vlog."
+  }
+}

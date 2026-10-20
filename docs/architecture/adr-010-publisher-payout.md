@@ -1,6 +1,16 @@
 # ADR-010 — Publisher Payout: Accrual, Reporting, and the Future Adapter
 
-**Status:** Accepted (2026-06-02); **amended 2026-06-29** — the payee is the **resource owner**, not the tenant; `resource_owner_id` is an owner-attested identity sourced from the owner manifest (carried on `AuthorizedExchange`), and the commission rate moves from a single `fora.tenants` column to a `(tenant, resource_owner)` registry with a tenant-level fallback, resolved at **Authorize** and carried on the hold. See the [Amendment (2026-06-29)](#amendment-2026-06-29--resource-owner-identity--commission-registry) section. Implemented under the TigerBeetle billing work.
+**Status:** Accepted (2026-06-02). Implemented under the TigerBeetle billing work.
+
+**Amended 2026-06-29.** Two changes. First, the money goes to the **resource owner**, not to the tenant. The resource owner is identified by `resource_owner_id`, a value the owner writes into its own manifest (the `AuthorizedExchange` entry). Second, the commission rate is no longer one column on `fora.tenants`. It is looked up per pair of tenant and resource owner; if that pair has no row, the tenant's own rate is used. The lookup happens when the transaction is authorized, and the rate is stored together with the held amount, so a later rate change does not affect that transaction. See the [Amendment (2026-06-29)](#amendment-2026-06-29--resource-owner-identity--commission-registry) section.
+
+**Amended 2026-09-17.** The `resource_owner_id` in a domain's manifest must match the id the domain was registered with (ADR-026 D2). See the [Amendment (2026-09-17)](#amendment-2026-09-17--the-id-in-the-manifest-must-match-the-registered-one) section.
+
+**Amended 2026-09-25.** The revenue report of D2 ships as a console route on the Exchange, not as the `GetRevenueReport` RPC, and without `audit_root` or a signature for now. See the [Amendment (2026-09-25)](#amendment-2026-09-25--the-revenue-report-is-a-console-route) section.
+
+**Amended 2026-09-29.** The console route's answer also counts the publisher's refused items by reason, read from the transaction event journal of ADR-027. See the bullet "The answer counts denials" in the [Amendment (2026-09-25)](#amendment-2026-09-25--the-revenue-report-is-a-console-route) section.
+
+**Amended 2026-09-30.** The revenue report can be narrowed to one of the publisher's resources or domains. The ledger still records nothing about what was sold; each settlement is traced to its transaction through the billing id of the hold it posted. See the [Amendment (2026-09-30)](#amendment-2026-09-30--the-revenue-report-can-be-narrowed-to-one-resource-or-domain) section. · **Amended again 2026-09-30.** A resource's domain is stored on its catalog row rather than derived from its address, a request can ask for the counts alone, and a failed billing-id lookup is an error rather than a ledger outage. See the [second amendment of 2026-09-30](#amendment-2026-09-30-second--the-stored-domain-count-only-reads-and-a-failed-lookup) section.
 
 ---
 
@@ -268,3 +278,169 @@ agent −70, owner +63, platform +7) is unchanged and is a required test vector.
 - The **typed** proto `resource_owner_id` field (this amendment uses `ext`).
 - The broader resource-owner **registry** beyond the rate slice (payout destination,
   KYC, etc.) — the rate is what billing needs now; the rest is v2 (D3).
+
+## Amendment (2026-09-17) — the id in the manifest must match the registered one
+
+**Status of this amendment:** Proposed together with ADR-026 (2026-09-17). It takes
+effect when ADR-026 is accepted and the registration migration is applied.
+
+**What Amendment A says today.** A domain writes any `resource_owner_id` it likes into
+its manifest, and the Exchange accepts it. That was safe for two reasons. A domain can
+only choose where its own earnings go; it cannot touch another domain's earnings. And in
+v1 the Exchange only counts and reports the amounts, it does not pay anyone yet. D3 added
+a rule for later: before the Exchange pays real money, it must check that the person
+asking for the money really controls the domains behind that id.
+
+**What changes.** ADR-026 does that check at registration, not at payout:
+
+- The Exchange creates the id when a publisher registers. The publisher does not choose
+  it and never types it.
+- A domain is attached to a publisher only if two things are both true: someone with
+  access to that publisher added the domain in the console, and the domain's manifest
+  carries the same id for this Exchange.
+- If a domain's manifest carries a different id than the one it was registered with, the
+  catalog push is rejected, with its own rejection reason next to the existing
+  `missing_resource_owner_id`.
+
+**What does not change.**
+
+- The manifest must still carry the id. No id, no sales.
+- The id still groups all domains of one publisher into one payee.
+- The `(tenant, resource_owner)` commission registry in §B is untouched.
+- The payout adapter's own check in D3 still applies. Registration proves who controls
+  the domain; payout must still prove who withdraws the money.
+
+## Amendment (2026-09-25) — the revenue report is a console route
+
+**Status of this amendment:** Accepted (2026-09-25).
+
+**What D2 says today.** The Exchange exposes a `GetRevenueReport` RPC. It takes a
+`tenant_id` and a `publisher_id`, aggregates the ledger, and returns the totals, an
+`audit_root` over the contributing transactions, and a signature. An empty answer
+carries an `absence_reason`, one of whose values is `UNKNOWN_PUBLISHER`.
+
+**What changes.**
+
+- **The report is a console route, not an RPC.** It is `POST
+  /exchange/v1/console/revenue/totals`, with plain JSON bodies, on the surface the
+  publisher console already signs its registration calls to (ADR-026, amendment of
+  2026-09-21). No protobuf message and no protocol package is added. The route answers
+  only the console, and the console answers only a signed-in person.
+- **The request names no tenant.** The Exchange sells as one seat (ADR-026 D1), so the
+  seat comes from the deployment. Queries on tenant-scoped tables still filter by it.
+- **Access is the registration grant.** The request names a `publisher_id` and the
+  person the console asserts. A person without a grant for that publisher is answered
+  `not_found`, the same answer as a publisher that does not exist. So
+  `UNKNOWN_PUBLISHER` is not an absence reason on this route; it is that refusal.
+- **Totals are grouped.** The request carries a half-open UTC period, as D2 says, and a
+  grouping of `day`, `week` (ISO, starting Monday) or `month`. The answer has the D2
+  figures for each bucket and in total. A request that needs more than 366 buckets is
+  refused, and so is a period outside the range the ledger's clock can represent: from
+  the Unix epoch to the year 2262.
+- **Where each figure comes from.** The money is what the ledger settled: the
+  post-pending transfers on the publisher's `owner:revenue:{resource_owner_id}` account
+  whose ledger time falls in the period. The gross of each is its hold, the net is what
+  was posted, and the fee is the difference, so the split is read, not recomputed.
+  Amounts are the protocol's canonical money strings (`"0.9"`, never `"0.90000000"`).
+  `transaction_count` comes from the transaction log, so a free transaction is counted
+  with a gross of 0, and a transaction whose best-effort `Record` failed is counted with
+  no money. The ledger stamps a settlement a few seconds after the log stamps its
+  transaction, so a transaction logged just before a bucket boundary can have its money
+  in the next bucket.
+- **Refund fields are 0.** `Refund` has no caller yet, so `refunded_amount`,
+  `refunded_platform_fee` and `refund_count` are always 0, and `net_payable` equals
+  `net_revenue`.
+- **A request that names no currency is read in the base currency.** That is the first
+  currency the deployment keeps a ledger in, the one its well-known document advertises
+  as `base_currency`, so the default is always a currency the ledger keeps. It can
+  differ from the currency the console prices new arrangements in, which is set
+  separately by `EXCHANGE_TERMS_CURRENCY` and defaults to EUR: the free and in-memory
+  adapters keep USD.
+- **Only a ledger with history can answer.** A currency the deployment keeps no ledger
+  in is answered `UNSUPPORTED_CURRENCY` before anything is read, whatever the billing
+  backend. A deployment charging through the in-memory adapter has no settlement
+  history: the counts are returned with `INTERNAL_ERROR`. A deployment charging through
+  the free adapter settles nothing: a period reports the transactions it holds with no
+  money, and `NO_TRANSACTIONS_IN_PERIOD` only when it holds none.
+- **Absence reasons.** `NO_TRANSACTIONS_IN_PERIOD`, `UNSUPPORTED_CURRENCY` and
+  `INTERNAL_ERROR`, as a JSON string (ADR-008, amendment of 2026-09-25).
+- **`audit_root` and the signed report are deferred.** The route returns neither. They
+  are planned as a later step on the same route; until then a publisher checks a single
+  transaction through the transaction detail route, which returns the signed offer and
+  the agent's signed acceptance.
+- **`include_transactions` is a separate route.** The transaction rows are read from
+  `transactions/list`, paged, rather than attached to the totals.
+- **The answer counts denials** (added 2026-09-29). `denials` lists, for the whole
+  period, how many of the publisher's items the Exchange refused, per reason, under the
+  protocol's `DenialReason` names. It is not split into buckets and not scoped by
+  currency, because a refused item moves no money; it is empty for an
+  `UNSUPPORTED_CURRENCY` answer, which reads nothing. It never changes the absence
+  reason. ADR-027 says which denials are recorded and why the count is a lower bound.
+
+**What does not change.**
+
+- No money moves. The report reads the ledger and nothing else.
+- The payee is the resource owner (amendment of 2026-06-29, A), and the fee is the rate
+  frozen on each hold (the same amendment, B and C).
+- The v2 payout adapter of D3.
+
+## Amendment (2026-09-30) — the revenue report can be narrowed to one resource or domain
+
+**Status of this amendment:** Accepted (2026-09-30).
+
+**What the amendment of 2026-09-25 says today.** The totals route reports what the
+ledger settled to the publisher's `owner:revenue:{resource_owner_id}` account. The
+request names the publisher, a period, a grouping and a currency, and nothing narrower.
+
+**What changes.**
+
+- **The request can name one resource, one domain, or both.** `resource_id` and
+  `domain` are optional. When one is set, the money and `transaction_count` in every
+  bucket and in the total are that resource's or that domain's alone. A domain is the
+  host of the resource's address, derived the same way the transaction list's domain
+  filter derives it.
+- **The money is still the ledger's.** The ledger records whose account a settlement
+  credited and nothing about what was sold. What each settlement does carry is the
+  pending transfer it posted, the hold the charge was reserved on. That hold's id is
+  the transaction's `billing_id`, which the transaction log records beside the
+  resource and its domain. The Exchange reads the settlements as before, asks the log
+  which of their billing ids are charges inside the narrowing, and keeps only those. It asks one batch of
+  settlements at a time, so a long period is still never held in memory at once. The
+  gross, the fee and the net of each settlement are read exactly as before, not
+  recomputed from the log's prices.
+- **The count is narrowed in the log**, as the unnarrowed count already is.
+- **A resource or domain that is not the publisher's reports nothing.** The billing-id
+  lookup and the count are both filtered by seat and publisher as well as by the
+  narrowing, so naming another publisher's resource or domain returns
+  `NO_TRANSACTIONS_IN_PERIOD`, the same answer as one of the publisher's own that sold
+  nothing.
+
+**What does not change.** The figures, their sources, the absence reasons, and the
+refund fields of the amendment of 2026-09-25. No money moves.
+
+## Amendment (2026-09-30, second) — the stored domain, count-only reads, and a failed lookup
+
+**Status of this amendment:** Accepted (2026-09-30).
+
+**What it corrects.** Three statements of the amendment above.
+
+- **"A domain is the host of the resource's address, derived the same way the
+  transaction list's domain filter derives it."** Superseded. Each catalog row now
+  stores its domain: the registered publisher domain the catalog push matched the
+  entry against. The narrowing compares that stored value, as the transaction list,
+  the catalog list and the automatic import's read of one site all do, so none of
+  them parses an address. The requested domain is normalized the way a domain is
+  registered, so its case does not matter, and one no publisher could register is
+  refused with `invalid_request`.
+- **"What does not change. The figures, their sources, the absence reasons ..."**
+  Superseded for the absence reasons. A request can set `count_only`. The Exchange
+  then answers the transaction counts without reading the ledger, with zero money and
+  the new absence reason `MONEY_NOT_REQUESTED`, or `NO_TRANSACTIONS_IN_PERIOD` when
+  nothing sold. The console's transaction list uses it for its "of N": it shows no
+  money, so it no longer walks the period's ledger on every page.
+- **A failed lookup.** The amendment above did not say what happens when the
+  transaction log cannot answer the billing-id lookup. It is an internal error, and
+  the request fails. It is not answered as `INTERNAL_ERROR` with the counts, the
+  answer a ledger outage gets, because the counts come from the same log and are not
+  known to be true either. The lookup is served by an index on
+  `transaction_log.billing_id`.

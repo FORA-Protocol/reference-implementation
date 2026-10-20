@@ -6,6 +6,7 @@
 package selection
 
 import (
+	"context"
 	"sort"
 	"strings"
 
@@ -13,7 +14,9 @@ import (
 	"github.com/FORA-Protocol/protocol/sdk/go/core"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	"github.com/shopspring/decimal"
+	"google.golang.org/protobuf/proto"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/repo"
 )
 
@@ -36,12 +39,19 @@ type Candidate struct {
 	Exchange ExchangeRef
 }
 
-// Dedup collapses candidates representing the same underlying resource,
-// keeping the cheapest (lowest unit_cost) candidate per identity.
-func Dedup(cands []Candidate) []Candidate {
+// Dedup collapses candidates that offer the SAME licensing alternative for the
+// same resource, keeping the cheapest (lowest unit_cost) of each.
+//
+// An offer sells exactly one license term, so a publisher that licenses one
+// article two ways (free for academic use, paid per unit) is discovered as two
+// offers with the same canonical URL. Those are different products and both
+// must reach the agent, which is why the key is the resource identity AND the
+// term, not the identity alone. Two exchanges relaying the same resource under
+// the same term still collapse to one candidate.
+func Dedup(ctx context.Context, cands []Candidate) []Candidate {
 	best := make(map[string]Candidate, len(cands))
 	for _, c := range cands {
-		key := identityKey(c.Offer.Offer())
+		key := dedupKey(ctx, c.Offer.Offer())
 		existing, ok := best[key]
 		if !ok {
 			best[key] = c
@@ -132,6 +142,45 @@ func parseMoneyOrZero(s string) decimal.Decimal {
 		return decimal.Zero
 	}
 	return d
+}
+
+// dedupKey names one licensing alternative: the resource identity plus the
+// exact terms the offer carries. Term equality is EXACT — the deterministic
+// protobuf encoding of each term, which covers rights, restrictions, scopes,
+// obligations and pricing without a hand-written comparator. Two terms that
+// mean the same thing but encode differently (a reordered repeated field, a
+// differently spelled money string) therefore stay separate candidates; that is
+// deliberate, because keeping an extra alternative is safe and dropping a real
+// one is not.
+//
+// An offer with no term keys on identity alone. An offer with several terms
+// keys on all of them: the protocol bounds an offer to one term, so such an
+// offer only appears while an older Exchange is still fusing terms, and keying
+// on the whole set keeps two differently fused offers apart.
+func dedupKey(ctx context.Context, o *forav1.Offer) string {
+	key := identityKey(o)
+	terms := o.GetTerms()
+	if len(terms) == 0 {
+		return key
+	}
+	opts := proto.MarshalOptions{Deterministic: true}
+	var b strings.Builder
+	b.WriteString(key)
+	for _, t := range terms {
+		raw, err := opts.Marshal(t)
+		if err != nil {
+			// Encoding a term the Exchange already signed should not fail. If it
+			// does, fall back to the identity-only key: that can merge two real
+			// alternatives, which costs the agent a choice, where a panic would
+			// cost it the whole discovery.
+			reqctx.FromContext(ctx).WarnContext(ctx, "broker.selection.term_encoding_failed",
+				"offer_id", o.GetOfferId(), "err", err)
+			return key
+		}
+		b.WriteString("|")
+		b.Write(raw)
+	}
+	return b.String()
 }
 
 func identityKey(o *forav1.Offer) string {

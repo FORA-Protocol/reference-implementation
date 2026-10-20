@@ -9,18 +9,18 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/broker"
 )
 
-// brokerDetail builds the ErrorDetail envelope every broker fault shares: the
-// non-authoritative developer Message, the stable Domain, and any structured
-// field metadata a broker.Error recorded via WithField/WithMeta. It is the
-// SINGLE source of the metadata-ride, so the broker's two emit sinks — the
-// Connect resolveFaultError and the raw-relay writeBrokerError — cannot drift
-// (jscpd). The envelope body itself is the shared SDK build half
-// (connectserver.NewErrorDetail) — the canonical ADR-019 §1 shape: the offending
-// field identity travels machine-readably, never only in the message string.
-// Broker faults are the generic transport class, so no reason oneof is set —
-// Domain + Message + optional Metadata only. The Connect sink attaches this via
-// the shared SDK connectserver.AttachDetail; the raw-relay sink
-// marshals it itself (it writes raw bytes, not a connect.Error).
+// brokerDetail builds the ErrorDetail envelope of every broker fault but one:
+// the non-authoritative developer Message, the stable Domain, and any structured
+// field metadata a broker.Error recorded via WithField/WithMeta. The envelope
+// body itself is the shared SDK build half (connectserver.NewErrorDetail) — the
+// canonical ADR-019 §1 shape: the offending field identity travels
+// machine-readably, never only in the message string. These faults are the
+// generic transport class, so no reason oneof is set — Domain + Message +
+// optional Metadata only. The Connect sink attaches this via the shared SDK
+// connectserver.AttachDetail. The one exception is a purchase whose requester
+// is not the signer: executeFaultError builds that detail with the SDK's
+// request_auth_failure helper (reason SIGNATURE_INVALID) and copies the
+// error's metadata onto it.
 func brokerDetail(err error) *forav1.ErrorDetail {
 	var meta map[string]string
 	var be *broker.Error

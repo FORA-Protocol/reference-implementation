@@ -8,6 +8,7 @@ import (
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/catalogfeed"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/ingest"
 )
 
@@ -31,9 +32,8 @@ import (
 // mapper. A rejected shape must leave NOTHING discoverable.
 func TestIngest_LicenseShapePermutations(t *testing.T) {
 	h := newPushHarness(t)
-	const domain = "publisher.example"
-	kid, priv := registerContributor(t, h, domain)
-	tenant := seedTenantForDomain(t, h, domain)
+	kid, priv := registerContributor(t, h)
+	tenant := seedSiteForDomain(t, h, ingestDomain)
 
 	const digest = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 	lic := `"license":{"id":"perm","uri":"https://ex.example/lic","uri_digest":"` + digest + `","name":"Perm"},`
@@ -47,7 +47,7 @@ func TestIngest_LicenseShapePermutations(t *testing.T) {
 	quota := `"quotas":[{"metric":"accesses","limit":500,"window":"daily"}],`
 
 	rec := func(path, license, term string) string {
-		return `{"domain":"` + domain + `","path":"` + path + `","title":"t",` + license + `"terms":[{` + term + `}]}`
+		return `{"domain":"` + ingestDomain + `","path":"` + path + `","title":"t",` + license + `"terms":[{` + term + `}]}`
 	}
 
 	cases := []struct {
@@ -127,18 +127,18 @@ func TestIngest_LicenseShapePermutations(t *testing.T) {
 			// A rejection may fire at any of the three ingest legs — parse
 			// (e.g. a numeric rate), map (e.g. a malformed rate string), or
 			// push (protovalidate) — and each must leave nothing discoverable.
-			records, parseErr := ingest.ParseJSONL(strings.NewReader(tc.record))
+			records, parseErr := catalogfeed.ParseJSONL(strings.NewReader(tc.record))
 			var mapErr, pushErr error
 			if parseErr == nil {
 				var entries []*forav1.ResourceEntry
-				entries, mapErr = ingest.MapRecords(records)
+				entries, mapErr = catalogfeed.MapRecords(records)
 				if mapErr == nil {
 					_, pushErr = ingest.PushEntries(h.ctx,
 						mustCatalogClient(t, h.server.URL, kid, priv), pushTarget(tenant, kid), entries)
 				}
 			}
 			rejected := parseErr != nil || mapErr != nil || pushErr != nil
-			uri := "https://" + domain + tc.path
+			uri := "https://" + ingestDomain + tc.path
 
 			if tc.wantErr {
 				if !rejected {
@@ -153,7 +153,8 @@ func TestIngest_LicenseShapePermutations(t *testing.T) {
 			if rejected {
 				t.Fatalf("want accept for %s, got rejected (parseErr=%v mapErr=%v pushErr=%v)", tc.name, parseErr, mapErr, pushErr)
 			}
-			terms := discoverTermsAs(t, h, uri, requesterWithExt("perm-agent", "commercial_entity", "DE", "ai-train"))
+			offers := discoverOffersAs(t, h, uri, requesterWithExt("perm-agent", "commercial_entity", "DE", "ai-train"))
+			terms := offerTerms(t, uri, offers)
 			if len(terms) == 0 {
 				t.Fatalf("accepted shape %s not discoverable", tc.name)
 			}
@@ -161,11 +162,21 @@ func TestIngest_LicenseShapePermutations(t *testing.T) {
 				t.Fatalf("accepted shape %s: machine fields not carried — FUNCTION %q absent from projected term", tc.name, tc.wantFn)
 			}
 			if tc.wantRate != "" {
-				if got := terms[0].GetPricing().GetRate(); got != tc.wantRate {
-					t.Fatalf("accepted shape %s: pricing.rate did not survive the round-trip — got %q, want %q", tc.name, got, tc.wantRate)
-				}
+				assertOfferRate(t, tc.name, offers[0], tc.wantRate)
 			}
 		})
+	}
+}
+
+// assertOfferRate checks the rate an accepted shape is offered at. The offer
+// carries its price once, on Offer.pricing, and its term copy is unpriced.
+func assertOfferRate(t *testing.T, shape string, offer *forav1.Offer, wantRate string) {
+	t.Helper()
+	if p := offer.GetTerms()[0].GetPricing(); p != nil {
+		t.Fatalf("accepted shape %s: the term copy carries pricing %v", shape, p)
+	}
+	if got := offer.GetPricing().GetRate(); got != wantRate {
+		t.Fatalf("accepted shape %s: pricing.rate did not survive the round-trip — got %q, want %q", shape, got, wantRate)
 	}
 }
 

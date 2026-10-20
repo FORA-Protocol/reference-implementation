@@ -1,0 +1,20 @@
+// The Lambda@Edge entry for www.publisher.example.
+//
+// Lambda@Edge passes no environment variables, so the settings are assigned
+// here. lambda-edge.mjs beside this file is the release bundle, byte for byte,
+// and is the same for every publisher.
+//
+// The export below is loaded before the assignment runs. That works because
+// the bundle reads process.env on its first invocation, not when it loads.
+Object.assign(process.env, {
+  "CATALOG_CONTRIBUTORS_JSON": "[]",
+  "EXCHANGES_JSON": "[{\"domain\":\"exchange.example\",\"endpoint\":\"https://exchange.example\"}]",
+  "EXCHANGE_URL": "https://exchange.example",
+  "EXCHANGE_WBA_URL": "https://exchange.example/.well-known/http-message-signatures-directory",
+  "FORA_ENFORCE_BINDING": "true",
+  "FORA_VERIFY_KEYS": "[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"l3cHOINRwzU9vsPaa4_UlbRlCQeb1OpNNXOdC3sjlb4\"}]",
+  "LICENSED_PATHS_JSON": "[\"/article/\",\"/q&a/\"]",
+  "PROVIDER": "www.publisher.example"
+});
+
+export { handler } from './lambda-edge.mjs';

@@ -4,10 +4,10 @@
 #
 # No private-key material is tracked in git. This file is generated at
 # bootstrap and mounted (read-only) into the publisher-jwks container via the
-# deploy/publisher-keys volume in docker-compose.e2e.yml. Run it once before
-# `docker compose -f docker-compose.e2e.yml up`.
+# deploy/publisher-keys volume in docker-compose.e2e.yml. `make e2e-keys` runs it
+# before every `make e2e-up`.
 #
-# Idempotent: the file is overwritten on each run and written 0600.
+# Idempotent: the file is replaced on each run, in one rename, and written 0600.
 #
 # Usage:
 #   scripts/gen-examplenews-publisher-key.sh                       # default kid=examplenews.sub.2026q2
@@ -31,12 +31,10 @@ mkdir -p "$(dirname "$KEY_FILE")"
 
 "${PYTHON[@]}" - "$REPO_ROOT/scripts/lib" "$PUBLISHER_KID" "$PUBLISHER_ISSUER" "$KEY_FILE" <<'PY'
 import json
-import os
 import sys
-from pathlib import Path
 
 sys.path.insert(0, sys.argv[1])
-from ed25519_keys import generate_seed_pub_b64
+from ed25519_keys import generate_seed_pub_b64, write_text_atomic
 
 kid, issuer, key_path = sys.argv[2:5]
 
@@ -44,7 +42,9 @@ priv_seed_b64, _pub_b64 = generate_seed_pub_b64()
 
 # Shape consumed by deploy/publisher-jwks/entrypoint.sh: the Ed25519 seed under
 # "private". The entrypoint derives the pubkey and renders the verify-side JWK.
-Path(key_path).write_text(json.dumps({
+# Atomic: another stack of this checkout may be starting its publisher-jwks,
+# which reads this file, while this run replaces it.
+write_text_atomic(key_path, json.dumps({
     "kid": kid,
     # The jwks entrypoint requires `issuer` for the manifest domain (it
     # refuses to guess from the kid): this publisher's domain is its compose
@@ -53,8 +53,7 @@ Path(key_path).write_text(json.dumps({
     "alg": "EdDSA",
     "use": "verify",
     "private": priv_seed_b64,
-}, indent=2, sort_keys=True) + "\n")
-os.chmod(key_path, 0o600)
+}, indent=2, sort_keys=True) + "\n", 0o600)
 
 print(f"wrote {key_path} (kid={kid})")
 PY

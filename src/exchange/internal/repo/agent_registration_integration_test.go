@@ -50,9 +50,9 @@ func setBillingRef(
 
 // seedAgent registers an agent through the production write surface
 // (AgentRepo.Upsert), the same path the httpsig registry uses.
-func seedAgent(t *testing.T, ctx context.Context, agents repo.AgentRepo, id string, key byte) repo.Agent {
+func seedAgent(t *testing.T, ctx context.Context, agents repo.AgentRepo, id string) repo.Agent {
 	t.Helper()
-	a, err := agents.Upsert(ctx, repo.Agent{ID: id, PublicKey: []byte{key}, RequesterType: "AGENT"})
+	a, err := agents.Upsert(ctx, repo.Agent{ID: id, PublicKey: []byte{0x01}, RequesterType: "AGENT"})
 	if err != nil {
 		t.Fatalf("seed agent %s: %v", id, err)
 	}
@@ -66,7 +66,7 @@ func TestSetBillingRefSetsAndReturns(t *testing.T) {
 	pool := newTestPool(t, ctx)
 	agents := repo.NewAgentRepo(sqlc.New(pool))
 	const agentID = "agent.example.com"
-	seeded := seedAgent(t, ctx, agents, agentID, 0x01)
+	seeded := seedAgent(t, ctx, agents, agentID)
 	if seeded.BillingRef != "" {
 		t.Fatalf("fresh agent BillingRef = %q, want empty (not registered yet)", seeded.BillingRef)
 	}
@@ -112,7 +112,7 @@ func TestSetBillingRefWithNoPublishedDigestStoresNull(t *testing.T) {
 	pool := newTestPool(t, ctx)
 	agents := repo.NewAgentRepo(sqlc.New(pool))
 	const agentID = "nodigest.example.com"
-	seedAgent(t, ctx, agents, agentID, 0x01)
+	seedAgent(t, ctx, agents, agentID)
 
 	if _, _, err := setBillingRef(t, ctx, pool, agents, agentID, "br-nodigest", nil); err != nil {
 		t.Fatalf("SetBillingRef: %v", err)
@@ -138,7 +138,7 @@ func TestUpsertPreservesBillingRefOnKeyRotation(t *testing.T) {
 	pool := newTestPool(t, ctx)
 	agents := repo.NewAgentRepo(sqlc.New(pool))
 	const agentID = "rotating.example.com"
-	seedAgent(t, ctx, agents, agentID, 0x01)
+	seedAgent(t, ctx, agents, agentID)
 	digest := "sha256:" + strings.Repeat("b", 64)
 	if _, _, err := setBillingRef(t, ctx, pool, agents, agentID, "br-rotation", &digest); err != nil {
 		t.Fatalf("SetBillingRef: %v", err)
@@ -178,7 +178,7 @@ func TestSetBillingRefRepeatKeepsStoredRef(t *testing.T) {
 	pool := newTestPool(t, ctx)
 	agents := repo.NewAgentRepo(sqlc.New(pool))
 	const agentID = "repeat.example.com"
-	seedAgent(t, ctx, agents, agentID, 0x01)
+	seedAgent(t, ctx, agents, agentID)
 	first := "sha256:" + strings.Repeat("c", 64)
 	if _, won, err := setBillingRef(t, ctx, pool, agents, agentID, "br-first", &first); err != nil {
 		t.Fatalf("first SetBillingRef: %v", err)
@@ -249,7 +249,7 @@ func TestTenantActivateNewAgentsByDefault(t *testing.T) {
 	const tenantID = "t-activation"
 	if _, err := q.InsertTenant(ctx, sqlc.InsertTenantParams{
 		TenantID: tenantID, Domain: "activation.example.com", Ed25519KeyRef: "k",
-		ReportingPolicy: []byte(`{}`), SigningScheme: sqlc.ForaSigningSchemeED25519,
+		ReportingPolicy: []byte(`{}`),
 	}); err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}

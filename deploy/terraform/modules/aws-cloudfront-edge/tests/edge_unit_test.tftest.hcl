@@ -35,7 +35,7 @@ run "lambda_matches_viewer_request_caps_and_is_published" {
 
   assert {
     condition     = aws_lambda_function.edge.runtime == "nodejs22.x" && aws_lambda_function.edge.handler == "index.handler"
-    error_message = "The bundle is built for nodejs22.x with a flat index.mjs exporting `handler`"
+    error_message = "The package is built for nodejs22.x with index.mjs at the zip root re-exporting `handler`"
   }
 }
 

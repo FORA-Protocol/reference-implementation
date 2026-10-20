@@ -65,13 +65,13 @@ func TestSelectBillingAdapter_Mapping(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("FORA_BILLING_ADAPTER", tc.env)
-			got, currency, cleanup, err := selectBillingAdapter(context.Background(), discardLogger())
+			got, currencies, cleanup, err := selectBillingAdapter(context.Background(), discardLogger())
 			if err != nil {
 				t.Fatalf("selectBillingAdapter: %v", err)
 			}
 			t.Cleanup(cleanup)
-			if currency != "USD" {
-				t.Fatalf("currency = %q, want USD for the demo tiers", currency)
+			if len(currencies) != 1 || currencies[0] != "USD" {
+				t.Fatalf("currencies = %q, want [USD] for the demo tiers", currencies)
 			}
 			tc.assert(t, got)
 		})
@@ -89,6 +89,10 @@ func TestSelectBillingAdapter_TigerBeetleFailFast(t *testing.T) {
 	}{
 		{"missing ledger", "", "127.0.0.1:3000"},
 		{"unsupported ledger", "999", "127.0.0.1:3000"},
+		{"unsupported ledger in a list", "978,826", "127.0.0.1:3000"},
+		{"duplicated ledger", "978,978", "127.0.0.1:3000"},
+		{"non-numeric entry", "978,EUR", "127.0.0.1:3000"},
+		{"empty entry", "978,", "127.0.0.1:3000"},
 		{"missing address", "840", ""},
 	}
 	for _, tc := range cases {
@@ -127,7 +131,7 @@ func TestNewBillingAdapter_SeedRejectsForeignCurrency(t *testing.T) {
 
 	// The well-formed USD entry in the same seed is kept: one bad entry must not
 	// discard the others.
-	kept, err := a.GetBalance(ctx, "agent-usd")
+	kept, err := a.GetBalance(ctx, "agent-usd", billing.DemoCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance(agent-usd): %v", err)
 	}
@@ -137,7 +141,7 @@ func TestNewBillingAdapter_SeedRejectsForeignCurrency(t *testing.T) {
 	}
 
 	// The EUR entry is absent entirely, not present with a coerced currency.
-	if _, err := a.GetBalance(ctx, "agent-eur"); err == nil {
+	if _, err := a.GetBalance(ctx, "agent-eur", billing.DemoCurrency); err == nil {
 		t.Error("agent-eur has a balance; the EUR seed entry must be skipped")
 	}
 

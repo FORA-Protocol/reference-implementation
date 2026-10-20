@@ -61,3 +61,40 @@ func windowSecondsForObligation(policy reportingPolicy, fallback time.Duration) 
 	}
 	return int32(fallback.Seconds())
 }
+
+// DefaultReportWindow is how long an agent has to file a usage report when the
+// seat's reporting policy sets no window.
+const DefaultReportWindow = 24 * time.Hour
+
+// EffectivePolicy is a seat's reporting policy with the Exchange's defaults
+// filled in, rather than what an operator configured. The obligation planner
+// and the publisher's terms read both resolve it here, so they fill the
+// defaults the same way. Two things still differ per obligation: the planner
+// drops billing_id from the required fields of a free sale, which stores no
+// billing id, and the window is the one each service was configured with,
+// which the composition root passes to both from one value.
+type EffectivePolicy struct {
+	RequiredFields    []string
+	QuantityTolerance float64
+	WindowSeconds     int32
+}
+
+// effectiveReportingPolicy resolves the stored policy against the defaults:
+// defaultQuantityTolerance when the policy sets no tolerance, and fallbackWindow
+// when it sets no window. RequiredFields is never nil.
+func effectiveReportingPolicy(raw []byte, fallbackWindow time.Duration) EffectivePolicy {
+	policy := decodeReportingPolicy(raw)
+	tolerance := defaultQuantityTolerance
+	if policy.QuantityTolerance != nil {
+		tolerance = *policy.QuantityTolerance
+	}
+	fields := policy.RequiredFields
+	if fields == nil {
+		fields = []string{}
+	}
+	return EffectivePolicy{
+		RequiredFields:    fields,
+		QuantityTolerance: tolerance,
+		WindowSeconds:     windowSecondsForObligation(policy, fallbackWindow),
+	}
+}

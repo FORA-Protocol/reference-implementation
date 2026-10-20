@@ -4,12 +4,15 @@
 //
 // # Why this is not in the tool handlers
 //
-// The rule these operations encode is a workflow, not a projection. A
-// registration is pre-checked against a freshly fetched schema, echoes that same
-// fetch's terms digest, and leaves a local note the Exchange's own answer can
-// later revoke. That is three collaborators and an ordering constraint between
-// them, and it belongs one layer below the surface that happens to expose it —
-// the MCP adapter today, and whatever asks next.
+// The rule these operations encode is a workflow, not a projection. The exchange
+// argument is refused as written before canonicalisation can rewrite it, the
+// payload is held to the protocol's bounds before anything is fetched or signed,
+// and a local note is left that the Exchange's own answer can later revoke. That
+// is an ordering constraint across three collaborators, and it belongs one layer
+// below the surface that happens to expose it — the MCP adapter today, and
+// whatever asks next. The pre-check against the published schema and the terms
+// digest echo were part of this and are not any more: both moved to the outbound
+// leg, which is where the fresh manifest read they depend on happens.
 //
 // # The note is a hint, and the Exchange is the authority
 //
@@ -40,7 +43,6 @@ import (
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
-	"github.com/FORA-Protocol/protocol/sdk/go/resolvers"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
@@ -48,31 +50,43 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/account"
 )
 
-// RequirementsReader reads what one Exchange asks of a registration.
-//
-// Named for the actor, like Caller and account.RegistrationLog, and not for what
-// it returns: account.Requirements is the value type, it is imported into this
-// same file, and one name for both leaves a reader working out which is meant at
-// every mention.
-//
-// Every read is a fresh fetch of that Exchange's manifest: the protocol forbids
-// echoing a cached terms digest, and reading the schema from the same fresh
-// bytes means a stale local schema cannot refuse a payload the Exchange would
-// have taken.
-type RequirementsReader interface {
-	Requirements(ctx context.Context, exchange string) (account.Requirements, error)
-}
-
 // Caller sends the two account RPCs, signed as the agent on whose behalf this
 // service is acting. The identity travels on the context, so nothing here can
 // ask for a different agent's signature.
 //
-// AccountStatus reports "this agent holds no account here" by returning an error
-// that wraps account.ErrNoAccount. That is part of the contract rather than one
-// client's private vocabulary: it is the answer this service turns into
-// "registered: false" and into dropping a note the Exchange has contradicted, so
-// an implementation that does not send it makes a normal answer read as a
-// failure.
+// AccountStatus reports "this agent holds no account here" in either of two
+// spellings, and Status treats them alike. The protocol's own is an ordinary
+// response carrying an empty account handle. An implementation may instead wrap
+// account.ErrNoAccount, which is what the leg does for a peer answering NotFound
+// — this deployment's own Exchange does. Both become "registered: false" and
+// both drop a note the Exchange has contradicted; what an implementation must
+// not do is report the absence as some other failure.
+//
+// # What a failure must still be carrying when it gets here
+//
+// classify reads a refusal with errors.Is and errors.As, so an implementation
+// that renders any of the three below into prose loses the distinction and this
+// service reports the wrong kind. Each is the ONLY route to the kind it names.
+//
+//   - account.ErrNotPermitted — the deployment's Exchange policy excluded the
+//     domain. Nothing was dialled, and the remedy is the operator's setting
+//     rather than the agent's argument or the peer.
+//   - account.ErrRequirementsUnread — the Exchange's manifest could not be read,
+//     so there was nothing to pre-check against and no terms digest to echo.
+//     Nothing was signed and nothing was sent.
+//   - account.ErrFieldsRefused, carried on an *account.FieldsRefusedError whose
+//     Fields name each member at fault. That is the outbound leg refusing the
+//     payload against the schema the Exchange publishes, before anything is
+//     signed, and the field list is what the tool layer renders. Telling it apart
+//     from an EXCHANGE refusing the same payload is the leg's job, not this
+//     one's: both carry the same shape of typed detail, and only the leg knows
+//     whether a peer replied. An implementation that reports a remote refusal
+//     with this sentinel makes the two outcomes one.
+//
+// An implementation that keeps none of them still compiles and still satisfies
+// the two spellings above. What it loses is silent: the agent is told the
+// Exchange refused its registration, with no member names and no sign that
+// nothing was sent.
 type Caller interface {
 	Register(ctx context.Context, req *forav1.RegisterRequest) (*forav1.RegisterResponse, error)
 	AccountStatus(
@@ -91,13 +105,27 @@ type Account struct {
 	//
 	// Register always sets it: the Exchange has just answered about an account
 	// that now exists, so false there means suspended rather than unknown. On a
-	// Status answer it is nil whenever there is no account.
+	// Status answer it is nil whenever there is no account — which is why the
+	// empty-handle answer must not reach confirmed. Taken through there it would
+	// arrive non-nil and FALSE, and false reads as suspended, so an agent with no
+	// account would be told it holds a suspended one.
 	Active *bool
 	// BillingRef is the Exchange-minted handle, empty where no authority
 	// reported one.
 	BillingRef string
 	// AsOf is when this answer was established.
 	AsOf time.Time
+	// Balances is what the account can spend now, one entry per currency, as
+	// the Exchange reported it on a Status answer. Empty means not reported,
+	// never zero. Register answers carry no balances, so it stays nil there.
+	Balances []Balance
+}
+
+// Balance is one currency's available balance: the amount as the Exchange's
+// exact decimal string, and the ISO 4217 code.
+type Balance struct {
+	Amount   string
+	Currency string
 }
 
 // IsActive answers Active as a plain bool, reading nil as false.
@@ -119,13 +147,20 @@ type confirmation interface {
 
 // confirmed records an Exchange's confirmation of an account and renders it.
 //
-// Both account calls end the same way: the Exchange has just answered about an
-// account that exists, so the local note is written and the answer becomes an
-// Account. Written once here, beside IsActive, so the two sides of this value's
-// contract sit together — "nil means nobody was asked" is decided in one place
-// for the reader, and this is the same decision for the writer. Registered is
-// true and Active is non-nil on both paths, which is exactly what the Active
-// field's own rule says and could not be relied on while two arms set it.
+// It is reached only where the Exchange has just answered about an account that
+// EXISTS. Register always qualifies, because a successful registration always
+// mints a handle. Status qualifies only when the answer carries one; the empty
+// handle is the protocol's way of saying there is no account, and that answer
+// takes the other path. Both facts matter here, because this function writes the
+// local note, and a note written for an account that does not exist is the exact
+// inverse of forget.
+//
+// Written once, beside IsActive, so the two sides of this value's contract sit
+// together — "nil means nobody was asked" is decided in one place for the
+// reader, and this is the same decision for the writer. Registered is true and
+// Active is non-nil on every path through here, which is what the Active field's
+// own rule says and could not be relied on while an arm reached this with no
+// account behind it.
 //
 // at is passed rather than read from the clock, because a caller takes one
 // timestamp for the whole call: Status stamps its no-account answer with the
@@ -157,8 +192,7 @@ type Hint struct {
 // defaults to the system clock, so only a test that wants time under its control
 // states it.
 type Config struct {
-	Requirements RequirementsReader
-	Caller       Caller
+	Caller Caller
 	// Notes is the local record of where this service has registered an agent.
 	Notes account.RegistrationLog
 	// Clock stamps the notes and every AsOf, so what a caller reads is the time
@@ -168,7 +202,6 @@ type Config struct {
 
 // Service opens and reports Exchange accounts.
 type Service struct {
-	reqs  RequirementsReader
 	fora  Caller
 	notes account.RegistrationLog
 	clk   clock.Clock
@@ -178,8 +211,6 @@ type Service struct {
 // nil-panicking on the first call.
 func New(cfg Config) (*Service, error) {
 	switch {
-	case cfg.Requirements == nil:
-		return nil, errors.New("exchacct: Config.Requirements is required")
 	case cfg.Caller == nil:
 		return nil, errors.New("exchacct: Config.Caller is required")
 	case cfg.Notes == nil:
@@ -189,7 +220,7 @@ func New(cfg Config) (*Service, error) {
 	if clk == nil {
 		clk = clock.System{}
 	}
-	return &Service{reqs: cfg.Requirements, fora: cfg.Caller, notes: cfg.Notes, clk: clk}, nil
+	return &Service{fora: cfg.Caller, notes: cfg.Notes, clk: clk}, nil
 }
 
 // Register opens subdomain's account at exchange, sending fields as the
@@ -220,15 +251,6 @@ func (s *Service) Register(
 			Kind: KindFieldsOutOfBounds, Exchange: exchange, Err: errors.New(verdict.String()),
 		}
 	}
-	reqs, err := s.requirements(ctx, subdomain, exchange)
-	if err != nil {
-		return Account{}, err
-	}
-	// Branch-free: a nil validator reports no failures, so "publishes none" and
-	// "publishes one this service cannot use" both fall through to send.
-	if failures := reqs.Schema.Validate(fields); len(failures) > 0 {
-		return Account{}, &Error{Kind: KindFieldsRefused, Exchange: exchange, Fields: failures}
-	}
 	data, err := structpb.NewStruct(fields)
 	if err != nil {
 		return Account{}, &Error{Kind: KindFieldsMalformed, Exchange: exchange, Err: err}
@@ -237,13 +259,19 @@ func (s *Service) Register(
 		Ver:              helpers.ProtocolVersion,
 		Exchange:         exchange,
 		RegistrationData: data,
-		// Echoed exactly as published, absent when the Exchange publishes none.
-		// The request signature covers this statement, so it is the durable
-		// record of which terms revision the operator accepted.
-		TermsDigest: reqs.TermsDigest,
+		// TermsDigest is deliberately UNSET, and that is a request rather than an
+		// omission. Leaving it empty is what asks the outbound leg to read this
+		// Exchange's own manifest, echo the terms revision it publishes and
+		// pre-check the payload against the schema it publishes, all before
+		// anything is signed. Setting it here would take over managing both and
+		// get neither.
+		//
+		// The echo matters because the request signature covers it, which is what
+		// makes it the durable record of which terms revision the operator
+		// accepted.
 	})
 	if err != nil {
-		return Account{}, &Error{Kind: outboundKind(err), Exchange: exchange, Err: err}
+		return Account{}, classify(exchange, err)
 	}
 	now := s.clk.Now()
 	return s.confirmed(ctx, subdomain, exchange, resp, now), nil
@@ -283,80 +311,6 @@ func checkExchange(exchange string) error {
 	}
 }
 
-// isManifestVersionRefused reports whether err is the one condition both legs of
-// this service can meet: the target Exchange's manifest was read and carries a
-// document version this build does not accept.
-//
-// It answers for BOTH spellings on purpose, because the two legs reach the
-// condition by different routes. The register leg reads requirements first, so
-// the refusal arrives as the port's own account.ErrManifestVersionRefused. The
-// status leg reads no requirements, so the same document is refused inside the
-// SDK's resolver and arrives as resolvers.ErrManifestVersionRefused underneath a
-// CallError. One condition classified in one place is what keeps the two tools
-// from telling an agent two different things about one Exchange.
-func isManifestVersionRefused(err error) bool {
-	return errors.Is(err, account.ErrManifestVersionRefused) ||
-		errors.Is(err, resolvers.ErrManifestVersionRefused)
-}
-
-// requirementsKind classifies what the requirements reader refused with.
-//
-// The reader distinguishes a refused ARGUMENT, a policy refusal and a manifest
-// it read but cannot accept from a peer that would not answer, and says so with
-// sentinels the port declares. Without this, all four arrived as
-// KindRequirements — so an operator reading call_failed could not tell an agent
-// that named a URL, a domain their own policy excludes, or an Exchange whose
-// document this build does not implement, from an Exchange that is down.
-func requirementsKind(err error) Kind {
-	switch {
-	case errors.Is(err, account.ErrNotBareDomain):
-		return KindExchangeShape
-	case errors.Is(err, account.ErrNotPermitted):
-		return KindNotPermitted
-	case isManifestVersionRefused(err):
-		return KindManifestVersionRefused
-	default:
-		return KindRequirements
-	}
-}
-
-// outboundKind classifies a failed account call.
-//
-// KindOutbound says the request was sent and the Exchange refused it, or the
-// call never completed. A manifest this build cannot read is neither: nothing
-// was sent, and nothing will be on a retry. The status leg reaches that verdict
-// through the SDK resolver rather than through the requirements reader, so
-// without this arm it rendered as the generic peer failure — whose own wording
-// says the request was sent, which it was not.
-func outboundKind(err error) Kind {
-	if isManifestVersionRefused(err) {
-		return KindManifestVersionRefused
-	}
-	return KindOutbound
-}
-
-// requirements reads the target's manifest and reports the pre-check that can be
-// run against it.
-//
-// A published schema this service cannot use is LOGGED, never refused. A local
-// check that cannot run must not become a local veto: the Exchange's own check
-// is the deciding one, and refusing here would block a registration it would
-// have accepted with no way for the agent past it. The operator still needs to
-// know the pre-check was silently skipped, which is what that line is.
-func (s *Service) requirements(
-	ctx context.Context, subdomain, exchange string,
-) (account.Requirements, error) {
-	reqs, err := s.reqs.Requirements(ctx, exchange)
-	if err != nil {
-		return account.Requirements{}, &Error{Kind: requirementsKind(err), Exchange: exchange, Err: err}
-	}
-	if reqs.SchemaRefused() {
-		reqctx.FromContext(ctx).WarnContext(ctx, "identity.mcp.register.schema_unusable",
-			"subdomain", subdomain, "exchange", exchange, "verdict", reqs.Verdict.String())
-	}
-	return reqs, nil
-}
-
 // Status asks one Exchange about subdomain's account there and returns its
 // answer, which is authoritative as of this call.
 //
@@ -374,15 +328,34 @@ func (s *Service) Status(ctx context.Context, subdomain, exchange string) (Accou
 	})
 	now := s.clk.Now()
 	switch {
-	case err == nil:
+	case err == nil && resp.GetBillingRef() != "":
 		// The note is refreshed to match, which is the only way one appears for a
-		// registration made outside this service.
-		return s.confirmed(ctx, subdomain, exchange, resp, now), nil
-	case errors.Is(err, account.ErrNoAccount):
+		// registration made outside this service. Balances are set here and not
+		// in confirmed, because the register answer confirmed also serves has
+		// none.
+		acct := s.confirmed(ctx, subdomain, exchange, resp, now)
+		for _, b := range resp.GetBalances() {
+			acct.Balances = append(acct.Balances, Balance{Amount: b.GetAmount(), Currency: b.GetCurrency()})
+		}
+		return acct, nil
+	case err == nil || errors.Is(err, account.ErrNoAccount):
+		// One answer in two spellings, and both must land here.
+		//
+		// The protocol's no-account answer is an ordinary response carrying an
+		// EMPTY account handle, and the contract says so of the field. This
+		// deployment's own Exchange instead refuses with NotFound, which the
+		// outbound leg states as ErrNoAccount. A conformant peer and this one are
+		// saying the same thing, so an agent must not learn a different answer
+		// depending on which it asked.
+		//
+		// Reading every non-error response as an account is what this replaces.
+		// Under that reading a conformant peer's "you have no account" became
+		// registered=true with a blank handle, and a local note was written
+		// claiming an account that does not exist.
 		s.forget(ctx, subdomain, exchange)
 		return Account{Exchange: exchange, Registered: false, AsOf: now}, nil
 	default:
-		return Account{}, &Error{Kind: outboundKind(err), Exchange: exchange, Err: err}
+		return Account{}, classify(exchange, err)
 	}
 }
 

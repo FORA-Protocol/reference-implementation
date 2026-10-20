@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"sync/atomic"
 	"testing"
 
@@ -23,9 +24,9 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
 )
 
-// E2E for the tenant-configured default agent credit: a freshly registered
-// agent is granted tenants.default_agent_credit once, through the public
-// Register RPC, and can spend exactly that much on paid transactions. Money
+// E2E for the configured default agent credit: a freshly registered agent is
+// granted ExchangeConfig.DefaultAgentCredits (EXCHANGE_DEFAULT_AGENT_CREDIT in
+// production) once, through the public Register RPC, and can spend exactly that much on paid transactions. Money
 // movement is driven end to end (Register → DiscoverResources →
 // ExecuteTransaction) against the balance-bearing InMemoryAdapter; the real
 // TigerBeetle ledger runs the same registration flow in
@@ -40,28 +41,25 @@ type tenantArrange struct {
 	tenantID string
 }
 
-// setTenantDefaultCredit arranges the tenant's default agent credit through
-// the production write surface — repo.NewTenantWriteRepo(...).SetDefaultAgentCredit
-// inside one transaction, the same guarded writer the boot-time
-// EXCHANGE_DEFAULT_AGENT_CREDIT application commits through — so the arrange
-// step runs guardDefaultAgentCredit rather than reaching past it with raw sqlc.
-func setTenantDefaultCredit(t *testing.T, a tenantArrange, amount string) {
+// harnessCredit is the welcome-credit configuration for a deployment billing in
+// the harness currency only: amount granted in that currency. It is what
+// cmd/server parses from EXCHANGE_DEFAULT_AGENT_CREDIT and hands the service as
+// ExchangeConfig.DefaultAgentCredits, so a harness built with it grants the
+// credit exactly as a configured production Exchange does.
+func harnessCredit(t *testing.T, amount string) map[string]*big.Rat {
 	t.Helper()
-	credit := sharedtestutil.MustRat(t, amount)
-	writer := repo.NewTenantWriteRepo(a.queries)
-	err := db.WithTx(a.ctx, a.pool, func(tx pgx.Tx) error {
-		n, err := writer.SetDefaultAgentCredit(a.ctx, tx, a.tenantID, credit)
-		if err != nil {
-			return err
-		}
-		if n != 1 {
-			return fmt.Errorf("rows affected = %d, want 1", n)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("set tenant default credit: %v", err)
+	return creditsOf(t, map[string]string{harnessCurrency: amount})
+}
+
+// creditsOf is harnessCredit for a deployment that bills in more than one
+// currency: amounts as decimal strings by ISO 4217 code.
+func creditsOf(t *testing.T, amounts map[string]string) map[string]*big.Rat {
+	t.Helper()
+	credits := make(map[string]*big.Rat, len(amounts))
+	for currency, amount := range amounts {
+		credits[currency] = sharedtestutil.MustRat(t, amount)
 	}
+	return credits
 }
 
 // setTenantActivationDefault arranges whether the tenant starts newly
@@ -141,15 +139,14 @@ func discoverOffersForAgent(t *testing.T, h *pushHarness, agentID string, uris .
 }
 
 // assertBalanceThrough asserts an agent's settled balance through the billing
-// adapter's GetBalance port. No production code path reads balances — the
-// Exchange exposes no balance RPC and the service never calls GetBalance — so
-// this is the Testing-Doctrine §9 tier-2 fallback: the adapter port is the
-// highest read surface that exists for ledger balances until a public
-// account-balance read lands. Shared by the in-memory and TigerBeetle
+// adapter's GetBalance port. GetAccountStatus reports the AVAILABLE balance
+// (holds subtracted); no public RPC reports the settled balance, so this is the
+// Testing-Doctrine §9 tier-2 fallback: the adapter port is the highest read
+// surface that exists for it. Shared by the in-memory and TigerBeetle
 // default-credit flows.
 func assertBalanceThrough(t *testing.T, ctx context.Context, bill billing.Adapter, ref, want string) {
 	t.Helper()
-	bal, err := bill.GetBalance(ctx, ref)
+	bal, err := bill.GetBalance(ctx, ref, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance(%q): %v", ref, err)
 	}
@@ -177,7 +174,7 @@ func seedThreePricedURIs(t *testing.T, h *pushHarness) []string {
 }
 
 // TestRegisterDefaultCredit_GrantedOnceAndSpendable is the headline
-// acceptance flow: with default_agent_credit = 0.10 on the tenant, a new agent
+// acceptance flow: with a configured welcome credit of 0.10, a new agent
 // registers and can buy paid content worth exactly 0.10 (two 0.05 items) end
 // to end through the public RPC surface. A repeat Register between the spends
 // does not credit twice — the third item is denied INSUFFICIENT_BALANCE, so
@@ -186,8 +183,7 @@ func seedThreePricedURIs(t *testing.T, h *pushHarness) []string {
 // Credit under the welcome idempotency key.
 func TestRegisterDefaultCredit_GrantedOnceAndSpendable(t *testing.T) {
 	rec := newRecordingAdapter(billing.NewInMemoryAdapter(billing.InMemoryOptions{}))
-	h := newPushHarnessWith(t, pushHarnessOptions{billing: rec})
-	setTenantDefaultCredit(t, h.arrange(), "0.10")
+	h := newPushHarnessWith(t, pushHarnessOptions{billing: rec, defaultAgentCredits: harnessCredit(t, "0.10")})
 	uris := seedThreePricedURIs(t, h)
 
 	agent := h.newAgent(t, "credit-agent.example")
@@ -206,7 +202,7 @@ func TestRegisterDefaultCredit_GrantedOnceAndSpendable(t *testing.T) {
 		events[1].Method != "Credit" || events[1].BillingRef != ref {
 		t.Fatalf("account events after Register = %+v, want [EnsureAgentAccount(%s) Credit(%s)]", events, ref, ref)
 	}
-	if wantKey := billing.WelcomeCreditKey(ref); events[1].Key != wantKey {
+	if wantKey := billing.WelcomeCreditKey(ref, harnessCurrency); events[1].Key != wantKey {
 		t.Fatalf("Credit idempotency key = %q, want %q", events[1].Key, wantKey)
 	}
 
@@ -250,8 +246,8 @@ func TestRegisterDefaultCredit_GrantedOnceAndSpendable(t *testing.T) {
 }
 
 // TestRegisterDefaultCredit_ZeroDefaultUnchanged pins the default-off contract:
-// with default_agent_credit = 0 (the column default, deliberately not set
-// here), registration grants nothing and the first paid transaction is denied
+// with no welcome credit configured (EXCHANGE_DEFAULT_AGENT_CREDIT unset, the
+// default), registration grants nothing and the first paid transaction is denied
 // INSUFFICIENT_BALANCE — the strictly prepaid behavior from before the feature.
 func TestRegisterDefaultCredit_ZeroDefaultUnchanged(t *testing.T) {
 	h := newPushHarnessWith(t, pushHarnessOptions{billing: billing.NewInMemoryAdapter(billing.InMemoryOptions{})})
@@ -267,7 +263,7 @@ func TestRegisterDefaultCredit_ZeroDefaultUnchanged(t *testing.T) {
 }
 
 // TestRegisterDefaultCredit_InactiveAccountNotGranted pins the review-hold
-// policy: with default_agent_credit set but activate_new_agents_by_default
+// policy: with a welcome credit configured but activate_new_agents_by_default
 // flipped off, a fresh registration succeeds inactive and the welcome credit
 // is NOT granted — the billing adapter sees the account creation and no Credit
 // call, and the balance stays 0. A tenant holding new agents for review must
@@ -275,8 +271,7 @@ func TestRegisterDefaultCredit_ZeroDefaultUnchanged(t *testing.T) {
 // the operator script's shared service slot instead.
 func TestRegisterDefaultCredit_InactiveAccountNotGranted(t *testing.T) {
 	rec := newRecordingAdapter(billing.NewInMemoryAdapter(billing.InMemoryOptions{}))
-	h := newPushHarnessWith(t, pushHarnessOptions{billing: rec})
-	setTenantDefaultCredit(t, h.arrange(), "0.10")
+	h := newPushHarnessWith(t, pushHarnessOptions{billing: rec, defaultAgentCredits: harnessCredit(t, "0.10")})
 	setTenantActivationDefault(t, h.arrange(), false)
 
 	agent := h.newAgent(t, "held-agent.example")
@@ -323,8 +318,7 @@ func TestRegisterDefaultCredit_CreditFailureFailsRegister(t *testing.T) {
 	inner := billing.NewInMemoryAdapter(billing.InMemoryOptions{})
 	flaky := &creditFailingAdapter{Adapter: inner, inject: errLedgerDown}
 	flaky.failures.Store(1)
-	h := newPushHarnessWith(t, pushHarnessOptions{billing: flaky})
-	setTenantDefaultCredit(t, h.arrange(), "0.10")
+	h := newPushHarnessWith(t, pushHarnessOptions{billing: flaky, defaultAgentCredits: harnessCredit(t, "0.10")})
 
 	agent := h.newAgent(t, "flaky-agent.example")
 	client := agent.client
@@ -360,8 +354,7 @@ func TestRegisterDefaultCredit_CreditOutageMapsUnavailable(t *testing.T) {
 	inner := billing.NewInMemoryAdapter(billing.InMemoryOptions{})
 	flaky := &creditFailingAdapter{Adapter: inner, inject: billing.ErrBackendUnavailable}
 	flaky.failures.Store(1)
-	h := newPushHarnessWith(t, pushHarnessOptions{billing: flaky})
-	setTenantDefaultCredit(t, h.arrange(), "0.10")
+	h := newPushHarnessWith(t, pushHarnessOptions{billing: flaky, defaultAgentCredits: harnessCredit(t, "0.10")})
 
 	agent := h.newAgent(t, "outage-agent.example")
 	client := agent.client

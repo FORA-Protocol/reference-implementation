@@ -31,7 +31,7 @@ func pricedTerms(n int) []*forav1.LicenseTerm {
 	for range n {
 		out = append(out, &forav1.LicenseTerm{
 			Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
-			Pricing:   &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.07", Currency: "USD", Unit: proto.String("accesses")},
+			Pricing:   &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.07", Currency: "USD", Unit: proto.String("accesses"), EstimatedQuantity: proto.Int32(1)},
 		})
 	}
 	return out
@@ -45,9 +45,9 @@ func pricedTerms(n int) []*forav1.LicenseTerm {
 // cap is accepted and stored; one term over is refused.
 //
 // Both legs assert only through public surfaces: the PushResources verdict, and
-// the DiscoverResources offer count as the persistence probe (one offer ⇒ the
-// entry reached the catalog, zero ⇒ it did not) — a protocol round-trip on both
-// legs, no DB/repo/sqlc access. The refusal additionally has to name WHICH tier
+// the DiscoverResources offer count as the persistence probe (one offer per
+// stored term ⇒ the entry reached the catalog, zero ⇒ it did not) — a protocol
+// round-trip on both legs, no DB/repo/sqlc access. The refusal additionally has to name WHICH tier
 // refused: the buf.validate.Violations detail the interceptor attaches, with a
 // violation on entries[0].terms under repeated.max_items. Without that check a
 // refusal from any later gate would also read as InvalidArgument with zero
@@ -69,7 +69,7 @@ func TestPushResources_TermsCardinalityCap(t *testing.T) {
 			name:       "exactly at the cap is accepted and persisted",
 			path:       "/cap/at-limit",
 			count:      capacity,
-			wantOffers: 1,
+			wantOffers: capacity, // one offer per term
 		},
 		{
 			name:    "one over the cap is refused at the wire and not persisted",
@@ -132,8 +132,8 @@ func TestPushResources_TermsCapMixedBatch(t *testing.T) {
 	if solo.Msg.GetAccepted() != 1 {
 		t.Fatalf("solo within-cap accepted=%d, want 1", solo.Msg.GetAccepted())
 	}
-	if got := discoverOfferCount(t, h, "https://"+h.publisherDom+soloPath); got != 1 {
-		t.Fatalf("solo within-cap offers = %d, want 1", got)
+	if got := discoverOfferCount(t, h, "https://"+h.publisherDom+soloPath); got != 2 {
+		t.Fatalf("solo within-cap offers = %d, want 2 (one per pushed term)", got)
 	}
 
 	// FAILURE leg: within-cap + over-cap sibling → the whole submission is

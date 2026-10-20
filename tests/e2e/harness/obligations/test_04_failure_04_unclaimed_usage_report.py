@@ -1,225 +1,104 @@
-"""Obligation 04, failure-mode 2: an unclaimed usage report is refused.
+"""Obligation PUBLIC-005: a report for another agent's transaction is answered as for an unknown one.
 
-Traces to failure-mode bullet 2 (verbatim):
+``UsageReport`` in ``fora.proto`` of the pinned module
+``github.com/FORA-Protocol/protocol``: a report for a transaction the Exchange
+recorded under a different agent is answered exactly as a report for an unknown
+transaction, ``not_found`` with ``usage_report_rejection`` TRANSACTION_NOT_FOUND, so
+the answer does not reveal that the transaction exists.
 
-> The agent attempts to report usage for a transaction whose ``agent_id``
-> does not match its own. The report is refused; the transaction belongs
-> to a different agent.
+Two agents of the test's own, both funded at exchange-d. The buyer buys the
+archive's lecture notes, a sale that owes a usage report. The stranger then files
+two reports, each through its own SDK client and signed with its own key:
 
-This test exercises the related, stronger refusal: an agent operating
-as its own principal (no separate-principal delegation) reports usage
-for a transaction id that does not exist in the ledger at all. Per the
-obligation's framing, the platform must refuse — the transaction does
-not belong to this agent (it does not belong to any agent yet, because
-it does not exist). The platform must also avoid inventing any state
-to make the report succeed: in particular, the "no separate principal
-was delegated" framing rules out fabricating an identity to attach the
-phantom transaction to.
+* one for the buyer's transaction, carrying the buyer's real billing_id, so the
+  report is right in every field except whose transaction it names;
+* one for a transaction id no one holds.
 
-Per obligation 04's "every request is signed by the agent's well-known
-key" clause, the request is signed by the agent's own Ed25519 keypair
-(no separate-principal delegation header). The caller's key resolves
-from its own well-known directory, so the signature verifies and the
-refusal comes from the service layer's no-obligation-for-transaction
-check — surfaced as the single ``not_found`` code that
-``_REFUSAL_CODES`` pins, so the test notices if a future change moves
-the refusal to a different layer or classification.
+Both must be refused the same way, with the same Connect code and the same typed
+reason, and that answer must be not_found with TRANSACTION_NOT_FOUND. The report
+for the buyer's transaction is sent a second time and refused the same way again.
 
-The observable: the platform refuses the report (Connect-Go non-2xx
-with a refusal code) and does NOT side-effect the ledger. In
-particular:
+"Not recorded" is read through ReportUsage itself. A transaction takes one report:
+a second report under a new key is refused DUPLICATE (MONEY-028). The buyer's own
+report, filed after the stranger's two attempts, is accepted, so neither attempt
+was recorded against the transaction. That control holds today and after the fix
+alike, as does the second attempt being answered like the first, so both run
+before the answer itself is judged.
 
-  1. The ``fora.transaction_log`` row count is unchanged — no
-     synthetic row is invented for the unknown transaction id.
-  2. The ``fora.agents`` row count grows by at most the caller's own
-     lazy registration — a missing identity must not cause a synthetic
-     agent insert (see the in-test comment on the exact bound).
-
-The test exercises the canonical v1 entry point — the Exchange direct
-call at ``/fora.v1.ExchangeService/ReportUsage``. Slice #2 deleted the
-Broker-relay route for this RPC (see ``src/broker/cmd/server/main.go``
-``buildBrokerMux`` comment: "The Exchange relay handler is removed
-in W3; W4 will rewire callers to the canonical
-DiscoverResources/ExecuteTransaction/ReportUsage relay"). Until W4
-re-adds a Broker relay path, the Exchange is the only HTTP surface
-that exposes ReportUsage; the refusal invariant is enforced there
-and the Broker variant of this test was removed (it 404'd against
-the deliberately-absent route, not against the obligation's
-refusal logic).
-
-Note: a tighter regression guard for the "agent_id does not match its
-own" wording would seed a real transaction under agent A and then
-attempt to report it as agent B; that variant is out of scope for this
-test (which catches the more permissive "no such transaction" case)
-and would belong in a sibling test once the multi-agent identity
-plumbing is wired through the harness.
+A report for a transaction id no one holds, filed by any agent, is MONEY-024.
 """
 
 from __future__ import annotations
 
-import json
 import uuid
-from typing import Any
 
-import httpx
-import psycopg
 import pytest
+from fora_sdk.client import CallError
+from wire.models import UsageReport
 
-from ..connect_errors import assert_refused
-from ..reporting import REPORT_USAGE_PATH, report_body
-from ..exchanges import recipient_of
-from ..conftest import COMPOSE_FILE, StackURLs
-from ..httpsig_signer import load_keypair, sign_request
-from ..seed import (
-    CONTRIBUTOR_KEY_PATH,
-    SeededFixture,
-    _resolve_pg_dsn,
-)
+from ..defects import FOREIGN_REPORT_NOT_HIDDEN
+from ..exchanges import EXCHANGE_D_DOMAIN
+from ..fresh_agent import AgentFactory, FreshAgent
+from ..money_path import LECTURE_NOTES, assert_bought, discover_offer, only_item
+from ..obligation_registry import Obligation, obligation
+from ..reporting import report_body
 
 # ADR-008 D5 — declare stack-isolation contract.
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
-
-# The Connect-Go JSON error code that qualifies as "refusal". Pinned to the
-# one code the deployed path actually returns — the service layer's
-# no-obligation-for-transaction check maps to ``not_found`` — so a change
-# that moves the refusal to another layer or classification is noticed
-# here instead of being absorbed silently.
-_REFUSAL_CODES: frozenset[str] = frozenset({"not_found"})
+_SEAT = EXCHANGE_D_DOMAIN
+_NOT_FOUND = ("not_found", "USAGE_REPORT_REJECTION_REASON_TRANSACTION_NOT_FOUND")
 
 
-def _post_signed_json(url: str, body: dict[str, Any]) -> httpx.Response:
-    """Sign a JSON POST with the agent's own well-known key and send it.
-
-    Obligation 04: "every request is signed by the agent's well-known
-    key". The agent operates as its OWN principal — no separate
-    principal delegated — so the request carries an RFC 9421 signature
-    (agent identity) but no ``Authorization`` bearer and no
-    ``X-FORA-Entitlement-Biscuit`` (those would carry a separate
-    principal). The platform cannot find a matching ``agent_id`` on
-    the (nonexistent) transaction and must refuse with the service
-    layer's no-obligation-for-transaction ``not_found`` (the only code
-    ``_REFUSAL_CODES`` accepts).
-    """
-    payload = json.dumps(body, separators=(",", ":")).encode()
-    kid, priv = load_keypair(CONTRIBUTOR_KEY_PATH)
-    signed = sign_request(method="POST", target_uri=url, body=payload, kid=kid, priv=priv)
-    headers = {**signed.headers, "Content-Type": "application/json"}
-    return httpx.post(url, content=payload, headers=headers, timeout=30.0)
+def _refusal(agent: FreshAgent, report: UsageReport) -> tuple[str | None, str | None]:
+    """The Connect code and the usage_report_rejection reason ``agent``'s report is refused with."""
+    with pytest.raises(CallError) as refused:
+        agent.exchange(_SEAT).report_usage(report)
+    detail = refused.value.detail
+    block = detail.usage_report_rejection if detail is not None else None
+    return refused.value.code, block.reason.value if block is not None else None
 
 
-def _snapshot_counts(dsn: str) -> tuple[int, int]:
-    """Return (transaction_log rows, agents rows) at this moment.
-
-    BLACK-BOX e2e exception: the transaction ledger has NO
-    protocol read surface BY DESIGN — record-read/reporting is downstream
-    observability over the operator's datastore, out of FORA's protocol scope,
-    so no public read RPC will be added. A full-stack e2e observing the
-    deployment's datastore directly is NOT the pt9 layer-bypass that rule
-    forbids (an in-process test reaching past a production layer); it is the
-    only way to assert these ledger side effects (here, their absence) end-to-end.
-    """
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM fora.transaction_log")
-        tx_row = cur.fetchone()
-        cur.execute("SELECT COUNT(*) FROM fora.agents")
-        ag_row = cur.fetchone()
-    assert tx_row is not None and ag_row is not None
-    return int(tx_row[0]), int(ag_row[0])
-
-
-def _assert_refused(resp: httpx.Response, unknown_tx_id: str) -> None:
-    """Assert the response is a Connect-Go refusal, not a 2xx accept.
-
-    The shared reader pins the code — see ``_REFUSAL_CODES`` above for which one
-    and why — so a refusal that moves to another layer is noticed here instead
-    of passing as "some 4xx".
-    """
-    assert_refused(resp, _REFUSAL_CODES, f"report for unclaimed transaction {unknown_tx_id}")
-
-
-def test_report_for_unclaimed_tx_is_refused_by_exchange(
-    compose_stack: StackURLs,
-    seeded: SeededFixture,
+@obligation(Obligation.PUBLIC_005, negative=True)
+@FOREIGN_REPORT_NOT_HIDDEN.mark
+def test_a_report_for_another_agents_transaction_is_answered_as_for_an_unknown_one(
+    fresh_agent_factory: AgentFactory,
 ) -> None:
-    """Exchange direct call refuses ReportUsage for an unknown transaction id.
-
-    Every assertion traces to the scenario text:
-
-      - "for a transaction whose ``agent_id`` does not match its own"
-        (interpreted strictly: the request's RFC 9421 signature
-        identifies the calling agent, and that agent's identity does
-        not match the transaction's ``agent_id`` — which moreover
-        does not exist) — we POST a ReportUsage to the Exchange's
-        ``/fora.v1.ExchangeService/ReportUsage`` endpoint with a
-        transaction_id that does not exist in
-        ``fora.transaction_log`` (fresh uuid). The POST is signed by
-        the agent's own well-known Ed25519 key per obligation 04
-        ("every request is signed by the agent's well-known key")
-        and carries no ``Authorization`` bearer and no
-        ``X-FORA-Entitlement-Biscuit`` (those would carry a separate
-        principal, contradicting the agent-as-own-principal setup).
-      - "The report is refused" — the response is a Connect-Go non-2xx
-        carrying the pinned ``not_found`` refusal code (the service
-        layer's no-obligation-for-transaction check; see
-        ``_REFUSAL_CODES``).
-      - Platform invariant: no ledger side effects — ``transaction_log``
-        row count is unchanged (the obligation's "no separate principal
-        was delegated" framing forbids inventing an agent identity to
-        accept a phantom transaction). The ``agents`` table MAY grow by
-        at most one: the request is signed by the caller's own published
-        well-known key, so the Exchange lazy-registers that caller
-        before refusing on the unknown transaction. That is the
-        validly-signed caller registering itself — not a synthetic
-        principal invented to accept the phantom tx; the refusal and the
-        untouched ``transaction_log`` are the load-bearing guarantees.
-
-    The Exchange is the canonical (and currently sole) HTTP entry
-    point for ReportUsage; see the module-level docstring on the
-    deliberately-deleted Broker relay route.
-    """
-    dsn = _resolve_pg_dsn(str(COMPOSE_FILE))
-    before_tx, before_agents = _snapshot_counts(dsn)
-
-    unknown_tx_id = f"tx-never-accepted-{uuid.uuid4().hex}"
-    url = f"{compose_stack.exchange}{REPORT_USAGE_PATH}"
-    body = report_body(
-        exchange=recipient_of(compose_stack.exchange),
-        transaction_id=unknown_tx_id,
-        consumed_quantity=1,
+    """Refused not_found TRANSACTION_NOT_FOUND, as an unknown id is; the buyer's report then stands."""
+    buyer, stranger = fresh_agent_factory(), fresh_agent_factory()
+    buyer.fund(_SEAT)
+    stranger.fund(_SEAT)
+    item = only_item(
+        buyer.exchange(_SEAT).execute(discover_offer(buyer, LECTURE_NOTES, _SEAT)),
+        "the buyer's purchase",
+    )
+    assert_bought(item, "the buyer's purchase")
+    assert item.reporting_obligation is not None and item.reporting_obligation.required, (
+        f"the purchase must owe a usage report for a report to be filed against it: {item}"
     )
 
-    resp = _post_signed_json(url, body)
-    _assert_refused(resp, unknown_tx_id)
-
-    after_tx, after_agents = _snapshot_counts(dsn)
-    assert after_tx == before_tx, (
-        f"refused report mutated transaction_log: {before_tx} -> {after_tx}"
+    foreign = report_body(
+        exchange=_SEAT, transaction_id=str(item.transaction_id), billing_id=item.billing_id
     )
-    # The ledger invariant above is load-bearing: NO phantom transaction is
-    # accepted (the report is refused and leaves no transaction_log row, asserted
-    # above/below). Lazy/just-in-time registration (ADR-009 D2, adopted
-    # from v1.1) resolves the CALLER from its own well-known BEFORE the
-    # no-such-transaction check, so a cryptographically-verified caller may
-    # legitimately gain its own fora.agents row — that is the real signer, NOT a
-    # synthetic identity invented to accept the phantom tx (which would require a
-    # row keyed to the tx's nonexistent agent_id). The agents table may therefore
-    # grow by at most one (the caller's own lazy registration) and must never
-    # decrease; never more.
-    assert 0 <= after_agents - before_agents <= 1, (
-        f"refused report changed agents by more than the lazy-registered "
-        f"caller: {before_agents} -> {after_agents}"
+    unknown = report_body(exchange=_SEAT, transaction_id=f"tx-{uuid.uuid4().hex}")
+
+    answered = _refusal(stranger, foreign)
+    unknown_answer = _refusal(stranger, unknown)
+    assert _refusal(stranger, foreign) == answered, "the second attempt was answered differently"
+
+    own = report_body(
+        exchange=_SEAT, transaction_id=str(item.transaction_id), billing_id=item.billing_id
+    )
+    report_id = buyer.exchange(_SEAT).report_usage(own).report_id
+    assert report_id, (
+        f"the buyer's own report was not accepted after the stranger's refused attempts: {own}"
     )
 
-    # BLACK-BOX e2e exception — same rationale as
-    # _snapshot_counts above: assert the unknown tx left no ledger row, observed
-    # directly on the deployment datastore (no protocol read surface exists).
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT 1 FROM fora.transaction_log WHERE transaction_id = %s",
-            (unknown_tx_id,),
-        )
-        found = cur.fetchone()
-    assert found is None, (
-        f"refused report inserted a transaction_log row for unknown tx {unknown_tx_id}"
+    FOREIGN_REPORT_NOT_HIDDEN.check(
+        answered == _NOT_FOUND,
+        f"the stranger's report for the buyer's transaction was refused {answered}",
+    )
+    assert unknown_answer == answered, (
+        "a report for an unknown transaction is answered differently from one for another "
+        "agent's transaction, which reveals that the transaction exists"
     )

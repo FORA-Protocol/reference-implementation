@@ -18,10 +18,15 @@ so those correlation IDs are the only way a transaction can be traced.
 
 TigerBeetle is the **financial ledger** the Exchange settles into. It holds every
 number that decides who has to be paid, and how much: each agent's prepaid
-balance in `agent:{billing_ref}`, money **reserved** for a purchase in flight and
-not yet confirmed, settled charges, each publisher's earned revenue in
-`owner:revenue:{resource_owner_id}`, and the platform's commission in
-`platform:fee`.
+balance in `agent:{currency}:{billing_ref}`, money **reserved** for a purchase in
+flight and not yet confirmed, settled charges, each publisher's earned revenue in
+`owner:{currency}:revenue:{resource_owner_id}`, and the platform's commission in
+`platform:{currency}:fee`.
+
+**Every account name carries its currency**, because the deployment may bill in
+more than one and each currency is a separate ledger. An agent has one balance
+per currency, nothing converts between them, and balances are never added
+together — see [`CONFIGURATION.md`](CONFIGURATION.md) §4.
 
 **`billing_ref` is the agent's account number.** The Exchange creates it — a
 random UUID — when the agent registers, and stores it on the agent's row in
@@ -97,8 +102,8 @@ docker compose logs exchange | grep tigerbeetle
 # wrapped here to fit the page.
 #   {"level":"INFO","msg":"tigerbeetle connected","cluster":1,
 #    "addresses":["10.0.1.7:3000"]}
-#   {"level":"INFO","msg":"billing adapter: tigerbeetle","ledger":978,
-#    "currency":"EUR","address":"10.0.1.7:3000","hold_timeout":"6m0s"}
+#   {"level":"INFO","msg":"billing adapter: tigerbeetle","currencies":"EUR,USD",
+#    "base_currency":"EUR","address":"10.0.1.7:3000","hold_timeout":"6m0s"}
 ```
 
 **If those lines are absent, the Exchange is billing nothing.** An unrecognised
@@ -172,7 +177,7 @@ earned and never collected. The line carries `transaction_id` and `billing_id`;
 | Exchange exits at boot: `billing: connect TigerBeetle at ...` | The address is invalid — most often **a hostname instead of an IP**. The client rejects hostnames. | Use `IP:port`. |
 | **`event=billing_record_failed_best_effort` in the Exchange log** | **The transaction committed but the charge never posted. The agent got the content free.** | §2.3, then §3.2 to confirm on the ledger. There is no automatic recovery. |
 | Every paid transaction denied, `/healthz` still green | The ledger is down. `/healthz` does not check it (§2.1). | Restart the ledger (§4.1). Free resources keep working throughout, which makes this easy to misread as a catalog problem. |
-| `billing denied: currency mismatch` | The catalog term's currency differs from the deployment's single ledger currency. | Fix the term's price currency. One deployment, one currency — [`CONFIGURATION.md`](CONFIGURATION.md) §4. |
+| `billing denied: currency mismatch` | The catalog term is priced in a currency this deployment does not bill in. | Fix the term's price currency, or add that currency to the deployment. The configured set and what it means are in [`CONFIGURATION.md`](CONFIGURATION.md) §4, and so is the procedure for adding one. |
 | `billing denied: insufficient balance` | The agent **has** an account, and it is empty — never funded, or the balance is spent. An agent cannot spend more than it has. | Fund it — §4.1. A newly registered agent always starts at zero. |
 | `agent is not registered for paid content: call Register first` | The agent **has no account**: it never called `Register`, so no `billing_ref` was ever created for it and there is nothing to charge. The Exchange refuses this before the ledger is consulted at all, so nothing reaches TigerBeetle. | The agent must call `Register` — you cannot fix this from the ledger side, and funding anything now credits an account no transaction will touch. Confirm with the query in §4.1: `billing_ref` is NULL for that agent. Free content is unaffected; only paid purchases are refused. |
 | Transaction denied, log names a resource owner the publisher's manifest never named (never "attested") | The catalog row has no `resource_owner_id`, so there is nobody to pay. Refused rather than paid into a shared account. | Fill in the missing owner — §4.3. |
@@ -180,11 +185,16 @@ earned and never collected. The line carries `transaction_id` and `billing_id`;
 
 ### 3.2 Diagnostics
 
-**Calculate an account id.** Account ids are `sha256(prefix + business id)`,
-truncated to the low 16 bytes and read little-endian. In production nothing extra
-is added to the input (the hashing is **unsalted**), so this calculator gives the
-real ids. Put your own ids in, and note the prefix for the one who gets paid is
-`owner:`, not `publisher:`.
+**Calculate an account id.** Account ids are
+`sha256(prefix + currency + ":" + business id)`, truncated to the low 16 bytes
+and read little-endian. In production nothing extra is added to the input (the
+hashing is **unsalted**), so this calculator gives the real ids. Put your own ids
+in, and note the prefix for the one who gets paid is `owner:`, not `publisher:`.
+
+**The currency is part of the id, so ask for the one you mean.** The same agent
+on the EUR ledger and on the USD ledger has two different account ids. Using the
+wrong currency gives you a valid-looking id for an account that either does not
+exist or holds money in the other currency.
 
 **For an agent, the business id is its `billing_ref`, not its name.** Read the
 `billing_ref` from PostgreSQL first (§4.1) and paste it in below. Owner and
@@ -193,16 +203,20 @@ platform ids need no lookup.
 ```bash
 python3 - <<'PY'
 import hashlib
-def account_id(s):
-    return int.from_bytes(hashlib.sha256(s.encode()).digest()[:16], "little")
-print("agent          ", account_id("agent:7c9e6679-7425-40de-944b-e07fc1f90ae7"))
-print("owner revenue  ", account_id("owner:revenue:acme"))
-print("platform fee   ", account_id("platform:fee"))
+def account_id(prefix, currency, business_id):
+    text = prefix + currency + ":" + business_id
+    return int.from_bytes(hashlib.sha256(text.encode()).digest()[:16], "little")
+ref = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+print("agent EUR       ", account_id("agent:", "EUR", ref))
+print("agent USD       ", account_id("agent:", "USD", ref))
+print("owner EUR       ", account_id("owner:", "EUR", "revenue:acme"))
+print("platform fee EUR", account_id("platform:", "EUR", "fee"))
 PY
 # Expect:
-#   agent           160256804321604199934357490248810311770
-#   owner revenue   253662641582529055044389689734124561153
-#   platform fee    3790524022861224602083356447743275029
+#   agent EUR        300683598873227862234078308272481577543
+#   agent USD        237161797134846634321013861757683979442
+#   owner EUR        276395377657432535366084133099668131956
+#   platform fee EUR 283923737139109635843339797573547837314
 ```
 
 **Read the account.** `repl` is TigerBeetle's own interactive command line — you
@@ -220,7 +234,7 @@ Then type this **at that prompt** — it is a ledger statement, not a shell comm
 and the trailing semicolon is required:
 
 ```
-lookup_accounts id=160256804321604199934357490248810311770;
+lookup_accounts id=300683598873227862234078308272481577543;
 ```
 
 You get back one account record. The three fields worth reading are
@@ -307,7 +321,9 @@ the `billing_id` values from the alert lines.
   fail over to. Losing the file loses the ledger.
 - **The Exchange is amd64 only** — the TigerBeetle client links a native library
   through CGO, which cannot build for a different processor type.
-- **Currency is deployment-wide** — one ledger, one currency, fixed at boot.
+- **The currency set is deployment-wide** — one ledger per currency, the set
+  fixed at boot, and no conversion between them. There is no per-tenant
+  currency.
 - **The client port has no authentication and no TLS.** Anything that can reach
   it can move money. Keep it private.
 - **`/healthz` tells you nothing about the ledger, deliberately** — `/readyz` is the
@@ -349,21 +365,31 @@ others.
 
 | Class | Account name | Created | Rule |
 |---|---|---|---|
-| Agent | `agent:{billing_ref}` | When the agent registers. | Limited — an agent can never spend more than it has been given. |
-| Resource-owner revenue | `owner:revenue:{resource_owner_id}` | On first use — when a purchase from that owner is first authorised. | Accrues credits. |
-| Platform fee | `platform:fee` | On first use — the first non-zero commission. | One account for the whole deployment. |
-| Operator liquidity | `platform:liquidity` | On first credit — by a funding script or the Register default credit. | Unlimited — goes negative by the total credit extended. |
+| Agent | `agent:{currency}:{billing_ref}` | When the agent registers — one per configured currency. | Limited — an agent can never spend more than it has been given, in that currency. |
+| Resource-owner revenue | `owner:{currency}:revenue:{resource_owner_id}` | On first use — when a purchase from that owner is first authorised in that currency. | Accrues credits. |
+| Platform fee | `platform:{currency}:fee` | On first use — the first non-zero commission in that currency. | One account per currency for the whole deployment. |
+| Operator liquidity | `platform:{currency}:liquidity` | On first credit — by a funding script or the Register welcome credit. | Unlimited — goes negative by the total credit extended in that currency. |
+
+**Each class exists once per currency.** A deployment billing in EUR and USD has
+two agent accounts per agent, two platform fee accounts, two liquidity accounts,
+and so on. Nothing moves between them.
 
 **Funding an agent account.** Adding money is done outside the platform on
 purpose. Per ADR-009 D2, an operator invoices the agent however they normally
 would, then adds the matching credit into the ledger by hand. One narrow
-exception exists (the ADR-009 amendment of 2026-08-13): a tenant with
-`default_agent_credit` above 0 grants that amount automatically, once, when an
-agent first registers — under the `service-welcome:{billing_ref}` transfer id,
-the same slot the funding scripts' reserved `service-welcome` label uses, so
-the two can never stack. With
-the setting at its default of 0 a freshly deployed stack starts with an empty
-ledger, and the first paid transaction is denied until you fund it.
+exception exists (the ADR-009 amendment of 2026-08-13): an Exchange with a welcome
+credit configured for a currency (`EXCHANGE_DEFAULT_AGENT_CREDIT`) grants that
+amount automatically, once, when an agent first registers — under the `service-welcome:{billing_ref}:{currency}`
+transfer id, the same slot the funding scripts' reserved `service-welcome` label
+uses, so the two can never stack. There is one such slot PER CURRENCY, so a
+registration that granted EUR and then failed before USD can be retried and
+grants only the USD that is missing. With no welcome credit configured a freshly
+deployed stack starts with an empty ledger, and the first paid transaction is
+denied until you fund it.
+
+**A currency added after an agent registered leaves that agent at zero in it.**
+The welcome credit is granted at registration and is not re-granted later, so
+fund those agents with the funding sweep, once per currency.
 
 **Step 1 — read the agent's `billing_ref` from PostgreSQL.** You cannot calculate
 it and you cannot guess it. Everything below depends on this value:
@@ -387,21 +413,29 @@ psql "$EXCHANGE_DSN" -c \
 money leaving one account, once as money arriving in another — so money cannot
 appear from nowhere. You need a source account to move it from.
 
-The platform's source account is `platform:liquidity`. Its id, and the agent's, come
-from the calculator in §3.2:
+The platform's source account is `platform:{currency}:liquidity` — one per
+currency, and it must be the currency you are funding. Its id, and the agent's,
+come from the calculator in §3.2. The example below funds **EUR**; for another
+currency change the code in both lines.
 
 ```bash
 python3 - <<'PY'
 import hashlib
-def account_id(s):
-    return int.from_bytes(hashlib.sha256(s.encode()).digest()[:16], "little")
-print("liquidity", account_id("platform:liquidity"))
-print("agent    ", account_id("agent:7c9e6679-7425-40de-944b-e07fc1f90ae7"))
+def account_id(prefix, currency, business_id):
+    text = prefix + currency + ":" + business_id
+    return int.from_bytes(hashlib.sha256(text.encode()).digest()[:16], "little")
+print("liquidity EUR", account_id("platform:", "EUR", "liquidity"))
+print("agent     EUR", account_id("agent:", "EUR", "7c9e6679-7425-40de-944b-e07fc1f90ae7"))
 PY
-# Expect (the liquidity id is the same in every deployment; the agent's is not):
-#   liquidity 336127876051426545196802061685315751094
-#   agent     160256804321604199934357490248810311770
+# Expect (the liquidity id is the same in every deployment for a given currency;
+# the agent's is not):
+#   liquidity EUR 329437178540122795680299142206267258359
+#   agent     EUR 300683598873227862234078308272481577543
 ```
+
+> **Funding the wrong currency's accounts succeeds and helps nobody.** Both ids
+> are valid; the money simply lands on a ledger the agent's EUR-priced purchases
+> never debit. Check the currency in the strings above before moving anything.
 
 Open `repl` (§3.2) and type these **at its prompt**, substituting your own agent id
 and amount. Each statement ends in a semicolon.
@@ -411,7 +445,7 @@ negative by whatever it hands out — that is correct for a source, so it gets *
 spending limit. `code=3` marks it a platform account.
 
 ```
-create_accounts id=336127876051426545196802061685315751094 code=3 ledger=978 flags=history;
+create_accounts id=329437178540122795680299142206267258359 code=3 ledger=978 flags=history;
 ```
 
 **2. Make sure the agent's account exists.** Registration already created it, so
@@ -420,7 +454,7 @@ instead creates a new account, the `billing_ref` you pasted is wrong: stop and
 recheck Step 1 before moving any money.
 
 ```
-create_accounts id=160256804321604199934357490248810311770 code=1 ledger=978 flags=debits_must_not_exceed_credits;
+create_accounts id=300683598873227862234078308272481577543 code=1 ledger=978 flags=debits_must_not_exceed_credits;
 ```
 
 **3. Post the credit.** Amounts are in units of 10⁻⁸ of the currency, so **€10.00 is
@@ -428,8 +462,12 @@ create_accounts id=160256804321604199934357490248810311770 code=1 ledger=978 fla
 from something that names this top-up, so a retry cannot double-credit:
 
 ```
-create_transfers id=<unique id> debit_account_id=336127876051426545196802061685315751094 credit_account_id=160256804321604199934357490248810311770 amount=1000000000 ledger=978 code=1;
+create_transfers id=<unique id> debit_account_id=329437178540122795680299142206267258359 credit_account_id=300683598873227862234078308272481577543 amount=1000000000 ledger=978 code=1;
 ```
+
+`ledger=978` is the EUR ledger. It must match the currency in both account ids —
+the ledger number and the ids are two statements of the same fact, and
+TigerBeetle rejects a transfer whose accounts are on a different ledger.
 
 Derive that id the same way as an account id, from a string naming the top-up:
 
@@ -437,7 +475,7 @@ Derive that id the same way as an account id, from a string naming the top-up:
 python3 - <<'PY'
 import hashlib
 print(int.from_bytes(hashlib.sha256(
-    b"fund:7c9e6679-7425-40de-944b-e07fc1f90ae7:1000000000:2026-07-invoice"
+    b"fund:EUR:7c9e6679-7425-40de-944b-e07fc1f90ae7:1000000000:2026-07-invoice"
 ).digest()[:16], "little"))
 PY
 # Expect: one number. Re-running it gives the same number, which is the point —
@@ -448,7 +486,7 @@ PY
 **4. Confirm.**
 
 ```
-lookup_accounts id=160256804321604199934357490248810311770;
+lookup_accounts id=300683598873227862234078308272481577543;
 ```
 
 `credits_posted` has risen by the amount. That number, minus `debits_posted`, is
@@ -460,8 +498,12 @@ what the agent can now spend.
 > exactly.
 
 Calculate both account ids with the calculator in §3.2 — the agent's from
-`agent:{billing_ref}` — and build the transfer id from something stable that
-names the top-up, for example `sha256("fund:{billing_ref}:{amount}:{label}")`.
+`agent:{currency}:{billing_ref}` — and build the transfer id from something
+stable that names the top-up AND its currency, for example
+`sha256("fund:{currency}:{billing_ref}:{amount}:{label}")`. The currency belongs
+in that string: without it the same top-up in two currencies derives one id, and
+the second one is rejected as a duplicate while the script still looks like it
+worked.
 Keying it on the `billing_ref` keeps the audit trail on the same value the account
 itself is keyed on. TigerBeetle rejects a duplicate transfer id, so a derived id
 makes the whole procedure safe to re-run: running it twice does not double the
@@ -682,13 +724,16 @@ place the money actually moved.
 - **Reversing a charge is not available.** The proportional refund exists in the
   ledger but no part of the platform ever calls it — no dispute RPC, no operator
   procedure.
-- **No end-to-end test stack exercises the ledger.** That suite runs against the
-  in-memory billing backend, so the ledger's only automated coverage is the
-  integration suite.
+- **The end-to-end stack runs one single-replica ledger per Exchange**, in
+  development mode on a throwaway volume. It proves purchases move balances, read
+  back through `GetAccountStatus`; it says nothing about durability, backups or
+  failover, which only an operator procedure covers.
 - **A single replica has no failover** — one process, one file. Recovery means
   restoring a backup (§5.3), which costs downtime plus every transaction since that
   backup was taken.
-- **Multiple currencies are not implemented yet.**
+- **Only EUR (978) and USD (840) can be billed.** The ledger runs one ledger per
+  configured currency, but the adapter knows these two codes only, so a paid term in
+  any other currency is denied rather than charged.
 - **Health coverage stops at "is it listening".** The container check is a TCP
   connect and `/readyz` is a single round-trip; neither tells you the ledger is
   answering *correctly*, only that it answers (§2.1).

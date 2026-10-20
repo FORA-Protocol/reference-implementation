@@ -191,9 +191,10 @@ Because the label is unauthenticated, an over-budget agent could evade the guard
 (the guard skipped the check) or by writing a different value. That is exactly the trust-confusion this
 ADR's two-names distinction warns about: an unverified value driving a money decision.
 
-Decision: **the Broker's cost guard keys on the authenticated agent identity** (`Requester.id`, which the
-Broker's httpsig middleware has already verified via `authorizeAgentSelfAct` — the signed `Signature-Agent`
-must equal `requester.id`), and it accumulates **per agent, per period**. `Requester.billing_ref` is
+Decision: **the Broker's cost guard keys on the authenticated agent identity** (the canonical host of the
+`Signature-Agent` directory the Broker's httpsig middleware verified, never the caller-written
+`Requester.id`, which the Broker forwards unchanged as a free label), and it accumulates **per agent, per
+period**. `Requester.billing_ref` is
 **attribution-only**: the Broker still echoes it to the Exchange for the customer's own usage reports, but
 nothing on the guard path reads it. The guard's *limit* stays caller-supplied (a guardrail, not a
 third-party guarantee): the agent declares its own ceiling, which is the whole point of a self-guard, so

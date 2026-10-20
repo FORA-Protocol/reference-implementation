@@ -31,7 +31,7 @@ import pytest
 
 from .conftest import REPO_ROOT
 from .deployment_docs import DECLARED_VERSION, DOCS, GATE, build_tree, doc_body
-from .guard_harness import GIT_TIMEOUT, git, guard_marks, run_git
+from .guard_harness import GIT_TIMEOUT, fixture_env, git, guard_marks, run_gate, run_git
 
 # The waiver marker must sit on the line itself or the one directly above it.
 # published-ref-allow: a test that drives a script has to name it; the skip below says why it is absent
@@ -65,7 +65,7 @@ def _make_fixture(tmp_path: Path) -> tuple[Path, Path]:
     origin = tmp_path / "origin.git"
     public = tmp_path / "public.git"
 
-    build_tree(repo, branch=_BRANCH, committer="deployment docs guard")
+    build_tree(repo, branch=_BRANCH)
     for bare in (origin, public):
         git("init", "-q", "--bare", "-b", "main", str(bare))
     run_git(repo, "remote", "add", "origin", str(origin))
@@ -106,18 +106,13 @@ def _run_release(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
         check=False,
         stdin=subprocess.DEVNULL,
         timeout=GIT_TIMEOUT,
+        env=fixture_env(),
     )
 
 
 def _run_gate(repo: Path) -> subprocess.CompletedProcess[str]:
     """The gate, from the copy the fixture carries."""
-    return subprocess.run(
-        ["bash", str(repo / "scripts" / GATE.name), "--root", str(repo)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=GIT_TIMEOUT,
-    )
+    return run_gate(repo, GATE.name, timeout=GIT_TIMEOUT)
 
 
 def _declared(repo: Path, doc: str) -> str:

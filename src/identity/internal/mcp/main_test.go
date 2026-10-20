@@ -1,5 +1,10 @@
 //go:build integration
 
+// Every FORA peer this suite stands up is an httptest TLS server, because a key
+// directory is only ever fetched over https; the setting below lets the test
+// binary trust their certificate (testutil.TrustHTTPTestTLS).
+//go:debug x509usefallbackroots=1
+
 package mcp_test
 
 import (
@@ -31,6 +36,7 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	testutil.TrustHTTPTestTLS()
 	os.Exit(testutil.RunPostgresVaultMain(m, testutil.PostgresVaultMain{
 		Migrations:      identitydb.Migrations,
 		MigrationsDir:   identitydb.MigrationsDir,

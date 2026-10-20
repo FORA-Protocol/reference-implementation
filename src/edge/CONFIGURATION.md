@@ -31,9 +31,36 @@ do not exist here:
   publisher.)
 - **There are no command-line flags.** Configuration is 100% environment
   variables — in Cloudflare these are called "vars".
-- **There is no `LOG_LEVEL`.** The Worker writes structured records (machine-
-  readable data, not free text) to Workers Logs, at two levels only: `warn` for
-  expected denials, `error` for operational failures.
+- **There is no `LOG_LEVEL`, by design.** The Worker writes structured records
+  (machine-readable data, not free text) to Workers Logs at three levels, and
+  none of them can be switched off safely:
+  - `info` is the delivery record, `edge.deliver.authorized`: one per signed
+    request the Worker authorized and served. It is written once the origin has
+    answered, or, where the CDN fetches from the origin itself, when the Worker
+    hands the request back to it; a delivery whose origin fetch failed writes
+    the `error` record for that failure instead. The record is the Edge's
+    witness in the evidence chain
+    ([ADR-012](../../docs/architecture/adr-012-edge-delivery-log.md)).
+    `fora-ledger` finds it by name, and today reads it only from the
+    function's CloudWatch logs on Lambda@Edge; nothing reads it back on
+    Cloudflare or Fastly yet. A `warn` threshold would remove every delivery
+    from that chain.
+  - `warn` is reserved for expected denials. Every unpaid bot produces one, and
+    the `edge.deny.signature` alert ([`RUNBOOK.md`](RUNBOOK.md) §2.3) and the
+    checks in [`DEPLOYMENT.md`](DEPLOYMENT.md) read these records.
+  - `error` is anything that needs attention. Because `warn` means an expected
+    denial here, an outage the Go services would record as a warning, such as
+    an unreachable key directory, is an `error` on the Edge.
+
+  There are no `debug` records to switch on either. And the Worker reads its
+  settings when a request arrives (on Lambda@Edge they are written into the
+  package's `index.mjs` when the package is built), so on Cloudflare and Fastly a mistyped level would not
+  stop anything at deploy time — it would fail every request. Do not reduce
+  the volume by sampling instead: keep `head_sampling_rate` at `1`
+  ([`DEPLOYMENT.md`](DEPLOYMENT.md) §6.4). Sampling drops every record of a
+  request that is not sampled, whatever its level, so it drops
+  `edge.deliver.authorized` records too. The Broker, Exchange and Identity
+  services, which run as long-lived processes, do take a level setting.
 - **There is no `/metrics` endpoint** and no Prometheus support. Alerting is done
   on log events — see [`RUNBOOK.md`](RUNBOOK.md) §2.3.
 - **The Worker is stateless** and needs **zero bindings**. (A "binding" is a
@@ -64,11 +91,13 @@ on **every** request, article traffic included. It is not a partial failure.
 | `FORA_VERIFY_KEYS` | Optional | JSON list of public keys to pin, skipping the network fetch — §3.2. | `[{"kty":"OKP","crv":"Ed25519","x":"<43-char base64url>"}]` |
 | `WBA_KEYS_JSON` | Optional | JSON list of the **publisher's own** public signing keys, served in its key directory. Unset is a legitimate configuration — §3.4. | see §3.4 |
 | `WBA_REVOCATION_URL` | Optional | Address where verifiers check whether the publisher's own keys were withdrawn. Ignored unless `WBA_KEYS_JSON` is also set. | `https://www.publisher.example/key-revocations` |
-| `RSL_BODY` | Optional | Text served at `/rsl.txt` as a licensing hint. Unset serves an empty document, not a 404 — §3.4. | `# RSL hint` |
+| `WBA_SIGNED_DIRECTORY_JSON` | Optional | The key directory pre-signed for this host, `{body, content_digest, signature_input, signature}`, made offline with `scripts/sign-wba-directory.mjs` by whoever holds the key. Served verbatim in place of the unsigned directory. When `WBA_KEYS_JSON` is also set, the body must list exactly those keys. | the output of the signing tool |
+| `RSL_BODY` | Optional | Text served at `/rsl.txt` as a licensing hint. Unset, empty, or whitespace-only returns 404 — §3.4. | `# RSL hint` |
 | `ACME_TOKENS_JSON` | Optional | JSON map of domain-verification tokens to their answers. Unset means every token address returns 404 — §3.4. | `{"token123":"challenge-response"}` |
 | `CATALOG_CONTRIBUTORS_JSON` | Optional | JSON list of other parties allowed to add content on the publisher's behalf. Unset means only `PROVIDER` itself may. | `[{"domain":"partner.example.com","relationship":"licensee"}]` |
 | `BOT_UA_ALLOW_JSON` | Optional | Replaces the built-in search-crawler list — §3.3. | `["Googlebot","bingbot"]` |
 | `BOT_UA_DENY_JSON` | Optional | Replaces the built-in AI-bot list — §3.3. | `["GPTBot","ClaudeBot"]` |
+| `LICENSED_PATHS_JSON` | Optional | JSON list of the path prefixes the publisher licenses, each starting with `/`. An unsigned read from an AI bot is refused only under these; the rest of the site passes to the origin. The discovery documents answer everywhere. Unset or `[]` means the whole site. Matching fails closed: percent-escapes are decoded, repeated slashes merged and case ignored before comparing, and a path that cannot be decoded or holds a dot segment counts as licensed. | `["/articles/","/archive/"]` |
 | `FORA_ENFORCE_BINDING` | Optional | `"false"` switches this Worker to the weaker mode, where a delivery address works for whoever holds it. Unset means the proof check runs — §3.6. | `true` |
 
 All values are strings, including the ones that look like lists or booleans:
@@ -199,8 +228,8 @@ their variable is unset, and the differences are easy to mistake for errors.
 |---|---|---|---|
 | `/healthz` | none | — | Always `200` with the body `ok` |
 | `/.well-known/fora.json` | `PROVIDER`, `EXCHANGES_JSON` | The discovery document | Cannot happen — both are required |
-| `/.well-known/http-message-signatures-directory` | `WBA_KEYS_JSON` | The publisher's public keys, as a JWK Set | **404** |
-| `/rsl.txt` | `RSL_BODY` | The text you supplied | **200 with an empty body** — not a 404 |
+| `/.well-known/http-message-signatures-directory` | `WBA_KEYS_JSON` | The publisher's public keys, as a Web Bot Auth key directory | **404** |
+| `/rsl.txt` | `RSL_BODY` | The text you supplied, unchanged | **404** when unset, empty, or whitespace-only |
 | `/.well-known/fora-verify/<token>` | `ACME_TOKENS_JSON` | The answer for a known token; 404 for any other | **404 for every token** |
 
 **`WBA_KEYS_JSON` has a strict shape.** It is a JSON array of 1 to 64 key
@@ -339,10 +368,13 @@ value needs a code change and a redeploy.
 ## 5. The Exchange-side prerequisite
 
 Configuring the Worker correctly is not sufficient on its own. **The publisher's
-tenant must be set up on the Exchange with `signing_scheme = 'ED25519'`.**
-That setting is what makes the Exchange sign delivery addresses in the form this
-Worker verifies. With any other scheme the delivery address does not carry the
-signature the Worker checks, and every paid request is refused.
+site must be registered on the Exchange with `signing_scheme = 'ED25519'` on its
+`fora.publisher_domains` row.** That setting is what makes the Exchange sign
+delivery addresses in the form this Worker verifies. The scheme is a property of
+the site, not of the Exchange seat that sells it, so one seat can serve a
+Cloudflare-fronted site and a CloudFront-fronted one at the same time. With any
+other scheme the delivery address does not carry the signature the Worker checks,
+and every paid request is refused.
 
 This is an Exchange-side action, taken by the Exchange operator — see
 [`../exchange/RUNBOOK.md`](../exchange/RUNBOOK.md). Confirm it is done before
@@ -435,8 +467,16 @@ serves.
 
 ### 8.2 `/.well-known/http-message-signatures-directory`
 
-Served with `content-type: application/jwk-set+json`, and only when
-`WBA_KEYS_JSON` is set — otherwise this address answers `404` (§3.4).
+Served with `content-type: application/http-message-signatures-directory+json`,
+the media type the Web Bot Auth profile names, and only when `WBA_KEYS_JSON` is
+set — otherwise this address answers `404` (§3.4). A reader under the profile
+refuses the older `application/jwk-set+json` label.
+
+A reader under the profile also takes a key only from a response signed by it,
+for the host it fetched from. With `WBA_SIGNED_DIRECTORY_JSON` set, the Worker
+serves that pre-signed body byte for byte with its `content-digest`,
+`signature-input` and `signature` headers; without it the directory goes out
+unsigned. How to produce the value is in the reference folder.
 
 | Field | Comes from | Notes |
 |---|---|---|

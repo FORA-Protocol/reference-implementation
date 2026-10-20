@@ -1,0 +1,105 @@
+# The harness bans of ADR-028 D8: what a TEST MODULE of the e2e harness may not
+# call. `make lint` in this directory runs it as
+#
+#     ruff check --config ruff-harness.toml --ignore-noqa .
+#
+# `--ignore-noqa` is what makes these bans binding: a `# noqa: TID251` comment in
+# a test module is ignored, so no file can exempt itself. There is no
+# per-file-ignores table here either. A test that needs something banned moves
+# onto the seam that owns it instead.
+#
+# The scope is the test modules only, set by `include` below. ruff applies
+# `include` when it walks a directory, which is how the Makefile runs it; a file
+# named on the command line is checked whatever `include` says. The send seam,
+# the transport alteration module (harness/after_signing.py), the poller
+# (harness/poll.py) and every other harness module are infrastructure, outside
+# this scope: that is where the banned calls are allowed to live.
+#
+# The ClientConfig ban stays in pyproject.toml rather than here, on purpose. It
+# protects a property of the whole harness (one function builds every SDK client
+# config), so it has to apply to the infrastructure modules as well, and this
+# file does not reach them.
+#
+# Each ban has a companion test in harness/test_harness_bans.py that runs ruff
+# with this file on a sample violation and requires it to fire.
+
+line-length = 100
+target-version = "py312"
+include = ["harness/test_*.py", "harness/**/test_*.py"]
+
+[lint]
+select = ["TID251"]
+
+[lint.flake8-tidy-imports.banned-api]
+# H3: a test reads every answer through a typed reader and never handles a raw
+# HTTP response. The readers are the SDK's verbs, the SDK's document readers
+# (manifest, Web Bot Auth directory, revocation list, license document, in
+# fora_sdk.resolvers) and, for the surfaces the SDK has no reader for, the harness
+# infrastructure modules: edge_fetch.py (delivered content, proof-free probes,
+# browser reads),
+# console_client.py, console_dashboard.py, identity_vault.py, mcp_session.py,
+# mcp_transport.py (the MCP endpoint's transport rules, below any MCP client),
+# admin_plane.py and lambda_edge.py, and the reader of any service's own plain JSON
+# API. Those modules may use httpx; a test module may not import it.
+"httpx".msg = "ADR-028 D8 H3: read through an SDK verb or a typed harness reader, never a raw response"
+# H5: signing happens only inside the SDK. A test never calls the SDK's
+# low-level signing functions: it signs through an SDK client, and alters a
+# signature through malformed(). The harness has no signing function of its own
+# to ban: every signer in harness/httpsig_signer.py is the SDK's SigningTransport.
+# Each function is listed under every module that exports it, because ruff
+# matches the name the test imported.
+"fora_sdk.sign_request".msg = "ADR-028 D8 H5: sign through an SDK client; alter a signature through malformed()"
+"fora_sdk.httpsig.sign_request".msg = "ADR-028 D8 H5: sign through an SDK client; alter a signature through malformed()"
+"fora_sdk.append_signature".msg = "ADR-028 D8 H5: sign through an SDK client; alter a signature through malformed()"
+"fora_sdk.httpsig.append_signature".msg = "ADR-028 D8 H5: sign through an SDK client; alter a signature through malformed()"
+"fora_sdk.sign_offer_jcs".msg = "ADR-028 D8 H5: offers are signed by the Exchange, never by a test"
+"fora_sdk.core.sign_offer_jcs".msg = "ADR-028 D8 H5: offers are signed by the Exchange, never by a test"
+"fora_sdk.sign_offer_acceptance".msg = "ADR-028 D8 H5: the SDK signs the agent acceptance inside execute()"
+"fora_sdk.acceptance.sign_offer_acceptance".msg = "ADR-028 D8 H5: the SDK signs the agent acceptance inside execute()"
+"fora_sdk.sign_offer_acceptance_jcs".msg = "ADR-028 D8 H5: the SDK signs the agent acceptance inside execute()"
+"fora_sdk.core.sign_offer_acceptance_jcs".msg = "ADR-028 D8 H5: the SDK signs the agent acceptance inside execute()"
+"fora_sdk.sign_request_acceptance_jcs".msg = "ADR-028 D8 H5: the SDK signs the request acceptance inside execute()"
+"fora_sdk.core.sign_request_acceptance_jcs".msg = "ADR-028 D8 H5: the SDK signs the request acceptance inside execute()"
+"fora_sdk.sign_agent_binding".msg = "ADR-028 D8 H5: the SDK mints the proof of possession inside fetch()"
+"fora_sdk.pop.sign_agent_binding".msg = "ADR-028 D8 H5: the SDK mints the proof of possession inside fetch()"
+"fora_sdk.sign_ed25519_signed_url".msg = "ADR-028 D8 H5: delivery URLs are minted by an Exchange; the Lambda@Edge suite mints through harness/lambda_edge.py"
+"fora_sdk.signedurl.sign_ed25519_signed_url".msg = "ADR-028 D8 H5: delivery URLs are minted by an Exchange; the Lambda@Edge suite mints through harness/lambda_edge.py"
+"fora_sdk.client.proof_headers".msg = "ADR-028 D8 H5: fetch through the SDK, which mints the proof inside fetch(); see harness/edge_fetch.py"
+"fora_sdk.client.content.proof_headers".msg = "ADR-028 D8 H5: fetch through the SDK, which mints the proof inside fetch(); see harness/edge_fetch.py"
+# Raw Ed25519: a test may not mint a private key, build one from raw bytes, or
+# call the unbound `Ed25519PrivateKey.sign`. A signing identity comes from the
+# SDK's identity helpers, through fresh_agent() or
+# httpsig_signer.unpublished_signer(). This ban has a known blind spot: ruff
+# resolves names, not the types of values, so `key.sign(...)` on a key object a
+# test already holds (one loaded from a keyfile, say) is not caught. Banning the
+# ways to make a key is what narrows it.
+"cryptography.hazmat.primitives.asymmetric.ed25519.Ed25519PrivateKey.generate".msg = "ADR-028 D8 H5: take a key from fresh_agent() or httpsig_signer.unpublished_signer()"
+"cryptography.hazmat.primitives.asymmetric.ed25519.Ed25519PrivateKey.from_private_bytes".msg = "ADR-028 D8 H5: take a key from fresh_agent() or httpsig_signer.unpublished_signer()"
+"cryptography.hazmat.primitives.asymmetric.ed25519.Ed25519PrivateKey.sign".msg = "ADR-028 D8 H5: sign through an SDK client, never with a raw key"
+
+# D3 on the mcp surface: every MCP tool call goes through harness/mcp_client.py,
+# which checks the arguments against the tool's inputSchema and the result
+# against its outputSchema, and raises a tool error as a typed McpToolError. A
+# test module that opened its own MCP client would read results nothing checked
+# and refusals as text, so both MCP client libraries are banned as modules: an
+# alias, a member import or a submodule import is refused too.
+"fastmcp".msg = "ADR-028 D3: call MCP tools through harness/mcp_client.py (mcp_session), never a raw MCP client"
+"mcp".msg = "ADR-028 D3: call MCP tools through harness/mcp_client.py (mcp_session), never a raw MCP client"
+
+# H6: no sleeps; a test waits by polling.
+"time.sleep".msg = "ADR-028 D8 H6: wait with harness.poll.poll_until(predicate, deadline_s)"
+"asyncio.sleep".msg = "ADR-028 D8 H6: wait with harness.poll.poll_until(predicate, deadline_s)"
+
+# H10 and Testing Doctrine point 9: a test arranges and observes state only
+# through the public and admin surfaces, never through a database or a cache.
+# Every database and cache driver is banned. So is the one harness module that
+# still writes a database (harness/operator_writes.py, the seed's writes that no
+# product surface can make yet), so a test cannot reach the database through it.
+"psycopg".msg = "ADR-028 H10: arrange and read state through a public or admin surface, never a database"
+"psycopg2".msg = "ADR-028 H10: arrange and read state through a public or admin surface, never a database"
+"asyncpg".msg = "ADR-028 H10: arrange and read state through a public or admin surface, never a database"
+"pg8000".msg = "ADR-028 H10: arrange and read state through a public or admin surface, never a database"
+"sqlalchemy".msg = "ADR-028 H10: arrange and read state through a public or admin surface, never a database"
+"sqlite3".msg = "ADR-028 H10: arrange and read state through a public or admin surface, never a database"
+"redis".msg = "ADR-028 H10: arrange and read state through a public or admin surface, never a cache"
+"harness.operator_writes".msg = "ADR-028 H10: the seed's operator writes are not a test surface; read through a public or admin surface"

@@ -8,9 +8,11 @@
 // signature — not the transport sig — as the authoritative agent identity and
 // binds the delivery URL to the agent key it proves (RFC 7638 thumbprint).
 //
-// Per the binding decision, the verifying key is the agent's REGISTERED
-// key (resolved from req.requester.id via the agents repo), uniform across
-// agent-direct and broker-only/fan-out transport.
+// Per the binding decision, the verifying key is the agent's REGISTERED key,
+// uniform across agent-direct and broker-only/fan-out transport. resolveAgent
+// resolves it once per request from the agent's directory host — the covered
+// Signature-Agent for a direct request, Requester.domain for one a Broker
+// re-packaged — never from the free-label Requester.id this payload also covers.
 
 package service
 

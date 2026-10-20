@@ -30,6 +30,8 @@ import {
   WELL_KNOWN_PATH,
   buildPublisherManifest,
   buildPublisherWba,
+  signedDirectoryFrom,
+  signedDirectoryHeaders,
 } from './well-known.mjs';
 
 const PORT = Number.parseInt(process.env.PORT ?? '8788', 10);
@@ -46,6 +48,12 @@ const CATALOG_CONTRIBUTORS = process.env.CATALOG_CONTRIBUTORS_JSON
 const WBA_KEYS = process.env.WBA_KEYS_JSON ? JSON.parse(process.env.WBA_KEYS_JSON) : undefined;
 // Optional directory-level revocation_url advertised in the WBA directory.
 const WBA_REVOCATION_URL = process.env.WBA_REVOCATION_URL || undefined;
+// Optional pre-signed directory response (WBA_SIGNED_DIRECTORY_JSON), made
+// offline for this host and served verbatim in place of the unsigned directory.
+// Read at start-up so a malformed value stops the shim rather than every fetch.
+const WBA_SIGNED = process.env.WBA_SIGNED_DIRECTORY_JSON
+  ? signedDirectoryFrom(process.env.WBA_SIGNED_DIRECTORY_JSON)
+  : undefined;
 // CloudFront RSA verify key provisioned out-of-band (trusted key group model);
 // the cdn-keys.json route is retired (D4). MUST be the public half of the
 // Exchange's RSA key. Read from FORA_CF_PUBLIC_PEM, or the file at
@@ -170,8 +178,13 @@ async function handle(req, res) {
     return;
   }
   if (url.pathname === WBA_PATH) {
-    // The publisher's self key as a JWK Set (no kid), so the Exchange learns it
+    // The publisher's self key as a Web Bot Auth directory (no kid), so the Exchange learns it
     // via the well-known fetch. Absent when no self key is provisioned → 404.
+    if (WBA_SIGNED) {
+      res.writeHead(200, signedDirectoryHeaders(WBA_SIGNED));
+      res.end(WBA_SIGNED.body);
+      return;
+    }
     if (!WBA_KEYS) {
       reply(res, 404, { error: 'not found' });
       return;

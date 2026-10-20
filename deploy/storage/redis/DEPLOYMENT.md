@@ -35,7 +35,7 @@ following:
 | Cluster mode or sharding | The whole data set is a few minutes of request volume, and every service replica must see the *same* instance. |
 | Redis modules, Lua, keyspace notifications, pub/sub | The platform issues `PING` at start-up and then only `SET … NX EX`, `EXISTS`, `GET`, and `INCRBY` + `EXPIRE` in a transaction. Nothing else. |
 | A tuned eviction policy | See [`CONFIGURATION.md`](CONFIGURATION.md) §4 — the correct answer is `noeviction`, or nothing at all. |
-| More than one database | The five key prefixes are disjoint, so a single database serves both services. |
+| More than one database | The three key prefixes are disjoint, so a single database serves both services. |
 
 Redis 7 is what the platform is developed and tested against.
 

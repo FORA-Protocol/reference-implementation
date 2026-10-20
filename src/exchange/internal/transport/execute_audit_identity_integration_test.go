@@ -47,7 +47,7 @@ func TestExecuteTransaction_PersistsOfferAndResourceIdentityUnconflated(t *testi
 	}
 	// resource_id is the resolved catalog entry: the tenant-scoped id derived
 	// from the pushed entry (no content_id pushed, so the key is the URI).
-	wantResource := h.tenantID + ":https://" + h.tenantDomain + "/articles/hello"
+	wantResource := h.tenantID + ":https://" + h.siteDomain + "/articles/hello"
 	if got := rec.ResourceID; got != wantResource {
 		t.Errorf("transaction_log.resource_id = %q, want the catalog entry id %q", got, wantResource)
 	}

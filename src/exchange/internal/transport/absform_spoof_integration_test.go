@@ -80,7 +80,7 @@ func TestExchangeRPC_AbsoluteFormRejected(t *testing.T) {
 
 	captured := captureSignedDiscover(t, h, testutil.HTTPSVariant(t, h.server.URL))
 	resp := testutil.SendAbsoluteForm(t, socketHost, captured.req, captured.body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assertExchangeAbsoluteFormRejected(t, resp, h)
 }
@@ -95,7 +95,7 @@ func TestExchangeRPC_AbsoluteFormHostSpoofRejected(t *testing.T) {
 	captured := captureSignedDiscover(t, h, testutil.HTTPSVariant(t, h.server.URL))
 	captured.req.URL.Host = "attacker.example" // request line names a host that is not the socket
 	resp := testutil.SendAbsoluteForm(t, socketHost, captured.req, captured.body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assertExchangeAbsoluteFormRejected(t, resp, h)
 }

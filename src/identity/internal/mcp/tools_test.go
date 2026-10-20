@@ -3,6 +3,7 @@
 package mcp_test
 
 import (
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -74,10 +75,12 @@ func TestDiscover_ReturnsOffersVerbatimAndNamesTheRequester(t *testing.T) {
 	if len(group.Rejected) != 0 {
 		t.Errorf("group carried %d rejected offers, want none: %+v", len(group.Rejected), group.Rejected)
 	}
+	// A clean call is the routine per-call line, at INFO.
+	assertDiscoverLogged(t, f, "INFO", 0)
 	// requester.id is the caller's directory origin (scheme + subdomain), which is
 	// what the Broker/Exchange match against the signed Signature-Agent — not the
 	// bare subdomain.
-	wantID := "http://" + a.Subdomain
+	wantID := "https://" + a.Subdomain
 	if got := f.broker.LastDiscovery().GetRequester().GetId(); got != wantID {
 		t.Errorf("requester id = %q, want the caller's directory %q", got, wantID)
 	}
@@ -407,12 +410,44 @@ func TestDiscover_FORARefusalSurfaces(t *testing.T) {
 // uncorrelatable with anything the caller has.
 func TestEveryTool_ReturnsTheCorrelationID(t *testing.T) {
 	f := newFixture(t)
+	calls := armEveryTool(t, f)
+	a := f.provision(t, "dev-one")
+	rt := &requestIDTransport{token: a.Token, prefix: "call"}
+	session := f.connectVia(t, rt, "")
+
+	for _, c := range calls {
+		// Every tool here is expected to have DONE its job as well as reported an
+		// id, and discovery is the one where doing nothing is silent: an empty
+		// answer carries a correlation id just as happily as a full one, and the
+		// offer reaching the agent depends on verification passing. So the whole
+		// discovery result is decoded, and only the id of the others.
+		out := callTool[discoverResult](t, session, c.name, c.args)
+		if sent := rt.lastCall(t).sent; out.RequestID != sent {
+			t.Errorf("%s returned request_id %q, want %q, the id the caller sent", c.name, out.RequestID, sent)
+		}
+		if c.name == "fora_discover" &&
+			(len(out.OfferGroups) != 1 || len(out.OfferGroups[0].Offers) != 1) {
+			t.Errorf("discovery returned %+v; an id echoed by a tool that answered nothing proves nothing",
+				out.OfferGroups)
+		}
+	}
+}
+
+// toolCall is one well-formed call of a named tool.
+type toolCall struct {
+	name string
+	args map[string]any
+}
+
+// armEveryTool gives each of the five tools a happy-path answer at the peers and
+// returns one well-formed call per tool, in the order an agent would make them.
+func armEveryTool(t *testing.T, f *fixture) []toolCall {
+	t.Helper()
 	f.exchange.registerResp = &forav1.RegisterResponse{Ver: helpers.ProtocolVersion, BillingRef: "acct-1", Active: true}
 	f.exchange.statusResp = &forav1.GetAccountStatusResponse{Ver: helpers.ProtocolVersion, BillingRef: "acct-1", Active: true}
 	// Genuinely issued by a peer whose directory publishes the key, because
-	// discovery verifies. A hand-written literal is rejected now, and this test
-	// reads only the correlation id — so the discover leg would quietly become
-	// "returned nothing and an id" while still passing.
+	// discovery verifies. A hand-written literal is rejected, and a caller that
+	// reads only the correlation id would quietly see "returned nothing and an id".
 	f.broker.resolveResp = &forav1.DiscoveryResponse{
 		Ver: helpers.ProtocolVersion,
 		OfferGroups: []*forav1.OfferGroup{{
@@ -422,55 +457,28 @@ func TestEveryTool_ReturnsTheCorrelationID(t *testing.T) {
 		}},
 	}
 	f.issuer.reportResp = &forav1.UsageReportResponse{Ver: helpers.ProtocolVersion, ReportId: "rep-1"}
-	f.broker.relayResp = &forav1.TransactionResponse{
+	f.broker.executeResp = &forav1.BrokerTransactionResponse{
 		Ver: helpers.ProtocolVersion,
 		Items: []*forav1.TransactionResultItem{{
 			OfferId: "offer-1", TransactionId: "tx-1",
-			RetrievalEndpoint: strPtr("https://edge.example/d?sig=a"),
+			RetrievalEndpoint: strPtr(f.exchange.SignDelivery(t, "https://edge.example/d")),
 		}},
 	}
-	a := f.provision(t, "dev-one")
-	session := f.connect(t, a.Token)
-
-	// Hoisted out of the map below so the whole result stays readable. Every tool
-	// here is expected to have DONE its job as well as reported an id, and
-	// discovery is the one where doing nothing is silent: an empty answer carries
-	// a correlation id just as happily as a full one, and the offer reaching the
-	// agent depends on verification passing.
-	discovered := callTool[discoverResult](t, session, "fora_discover", map[string]any{
-		"uris": []string{"https://pub.example/a"},
-	})
-
-	// Each entry returns the request_id its tool reported. The id the fixture's
-	// session sends is what they must all echo.
-	got := map[string]string{
-		"fora_register": callTool[registerResult](t, session, "fora_register", registerArgs(t, f)).RequestID,
+	return []toolCall{
+		{"fora_register", registerArgs(t, f)},
 		// Named, so this drives the leg that actually calls the Exchange. The
 		// no-argument mode answers from a local note and never leaves the
-		// process, so an id echoed there would say nothing about correlation
-		// reaching a peer.
-		"fora_status": callTool[statusResult](t, session, "fora_status", map[string]any{
-			"exchange": f.exchange.Domain(t),
-		}).RequestID,
-		"fora_discover": discovered.RequestID,
-		"fora_execute": callTool[executeResult](t, session, "fora_execute", map[string]any{
-			"offers": []map[string]any{signedOffer("offer-1", "exchange.example")},
-		}).RequestID,
-		"fora_report": callTool[reportResult](t, session, "fora_report", map[string]any{
+		// process.
+		{"fora_status", map[string]any{"exchange": f.exchange.Domain(t)}},
+		{"fora_discover", map[string]any{"uris": []string{"https://pub.example/a"}}},
+		{"fora_execute", map[string]any{
+			"offers": []map[string]any{signedOffer("offer-1", f.exchange.Domain(t))},
+		}},
+		{"fora_report", map[string]any{
 			"exchange":        f.issuer.Domain(t),
 			"transaction_id":  "tx-1",
 			"idempotency_key": "idem-1",
-		}).RequestID,
-	}
-
-	for tool, id := range got {
-		if id == "" {
-			t.Errorf("%s returned no request_id; every tool returns one", tool)
-		}
-	}
-	if len(discovered.OfferGroups) != 1 || len(discovered.OfferGroups[0].Offers) != 1 {
-		t.Errorf("discovery returned %+v; an id echoed by a tool that answered nothing proves nothing",
-			discovered.OfferGroups)
+		}},
 	}
 }
 
@@ -498,6 +506,12 @@ type statusEntry struct {
 	Active     *bool  `json:"active"`
 	BillingRef string `json:"billing_ref"`
 	AsOf       string `json:"as_of"`
+	// Balances is nil when the member is missing or null, so a test can tell
+	// both apart from the literal [] the tool must send.
+	Balances []struct {
+		Amount   string `json:"amount"`
+		Currency string `json:"currency"`
+	} `json:"balances"`
 }
 
 type discoverResult struct {
@@ -537,22 +551,15 @@ func onlyCall(t *testing.T, p *foraPeer) peerCall {
 	return calls[0]
 }
 
-func assertRegistrationField(t *testing.T, data map[string]any, field, want string) {
-	t.Helper()
-	if got, _ := data[field].(string); got != want {
-		t.Errorf("registration_data[%q] = %q, want %q", field, got, want)
-	}
-}
-
 // hostOf reduces a peer's origin URL to the bare host:port an Offer.exchange
 // carries — a domain, never a URL, because the endpoint is the manifest's to give.
 func hostOf(t *testing.T, origin string) string {
 	t.Helper()
-	host := strings.TrimPrefix(origin, "http://")
-	if host == origin {
-		t.Fatalf("peer origin %q is not the plain http the fixture builds", origin)
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		t.Fatalf("origin %q is not an http(s) origin", origin)
 	}
-	return host
+	return u.Host
 }
 
 // callTool runs one tools/call over the live MCP session and decodes the

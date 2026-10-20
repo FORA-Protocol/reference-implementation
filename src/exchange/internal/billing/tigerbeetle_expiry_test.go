@@ -34,7 +34,7 @@ func TestTigerBeetleExpiry_LateRecordRelease(t *testing.T) {
 	if err != nil || !res.Approved {
 		t.Fatalf("authorize = (%+v, %v), want approved", res, err)
 	}
-	agentID := tbtest.MustAccountID(t, tigerbeetle.PrefixAgent, ns+"ag")
+	agentID := tbtest.MustAccountID(t, tigerbeetle.PrefixAgent, led.Currency(t), ns+"ag")
 	waitPendingCleared(t, led, agentID)
 
 	// Late Record must not settle an expired hold (linked-split path at fee!=0).

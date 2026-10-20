@@ -3,9 +3,12 @@
 # reference implementation.
 #
 # Sourced, never executed. Defines the path arrays and nothing else: no side
-# effects, no output, no `set` changes. Both the publish tool and the
-# unresolvable-reference gate read this file, so the set they enforce and the
-# set they publish cannot drift apart.
+# effects, no output, no `set` changes. The publish tool, the
+# unresolvable-reference gate and the published-set secret scan all read this
+# file, so the set they enforce and the set they publish cannot drift apart. The
+# publish tool reads it from the checkout it runs in, and refuses to run when that
+# copy differs from the copy on the ref it publishes from, so the arrays that
+# decide a publish are the arrays that ship with it.
 #
 # That drift is the reason this file exists. The two consumers previously kept
 # their own copies in OPPOSITE polarity — an allowlist in one, a denylist in the
@@ -32,12 +35,14 @@ ALLOW_DIRS=(
   docs/architecture
   .github
 )
-# schemas/ is load-bearing, not documentation, and two suites read it. Neither carries a
-# build tag, so the absence of either schema fails `make test-fast` and
-# `make test-integration` alike: src/exchange/internal/comptest/schema_test.go reads
-# schemas/comp/v1/comp-v1.schema.json, and src/exchange/internal/ingest/feedschema_test.go
-# reads schemas/catalog-feed/v1/ — both the schema and the example feed beside it, which it
-# validates line by line.
+# schemas/ is load-bearing, not documentation: tests without a build tag read every schema
+# in it, so the absence of any of them fails `make test-fast` and `make test-integration`
+# alike. src/exchange/internal/comptest/schema_test.go reads
+# schemas/comp/v1/comp-v1.schema.json; internal/catalogfeed/schema_test.go and
+# internal/catalogfeed/feedschema_test.go read schemas/catalog-feed/v1/ — both the schema
+# and the example feed beside it, which they validate line by line; and
+# internal/catalogfeed/music_schema_test.go reads schemas/music/v1/music-v1.schema.json and
+# validates the music.<field> keys of the music feeds against it.
 #
 # docs/architecture is the only docs/ SUBTREE published, by owner decision. Individual
 # docs/ files outside it are published one at a time through ALLOW_DOC_FILES below.
@@ -51,9 +56,10 @@ ALLOW_DIRS=(
 #
 # CAUTION, and it applies to every entry here: an ALLOW_DIRS entry copies the WHOLE
 # subtree. Anything added under .github/ later reaches the public repository on the next
-# publish with no further decision. ALLOW_SCRIPTS below is per-file and this array is not,
-# so if .github/ ever needs to hold something that must stay private, the granularity has
-# to be built first.
+# publish with no further decision. ALLOW_SCRIPTS below is per-file and this array is not:
+# a path inside one of these subtrees that must stay private is held back by an entry in
+# DENY_PATHS at the end of this file, and someone has to write that entry for each such
+# path.
 
 # --- Individual docs/ files published outside docs/architecture ---
 #
@@ -76,7 +82,7 @@ ALLOW_DOC_FILES=(
 # --- Root-level build/config files (required to build/test) ---
 ALLOW_ROOT_FILES=(
   go.mod go.sum sqlc.yaml
-  Makefile docker-compose.yml docker-compose.e2e.yml
+  Makefile docker-compose.yml docker-compose.e2e.yml docker-compose.e2e.ports.yml
   .golangci.yml .jscpd.json .gitignore .dockerignore .gitleaks.toml
 )
 
@@ -89,6 +95,16 @@ ALLOW_ROOT_FILES=(
 ALLOW_SCRIPTS=(
   # This file — the public clone needs it to run the reference gate below.
   scripts/published-paths.sh
+  # The argument seam four of the gates below source. They abort without it, so a
+  # publish that shipped them and not this one would ship four gates that cannot
+  # start.
+  scripts/gate-args.sh
+  # Darwin CGO linker workaround for TigerBeetle archive alignment on Xcode 15+.
+  scripts/darwin-cgo-env.sh
+  # Go module download helper with proxy fallback and retry.
+  scripts/go-mod-fetch.sh
+  # Verifies Dockerfile ARG defaults match canonical values from go-mod-fetch.sh.
+  scripts/check-build-args.sh
 
   # Quality gates the Makefile invokes.
   scripts/check-file-length.py
@@ -123,6 +139,9 @@ ALLOW_SCRIPTS=(
   # Makefile calls it on the reader's very first stack-up. Without it that
   # target dies on a missing script instead of building.
   scripts/check-buildx.sh
+  # Every e2e make target and the harness's own host-run path drive the stack
+  # through it: it creates the stack's network and hands compose its address.
+  scripts/e2e-stack.sh
   scripts/devstack.sh
   scripts/gen-broker-relay-key.sh
   scripts/gen-buyer-delegation-key.sh
@@ -131,16 +150,12 @@ ALLOW_SCRIPTS=(
   # to exist in the published tree.
   scripts/gen-contributor-key.sh
   scripts/gen-e2e-keys.sh
+  scripts/gen-e2e-signed-directories.sh
   scripts/gen-examplenews-publisher-key.sh
   # Imported by the gen-*-key scripts via an inline heredoc.
   scripts/lib/ed25519_keys.py
   # Sourced by every key-gen script to pick a cryptography-capable interpreter.
   scripts/lib/select-python.sh
-  # Bind-mounted read-only by docker-compose.e2e.yml into a service with no
-  # profile; identity waits on it with service_completed_successfully. A missing
-  # source makes Docker materialise a DIRECTORY there, so the stack fails with
-  # "is a directory" rather than "not found".
-  scripts/zitadel-bootstrap.sh
   scripts/zitadel-pkce-smoke.sh
 
   # Ops / deploy.
@@ -198,3 +213,78 @@ UNPUBLISHED_DOC_DIRS=(
 # show the format it mandates.
 # published-ref-allow: the definition of the forbidden names cannot avoid naming them
 LOCAL_ONLY_FILES=( publish-public.sh release-version.sh PUBLISH-PUBLIC.md PUBLIC-REPO-FIXES.md PUBLISH-VALIDATION-FINDINGS.md PUBLISH-DOC-CITATIONS.md )
+
+# --- Paths held back from inside the published subtrees ---
+#
+# ALLOW_DIRS publishes whole subtrees, and some of what sits inside them has to stay
+# here: a deployment's own production stack, or a component that is not part of the
+# reference implementation. Each entry names one such path. The publish tool removes
+# every entry from the staged tree once all the routes onto it have run, and its
+# forbidden-path scan refuses an entry that is still there, so a held-back path stays
+# behind whichever route tried to bring it in.
+#
+# The two shapes: a DIRECTORY entry ends with "/", a FILE entry does not. The publish
+# tool checks every entry against the ref it publishes from and refuses one that does
+# not match what is there. A misspelled entry holds nothing back, so the path it was
+# written for would ship; a directory written without its slash would become an
+# exact-path rule that never sees the files inside it.
+#
+# What reads this array, each deriving from it rather than restating it:
+#   - the publish tool: the shape, overlap and source-ref checks, the hold-back step
+#     and the forbidden-path scan;
+#   - scripts/check-published-refs.sh: a held-back file is not scanned, because it
+#     does not ship, and a citation of a held-back path from a published file is
+#     refused, because the public reader cannot open it;
+#   - the guard suites under tests/e2e/harness/, which read it back through
+#     published_paths.py.
+# scripts/check-published-secrets.sh deliberately does NOT subtract it. A key
+# committed under a held-back path is one edit of this array away from shipping, and
+# that gate is the only secret scan the tree gets, so it keeps reading these paths.
+#
+# One entry per line, each with its own waiver on that line: this array IS the list of
+# paths the reference gate refuses to see cited, so it cannot avoid naming them, the
+# same carve-out LOCAL_ONLY_FILES makes above. Comments between the entries name none.
+DENY_PATHS=(
+  # The production deployment: its stack, its host module, its guides, and the
+  # operator scripts and tests that exist only for it. A deployment's own
+  # production topology and release mechanism are not part of the reference.
+  deploy/terraform/stacks/production-aws/                                 # published-ref-allow: held back from the publish
+  deploy/terraform/modules/aws-production-host/                           # published-ref-allow: held back from the publish
+  deploy/terraform/docs/deploy-production-aws.md                          # published-ref-allow: held back from the publish
+  deploy/terraform/docs/operate-production-aws.md                         # published-ref-allow: held back from the publish
+  deploy/terraform/docs/release.md                                        # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/bootstrap-production-db.py                     # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/bootstrap-vault.sh                             # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/check-release-plan.sh                          # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/production-rollout-record.py                   # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/production-rollout.sh                          # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/release-rollout.sh                             # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/seed-prod.sh                                   # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/verify-state-backend.sh                        # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/bootstrap-production-db-test.py          # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/bootstrap-production-db-version-test.py  # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/check-release-plan-guard-test.sh         # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/database-contract-test.py                # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/fora-rollout-approved-version-test.sh    # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/fora-rollout-flow-test.py                # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/fora-rollout-install-test.sh             # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/fora-rollout-ready-test.sh               # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/production-billing-currencies-test.py    # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/production-docs-guard-test.py            # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/production-rollout-guard-test.sh         # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/production-rollout-record-test.py        # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/production-suite.sh                      # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/release-rollout-guard-test.sh            # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/seed-prod-test.py                        # published-ref-allow: held back from the publish
+  deploy/terraform/scripts/tests/verify-state-backend-guard-test.sh       # published-ref-allow: held back from the publish
+  # The onboarding preview service: its source, its domain error package, its
+  # e2e harness module, tests and obligations, and the compose overlay that adds
+  # it to the e2e stack. It is not part of the reference implementation.
+  docker-compose.e2e.onboarding.yml                                       # published-ref-allow: held back from the publish
+  internal/onboarding/                                                    # published-ref-allow: held back from the publish
+  src/onboarding/                                                         # published-ref-allow: held back from the publish
+  tests/e2e/harness/obligations/test_onboarding_preview.py                # published-ref-allow: held back from the publish
+  tests/e2e/harness/onboarding_preview.py                                 # published-ref-allow: held back from the publish
+  tests/e2e/harness/onboarding_preview_whitelist.py                       # published-ref-allow: held back from the publish
+  tests/e2e/obligations/onboarding.yaml                                   # published-ref-allow: held back from the publish
+)

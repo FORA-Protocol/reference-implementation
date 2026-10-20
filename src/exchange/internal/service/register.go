@@ -13,9 +13,7 @@ import (
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/exchange"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/money"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/sor"
 )
@@ -147,28 +145,8 @@ func (s *ExchangeService) firstRegister(
 	if err := s.billing.EnsureAgentAccount(ctx, acct.BillingRef); err != nil {
 		return nil, exchange.Wrap(billingErrorKind(err), err, "create ledger account")
 	}
-	// The tenant-configured welcome credit (0 disables it) runs before
-	// SetBillingRef, so a failed grant fails the RPC while the row still has no
-	// billing_ref — the retry re-enters this branch instead of the fast path.
-	// The shared welcome-slot idempotency key (billing.WelcomeCreditKey) makes
-	// the retry (or an operator prefund under the same key) grant at most once.
-	// Only an account
-	// the SoR reports active is granted: a tenant holding new agents for review
-	// (activate_new_agents_by_default = false) must not pay for every
-	// self-signup, and an agent activated manually later is funded through the
-	// operator script's shared service slot instead.
-	if acct.Active && tenant.DefaultAgentCredit != nil && tenant.DefaultAgentCredit.Sign() > 0 {
-		welcomeKey := billing.WelcomeCreditKey(acct.BillingRef)
-		grant := billing.Amount{Value: tenant.DefaultAgentCredit, Currency: s.cfg.LedgerCurrency}
-		if err := s.billing.Credit(ctx, acct.BillingRef, grant, welcomeKey); err != nil {
-			return nil, exchange.Wrap(billingErrorKind(err), err, "grant default credit")
-		}
-		// The welcome credit has no aggregate cap, so this request-correlated
-		// line is the operator's visibility into a drain on the liquidity
-		// account.
-		reqctx.FromContext(ctx).InfoContext(ctx, "granted default agent credit",
-			"billing_ref", acct.BillingRef,
-			"amount", money.DecimalString(tenant.DefaultAgentCredit))
+	if err := s.grantWelcomeCredits(ctx, acct); err != nil {
+		return nil, err
 	}
 	if err := s.recordRegistration(ctx, registrationRecord{
 		agentID:    agentID,
@@ -303,8 +281,7 @@ func (s *ExchangeService) recordRegistration(ctx context.Context, rec registrati
 			Actor:      &actor,
 			SourceAddr: rec.sourceAddr,
 			// The action names the service method that made the change, which
-			// is what every other audit row does — including
-			// SetDefaultAgentCredit, which has no RPC of its own.
+			// is what every other audit row does.
 			Action:    registerAuditAction,
 			Detail:    detail,
 			TenantID:  rec.tenantID,
@@ -428,7 +405,7 @@ func (s *ExchangeService) acceptedTermsDigest(presented string) (*string, error)
 // GetAccountStatus reports the calling agent's account state (ADR-021). It
 // resolves identity from the verified request signature the same way Register
 // does, reads the billing_ref stored on the agent's fora.agents row, and returns
-// {billing_ref, active, terms_digest}. An identity with no stored billing_ref is
+// {billing_ref, active, terms_digest, balances}. An identity with no stored billing_ref is
 // not registered for paid content yet and surfaces NotFound; an account that
 // exists but is switched off is active=false, never NotFound.
 //
@@ -450,7 +427,9 @@ func (s *ExchangeService) acceptedTermsDigest(presented string) (*string, error)
 // handle it hangs on: terms_digest may be present only when billing_ref is. This
 // method satisfies it structurally rather than by a branch — the empty-ref case
 // above has already returned NotFound, so every response that reaches the return
-// below carries a billing_ref.
+// below carries a billing_ref. The same holds for balances, which the contract
+// also allows only beside a billing_ref. An inactive account still reports its
+// balances: switching an account off does not change what it holds.
 func (s *ExchangeService) GetAccountStatus(
 	ctx context.Context,
 	_ *forav1.GetAccountStatusRequest,
@@ -475,10 +454,15 @@ func (s *ExchangeService) GetAccountStatus(
 		// two states honestly distinct.
 		return nil, exchange.Wrap(sorErrorKind(err), err, "read account status")
 	}
+	balances, err := s.accountBalances(ctx, agent.BillingRef)
+	if err != nil {
+		return nil, err
+	}
 	return &forav1.GetAccountStatusResponse{
 		Ver:         helpers.ProtocolVersion,
 		BillingRef:  agent.BillingRef,
 		Active:      active,
 		TermsDigest: agent.AcceptedTermsDigest,
+		Balances:    balances,
 	}, nil
 }

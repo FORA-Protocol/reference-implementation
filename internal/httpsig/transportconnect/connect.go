@@ -1,45 +1,31 @@
-// Package transportconnect adapts httpsig gate rejections to Connect-over-HTTP
-// responses and the service audit vocabulary.
-//
-// It is the transport-aware seam deliberately kept OUT of the protocol-pure
-// internal/httpsig package (Architecture Rules 5 and 9): httpsig verifies RFC
-// 9421 signatures and returns sentinel errors only; this package maps those
-// sentinels to Connect codes, HTTP statuses, and the REJECTED_* audit tokens a
-// Connect-over-HTTP service emits. A non-Connect consumer of httpsig does not
-// pull in connectrpc.
+// Package transportconnect adapts verify-seam rejections to Connect-over-HTTP
+// responses and the service audit vocabulary. It has two kinds of user. The
+// Exchange's own signed surfaces (the catalog capture and the console surface,
+// which verify through the SDK's pure face rather than its connectserver mount)
+// use it to classify an over-cap body and write the refusal. The reject logger
+// in internal/reqctx (NewRejectLogger) uses its audit outcome, and the
+// Exchange's and the Broker's SDK mounts log every refused request through that
+// logger.
 //
 // It does NOT own how a refusal is written. The SDK's server binding exports
 // that — connectserver.RejectCode, IsBodyTooLarge and WriteReject — and every
 // function here that answers a protocol-shaped question defers to it. What
-// stays is the part the SDK cannot know: this repository's own gate sentinels,
-// which are distinct error objects from the SDK's, and the two audit
-// vocabularies the services emit.
+// stays is the part the SDK cannot know: the audit token for a body past the
+// read cap, which the SDK's reject classifier has no value for.
 package transportconnect
 
 import (
-	"errors"
 	"net/http"
 
 	connect "connectrpc.com/connect"
 	"github.com/FORA-Protocol/protocol/sdk/go/connectserver"
-
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/httpsig"
 )
 
 // RejectCode maps a rejection at the verify seam to the Connect code returned to
-// the client.
-//
-// One arm is answered here and the rest is the SDK's. The app-owned gate in
-// internal/httpsig returns httpsig.ErrTooManyHops, which is a different error
-// object from the helpers.ErrTooManyHops the SDK keys on — errors.Is between
-// the two is false — so a hop-budget rejection from that gate would classify as
-// an authentication failure and be answered 401 instead of 429. Every other
-// input, the over-cap body included, is the SDK's judgement, and asking it is
-// what keeps the two mounts answering alike.
+// the client. It is the SDK's judgement (connectserver.RejectCode), the over-cap
+// body included, so the Exchange's own surfaces and the SDK's mounts answer
+// alike.
 func RejectCode(err error) connect.Code {
-	if errors.Is(err, httpsig.ErrTooManyHops) {
-		return connect.CodeResourceExhausted
-	}
 	return connectserver.RejectCode(err)
 }
 
@@ -63,11 +49,9 @@ func IsBodyTooLarge(err error) bool {
 // The 413 is a deliberate departure from Connect's own table, which is why one
 // place decides it.
 //
-// Its signature matches httpsig.InterceptorOptions.OnReject, so it can be wired
-// directly as the app gate's reject responder; the Exchange's catalog capture
-// calls it for the over-cap read, which happens at the same point of the same
-// seam. It answers those two verdicts only — a caller holding any other, such
-// as a malformed read, writes that response itself.
+// The Exchange's catalog capture calls it for the over-cap read. It answers the
+// two resource verdicts and the authentication refusal only — a caller holding
+// any other, such as a malformed read, writes that response itself.
 func WriteError(w http.ResponseWriter, err error) {
 	connectserver.WriteReject(w, RejectCode(err), err)
 }

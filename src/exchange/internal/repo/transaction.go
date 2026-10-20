@@ -27,7 +27,6 @@ type TransactionRecord struct {
 	UnitCostDecimal   string // canonical decimal representation
 	Currency          string
 	ConsumedUnit      string
-	DenialReason      string
 	CreatedAt         time.Time
 	// ResultPayload is the serialized forav1.TransactionResultItem built for the
 	// ExecuteTransaction response, persisted on the row so a replayed
@@ -91,6 +90,11 @@ type TransactionRepo interface {
 	// production read path for observing a persisted transaction by its id —
 	// the surface tests assert through instead of a raw transaction_log SELECT.
 	ByID(ctx context.Context, transactionID string) (TransactionRecord, error)
+	// ByTenantAndID returns the tenant's transaction with the given
+	// transaction_id, and ErrTransactionNotFound when the tenant holds no such
+	// transaction. It is the read a caller acting for one tenant uses: the
+	// tenant is a predicate of the query, not a check the caller makes after.
+	ByTenantAndID(ctx context.Context, tenantID, transactionID string) (TransactionRecord, error)
 	// ClaimRequest durably claims (agentID, idempotencyKey) for the item set
 	// itemsDigest identifies, before any item bills or persists. won=true means
 	// this call inserted the claim (a fresh request). won=false means the key
@@ -143,7 +147,6 @@ func (r *transactionRepo) Create(ctx context.Context, tx pgx.Tx, rec Transaction
 		UnitCost:          unitCost,
 		Currency:          rec.Currency,
 		ConsumedUnit:      pgText(rec.ConsumedUnit),
-		DenialReason:      nullDenial(rec.DenialReason),
 		ResultPayload:     rec.ResultPayload,
 	})
 	if err != nil {
@@ -193,6 +196,22 @@ func (r *transactionRepo) ByID(ctx context.Context, transactionID string) (Trans
 			return TransactionRecord{}, ErrTransactionNotFound
 		}
 		return TransactionRecord{}, fmt.Errorf("get transaction by id: %w", err)
+	}
+	return transactionFromRow(row)
+}
+
+func (r *transactionRepo) ByTenantAndID(
+	ctx context.Context, tenantID, transactionID string,
+) (TransactionRecord, error) {
+	row, err := r.q.GetTransactionByTenantAndID(ctx, sqlc.GetTransactionByTenantAndIDParams{
+		TenantID:      tenantID,
+		TransactionID: transactionID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return TransactionRecord{}, ErrTransactionNotFound
+		}
+		return TransactionRecord{}, fmt.Errorf("get transaction by tenant and id: %w", err)
 	}
 	return transactionFromRow(row)
 }
@@ -274,9 +293,6 @@ func transactionFromRow(row sqlc.ForaTransactionLog) (TransactionRecord, error) 
 		return TransactionRecord{}, fmt.Errorf("decode unit_cost for transaction %q: %w", row.TransactionID, err)
 	}
 	rec.UnitCostDecimal = dec
-	if row.DenialReason.Valid {
-		rec.DenialReason = string(row.DenialReason.ForaDenialReason)
-	}
 	if row.CreatedAt.Valid {
 		rec.CreatedAt = row.CreatedAt.Time
 	}
@@ -304,14 +320,4 @@ func decimalFromNumeric(n pgtype.Numeric) (string, error) {
 		return fmt.Sprintf("%v", v), nil
 	}
 	return s, nil
-}
-
-func nullDenial(s string) sqlc.NullForaDenialReason {
-	if s == "" {
-		return sqlc.NullForaDenialReason{}
-	}
-	return sqlc.NullForaDenialReason{
-		ForaDenialReason: sqlc.ForaDenialReason(s),
-		Valid:            true,
-	}
 }

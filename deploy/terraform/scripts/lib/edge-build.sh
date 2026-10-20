@@ -9,7 +9,7 @@ EDGE_DIR="${REPO_ROOT}/src/edge"
 # and the bundler print without it are much harder to read. Then install from
 # the lockfile for a reproducible dependency tree. Run npm ci unconditionally:
 # skipping on an existing node_modules would keep a stale dependency tree on a
-# warm checkout — a bumped @fora-protocol/sdk-l1 (the package that supplies
+# warm checkout — a bumped @fora-protocol/sdk (the package that supplies
 # verify) would silently not make it into the bundle.
 edge_npm_ci() {
     command -v node >/dev/null 2>&1 || { echo "missing: node" >&2; exit 2; }

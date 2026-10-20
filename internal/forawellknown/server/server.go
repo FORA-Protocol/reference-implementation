@@ -9,6 +9,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
 )
 
 // KeySource yields the JWKs to publish in the WBA directory, in document order.
@@ -94,9 +96,18 @@ type Config struct {
 // WBAConfig describes a WBA directory to build. Keys is required (a directory
 // publishes at least one key); RevocationURL is the optional directory-level
 // emergency revocation channel advertised to peers.
+//
+// Signers hold the private halves of the listed keys, each with its RFC 7638
+// thumbprint as its keyid. NewWBAHandler requires one for every key the
+// directory lists, because the served response is signed once per listed key
+// and a verifier hands out only the keys that signed it. BuildWBA ignores them.
+// Now is the clock the response signatures are dated from; nil means the system
+// clock.
 type WBAConfig struct {
 	Keys          KeySource
 	RevocationURL string
+	Signers       []helpers.Signer
+	Now           func() time.Time
 }
 
 // Build assembles, marshals, and schema-validates the overlay manifest for cfg,
@@ -136,6 +147,13 @@ func Build(cfg Config) ([]byte, error) {
 // path, which does have rules. If a later revision constrains either message,
 // this is where the produce side has to catch up.
 func BuildWBA(cfg WBAConfig) ([]byte, error) {
+	raw, _, err := buildWBA(cfg)
+	return raw, err
+}
+
+// buildWBA is BuildWBA, also returning the keys the document lists so the
+// handler can pick the signers its response is signed by.
+func buildWBA(cfg WBAConfig) ([]byte, []*forawellknown.Key, error) {
 	f := &forawellknown.WBAFile{}
 	if cfg.Keys != nil {
 		f.Keys = cfg.Keys.Keys()
@@ -145,12 +163,12 @@ func BuildWBA(cfg WBAConfig) ([]byte, error) {
 	}
 	raw, err := (protojson.MarshalOptions{UseProtoNames: true}).Marshal(f)
 	if err != nil {
-		return nil, fmt.Errorf("forawellknown/server: marshal wba: %w", err)
+		return nil, nil, fmt.Errorf("forawellknown/server: marshal wba: %w", err)
 	}
 	if err := forawellknown.ValidateWBA(raw); err != nil {
-		return nil, fmt.Errorf("forawellknown/server: built wba directory invalid: %w", err)
+		return nil, nil, fmt.Errorf("forawellknown/server: built wba directory invalid: %w", err)
 	}
-	return raw, nil
+	return raw, f.GetKeys(), nil
 }
 
 func assemble(cfg Config) (*forawellknown.Manifest, error) {
@@ -219,33 +237,61 @@ func setRegistration(m *forawellknown.Manifest, cfg Config) {
 }
 
 // Handler serves one built discovery document (overlay manifest or WBA
-// directory) at its canonical path. Serialized bytes are cached in an
+// directory) at its canonical path. The served document is cached in an
 // atomic.Pointer so ServeHTTP is lock-free; Rebuild swaps in a freshly
 // marshaled document (e.g. after key rotation).
+//
+// A WBA directory handler signs its response: once per listed key, covering
+// the authority the request named and the body's digest, under the directory
+// media type, and never through a redirect.
 type Handler struct {
-	build       func() ([]byte, error)
+	build       func() (document, error)
 	contentType string
 	path        string
-	bytes       atomic.Pointer[[]byte]
+	doc         atomic.Pointer[document]
+	// signatures is non-nil for a WBA directory, whose responses are signed.
+	signatures *SignatureCache
+}
+
+// document is one built document and, for a WBA directory, the signers of its
+// listed keys, swapped together so a response is never signed by a key the
+// served body does not list.
+type document struct {
+	bytes   []byte
+	signers []helpers.Signer
 }
 
 // NewHandler builds the initial overlay manifest and returns a ready Handler
 // that serves it at /.well-known/fora.json.
 func NewHandler(cfg Config) (*Handler, error) {
-	return newHandler(func() ([]byte, error) { return Build(cfg) },
-		"application/json", forawellknown.Path)
+	return newHandler(func() (document, error) {
+		raw, err := Build(cfg)
+		return document{bytes: raw}, err
+	}, "application/json", forawellknown.Path, nil)
 }
 
 // NewWBAHandler builds the initial WBA directory and returns a ready Handler
-// that serves it at /.well-known/http-message-signatures-directory with the
-// JWK-Set content type.
+// that serves it at /.well-known/http-message-signatures-directory under
+// DirectoryMediaType, signed by cfg.Signers. A directory listing a key no signer
+// holds is a configuration error, refused here and on every Rebuild.
 func NewWBAHandler(cfg WBAConfig) (*Handler, error) {
-	return newHandler(func() ([]byte, error) { return BuildWBA(cfg) },
-		"application/jwk-set+json", forawellknown.WBAPath)
+	return newHandler(func() (document, error) {
+		raw, keys, err := buildWBA(cfg)
+		if err != nil {
+			return document{}, err
+		}
+		signers, err := signersFor(keys, cfg.Signers)
+		if err != nil {
+			return document{}, err
+		}
+		return document{bytes: raw, signers: signers}, nil
+	}, DirectoryMediaType, forawellknown.WBAPath, NewSignatureCache(cfg.Now, 0))
 }
 
-func newHandler(build func() ([]byte, error), contentType, path string) (*Handler, error) {
-	h := &Handler{build: build, contentType: contentType, path: path}
+func newHandler(
+	build func() (document, error), contentType, path string, signatures *SignatureCache,
+) (*Handler, error) {
+	h := &Handler{build: build, contentType: contentType, path: path, signatures: signatures}
 	if err := h.Rebuild(); err != nil {
 		return nil, err
 	}
@@ -254,26 +300,51 @@ func newHandler(build func() ([]byte, error), contentType, path string) (*Handle
 
 // Rebuild re-runs the document builder (re-reading the KeySource) and re-marshals.
 func (h *Handler) Rebuild() error {
-	raw, err := h.build()
+	doc, err := h.build()
 	if err != nil {
 		return err
 	}
-	h.bytes.Store(&raw)
+	h.doc.Store(&doc)
 	return nil
 }
 
 // Bytes returns the currently served document.
 func (h *Handler) Bytes() []byte {
-	if p := h.bytes.Load(); p != nil {
-		return *p
+	if p := h.doc.Load(); p != nil {
+		return p.bytes
 	}
 	return nil
 }
 
-// ServeHTTP writes the cached document with its content type.
-func (h *Handler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+// ServeHTTP writes the cached document with its content type; a WBA directory
+// is written signed (WriteDirectory).
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	doc := h.doc.Load()
+	if doc == nil {
+		http.Error(w, "document unavailable", http.StatusInternalServerError)
+		return
+	}
+	if h.signatures != nil {
+		if err := WriteDirectory(w, r, doc.bytes, doc.signers, h.signatures); err != nil {
+			logDirectoryFailure(r, h.path, err)
+		}
+		return
+	}
 	w.Header().Set("Content-Type", h.contentType)
-	_, _ = w.Write(h.Bytes())
+	_, _ = w.Write(doc.bytes)
+}
+
+// logDirectoryFailure records why a key directory was answered 500, through the
+// request's own logger, so the line carries the request_id the service's
+// request-id middleware bound. A request that names no host is the caller's doing
+// and any client can send one, so it is a warning; a signer that fails is this
+// service's own fault, so it is an error.
+func logDirectoryFailure(r *http.Request, path string, err error) {
+	level := slog.LevelError
+	if errors.Is(err, ErrNoAuthority) {
+		level = slog.LevelWarn
+	}
+	reqctx.FromContext(r.Context()).Log(r.Context(), level, "wellknown.directory_sign_failed", "path", path, "err", err)
 }
 
 // RegisterRoutes mounts the document route on mux at its canonical path.

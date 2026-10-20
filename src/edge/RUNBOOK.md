@@ -84,12 +84,20 @@ to how the Worker is deployed.
 
 ### 2.2 Logs
 
-The Worker writes structured records to Workers Logs. **Only denials and failures
-produce one** — a request that is served writes no `edge.*` record at all.
-Cloudflare's own invocation log still shows the request.
+The Worker writes structured records to Workers Logs, one per decision. A signed
+request the Worker authorizes and serves writes one `info` record,
+`edge.deliver.authorized`, once the origin has answered; if the origin cannot be
+reached, the request writes `edge.origin.fetch_failed` instead. A denial writes
+one `warn` record and a failure one `error` record. An unsigned request that is
+simply passed through to the origin writes no `edge.*` record at all.
+Cloudflare's own invocation log still shows every request. There is no setting
+that changes which of these are written — [`CONFIGURATION.md`](CONFIGURATION.md)
+§1 says why — and `head_sampling_rate` must stay at `1`, because sampling drops
+records at every level.
 
 | Event | Level | Means |
 |---|---|---|
+| `edge.deliver.authorized` | INFO | A signed request was authorized. Carries `url_hash` (the SHA-256 of the request URL, which is what the evidence chain joins on), `outcome` (`origin-forwarded`, `same-zone` or `cdn-origin-fetch`), `kid` and `agent_id` when the address carried them, and `origin_status` when the Worker waited for the origin's answer. `fora-ledger` finds deliveries by this name, and today reads them only from the function's CloudWatch logs on Lambda@Edge; nothing reads them back from Workers Logs yet. |
 | `edge.origin.fetch_failed` | ERROR | The origin could not be reached. The caller got a `502`. Carries `message`. |
 | `edge.keys.load_failed` | ERROR | The Exchange's key directory is unreachable or unreadable. Carries `message` and `wba_url`. |
 | `edge.verify.unavailable` | ERROR | A signature could not be checked because key loading failed. The caller got a retryable `503`. |
@@ -213,8 +221,11 @@ correlation id:
 
 ```
 request_id = "<the id from the X-Request-ID header>"
-# Expect: at most one edge.* record. A served request produces none —
-#         absence means the request was allowed, not that it was lost.
+# Expect: at most one edge.* record. A signed request that was served
+#         produces edge.deliver.authorized, or edge.origin.fetch_failed if
+#         the origin could not be reached; an unsigned request passed
+#         through to the origin produces none — absence means the request
+#         was allowed, not that it was lost.
 ```
 
 **Reproduce all four decision paths** against a real article:
@@ -329,9 +340,10 @@ curl -sI https://<host>/ | grep -i '^server:'
 
 **Adding a new publisher — the Edge-side steps.** Four things, in this order:
 
-1. **Exchange side first.** The publisher's tenant must be set up with
-   `signing_scheme = 'ED25519'`, or the delivery address will not carry the
-   signature this Worker checks. See [`../exchange/RUNBOOK.md`](../exchange/RUNBOOK.md).
+1. **Exchange side first.** The publisher's site must be registered on the
+   Exchange with `signing_scheme = 'ED25519'` on its `fora.publisher_domains`
+   row, or the delivery address will not carry the signature this Worker checks.
+   See [`../exchange/RUNBOOK.md`](../exchange/RUNBOOK.md).
 2. **Routes** covering all article paths **and** `/.well-known/*`
    ([`DEPLOYMENT.md`](DEPLOYMENT.md) §6.1), on proxied DNS records (§6.2).
 3. **The two discovery documents.** `/.well-known/fora.json` is always served by
@@ -445,9 +457,10 @@ routine.
   With `FORA_ENFORCE_BINDING` on — the default — reuse is still limited to whoever
   holds the key the address names, so a leaked address alone is not enough. With it
   off, the address is a bearer credential and expiry is the only bound.
-- **The Worker records nothing about deliveries.** Per-delivery records at the
-  edge are **not implemented yet** — the Exchange's transaction log is the record
-  of what was sold.
+- **The Worker's delivery record is a log line, not a signed delivery log.**
+  `edge.deliver.authorized` names each authorized delivery by its `url_hash`, but
+  it carries no signature of its own and is kept only as long as the log platform
+  keeps it. The Exchange's transaction log remains the record of what was sold.
 - **Cloudflare is the supported platform for this deployment.** Adapters for
   Fastly Compute and AWS Lambda@Edge exist in the source and are tested, but are
   not part of this deployment path.

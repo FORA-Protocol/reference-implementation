@@ -12,7 +12,7 @@
     "lint:promises": "oxlint -A all --type-aware -D no-floating-promises src tests scripts",
     "lint:fix": "biome check --write .",
     "cycles": "madge --circular --extensions ts src",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e:cf": "vitest run --project workers tests/workers/e2e.cloudflare.test.ts",
@@ -20,10 +20,12 @@
     "test:fastly": "vitest run --project node tests/node/fastly-entry.test.ts",
     "test:e2e:article": "vitest run --project article-path",
     "build:worker": "node scripts/build-worker.mjs",
+    "build:release": "node scripts/build-release.mjs",
     "serve:miniflare": "node scripts/serve-miniflare.mjs"
   },
   "dependencies": {
-    "@fora-protocol/sdk-l1": "git+https://github.com/FORA-Protocol/protocol.git#307f54b7fa64c76ca80ac9bd4854012a035ef0f0",
+    "@fora-protocol/sdk": "1.1.0",
+    "@noble/ed25519": "^2.3.0",
     "hono": "^4.7.0",
     "zod": "^3.24.0"
   },

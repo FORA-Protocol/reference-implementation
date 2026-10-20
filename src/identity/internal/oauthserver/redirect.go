@@ -42,13 +42,13 @@ func allowedRedirect(client oauth.Client, uri string) bool {
 }
 
 // redirectSuccess sends the browser back to the client with the authorization code
-// (and the client's state, when it supplied one).
-func redirectSuccess(w http.ResponseWriter, r *http.Request, base, code, state string) {
+// (and the client's state, when it supplied one). redirectWith adds the issuer.
+func (s *Server) redirectSuccess(w http.ResponseWriter, r *http.Request, base, code, state string) {
 	params := url.Values{"code": {code}}
 	if state != "" {
 		params.Set("state", state)
 	}
-	redirectWith(w, r, base, params)
+	s.redirectWith(w, r, base, params)
 }
 
 // oauthErr is an RFC 6749 error pair (a code and an optional human description)
@@ -60,8 +60,8 @@ type oauthErr struct {
 }
 
 // redirectError sends the browser back to the client with an OAuth error (RFC 6749
-// §4.1.2.1), used once the redirect target is trusted.
-func redirectError(w http.ResponseWriter, r *http.Request, base, state string, oe oauthErr) {
+// §4.1.2.1), used once the redirect target is trusted. redirectWith adds the issuer.
+func (s *Server) redirectError(w http.ResponseWriter, r *http.Request, base, state string, oe oauthErr) {
 	params := url.Values{"error": {oe.code}}
 	if oe.desc != "" {
 		params.Set("error_description", oe.desc)
@@ -69,11 +69,25 @@ func redirectError(w http.ResponseWriter, r *http.Request, base, state string, o
 	if state != "" {
 		params.Set("state", state)
 	}
-	redirectWith(w, r, base, params)
+	s.redirectWith(w, r, base, params)
 }
 
-// redirectWith merges extra query parameters onto base and 302s there.
-func redirectWith(w http.ResponseWriter, r *http.Request, base string, extra url.Values) {
+// redirectWith is the one exit for an authorization response to the client: it
+// merges the response parameters onto the client's registered redirect URI, names
+// this server as the issuer, and 302s there.
+//
+// The iss parameter (RFC 9207 §2) goes on every response, approval and refusal
+// alike. handleMetadata advertises authorization_response_iss_parameter_supported,
+// and a client that has read that flag rejects any authorization response without
+// iss. The value is the configured Issuer, the same string the metadata document
+// publishes as "issuer", because clients compare the two without normalizing
+// either one.
+//
+// Every response parameter is written with Set, and iss is written last. A
+// parameter of the same name already in the registered redirect URI is therefore
+// replaced, never repeated, so a client that registered itself cannot make this
+// server name a different issuer.
+func (s *Server) redirectWith(w http.ResponseWriter, r *http.Request, base string, extra url.Values) {
 	u, err := url.Parse(base)
 	if err != nil {
 		http.Error(w, "invalid redirect target", http.StatusBadRequest)
@@ -85,6 +99,7 @@ func redirectWith(w http.ResponseWriter, r *http.Request, base string, extra url
 			q.Set(key, v)
 		}
 	}
+	q.Set("iss", s.cfg.Issuer)
 	u.RawQuery = q.Encode()
 	http.Redirect(w, r, u.String(), http.StatusFound)
 }

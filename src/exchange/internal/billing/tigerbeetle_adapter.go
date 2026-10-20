@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing/tigerbeetle"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/money"
 )
 
 const (
@@ -34,41 +33,27 @@ var errAuthGenerationsExhausted = errors.New("billing: authorize exhausted hold 
 // Record posts the two-posting owner/platform settlement split at the rate frozen on
 // the hold, and Refund reverses that split proportionally off the posted fee; both are
 // idempotent via check-then-act on deterministic leg ids.
+//
+// It operates one ledger per configured currency. A charge, a credit or a
+// balance read names its currency, and the adapter resolves that currency to a
+// ledger number (the currency's ISO 4217 numeric code) through the shared
+// tigerbeetle table. Nothing is converted between currencies: each currency's
+// money lives on its own ledger and its own accounts, and a currency the
+// deployment did not configure is refused.
 type TigerBeetleAdapter struct {
-	tb          *tigerbeetle.Client
-	ledger      uint32
-	currency    string
+	tb *tigerbeetle.Client
+	// currencies are the configured ISO 4217 alpha codes in configuration order,
+	// and ledgers maps each of them to its ledger number. currencies keeps the
+	// order so account creation and log output are deterministic; ledgers is the
+	// lookup the per-call resolution uses. Both are built together in the
+	// constructor from one input, so they cannot disagree.
+	currencies  []string
+	ledgers     map[string]uint32
 	holdTimeout time.Duration
 	// idNS namespaces every derived account/transfer id. It is empty in production
 	// (hashing stays unsalted); tests set a unique value per instance so cases on
 	// the shared cluster never collide.
 	idNS string
-}
-
-// TigerBeetleOptions configures a TigerBeetleAdapter. HoldTimeout falls back
-// to the package default when zero. The asset scale is not an option: it is
-// deliberately fixed at money.AssetScale for every deployment.
-type TigerBeetleOptions struct {
-	Client      *tigerbeetle.Client
-	Ledger      uint32
-	Currency    string
-	HoldTimeout time.Duration
-	IDNamespace string
-}
-
-// NewTigerBeetleAdapter builds an adapter from opts.
-func NewTigerBeetleAdapter(opts TigerBeetleOptions) *TigerBeetleAdapter {
-	a := &TigerBeetleAdapter{
-		tb:          opts.Client,
-		ledger:      opts.Ledger,
-		currency:    opts.Currency,
-		holdTimeout: opts.HoldTimeout,
-		idNS:        opts.IDNamespace,
-	}
-	if a.holdTimeout <= 0 {
-		a.holdTimeout = defaultHoldTimeout
-	}
-	return a
 }
 
 var _ Adapter = (*TigerBeetleAdapter)(nil)
@@ -133,26 +118,39 @@ func (a *TigerBeetleAdapter) Authorize(ctx context.Context, req AuthorizeRequest
 	if req.Quantity <= 0 {
 		return AuthorizeResult{Approved: false, Reason: "non-positive quantity"}, nil
 	}
-	// The charge currency must match the configured ledger currency: the amount is
-	// posted in the ledger's minor units, so a mismatched label would silently
-	// relabel the money. A zero-cost term settles nothing, so — like InMemory — the
-	// held currency is irrelevant there and the gate is skipped.
-	if req.UnitCost.Value.Sign() != 0 && req.UnitCost.Currency != a.currency {
-		return AuthorizeResult{Approved: false, Reason: "currency mismatch"}, nil
+	// The charge must be denominated in a currency this deployment bills in: the
+	// amount is posted in that ledger's minor units, so an unconfigured label
+	// would either relabel the money or land on a ledger nothing else reads. A
+	// zero-cost term settles nothing, so — like InMemory — the held currency is
+	// irrelevant there and the gate is skipped; the EUR ledger carries the
+	// zero-amount hold in that case.
+	currency := req.UnitCost.Currency
+	ledger, configured := a.ledgerFor(currency)
+	if !configured {
+		if req.UnitCost.Value.Sign() != 0 {
+			return AuthorizeResult{Approved: false, Reason: "currency mismatch"}, nil
+		}
+		// A zero-cost term in an unconfigured currency has no money to put
+		// anywhere, so the hold is parked on the first configured ledger rather
+		// than denied. A zero-cost term in a configured currency keeps that
+		// currency's ledger, which is why this fallback is only for the
+		// unconfigured case.
+		currency = a.currencies[0]
+		ledger = a.ledgers[currency]
 	}
 	minor, err := a.toMinor(totalCharge(req.UnitCost, req.Quantity))
 	if err != nil {
 		return AuthorizeResult{}, err
 	}
-	agentAcct, err := a.accountID(tigerbeetle.PrefixAgent, req.BillingRef)
+	agentAcct, err := a.accountID(tigerbeetle.PrefixAgent, currency, req.BillingRef)
 	if err != nil {
 		return AuthorizeResult{}, err
 	}
-	ownerID, err := a.ownerAccount(req.ResourceOwnerID)
+	ownerID, err := a.ownerAccount(currency, req.ResourceOwnerID)
 	if err != nil {
 		return AuthorizeResult{}, err
 	}
-	if err := a.ensureAccounts(ctx, agentAcct, ownerID); err != nil {
+	if err := a.ensureAccounts(ctx, ledger, agentAcct, ownerID); err != nil {
 		return AuthorizeResult{}, err
 	}
 	denial, ok, err := a.checkBalance(ctx, agentAcct, minor)
@@ -163,19 +161,22 @@ func (a *TigerBeetleAdapter) Authorize(ctx context.Context, req AuthorizeRequest
 		return denial, nil
 	}
 	return a.reserve(ctx, holdParams{
-		billingRef: req.BillingRef, authKey: req.IdempotencyKey,
-		agentAcct: agentAcct, owner: ownerID, minor: minor, bps: req.FeeRateBps,
+		billingRef: req.BillingRef, authKey: req.IdempotencyKey, currency: currency,
+		ledger: ledger, agentAcct: agentAcct, owner: ownerID, minor: minor, bps: req.FeeRateBps,
 	})
 }
 
 // holdParams bundles the values Authorize freezes on a hold: the paying account's
 // billing_ref (part of the pending id so two accounts sharing one idempotency key
-// get separate holds), the ledger account debited, the resource-owner account
-// credited, the gross in minor units, and the commission rate in basis points
-// (stamped on the pending's user_data so Record recovers it).
+// get separate holds), the charge's currency and its ledger, the ledger account
+// debited, the resource-owner account credited, the gross in minor units, and the
+// commission rate in basis points (stamped on the pending's user_data so Record
+// recovers it).
 type holdParams struct {
 	billingRef string
 	authKey    string
+	currency   string
+	ledger     uint32
 	agentAcct  tigerbeetle.ID
 	owner      tigerbeetle.ID
 	minor      *big.Int
@@ -186,7 +187,7 @@ type holdParams struct {
 // that is free (create it) or live (return its id), skipping resolved generations.
 func (a *TigerBeetleAdapter) reserve(ctx context.Context, h holdParams) (AuthorizeResult, error) {
 	for gen := 0; gen < maxAuthGenerations; gen++ {
-		pendingID, err := a.pendingID(h.billingRef, h.authKey, gen)
+		pendingID, err := a.pendingID(h.billingRef, h.currency, h.authKey, gen)
 		if err != nil {
 			return AuthorizeResult{}, err
 		}
@@ -218,7 +219,7 @@ func (a *TigerBeetleAdapter) createHold(
 		Debit:       h.agentAcct,
 		Credit:      h.owner,
 		Amount:      h.minor,
-		Ledger:      a.ledger,
+		Ledger:      h.ledger,
 		Timeout:     a.timeoutSeconds(),
 		UserData128: tigerbeetle.IDFromUint64(bps),
 	})
@@ -304,7 +305,17 @@ func (a *TigerBeetleAdapter) Refund(
 	if cErr := a.classifyForRefund(ctx, pendingID); cErr != nil {
 		return cErr
 	}
-	rMinor, err := a.refundMinor(amount)
+	// The settled hold is read once here and threaded down, because the reversal
+	// needs three things from it: the gross, the frozen fee rate, and the ledger
+	// that says which currency the charge was in.
+	info, ok, err := a.tb.LookupTransfer(ctx, pendingID)
+	if err != nil {
+		return fmt.Errorf("billing: refund lookup pending: %w", err)
+	}
+	if !ok {
+		return ErrUnknownBillingID
+	}
+	rMinor, err := a.refundMinor(amount, info.Ledger)
 	if err != nil {
 		return err
 	}
@@ -320,27 +331,9 @@ func (a *TigerBeetleAdapter) Refund(
 		return nil // idempotent replay — no-op against both accounts
 	}
 	return a.reverseRefund(ctx, refundReq{
-		pendingID: pendingID, netID: netID, feeID: feeID, rMinor: rMinor, reason: reason,
+		pendingID: pendingID, info: info, netID: netID, feeID: feeID,
+		rMinor: rMinor, reason: reason,
 	})
-}
-
-// GetBalance returns the settled balance (credits_posted − debits_posted); pending
-// holds are excluded, matching InMemoryAdapter. An unknown account is an error.
-func (a *TigerBeetleAdapter) GetBalance(ctx context.Context, billingRef string) (amt Amount, err error) {
-	defer func() { err = classifyUnavailable(err) }()
-	id, err := a.accountID(tigerbeetle.PrefixAgent, billingRef)
-	if err != nil {
-		return Amount{}, err
-	}
-	acc, found, err := a.tb.LookupAccount(ctx, id)
-	if err != nil {
-		return Amount{}, fmt.Errorf("billing: get balance: %w", err)
-	}
-	if !found {
-		return Amount{}, fmt.Errorf("billing: unknown account %q", billingRef)
-	}
-	bal := new(big.Int).Sub(acc.CreditsPosted.BigInt(), acc.DebitsPosted.BigInt())
-	return a.fromMinor(bal), nil
 }
 
 // GetQuota returns 0 (no cap): a unit-count quota is not modelled on the ledger. The
@@ -349,42 +342,29 @@ func (a *TigerBeetleAdapter) GetQuota(_ context.Context, _ string) (int64, error
 	return 0, nil
 }
 
-// checkBalance pre-checks available funds (credits_posted − debits_posted −
-// debits_pending) so an insufficient balance is a clean soft denial rather than a
-// failed transfer whose (poisoned) id could never be retried.
-func (a *TigerBeetleAdapter) checkBalance(
-	ctx context.Context, agentAcct tigerbeetle.ID, minor *big.Int,
-) (AuthorizeResult, bool, error) {
-	acc, found, err := a.tb.LookupAccount(ctx, agentAcct)
-	if err != nil {
-		return AuthorizeResult{}, false, fmt.Errorf("billing: lookup agent: %w", err)
-	}
-	available := new(big.Int)
-	if found {
-		available.Sub(acc.CreditsPosted.BigInt(), acc.DebitsPosted.BigInt())
-		available.Sub(available, acc.DebitsPending.BigInt())
-	}
-	if available.Cmp(minor) < 0 {
-		return AuthorizeResult{Approved: false, Reason: "insufficient balance"}, false, nil
-	}
-	return AuthorizeResult{}, true, nil
-}
-
 // pendingID derives the hold's transfer id from the paying account's billing_ref,
-// the caller's idempotency key, and the generation. The billing_ref is part of the
-// id so two accounts that reuse the same idempotency key derive different holds and
-// cannot collide on one shared pending — each settles only its own account. The
-// boundary between the ref and the key stays unambiguous because billing_ref is
-// server-minted (a UUID, ADR-021 D1) and never contains a colon; the caller may put
-// colons in the key, but the key sits AFTER the ref, so it cannot shift where the
-// ref ends. The guard below enforces that invariant instead of trusting it: a
-// colon-bearing ref (a future generator bug) fails loudly here rather than
-// silently deriving an id another account could also derive.
-func (a *TigerBeetleAdapter) pendingID(billingRef, authKey string, gen int) (tigerbeetle.ID, error) {
+// the charge's currency, the caller's idempotency key, and the generation. The
+// billing_ref is part of the id so two accounts that reuse the same idempotency key
+// derive different holds and cannot collide on one shared pending — each settles
+// only its own account. The boundary between the ref and the key stays unambiguous
+// because billing_ref is server-minted (a UUID, ADR-021 D1) and never contains a
+// colon; the caller may put colons in the key, but the key sits AFTER the ref, so it
+// cannot shift where the ref ends. The guard below enforces that invariant instead
+// of trusting it: a colon-bearing ref (a future generator bug) fails loudly here
+// rather than silently deriving an id another account could also derive.
+//
+// The currency is in the id for the same reason it is in the account id: a
+// TigerBeetle transfer id is unique per cluster, not per ledger. Two charges in
+// different currencies that reused one idempotency key would otherwise derive one
+// shared hold, and the generation probe would hand the second charge the first
+// charge's hold — settling the wrong currency's money. The RPC boundary supplies a
+// per-transaction key so the collision is not reachable today; the currency in the
+// id is what keeps it unreachable.
+func (a *TigerBeetleAdapter) pendingID(billingRef, currency, authKey string, gen int) (tigerbeetle.ID, error) {
 	if strings.Contains(billingRef, ":") {
 		return tigerbeetle.ID{}, fmt.Errorf("billing: billing_ref %q must not contain ':'", billingRef)
 	}
-	businessID := a.idNS + tigerbeetle.TransferPendingPrefix +
+	businessID := a.idNS + tigerbeetle.TransferPendingPrefix + currency + ":" +
 		billingRef + ":" + authKey + ":" + strconv.Itoa(gen)
 	id, err := tigerbeetle.TransferID(businessID)
 	if err != nil {
@@ -443,28 +423,6 @@ func (a *TigerBeetleAdapter) timeoutSeconds() uint32 {
 		return math.MaxUint32
 	}
 	return uint32(s)
-}
-
-// toMinor converts a currency amount to an integer number of minor units at the
-// ledger's asset scale. At scale 8 every amount the Exchange produces (8-decimal
-// prices) is exact; a value with finer precision is rejected rather than silently
-// rounded. The conversion itself is money.MinorUnits so the adapter, the repo
-// layer, and the test fixtures share one money-math source of truth.
-func (a *TigerBeetleAdapter) toMinor(amt Amount) (*big.Int, error) {
-	minor, err := money.MinorUnits(amt.Value)
-	if errors.Is(err, money.ErrAmountNotRepresentable) {
-		// Translate the conversion-layer sentinel into the billing sentinel so a
-		// finer-than-scale price surfaces as KindInvalidRequest (4xx), not a 500.
-		return nil, fmt.Errorf("%w: %w", ErrAmountNotRepresentable, err)
-	}
-	return minor, err
-}
-
-func (a *TigerBeetleAdapter) fromMinor(minor *big.Int) Amount {
-	return Amount{
-		Value:    new(big.Rat).SetFrac(minor, money.ScaleFactor()),
-		Currency: a.currency,
-	}
 }
 
 func resolveErr(out tigerbeetle.ResolveOutcome) error {

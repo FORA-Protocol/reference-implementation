@@ -1,26 +1,18 @@
-"""Obligation 00, happy-0: offer list with prices and currencies in plain numbers.
-
-Scenario (verbatim — the first happy-path bullet):
-
-> An agent asks the platform for a resource by URI. The platform returns
-> the list of ways the buyer can pay for it, with prices and currencies
-> in plain numbers.
+"""Obligation PAID-001: discovery returns the ways to pay, with prices and currencies.
 
 Driven against the demo ``epicurus`` resource — a single PER_UNIT USD term
 (0.0001/characters, individual, US/GB) the real ingester produced. A single
 DiscoverResources call surfaces the per-request offer with its term-derived
 price and ISO-4217 currency as plain numbers.
 
-Assertions trace to the scenario text:
-(a) "asks the platform for a resource by URI" — one DiscoverResources POST
-    returns 200.
-(b) "returns the list of ways the buyer can pay for it" — the per-request
-    offer for the URI surfaces.
-(c) "with prices and currencies" — the offer carries ``pricing.rate`` (double)
-    and ``pricing.currency`` (3-letter ISO 4217).
-(d) "plain numbers" — ``pricing.rate`` is a JSON number, not locale- or
-    currency-formatted.
-Scope boundary: no SUBSCRIPTION offer surfaces (that path is obligation 01).
+Assertions:
+(a) one DiscoverResources call for the URI is answered successfully.
+(b) the per-request offer for the URI surfaces.
+(c) the offer carries ``pricing.rate`` (double) and ``pricing.currency``
+    (3-letter ISO 4217).
+(d) ``pricing.rate`` is a plain number, not locale- or currency-formatted.
+Scope boundary: no SUBSCRIPTION offer surfaces; subscription access is not part
+of this obligation.
 """
 
 from __future__ import annotations
@@ -28,25 +20,18 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-import httpx
 import pytest
 
-from ..exchanges import recipient_of
-from ..discovery import discover_body
-from ..conftest import StackURLs
-from ..seed import DEMO_PHILOSOPHY_DOMAIN, USD_AGENT_ID, SeededFixture
-from ..signing import sign_post
+from ..broker_purchase import discover_group
+from ..constants import requester
+from ..exchanges import EXCHANGE_A_DOMAIN
+from ..fresh_agent import FreshAgent
+from ..seed import DEMO_PHILOSOPHY_DOMAIN
+from ..obligation_registry import Obligation, obligation
 
 # ADR-008 D5 — declare stack-isolation contract.
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
-_OBLIGATION_TEXT = (
-    "An agent asks the platform for a resource by URI. The platform returns "
-    "the list of ways the buyer can pay for it, with prices and currencies "
-    "in plain numbers."
-)
-
-_DISCOVER_PATH = "/fora.v1.ExchangeService/DiscoverResources"
 
 # epicurus: PER_UNIT 0.0001/characters USD; individual; geo[US,GB].
 _RESOURCE_URI = f"http://{DEMO_PHILOSOPHY_DOMAIN}/articles/philosophers/epicurus.txt"
@@ -71,39 +56,30 @@ def _coerce_rate(raw: object) -> float:
     raise AssertionError(msg)
 
 
+@obligation(Obligation.PAID_001)
 def test_paid_resource_offer_list_with_plain_prices_and_currencies(
-    compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: seed ingests the demo catalog
+    fresh_agent: FreshAgent,
 ) -> None:
     """DiscoverResources on a paid demo URI returns the per-request offer with plain prices."""
-    resp = sign_post(
-        f"{compose_stack.exchange}{_DISCOVER_PATH}",
-        body=discover_body(
-            agent_id=USD_AGENT_ID,
-            uris=[_RESOURCE_URI],
-            exchange=recipient_of(compose_stack.exchange),
-            domain=DEMO_PHILOSOPHY_DOMAIN,
-            user_type="individual",
-            geography="US",
-        ),
+    # (a): the SDK client returns only a successful answer that passed the strict
+    # response schema.
+    group = discover_group(
+        fresh_agent.exchange(EXCHANGE_A_DOMAIN),
+        EXCHANGE_A_DOMAIN,
+        _RESOURCE_URI,
+        "paid-URI discovery",
+        requester=requester(fresh_agent.agent_id, user_type="individual", geography="US"),
     )
-    # (a)
-    assert resp.status_code == httpx.codes.OK, (
-        f"DiscoverResources on paid URI should succeed, got {resp.status_code}: {resp.text[:512]}"
-    )
-    payload = cast(dict[str, Any], resp.json())
-    offers = cast(list[dict[str, Any]], payload.get("offers") or [])
+    offers = [verified.offer for verified in group.result.verified]
 
     # (b)
-    assert offers, f"expected a per-request offer for {_RESOURCE_URI!r}; got {payload}"
+    assert offers, f"expected a per-request offer for {_RESOURCE_URI!r}; got {group}"
 
     # scope boundary — no SUBSCRIPTION offers
     subscription_offers = [o for o in offers if o.get("subscription_id")]
-    assert not subscription_offers, (
-        f"obligation 00 scopes subscription out; got {subscription_offers}"
-    )
+    assert not subscription_offers, f"PAID-001 scopes subscription out; got {subscription_offers}"
 
-    spot = offers[0]
+    spot = cast(dict[str, Any], offers[0])
     pricing = cast(dict[str, Any], spot.get("pricing") or {})
     # (c) + (d)
     rate = _coerce_rate(pricing.get("rate"))

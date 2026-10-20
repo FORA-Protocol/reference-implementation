@@ -285,8 +285,9 @@ and what to compare inside the body, is in the same folder. If the body does not
 match what you configured, re-check the routes in §6.1.
 
 **Check E — signed URLs work.** Take a signed address produced by the Exchange
-and request it. This needs the Exchange side done first: the publisher's tenant
-must be set up with `signing_scheme = 'ED25519'`.
+and request it. This needs the Exchange side done first: the publisher's site
+must be registered on the Exchange with `signing_scheme = 'ED25519'` on its
+`fora.publisher_domains` row.
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' \

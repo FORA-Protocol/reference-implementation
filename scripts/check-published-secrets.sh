@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # check-published-secrets.sh
 #
-# Secret scan over exactly the files the publish ships.
+# Secret scan over the files the publish ships, and over the paths it holds back
+# from inside them.
 #
 # src/, internal/, tests/, testdata/, deploy/, schemas/, docs/architecture/, the
 # root build files, a curated scripts/ set and a curated set of individual docs/
-# files are published verbatim to the public reference implementation. A secret
-# that reaches one of those paths is public the moment the next snapshot is
-# pushed, and a push cannot be taken back.
+# files are published verbatim to the public reference implementation, minus the
+# paths DENY_PATHS holds back. A secret that reaches one of those paths is public
+# the moment the next snapshot is pushed, and a push cannot be taken back.
 #
 # The publish tool runs the same scanner over the curated tree it is about to
 # push. That run is the last line of defence, and it is too late to be the only
@@ -27,6 +28,13 @@
 #     are different files. Scanning them would report on content that never
 #     ships.
 #
+#   - DENY_PATHS is deliberately NOT subtracted, unlike in the reference gate.
+#     A held-back path sits under a published root and never ships, so a key
+#     there is not yet a leak — but it is one edit of that array away from
+#     becoming one, and this gate is the only secret scan the tree gets.
+#     Subtracting the array would leave a key committed under one of those paths
+#     unscanned everywhere.
+#
 #   - TRACKED files only, via `git ls-files`. A directory walk also sees
 #     gitignored local output — generated dev keys under deploy/, node_modules/,
 #     a virtualenv — none of which is published. The publish checks out tracked
@@ -43,33 +51,20 @@
 # tree is found because its default lookup path is the working directory. That is
 # the same invocation shape the publish tool uses, so the two runs agree.
 #
-# `--root <dir>` scans a tree other than this checkout; the guard's own tests use
-# it to drive synthetic repositories. It is an ARGUMENT and not an environment
-# variable on purpose: an ambient variable that selects what a gate reads can
-# redirect it while it still reports PASS. There is deliberately no seam for the
-# temporary directory — this script deletes that path, and the only path it will
-# delete is one `mktemp -d` handed it.
+# `--root <dir>` scans a tree other than this checkout. The argument, and why it
+# is an argument, are described once in scripts/gate-args.sh. What is specific
+# here: there is deliberately no seam for the temporary directory — this script
+# deletes that path, and the only path it will delete is one `mktemp -d` handed it.
 #
 # Exits 0 when clean, 1 otherwise.
 
 set -euo pipefail
 
-die() { printf 'FAIL  %s\n' "$*" >&2; exit 1; }
-
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root=""
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --root)
-      [ $# -ge 2 ] || die "--root requires a directory"
-      repo_root="$(cd "$2" && pwd)" || die "--root: no such directory: $2"
-      shift 2
-      ;;
-    *) die "unknown argument: $1" ;;
-  esac
-done
-[ -n "${repo_root}" ] || repo_root="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=scripts/gate-args.sh
+source "${script_dir}/gate-args.sh"
+parse_gate_args "$@"
 
 # shellcheck source=scripts/published-paths.sh
 source "${script_dir}/published-paths.sh"

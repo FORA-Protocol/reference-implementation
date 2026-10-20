@@ -19,7 +19,7 @@
 // usage report. Two other legs reach an Exchange and are NOT governed, and both
 // are outside what an allowlist could decide:
 //
-//   - The purchase goes through the Broker's execute relay. The Broker chooses
+//   - The purchase goes through the Broker's ExecuteTransaction. The Broker chooses
 //     which Exchange to hand it to, from an offer the Exchange itself signed, so
 //     there is no domain here to hold against a list.
 //   - The offer-key lookup fetches an Exchange's published directory to VERIFY
@@ -29,6 +29,15 @@
 //
 // Stating the two is the point: "applies to every outbound call" would be the
 // comfortable sentence and it would be false.
+//
+// # How it reaches them
+//
+// Two ways, and the package carries both so the answer and its application do
+// not drift apart. Permits is the predicate, injected wherever a leg decides for
+// itself -- the tool layer, for a readable refusal, and the requirements reader,
+// which is the one leg that dials without routing. PermittedEndpoints wraps the
+// shared endpoint resolver for every leg that DOES route, and its own doc says
+// why a wrapper rather than the resolver's hook.
 package exchpolicy
 
 import (

@@ -239,23 +239,6 @@
       "warnings": []
     },
     {
-      "name": "structural_term_without_pricing",
-      "entry": {
-        "domain": "publisher.example",
-        "path": "/premium/article-42.html",
-        "terms": [
-          {
-            "semantics": "TERM_SEMANTICS_ENUMERATED"
-          }
-        ]
-      },
-      "ok": false,
-      "structural": true,
-      "cross_field_rules": [],
-      "term_rules": [],
-      "warnings": []
-    },
-    {
       "name": "structural_nested_cel_only",
       "entry": {
         "domain": "publisher.example",
@@ -282,6 +265,25 @@
       "structural": false,
       "cross_field_rules": [
         "pricing.per_unit.requires_unit"
+      ],
+      "term_rules": [],
+      "warnings": []
+    },
+    {
+      "name": "cross_field_resource_entry_term_without_pricing",
+      "entry": {
+        "domain": "publisher.example",
+        "path": "/premium/article-42.html",
+        "terms": [
+          {
+            "semantics": "TERM_SEMANTICS_ENUMERATED"
+          }
+        ]
+      },
+      "ok": false,
+      "structural": false,
+      "cross_field_rules": [
+        "resource_entry.terms.pricing_required"
       ],
       "term_rules": [],
       "warnings": []
@@ -514,6 +516,29 @@
       "cross_field_rules": [
         "pricing.free.zero_rate"
       ],
+      "term_rules": [],
+      "warnings": []
+    },
+    {
+      "name": "metered_term_with_no_estimate_accepted",
+      "entry": {
+        "domain": "publisher.example",
+        "path": "/premium/article-42.html",
+        "terms": [
+          {
+            "pricing": {
+              "currency": "USD",
+              "model": "PRICING_MODEL_PER_UNIT",
+              "rate": "0.00002",
+              "unit": "tokens"
+            },
+            "semantics": "TERM_SEMANTICS_ENUMERATED"
+          }
+        ]
+      },
+      "ok": true,
+      "structural": false,
+      "cross_field_rules": [],
       "term_rules": [],
       "warnings": []
     },

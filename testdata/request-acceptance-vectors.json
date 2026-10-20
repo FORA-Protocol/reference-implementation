@@ -1,0 +1,81 @@
+{
+  "canonicalization": "jcs",
+  "refused": [
+    {
+      "name": "empty_requester_id",
+      "empty": "requester_id",
+      "items": [
+        {
+          "offer_sig": "sig-x",
+          "exchange": "one.example"
+        }
+      ],
+      "requester_id": "",
+      "requester_domain": "agent.example",
+      "idempotency_key": "idem-4",
+      "canonical_jcs": "{\"idempotency_key\":\"idem-4\",\"items\":[{\"exchange\":\"one.example\",\"offer_sig\":\"sig-x\"}],\"requester_domain\":\"agent.example\"}",
+      "signature_hex": "934241520ac7de830fefd7ee3a8d07a14ff648f3a7e5fc0dc269857e67490456f5569ed5ed0d0965c1e7537d55a5f82f618e68cdd9b0778860ec3e1f6a809f04",
+      "pubkey_b64": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+      "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+    },
+    {
+      "name": "empty_requester_domain",
+      "empty": "requester_domain",
+      "items": [
+        {
+          "offer_sig": "sig-z",
+          "exchange": "one.example"
+        }
+      ],
+      "requester_id": "agent-2",
+      "requester_domain": "",
+      "idempotency_key": "idem-2",
+      "canonical_jcs": "{\"idempotency_key\":\"idem-2\",\"items\":[{\"exchange\":\"one.example\",\"offer_sig\":\"sig-z\"}],\"requester_id\":\"agent-2\"}",
+      "signature_hex": "76bf03cc025b6a32e8da0868aa53f769cf301b5c04a7ae1d57d37fbe1adb41e6a4c09e6d4faf8c816ac1fe9805635c92184035b672f300cec43f9695ef6b990c",
+      "pubkey_b64": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+      "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+    }
+  ],
+  "vectors": [
+    {
+      "name": "mixed_exchange_order",
+      "items": [
+        {
+          "offer_sig": "sig-a",
+          "exchange": "one.example"
+        },
+        {
+          "offer_sig": "sig-b",
+          "exchange": "two.example"
+        },
+        {
+          "offer_sig": "sig-c",
+          "exchange": "one.example"
+        }
+      ],
+      "requester_id": "agent-1",
+      "requester_domain": "agent.example",
+      "idempotency_key": "idem-1",
+      "canonical_jcs": "{\"idempotency_key\":\"idem-1\",\"items\":[{\"exchange\":\"one.example\",\"offer_sig\":\"sig-a\"},{\"exchange\":\"two.example\",\"offer_sig\":\"sig-b\"},{\"exchange\":\"one.example\",\"offer_sig\":\"sig-c\"}],\"requester_domain\":\"agent.example\",\"requester_id\":\"agent-1\"}",
+      "signature_hex": "bfe5bc3e042022c621c4160bbe7015220cb9210eb13a7a849df19163374ce4bbb98e4846dc92053eddb2c7a97759e0232ccfabd580cda82fdd7f2165d374a10c",
+      "pubkey_b64": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+      "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+    },
+    {
+      "name": "empty_idempotency_key",
+      "items": [
+        {
+          "offer_sig": "sig-y",
+          "exchange": "one.example"
+        }
+      ],
+      "requester_id": "agent-3",
+      "requester_domain": "agent.example",
+      "idempotency_key": "",
+      "canonical_jcs": "{\"items\":[{\"exchange\":\"one.example\",\"offer_sig\":\"sig-y\"}],\"requester_domain\":\"agent.example\",\"requester_id\":\"agent-3\"}",
+      "signature_hex": "e36cd6f63770f3ec0e417e3684e0d5441bfb6a376da755fdb4b3d5b8a24185fde73f0f988748fe319ae738b71871951e3fc8309628786c41df24f7bf730b1704",
+      "pubkey_b64": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+      "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+    }
+  ]
+}

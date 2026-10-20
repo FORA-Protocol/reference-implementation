@@ -1,6 +1,11 @@
 # ADR-021 — FORA SDK Documentation: Layered Guides + Generated Reference, Co-located on the Protocol Website
 
-**Status:** Accepted
+**Status:** Accepted · **amended (2026-09-11)** — the SDK now ships as tagged
+releases, so the off-commit consumption this ADR builds on is superseded by
+ADR-020's own amendment. §7's versioning decision, §3's "Install & setup" row and
+the Rejected-alternatives entry about a versioned release all describe the period
+before the `v1.0.3` release. See the
+[Addendum (2026-09-11)](#addendum-2026-09-11--the-sdk-ships-releases-so-the-docs-track-a-version).
 
 ---
 
@@ -134,3 +139,46 @@ Add the `SDK` sidebar group + **Overview** + **one** guide — **"Verify a recei
 - **Exemplars** — Stripe (persistent multi-language selector, guides + generated reference, progressive disclosure); Temporal (neutral core + per-language SDK guide split); gRPC.io / Protocol Buffers (parallel per-language guides over an IDL); Rust (the Book + docs.rs — narrative cross-linked into generated reference).
 - **Starlight capabilities** — `<Tabs syncKey>` (synced code tabs), `starlight-typedoc` (TS API pages), `starlight-links-validator` (already installed — CI-gated cross-links).
 - **First slice** — SDK sidebar group + "Verify a received offer" multi-language guide + one bidirectional cross-link (§8).
+
+---
+
+## Addendum (2026-09-11) — the SDK ships releases, so the docs track a version
+
+**Context.** This ADR was written while the SDK was consumed off-commit, and it
+says so in four places: §3's sidebar sketch describes the Install & setup page as
+"the off-commit git-pin snippet each"; §7 decides that the version banner tracks a
+commit; the Rejected-alternatives entry calls a versioned release unnecessary
+"while the contract is in flux"; and the References entry cites ADR-020 §6 for
+off-commit consumption.
+
+ADR-020's own amendment records what changed: the `v1.0.3` release tags the
+protocol repository and publishes `@fora-protocol/sdk` on npm and
+`fora-protocol-sdk` and `fora-protocol` on PyPI. A consumer installs a release.
+
+**What this changes.** §7's versioning decision is the one that was load-bearing.
+It reads "Since the SDK is consumed off-commit (ADR-020 §6), the docs track that
+commit; when it semver-stabilizes, the docs version with it." The premise is gone
+and the conditional has fired, so the decision is now the second half of its own
+sentence: the docs track a version.
+
+The website implements that. A build-time plugin resolves the SDK version from the
+protocol repository's root `package.json` — the same file the release procedure
+advances — and substitutes it into the install instructions, so the site follows a
+release rather than restating one. It also fails the build when a version written
+by hand next to an SDK package name has gone stale, which is what makes "one
+source" hold rather than merely be intended. The check is scoped to the SDK
+package names on purpose: the site also cites CoMP, RSL, C2PA and the protocol
+version, and a rule over every `X.Y.Z` would flag those too.
+
+§3's sidebar sketch describes the Install & setup page as carrying an off-commit
+git-pin snippet per language. That page now carries a release install per
+language, in the forms ADR-020's addendum lists; the sketch describes the page as
+it was planned, not as it stands. The Rejected-alternatives entry stands as a record of
+the sequencing decision — coupling the docs to a release was premature when this
+ADR was written, and the release has since happened — the same way ADR-020 treats
+its own entry on publication.
+
+**What it does not change.** Everything else in this ADR is independent of how a
+consumer names the dependency: the Diátaxis quadrant split, the sidebar shape, the
+synced multi-language tabs, the generated reference, the cross-link contract, and
+the incremental-slice plan. Those were never arguments about pinning.

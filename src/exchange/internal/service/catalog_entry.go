@@ -7,11 +7,33 @@ package service
 
 import (
 	"fmt"
+	"net/url"
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/catalogid"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/metadatacodec"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/termscodec"
 )
+
+// siteDomainFromURI recovers the publisher site a stored catalog URI belongs to
+// — the key of its fora.publisher_domains row.
+//
+// entryFromProto builds the URI as scheme + "://" + domain + path
+// (catalogid.Page.URI), so url.Host returns exactly the domain the push carried.
+// Host and not Hostname: Hostname strips a port, and a domain that carried one
+// would then miss its registration.
+func siteDomainFromURI(uri string) (string, error) {
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return "", fmt.Errorf("parse catalog uri %q: %w", uri, err)
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("catalog uri %q names no host", uri)
+	}
+	return parsed.Host, nil
+}
 
 // entryFromProto converts a ResourceEntry message into the repo.CatalogEntry
 // shape, materializing the stable resource_id and the pricing JSON payload.
@@ -19,18 +41,21 @@ func entryFromProto(tenantID string, e *forav1.ResourceEntry) (repo.CatalogEntry
 	if e.GetDomain() == "" || e.GetPath() == "" {
 		return repo.CatalogEntry{}, fmt.Errorf("missing domain/path")
 	}
-	uri := currentCatalogURIScheme() + "://" + e.GetDomain() + e.GetPath()
-	id := namespaceResourceID(tenantID, e.GetContentId(), uri)
-	terms, err := marshalTerms(e.GetTerms())
+	page := catalogid.Page{
+		TenantID: tenantID, Domain: e.GetDomain(), Path: e.GetPath(), ContentID: e.GetContentId(),
+	}
+	scheme := currentCatalogURIScheme()
+	uri := page.URI(scheme)
+	terms, err := termscodec.Marshal(e.GetTerms())
 	if err != nil {
 		return repo.CatalogEntry{}, fmt.Errorf("marshal terms: %w", err)
 	}
-	metadata, err := marshalResourceMetadata(e)
+	metadata, err := metadatacodec.Marshal(e)
 	if err != nil {
 		return repo.CatalogEntry{}, fmt.Errorf("marshal metadata: %w", err)
 	}
 	return repo.CatalogEntry{
-		ResourceID: id,
+		ResourceID: page.ResourceID(scheme),
 		TenantID:   tenantID,
 		URI:        uri,
 		URIPrefix:  uri,
@@ -43,7 +68,7 @@ func entryFromProto(tenantID string, e *forav1.ResourceEntry) (repo.CatalogEntry
 		TermsJSON:      terms,
 		DeliveryMethod: "INSTRUCTIONS",
 		MetadataJSON:   metadata,
-		// Stored in its own column, not in MetadataJSON: marshalResourceMetadata
+		// Stored in its own column, not in MetadataJSON: metadatacodec.Marshal
 		// projects only the extension-metadata fields and excludes the title by
 		// design. An empty pushed title is normalized to nil so the column stays
 		// NULL and Offer.title stays unset, rather than becoming a
@@ -62,26 +87,6 @@ func titleOrNil(title string) *string {
 	return &title
 }
 
-// namespaceResourceID scopes a resource_id to its owning tenant so a
-// resource_id can never collide across tenants: a contributor for one tenant
-// cannot address — and so cannot overwrite — another tenant's row. tenant_id is
-// a t_<uuid> (no ':') so the delimiter is unambiguous.
-//
-// The scoping KEY is the caller-supplied content_id when present. When absent,
-// the key falls back to the entry's URI rather than a fresh server UUID: the URI
-// is the stable identity of the resource, so an absent-content_id re-push of the
-// same (domain, path) maps to the SAME resource_id and upserts in place
-// (idempotency), instead of minting a new resource_id that would falsely collide
-// with the incumbent under the URI-ownership gate. The URI already encodes
-// the domain (which derives the tenant), so URI-keyed ids stay tenant-scoped.
-func namespaceResourceID(tenantID, contentID, uri string) string {
-	key := contentID
-	if key == "" {
-		key = uri
-	}
-	return tenantID + ":" + key
-}
-
 // legacyPricingSentinel is the value written into the NOT NULL catalog.pricing
 // JSONB column now that offer/billing pricing is derived from the selected
 // LicenseTerm rather than a stored pricing blob. It exists only to
@@ -96,5 +101,5 @@ func uriFromEntry(e *forav1.ResourceEntry) string {
 	if e.GetDomain() == "" && e.GetPath() == "" {
 		return ""
 	}
-	return currentCatalogURIScheme() + "://" + e.GetDomain() + e.GetPath()
+	return catalogid.Page{Domain: e.GetDomain(), Path: e.GetPath()}.URI(currentCatalogURIScheme())
 }

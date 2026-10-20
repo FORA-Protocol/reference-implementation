@@ -108,7 +108,7 @@ func TestInMemoryAdapter_CreditIntoForeignCurrencyBalance(t *testing.T) {
 	if errors.Is(err, billing.ErrInvalidAmount) {
 		t.Errorf("Credit into a EUR balance = %v, want a plain error, not ErrInvalidAmount", err)
 	}
-	bal, err := a.GetBalance(ctx, "ag")
+	bal, err := a.GetBalance(ctx, "ag", "EUR")
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestInMemoryAdapter_ZeroCostBypassesCurrencyGate(t *testing.T) {
 	if err := a.Record(ctx, res.BillingID, 1, ""); err != nil {
 		t.Fatalf("record zero-charge hold: %v", err)
 	}
-	bal, _ := a.GetBalance(ctx, "ag")
+	bal, _ := a.GetBalance(ctx, "ag", "EUR")
 	want, _ := billing.NewAmount("1.00", "EUR")
 	if bal.Currency != "EUR" || bal.Value.Cmp(want.Value) != 0 {
 		t.Errorf("balance after zero-charge record = %s %s, want 1.00 EUR",
@@ -349,7 +349,7 @@ func TestInMemoryAdapter_RecordSettlesReservedAmountNotPassedQty(t *testing.T) {
 		if err := a.Record(ctx, res.BillingID, divergentQty, ""); err != nil {
 			t.Fatalf("record(qty=%d): %v", divergentQty, err)
 		}
-		bal, _ := a.GetBalance(ctx, "ag")
+		bal, _ := a.GetBalance(ctx, "ag", confCurrency)
 		// Settled charge is always the reserved 0.50 → balance 9.50.
 		want, _ := billing.NewAmount("9.50", "USD")
 		if bal.Value.Cmp(want.Value) != 0 {

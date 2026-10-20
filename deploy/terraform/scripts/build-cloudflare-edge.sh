@@ -13,6 +13,11 @@ set -euo pipefail
 
 . "$(dirname "${BASH_SOURCE[0]}")/lib/edge-build.sh"
 
+# The previous bundle goes before anything is built. Under set -e a failed step
+# stops the script, and a bundle left from an earlier run would then be what
+# Terraform uploads.
+rm -f "${EDGE_DIR}/dist/worker.mjs"
+
 edge_npm_ci
 
 echo "==> bundling worker"

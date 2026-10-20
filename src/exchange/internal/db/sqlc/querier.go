@@ -9,10 +9,27 @@ import (
 )
 
 type Querier interface {
+	// Records a manifest check that passed: the listing goes ACTIVE and both
+	// timestamps move to the moment of the check. verified_at is set from the same
+	// NOW() as last_checked_at so a reader can never see a verification that appears
+	// to predate the check that produced it. Tenant-scoped.
+	//
+	// Returns the row rather than a count, so a caller can tell a listing that is
+	// not there (no rows) from one it wrote, and can read what it wrote inside the
+	// same transaction. CheckDomain, the service's one caller, needs only the
+	// first: it reads the listing back after its transaction commits.
+	ActivatePublisherDomainListing(ctx context.Context, arg ActivatePublisherDomainListingParams) (ForaPublisherDomainListing, error)
 	// Appends one admin control-plane change to the append-only audit log. Written
 	// inside the setter's transaction, after the rows-affected check, so an
 	// unknown-tenant no-op leaves no row.
 	AppendAuditLog(ctx context.Context, arg AppendAuditLogParams) error
+	// The transaction event journal, fora.transaction_events (migration 000044).
+	// Rows are appended and never changed.
+	// Appends one event. A second event with the same (event_type, agent_id,
+	// idempotency_key) is dropped, so a denial raised again for the same agent and
+	// item key is recorded once. The affected-row count tells the caller which of
+	// the two happened.
+	AppendTransactionEvent(ctx context.Context, arg AppendTransactionEventParams) (int64, error)
 	// Returns the audit trail for a tenant, most recent first. Read path for admin
 	// change reconstruction and the integration tests' side-effect assertions.
 	AuditLogByTenant(ctx context.Context, tenantID string) ([]ForaAuditLog, error)
@@ -37,6 +54,24 @@ type Querier interface {
 	// The ::boolean cast pins the generated Go field to bool. deadline is NOT NULL,
 	// so the comparison is never null.
 	CountObligationsByStateAndDueness(ctx context.Context, arg CountObligationsByStateAndDuenessParams) ([]CountObligationsByStateAndDuenessRow, error)
+	// How many sites one payee has saved on one seat and not verified yet: the
+	// listings still PENDING_MANIFEST. Registration reads it, after locking the
+	// payee's row, to cap how many hostnames one payee can hold without proving any
+	// of them. Joins the site row because the listing is keyed by domain and the
+	// payee is a fact of the site. Tenant-scoped.
+	CountPendingPublisherDomainListings(ctx context.Context, arg CountPendingPublisherDomainListingsParams) (int64, error)
+	// How many of one publisher's items this seat refused in
+	// [period_start, period_end), per denial reason. The publisher is the resource
+	// owner recorded when each item was refused, not the catalog entry's current
+	// owner. Reasons with no denial in the period are absent.
+	CountPublisherDenialsByReason(ctx context.Context, arg CountPublisherDenialsByReasonParams) ([]CountPublisherDenialsByReasonRow, error)
+	// How many of the publisher's transactions in the currency each bucket of a
+	// totals read holds. bucket_starts is the sorted start of every bucket, and the
+	// first one is period_start, so width_bucket numbers the buckets from 1 and a
+	// bucket that holds no transaction has no row. Free transactions are counted:
+	// they are sales of nothing, and the count says so. resource_id and domain,
+	// when given, count one resource's or one domain's transactions only.
+	CountPublisherTransactionsByBucket(ctx context.Context, arg CountPublisherTransactionsByBucketParams) ([]CountPublisherTransactionsByBucketRow, error)
 	// Writes the append-once evidence row for a successfully executed transaction
 	// item: the full signed offer + both-party signatures + both verifying public
 	// keys + the delivered URL. Written inside the same transaction as the
@@ -44,6 +79,32 @@ type Querier interface {
 	// transaction_id FK). The row is never updated or deleted (append-once triggers).
 	CreateEvidence(ctx context.Context, arg CreateEvidenceParams) error
 	CreateObligation(ctx context.Context, arg CreateObligationParams) (ForaReportingObligation, error)
+	// Records a newly minted payee. Registration runs this and the caller's grant in
+	// one transaction, so a publisher can never exist with nobody able to act for
+	// it. No ON CONFLICT: the id is minted per registration, so a collision is a
+	// broken minter and must surface rather than silently return someone else's row.
+	CreatePublisher(ctx context.Context, arg CreatePublisherParams) (ForaPublisher, error)
+	// Registers one site under one publisher. The signing scheme follows from the
+	// CDN, never from the publisher. The CloudFront key-pair id is not taken here:
+	// it exists only after the publisher has uploaded the public key to their own
+	// AWS account, and no supported integration asks for one today. The CDN is
+	// stored because every supported integration verifies inside an edge function
+	// and therefore signs with Ed25519, so the scheme no longer tells the three
+	// apart and the generated configuration differs per integration.
+	CreatePublisherDomain(ctx context.Context, arg CreatePublisherDomainParams) (ForaPublisherDomain, error)
+	// Lists a site on a seat. The state is left to the column default,
+	// PENDING_MANIFEST: a listing is never born proven, and taking the state from
+	// the caller would let registration create an ACTIVE listing without a manifest.
+	// No ON CONFLICT, so listing the same site twice on one seat surfaces the
+	// duplicate instead of silently overwriting the first listing's path scope or
+	// the licensing it agreed.
+	CreatePublisherDomainListing(ctx context.Context, arg CreatePublisherDomainListingParams) (ForaPublisherDomainListing, error)
+	// Grants one person the right to act for one payee on one seat. Runs in the same
+	// transaction as the publisher it grants, so a registration cannot commit a
+	// payee nobody can reach. ON CONFLICT DO NOTHING makes re-granting an existing
+	// pair a no-op rather than an error: the grant is a set membership, and adding a
+	// member twice is the same set.
+	CreatePublisherGrant(ctx context.Context, arg CreatePublisherGrantParams) error
 	// Writes the full transaction row. The handler MUST await this commit before
 	// returning the signed URL to the caller (write-before-sign invariant).
 	CreateTransaction(ctx context.Context, arg CreateTransactionParams) (ForaTransactionLog, error)
@@ -92,6 +153,22 @@ type Querier interface {
 	// row. The transaction_log + tenants rows are read-only
 	// on this path and need no lock.
 	GetObligationWithTransactionForUpdate(ctx context.Context, transactionID string) (GetObligationWithTransactionForUpdateRow, error)
+	// Resolves one payee by its minted id. Deployment-wide by design: the id groups
+	// an owner's sites across every seat that sells them, so there is no tenant_id
+	// to filter on here.
+	GetPublisher(ctx context.Context, publisherID string) (ForaPublisher, error)
+	// One of the publisher's resources. Scoped on the seat and the publisher like
+	// every read here, so naming another publisher's resource returns no row
+	// rather than that publisher's data.
+	GetPublisherCatalogResource(ctx context.Context, arg GetPublisherCatalogResourceParams) (GetPublisherCatalogResourceRow, error)
+	// Resolves one site to its publisher and its URL-signing facts. The catalog push
+	// path starts here: the pushed entry's domain names the payee. Deployment-wide by
+	// design -- a site sits behind one CDN whichever seat sells it -- so there is no
+	// tenant_id to filter on.
+	GetPublisherDomain(ctx context.Context, domain string) (ForaPublisherDomain, error)
+	// Reads one seat's listing of one site: whether the site may sell here, and the
+	// commercial arrangement the generated artifacts are built from. Tenant-scoped.
+	GetPublisherDomainListing(ctx context.Context, arg GetPublisherDomainListingParams) (ForaPublisherDomainListing, error)
 	// Returns the per-(tenant, resource_owner) commission override in basis points,
 	// or no row when none is configured (the caller falls back to the tenant default).
 	GetResourceOwnerFeeOverride(ctx context.Context, arg GetResourceOwnerFeeOverrideParams) (int32, error)
@@ -105,12 +182,97 @@ type Querier interface {
 	GetTransactionByID(ctx context.Context, transactionID string) (ForaTransactionLog, error)
 	// Idempotency lookup: return a prior transaction for the same idempotency_key.
 	GetTransactionByIdempotencyKey(ctx context.Context, idempotencyKey string) (ForaTransactionLog, error)
+	// Reads one tenant's transaction. A caller that reads on behalf of a tenant
+	// uses this rather than GetTransactionByID, so the tenant predicate is part of
+	// the query and not a check every such caller has to remember.
+	GetTransactionByTenantAndID(ctx context.Context, arg GetTransactionByTenantAndIDParams) (ForaTransactionLog, error)
 	GetTransactionRequestClaim(ctx context.Context, arg GetTransactionRequestClaimParams) (ForaTransactionRequestClaim, error)
+	// Answers the question every console request asks before it touches anything:
+	// may this person act for this payee on this seat? Tenant-scoped.
+	HasPublisherGrant(ctx context.Context, arg HasPublisherGrantParams) (bool, error)
 	InsertCatalogEntry(ctx context.Context, arg InsertCatalogEntryParams) (ForaCatalog, error)
+	// Creates one Exchange seat. `domain` is the hostname the seat answers on --
+	// the value EXCHANGE_DOMAIN carries -- not a publisher's site. The signing
+	// scheme and the CloudFront key-pair id are NOT here: those describe one site
+	// and live on fora.publisher_domains. What the seat holds is the private-key
+	// side, ed25519_key_ref and rsa_key_ref.
 	InsertTenant(ctx context.Context, arg InsertTenantParams) (ForaTenant, error)
 	InsertTransactionRequestClaim(ctx context.Context, arg InsertTransactionRequestClaimParams) (int64, error)
 	ListAllCatalog(ctx context.Context) ([]ForaCatalog, error)
 	ListCatalogByTenant(ctx context.Context, tenantID string) ([]ForaCatalog, error)
+	// The rows the automatic import compares a site's pages with: every row of one
+	// seat pushed under one domain, whatever scheme its URI was built with. The
+	// comparison is on the stored domain and exact, so publisher.example never
+	// matches publisher.example.org or x.publisher.example. Tenant-scoped.
+	ListCatalogPagesOfSite(ctx context.Context, arg ListCatalogPagesOfSiteParams) ([]ListCatalogPagesOfSiteRow, error)
+	// The listings one seat imports automatically: ACTIVE, with a sitemap
+	// recorded. Every ACTIVE listing carries its licensing -- the table's
+	// publisher_domain_listings_active_has_terms CHECK refuses one without it, and
+	// registration validated it -- so the sitemap is the one setting that can be
+	// missing, and an empty one means "not recorded": that listing is skipped,
+	// never imported from a guess. The site row is joined for the payee, which the
+	// importer logs with every outcome. Tenant-scoped: the importer runs for one
+	// seat, the deployment's own.
+	ListImportEligibleListings(ctx context.Context, tenantID string) ([]ListImportEligibleListingsRow, error)
+	// One page of the publisher's resources, newest first, keyset on
+	// (created_at, resource_id) as the transaction list is. The price of a resource
+	// is on each of its terms; the legacy catalog.pricing column is not read.
+	// resource_id and domain, when given, narrow the page the same way they narrow
+	// the transaction reads.
+	ListPublisherCatalogPage(ctx context.Context, arg ListPublisherCatalogPageParams) ([]ListPublisherCatalogPageRow, error)
+	// ListPublisherCatalogPage read the other way, for a Previous link, as
+	// ListPublisherTransactionsPageBefore is for the transactions. Its filters
+	// must stay the forward query's word for word.
+	ListPublisherCatalogPageBefore(ctx context.Context, arg ListPublisherCatalogPageBeforeParams) ([]ListPublisherCatalogPageBeforeRow, error)
+	// Every site one payee has listed on one seat, for the console's domain list.
+	// Joins to fora.publisher_domains because the listing is keyed by domain and the
+	// publisher is a fact of the site, not of the relationship. Tenant-scoped.
+	ListPublisherDomainListings(ctx context.Context, arg ListPublisherDomainListingsParams) ([]ForaPublisherDomainListing, error)
+	// Resolves a set of sites in one read, for the console's domain list: every
+	// listing a payee holds on a seat names one site, and reading them one query at
+	// a time would cost a round trip per site. Deployment-wide by design, for the
+	// reason GetPublisherDomain gives; the caller has already scoped the domains to
+	// one seat's listings.
+	ListPublisherDomainsByDomain(ctx context.Context, domains []string) ([]ForaPublisherDomain, error)
+	// Every payee one person may act for on one seat, for the console's publisher
+	// picker. Tenant-scoped.
+	ListPublisherGrantsForActor(ctx context.Context, arg ListPublisherGrantsForActorParams) ([]string, error)
+	// Publisher-scoped reads for the console. Which transactions are a publisher's
+	// is decided once, by the fora.publisher_transactions view. Every query here
+	// filters on the seat and on the publisher.
+	// One page of the publisher's transactions in [period_start, period_end),
+	// newest first. The keyset (created_at, transaction_id) is strictly below the
+	// cursor, so a page never repeats the last row of the one before it. The caller
+	// asks for one row more than the page size and reads the extra row as "there is
+	// a next page". The obligation columns are the transaction's latest
+	// obligation: an empty state and a NULL deadline when it minted none. The state
+	// is read as text because the lateral join can leave it NULL, which the enum
+	// type sqlc would otherwise generate cannot hold.
+	//
+	// match_status narrows the page to the transactions whose latest obligation
+	// meets one of three conditions: there is none (match_none), its state is in
+	// match_open and its deadline has not passed as_of, or its state is in
+	// match_past and the deadline has passed. The query decides no reporting
+	// status. Which conditions make up a status is the service's rule, the same one
+	// it labels each row with, and it hands this query the conditions it derived.
+	// deadline is NOT NULL on the obligations table, so for a transaction with an
+	// obligation neither comparison is null.
+	ListPublisherTransactionsPage(ctx context.Context, arg ListPublisherTransactionsPageParams) ([]ListPublisherTransactionsPageRow, error)
+	// ListPublisherTransactionsPage read the other way, for a Previous link: the
+	// rows strictly above the keyset, oldest first, so the caller takes the ones
+	// nearest to it. It takes the same arguments and returns the same columns;
+	// only the keyset comparison and the order are turned around. Its filters must
+	// stay the forward query's word for word, which the console-read tests hold
+	// by walking every filtered list forward and back and comparing the pages.
+	ListPublisherTransactionsPageBefore(ctx context.Context, arg ListPublisherTransactionsPageBeforeParams) ([]ListPublisherTransactionsPageBeforeRow, error)
+	// Takes the payee's row lock for the rest of the transaction, so registrations
+	// for one payee that count what it already holds run one after another rather
+	// than each counting before the other has written. FOR NO KEY UPDATE rather
+	// than FOR UPDATE: it conflicts with itself, which is all the registrations
+	// need, and not with the KEY SHARE lock a foreign-key check takes, so writes
+	// that only reference the payee -- a site, a grant -- are not held up by it.
+	// Deployment-wide for the reason GetPublisher gives.
+	LockPublisher(ctx context.Context, publisherID string) (string, error)
 	// Records the rejection outcome for an obligation that is still PENDING. An
 	// audit row is written for every rejection against a PENDING obligation, so
 	// disputes have a trail; a report against an obligation that has already
@@ -146,6 +308,30 @@ type Querier interface {
 	// would not be a sound lateness check, and a test could not drive the comparison
 	// deterministically.
 	MarkValidationValidated(ctx context.Context, arg MarkValidationValidatedParams) (ForaReportingObligation, error)
+	// Whether the transaction is one of the publisher's on this seat. A read of
+	// another publisher's transaction and a read of a transaction that does not
+	// exist get the same answer.
+	PublisherOwnsTransaction(ctx context.Context, arg PublisherOwnsTransactionParams) (bool, error)
+	// Which of billing_ids are charges for the publisher on this seat, narrowed to
+	// one resource and to one domain when those are given. The ledger hands the
+	// revenue read the billing id of each settlement and nothing about what was
+	// sold; this is how the read keeps only one resource's or one domain's money.
+	// A billing id of another publisher, outside the narrowing, or of no
+	// transaction at all is simply not returned.
+	PublisherScopedBillingIDs(ctx context.Context, arg PublisherScopedBillingIDsParams) ([]string, error)
+	// Writes what one import run did to one listing. The attempt timestamp always
+	// moves; the success timestamp moves only when the outcome is complete, so the
+	// row keeps saying when the catalog last matched the sitemap. The six counts
+	// are written together with the outcome and replace the previous run's whole.
+	// Tenant-scoped, and only the named row: a run for one seat's listing can
+	// never touch another seat's listing of the same site.
+	RecordListingImportOutcome(ctx context.Context, arg RecordListingImportOutcomeParams) (int64, error)
+	// Records a manifest check that did NOT pass. Only last_checked_at moves; the
+	// state and verified_at are left alone deliberately, so the row keeps saying
+	// when the site last proved itself. The proof is continuous and the push path is
+	// what stops a site whose manifest has gone stale, so a failed check does not
+	// revoke an active listing from here. Tenant-scoped.
+	RecordPublisherDomainListingCheck(ctx context.Context, arg RecordPublisherDomainListingCheckParams) (int64, error)
 	// Stores the billing account id for an agent, plus the digest of the licensing
 	// terms the registration accepted, first write wins. The billing_ref IS NULL
 	// guard makes a repeat call a no-op (zero rows → pgx.ErrNoRows), so a stored ref
@@ -159,6 +345,32 @@ type Querier interface {
 	// Neither column appears in UpsertAgent's update list: a key rotation re-upsert
 	// must leave both intact (ADR-021 D3).
 	SetAgentBillingRef(ctx context.Context, arg SetAgentBillingRefParams) (ForaAgent, error)
+	// Sets the terms of a listing that is not verified yet: the licensing, the
+	// sitemap and the import's take-over answer, which are chosen together on the
+	// console's licensing step. The state is in the WHERE clause rather than only
+	// checked beforehand, so a listing activated between the check and this write
+	// is not changed: an ACTIVE listing is sold under its terms, and nothing here
+	// changes them. No rows means the listing is not there or is ACTIVE.
+	// Tenant-scoped.
+	SetPendingPublisherDomainListingTerms(ctx context.Context, arg SetPendingPublisherDomainListingTermsParams) (ForaPublisherDomainListing, error)
+	// Records the CloudFront key-pair id the publisher got back from AWS.
+	//
+	// Scoped on publisher_id as well as domain. fora.publisher_domains is
+	// deployment-wide and the domain is the caller's own input, so without the
+	// publisher in the predicate an actor authorized for one payee could write the
+	// key-pair id of another payee's site -- and that column becomes the Key-Pair-Id
+	// on every delivery URL the site mints, so the write would break delivery for
+	// content the Exchange has already charged for. The handler authorizes by
+	// publisher; this is the matching scope on the write.
+	//
+	// Also guarded on the scheme: an Ed25519 site has no key-pair id, and writing
+	// one would leave a value the signer never reads.
+	//
+	// Returns rows-affected, which is zero for three distinct reasons the caller
+	// cannot tell apart here: the site is not registered, it belongs to another
+	// publisher, or it does not sign with CloudFront RSA. All three mean the id was
+	// not recorded, so the caller must see the no-op rather than report success.
+	SetPublisherDomainKeyPairID(ctx context.Context, arg SetPublisherDomainKeyPairIDParams) (int64, error)
 	// Flips the per-tenant policy for whether a newly registered agent starts
 	// active in the billing system-of-record. Admin / fixture path; the column
 	// defaults to TRUE on insert, so this is only needed to opt a tenant out.
@@ -169,14 +381,9 @@ type Querier interface {
 	// Flips the broker-relay opt-in for a tenant. Admin / fixture path; the
 	// column defaults to FALSE on insert so this is only needed when a tenant
 	// explicitly opts into broker-on-behalf reporting.
-	SetTenantAllowBrokerRelay(ctx context.Context, arg SetTenantAllowBrokerRelayParams) error
-	// Replaces the per-tenant default credit granted to a newly registered agent
-	// (deployment ledger currency; 0 disables the grant). Written by the boot-time
-	// env seeding (EXCHANGE_DEFAULT_AGENT_CREDIT); otherwise set out of band like
-	// activate_new_agents_by_default — there is no admin RPC.
 	// Returns rows-affected so a call for a missing tenant is a detectable no-op
 	// rather than a silent success.
-	SetTenantDefaultAgentCredit(ctx context.Context, arg SetTenantDefaultAgentCreditParams) (int64, error)
+	SetTenantAllowBrokerRelay(ctx context.Context, arg SetTenantAllowBrokerRelayParams) (int64, error)
 	// Replaces the tenant-level default commission rate (basis points) and the
 	// operator note in one write. The admin SetTenantFeeRate RPC write path (also a
 	// fixture mutator). Full replace: fee_rate_notes is set to $3, which is NULL

@@ -2,13 +2,14 @@ package runhttp
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
 )
 
 // healthzServer starts a loopback HTTP server whose /healthz answers with the
@@ -49,15 +50,25 @@ func TestProbeHealthz_NonOKStatus(t *testing.T) {
 	}
 }
 
+// downAddr is an address no peer test in this binary can end up listening on.
+// A 127.0.0.1:0 bind — every httptest server the package starts — is answered
+// from the kernel's ephemeral range, which begins at 32768 under the Linux
+// default, and binding a port below 1024 on purpose needs root. Port 1 is
+// therefore out of reach of both.
+//
+// Do NOT spell this as "start a server, take its port, close it": that returns
+// the port to the ephemeral pool, and a peer test's httptest server can be
+// assigned it before the probe dials. The probe then reaches a healthy
+// /healthz and this test fails, because the reason it expected an error is
+// gone.
+const downAddr = "127.0.0.1:1"
+
 // TestProbeHealthz_ConnectionRefused pins the down contract: a service that is
 // not listening (crash-looping at boot) probes unhealthy.
 func TestProbeHealthz_ConnectionRefused(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.NewServeMux())
-	addr := strings.TrimPrefix(srv.URL, "http://")
-	srv.Close() // release the port so nothing listens on it
-	if err := ProbeHealthz(context.Background(), addr); err == nil {
-		t.Fatal("ProbeHealthz against a closed port: want error, got nil")
+	if err := ProbeHealthz(context.Background(), downAddr); err == nil {
+		t.Fatal("ProbeHealthz against a port nothing listens on: want error, got nil")
 	}
 }
 
@@ -91,15 +102,13 @@ func TestProbeHealthz_BadAddr(t *testing.T) {
 // MaybeHealthcheck calls os.Exit, so its dispatch and exit-code mapping — the
 // exact contract the compose `healthcheck:` stanzas ride on — can only be
 // observed from outside the process. These tests re-execute this test binary
-// as a subprocess (the stdlib helper-process pattern): the child runs ONLY
-// TestHelperMaybeHealthcheck, which shims os.Args to the requested shape and
-// hands control to MaybeHealthcheck; the parent asserts on the child's exit
-// code.
+// through testutil.RunHelper: the child runs ONLY TestHelperMaybeHealthcheck,
+// which shims os.Args to the requested shape and hands control to
+// MaybeHealthcheck; the parent asserts on the child's exit code.
 
 const (
-	// healthcheckHelperEnv gates the helper: without it the helper test is a
-	// skip, so a normal suite run never re-enters MaybeHealthcheck.
-	healthcheckHelperEnv = "RUNHTTP_TEST_HEALTHCHECK_HELPER"
+	// healthcheckHelper is the helper test the child runs.
+	healthcheckHelper = "TestHelperMaybeHealthcheck"
 	// healthcheckHelperArgEnv carries the os.Args[1] value the helper should
 	// present to MaybeHealthcheck ("" = no argument).
 	healthcheckHelperArgEnv = "RUNHTTP_TEST_HEALTHCHECK_ARG"
@@ -113,7 +122,7 @@ const (
 
 // TestHelperMaybeHealthcheck is the subprocess body, not a standalone test.
 func TestHelperMaybeHealthcheck(t *testing.T) {
-	if os.Getenv(healthcheckHelperEnv) == "" {
+	if !testutil.InHelperProcess(t) {
 		t.Skip("helper process for TestMaybeHealthcheck_*; run via subprocess only")
 	}
 	os.Args = []string{os.Args[0]}
@@ -128,22 +137,11 @@ func TestHelperMaybeHealthcheck(t *testing.T) {
 // the probe address env set to addr, and returns the child's exit code.
 func maybeHealthcheckExitCode(t *testing.T, arg, addr string) int {
 	t.Helper()
-	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestHelperMaybeHealthcheck$")
-	cmd.Env = append(
-		os.Environ(),
-		healthcheckHelperEnv+"=1",
+	cmd := exec.CommandContext(t.Context(), os.Args[0])
+	return testutil.RunHelper(t, cmd, healthcheckHelper,
 		healthcheckHelperArgEnv+"="+arg,
 		healthcheckHelperAddrEnv+"="+addr,
-	)
-	err := cmd.Run()
-	if err == nil {
-		return 0
-	}
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Fatalf("re-exec of test binary: %v", err)
-	}
-	return exitErr.ExitCode()
+	).Code
 }
 
 // TestMaybeHealthcheck_HealthyExitsZero pins the healthy contract: invoked as

@@ -105,11 +105,11 @@ func TestComp_TermProjection(t *testing.T) {
 	h := newPushHarness(t)
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 
 	const termPath = "/articles/comp-term"
 	resourceID := "res-" + uuid.NewString()
@@ -137,7 +137,7 @@ func TestComp_TermProjection(t *testing.T) {
 	// keeps it (entitlement scopes are the only discovery eligibility
 	// filter — restriction axes do not exclude terms; ADR-014).
 	compOffer := discoverCompOffer(t, h, uri, "entitlement:full")
-	assertCompTermProjection(t, compOffer, term, compPackageID(h, resourceID, 0))
+	assertCompTermProjection(t, compOffer, term, compPackageID(h, compContentKey(h, resourceID), 0))
 	assertCompUnmappableOmitted(t, compOffer)
 
 	// PARITY: the signed (now richer) comp ext verifies unchanged at execute

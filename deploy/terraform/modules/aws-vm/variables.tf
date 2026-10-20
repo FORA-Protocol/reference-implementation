@@ -118,9 +118,45 @@ variable "vpc_cidr" {
   nullable    = false
 }
 
+variable "public_subnet_cidr" {
+  description = "Public subnet CIDR within vpc_cidr. Null preserves the full-VPC subnet used by existing stacks."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.public_subnet_cidr == null || can(cidrnetmask(var.public_subnet_cidr))
+    error_message = "public_subnet_cidr must be an IPv4 CIDR or null."
+  }
+}
+
 variable "user_data_replace_on_change" {
   description = "Recreate the instance when user data changes. True keeps the VM's config exactly what Terraform rendered (staging posture: data is disposable); set false to keep the instance and apply config changes by hand."
   type        = bool
   default     = true
   nullable    = false
+}
+
+variable "data_volume_gb" {
+  description = "Size in GiB of an optional gp3 EBS data volume attached at /dev/sdf. The volume is created with prevent_destroy, so Terraform refuses any plan that would destroy it — this is where state that must outlive the instance belongs. null (the default) creates no volume."
+  type        = number
+  default     = null
+}
+
+variable "iam_instance_profile" {
+  description = "Name of an IAM instance profile to attach to the VM (for example a role that reads a Secrets Manager secret and unseals Vault through KMS). null (the default) attaches none."
+  type        = string
+  default     = null
+}
+
+variable "ami_id" {
+  description = "Pin the instance to one AMI id. null (the default) uses the newest Canonical Ubuntu 24.04 build at plan time, which is fine while the VM is disposable; a long-lived instance must be pinned, because a newer build changes the ami attribute and that change replaces the instance."
+  type        = string
+  default     = null
+
+  validation {
+    # can() absorbs the error regex() raises on a null argument, so the null
+    # default passes through the left operand alone.
+    condition     = var.ami_id == null || can(regex("^ami-[0-9a-f]+$", var.ami_id))
+    error_message = "ami_id must be an AMI id (\"ami-\" followed by lowercase hex digits) or null."
+  }
 }

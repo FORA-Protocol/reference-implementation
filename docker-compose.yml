@@ -97,14 +97,17 @@ services:
       timeout: 3s
       retries: 5
 
-  # ── Zitadel: the upstream OIDC provider for developer sign-up. Integration tests
-  # do not use these; the `zitadel` test tier starts its own pair via
+  # ── Zitadel: the upstream OIDC provider, with two instances: developers sign
+  # up at http://localhost:58080, publishers at http://127.0.0.1:58080 (two
+  # host names, so two separate browser sessions). Integration tests do not use
+  # these; the `zitadel` test tier starts its own pair via
   # internal/testutil.StartSharedZitadel. Bring them up with `make zitadel-up`,
-  # which runs scripts/zitadel-bootstrap.sh to provision the org, the OIDC app and
-  # — when GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are exported — Google
-  # federation. Sign-in then runs through the Identity service's own flow.
+  # which runs deploy/zitadel/bootstrap/bootstrap.sh for each instance — and,
+  # when GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are exported, Google
+  # federation on the developers' side. Sign-in then runs through the Identity
+  # service's and the console's own flows.
   #
-  # The `zitadel` profile keeps all three out of the default set, so a bare
+  # The `zitadel` profile keeps all of them out of the default set, so a bare
   # `docker compose up` skips their ~30-45s boot. Corollary: a bare
   # `docker compose down` does not stop them either — use `make zitadel-down`.
   zitadel-db:
@@ -157,28 +160,71 @@ services:
       ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: zitadel
       ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: zitadel
       ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+      # The System API user that creates the publisher instance; its key is
+      # zitadel-system-key's, read at the user's first call.
+      ZITADEL_SYSTEMAPIUSERS: '{"fora-instance-admin":{"Path":"/systemapi/public.pem"}}'
+      # Every instance's mail goes to mailpit, whose inbox is at
+      # http://127.0.0.1:58025. Zitadel reads these settings when it creates
+      # an instance, so a change needs `make zitadel-down` first.
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_SMTP_HOST: mailpit:1025
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_SMTP_USER: ""
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_SMTP_PASSWORD: ""
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_TLS: "false"
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_FROM: noreply@zitadel.example
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_FROMNAME: FORA
     # root, so FirstInstance can write the admin PAT into the shared volume.
     user: "0"
-    ports:
-      - "127.0.0.1:${FORA_ZITADEL_PORT:-58080}:8080"
     volumes:
       - ./deploy/zitadel/init-steps.yaml:/etc/zitadel/init-steps.yaml:ro
       - zitadel-bootstrap:/bootstrap
+      - zitadel-systemapi:/systemapi:ro
     depends_on:
       zitadel-db:
         condition: service_healthy
+      mailpit:
+        condition: service_healthy
 
-  # One-shot provisioning; see scripts/zitadel-bootstrap.sh. It dials zitadel:8080
-  # over the compose network while ExternalDomain is `localhost`, so it overrides
-  # the Host header — Zitadel routes instances by it.
+  # Same host-specific stylesheet routes as the deployed Caddy front end.
+  # The public port stays the same; Zitadel still owns every authentication route.
+  zitadel-login:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    profiles: ["zitadel"]
+    ports:
+      - "127.0.0.1:${FORA_ZITADEL_PORT:-58080}:8080"
+    volumes:
+      - ./deploy/zitadel/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/zitadel/developer-login.css:/srv/branding/developer-login.css:ro
+      - ./deploy/zitadel/publisher-login.css:/srv/branding/publisher-login.css:ro
+    depends_on:
+      - zitadel
+
+  # Catches every email both Zitadel instances send: sign-up codes, password
+  # resets. Read them at http://127.0.0.1:58025.
+  mailpit:
+    image: axllent/mailpit:v1.31.4
+    profiles: ["zitadel"]
+    ports:
+      - "127.0.0.1:58025:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # One-shot provisioning of the developer instance; see
+  # deploy/zitadel/bootstrap/bootstrap.sh. It dials zitadel:8080 over the
+  # compose network while ExternalDomain is `localhost`, so it overrides the
+  # Host header — Zitadel routes instances by it.
   zitadel-init:
     image: curlimages/curl:8.11.1
     profiles: ["zitadel"]
-    entrypoint: ["sh", "/bootstrap.sh"]
+    entrypoint: ["sh", "/zitadel/bootstrap.sh"]
     # root, to match the zitadel service: FirstInstance creates /bootstrap owned by
     # root, and this image's default uid 100 cannot write the client id/secret there.
     user: "0"
     environment:
+      ZITADEL_INSTANCE_ROLE: developers
       ZITADEL_BASE_URL: http://zitadel:8080
       ZITADEL_INSTANCE_HOST: ${FORA_ZITADEL_DOMAIN:-localhost}
       ZITADEL_ISSUER: http://${FORA_ZITADEL_DOMAIN:-localhost}:${FORA_ZITADEL_PORT:-58080}
@@ -186,11 +232,57 @@ services:
       EXTRA_REDIRECT_URIS: ${EXTRA_REDIRECT_URIS:-}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # `ROTATE_CLIENT_SECRET=1 make zitadel-up` mints new secrets; without it a
+      # re-run keeps every secret Zitadel still accepts.
+      ROTATE_CLIENT_SECRET: ${ROTATE_CLIENT_SECRET:-}
     volumes:
-      - ./scripts/zitadel-bootstrap.sh:/bootstrap.sh:ro
+      - ./deploy/zitadel/bootstrap:/zitadel:ro
       - zitadel-bootstrap:/bootstrap
     depends_on:
       - zitadel
+
+  # One-shot: the System API key this stack's Zitadel trusts, and a token from
+  # it that lives five minutes, minted right before the publisher instance's
+  # step uses it.
+  zitadel-system-key:
+    image: alpine/openssl:3.3.2
+    profiles: ["zitadel"]
+    entrypoint: ["sh", "/zitadel/local-system-key.sh"]
+    user: "0"
+    environment:
+      AUDIENCE: http://${FORA_ZITADEL_DOMAIN:-localhost}:${FORA_ZITADEL_PORT:-58080}
+      KEY_DIR: /systemapi
+    volumes:
+      - ./deploy/zitadel/bootstrap:/zitadel:ro
+      - zitadel-systemapi:/systemapi
+
+  # One-shot (publishers.sh): creates the publisher instance at 127.0.0.1
+  # through the System API (or finds it), then provisions it: the console's
+  # OIDC client — its /auth/callback and /signed-out on CONSOLE_PUBLIC_ORIGIN,
+  # which must match what the console is configured with, exactly — the admin
+  # and alice.
+  zitadel-publishers-init:
+    image: curlimages/curl:8.11.1
+    profiles: ["zitadel"]
+    entrypoint: ["sh", "/zitadel/publishers.sh"]
+    user: "0"
+    environment:
+      ZITADEL_BASE_URL: http://zitadel:8080
+      ZITADEL_INSTANCE_HOST: 127.0.0.1
+      ZITADEL_PAT_FILE: /publishers/bootstrap.pat
+      ZITADEL_SYSTEM_TOKEN_FILE: /systemapi/token
+      ZITADEL_ISSUER: http://127.0.0.1:${FORA_ZITADEL_PORT:-58080}
+      CONSOLE_PUBLIC_ORIGIN: ${CONSOLE_PUBLIC_ORIGIN:-http://localhost:8085}
+      CONSOLE_OUT_DIR: /console-oidc
+      # Local-stack value in a tracked file, like the developer instance's
+      # admin password in deploy/zitadel/init-steps.yaml.
+      ZITADEL_ADMIN_PASSWORD: Publisher-Admin-1!
+      ROTATE_CLIENT_SECRET: ${ROTATE_CLIENT_SECRET:-}
+    volumes:
+      - ./deploy/zitadel/bootstrap:/zitadel:ro
+      - zitadel-systemapi:/systemapi:ro
+      - zitadel-publishers:/publishers
+      - zitadel-console-oidc:/console-oidc
 
 # Named volumes are scoped by docker compose project name (`-p <project>`),
 # so two concurrent projects get independent data dirs automatically.
@@ -201,3 +293,8 @@ volumes:
   # Carries the admin PAT from FirstInstance to the bootstrap, and the resulting
   # client id/secret back out to `make zitadel-creds`.
   zitadel-bootstrap:
+  # The System API key and token, the publisher instance's admin token, and the
+  # console's client id/secret. Named zitadel-* so `make zitadel-down` wipes them.
+  zitadel-systemapi:
+  zitadel-publishers:
+  zitadel-console-oidc:

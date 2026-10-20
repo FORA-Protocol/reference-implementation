@@ -2,6 +2,7 @@ package forawellknown
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -72,9 +73,10 @@ type Document struct {
 
 // Fetch GETs host's /.well-known/fora.json, applies the document version gate,
 // schema-validates it, decodes it via protojson, and (optionally) asserts its
-// role. A 404 yields ErrNoDocument; a transient/non-2xx failure yields ErrFetch;
-// a document version this reader does not accept yields ErrVersionRefused; a
-// malformed body yields ErrSchemaInvalid; a role mismatch yields ErrRoleMismatch.
+// role. A 404 yields ErrNoDocument; a transient/non-2xx failure yields ErrFetch,
+// as does a body that is not JSON at all; a document version this reader does
+// not accept yields ErrVersionRefused; a document that parsed and broke a rule
+// yields ErrSchemaInvalid; a role mismatch yields ErrRoleMismatch.
 //
 // It is FetchDocument with the body dropped, and it stays because most readers
 // want only the message. One fetch-and-parse path serves both, so the two
@@ -102,7 +104,31 @@ func FetchDocument(ctx context.Context, host string, opts FetchOptions) (*Docume
 	if err != nil {
 		return nil, err
 	}
-	return ParseDocument(raw, opts.ExpectRole)
+	doc, err := ParseDocument(raw, opts.ExpectRole)
+	return doc, asFetchFailure(err)
+}
+
+// asFetchFailure states a parse refusal the way a FETCH must state it.
+//
+// The validator is pure and cannot know a network was involved, so it reports a
+// body that never parsed as ErrNotJSON and nothing more. A function that did
+// reach an origin owes the caller the other half: the bytes came from somewhere
+// that may answer differently next time, which is what makes this retryable
+// where a document that arrived and broke a rule is not.
+//
+// One helper rather than the same wrap written at each boundary, so the set of
+// functions that count as a fetch is a thing a reader can grep for. There are
+// two, and Cache.load is the one that surprises: it does its own GET and calls
+// the exported ParseManifest, so it never passes through FetchDocument.
+//
+// Both sentinels match through the wrap, so a consumer branching on ErrFetch
+// sees no change and one branching on ErrNotJSON can still ask the narrower
+// question.
+func asFetchFailure(err error) error {
+	if err == nil || !errors.Is(err, ErrNotJSON) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrFetch, err)
 }
 
 // ParseManifest applies the document version gate to raw, schema-validates it,
@@ -128,27 +154,6 @@ func ParseDocument(raw []byte, expect Role) (*Document, error) {
 		return nil, fmt.Errorf("%w: want %s got %s", ErrRoleMismatch, expect, m.GetRole())
 	}
 	return &Document{Manifest: &m, Raw: raw}, nil
-}
-
-// FetchWBA GETs host's /.well-known/http-message-signatures-directory, schema-
-// validates it, and decodes it via protojson into a WBAFile. A 404 yields
-// ErrNoDocument; a transient/non-2xx failure yields ErrFetch; a malformed body
-// yields ErrSchemaInvalid. FetchOptions.ExpectRole is not consulted — the WBA
-// directory carries no role.
-func FetchWBA(ctx context.Context, host string, opts FetchOptions) (*WBAFile, error) {
-	u, err := WBAURL(host, opts.Scheme, opts.Port)
-	if err != nil {
-		return nil, err
-	}
-	client, err := opts.client()
-	if err != nil {
-		return nil, err
-	}
-	raw, err := getDoc(ctx, client, u, opts.timeout())
-	if err != nil {
-		return nil, err
-	}
-	return ParseWBA(raw)
 }
 
 // ParseWBA schema-validates raw and decodes it via protojson into a WBAFile.
@@ -188,12 +193,12 @@ func httpGet(
 ) (int, http.Header, []byte, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	// rawURL's host can be REQUEST-DERIVED on the discovery path: after the WBA
-	// split it is built from the caller-supplied Signature-Agent directory. SSRF
-	// is therefore mitigated by the SDK-guarded HTTP client the discovery callers
-	// inject (constructed once from resolvers.NewGuardedClientFromEnv at the
-	// composition root); callers on request-influenced hosts MUST pass a guarded
-	// client, never a fail-open http.DefaultClient.
+	// rawURL's host can be REQUEST-DERIVED: a catalog push names the publisher
+	// domains whose manifests are read. SSRF is therefore mitigated by the
+	// SDK-guarded HTTP client the callers inject (constructed once from
+	// resolvers.NewGuardedClientFromEnv at the composition root); callers on
+	// request-influenced hosts MUST pass a guarded client, never a fail-open
+	// http.DefaultClient.
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, rawURL, nil) //nolint:noctx // ctx carried via reqCtx
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("%w: build request: %w", ErrFetch, err)

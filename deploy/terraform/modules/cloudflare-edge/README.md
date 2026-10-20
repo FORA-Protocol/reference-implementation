@@ -47,7 +47,7 @@ module "fora_edge" {
   exchanges_json = jsonencode([{
     domain             = "exchange.operator.example"
     endpoint           = "https://exchange.operator.example"
-    supported_profiles = ["fora-news-v1"]
+    supported_profiles = ["fora-news-v1", "fora-comp-v1", "fora-music-v1"]
   }])
 
   origin_url = "https://origin.example.com" # omit when the CDN routes to origin itself
@@ -78,6 +78,7 @@ module "fora_edge" {
 | `catalog_contributors_json` | no | `CATALOG_CONTRIBUTORS_JSON` binding |
 | `wba_keys_json` | no | `WBA_KEYS_JSON` binding |
 | `wba_revocation_url` | no | `WBA_REVOCATION_URL` binding |
+| `wba_signed_directory_json` | no | `WBA_SIGNED_DIRECTORY_JSON` binding: the key directory pre-signed for this host |
 | `create_waf_skip_rule` | no | Add a zone firewall skip rule (default off — see below) |
 | `waf_skip_expression` | with skip rule | Filter expression for the skip rule |
 | `waf_skip_products` | no | Products the skip rule bypasses |

@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
-
 	"connectrpc.com/connect"
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
@@ -64,44 +62,36 @@ func acquireTestRedis(tb testing.TB, ctx context.Context) *redis.Client {
 	return sharedRedis.Client
 }
 
-// -----------------------------------------------------------------------------
-// Mock EXA server.
-
-type mockExa struct {
-	server *httptest.Server
-	domain string
+// readAndCloseBody reads a relay response body in full and closes it, failing
+// the test if either step errors. Helpers that consume a response go through it
+// so no caller has to close a body a helper already read.
+func readAndCloseBody(t *testing.T, resp *http.Response) []byte {
+	t.Helper()
+	body, err := io.ReadAll(resp.Body)
+	if cerr := resp.Body.Close(); cerr != nil {
+		t.Fatalf("close response body: %v", cerr)
+	}
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	return body
 }
-
-func newMockExa(tb testing.TB, resultDomain string) *mockExa {
-	m := &mockExa{domain: resultDomain}
-	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"results":[{"url":"https://`+resultDomain+`/article-42","title":"Example","score":0.9}]}`)
-	}))
-	tb.Cleanup(m.server.Close)
-	return m
-}
-
-func (m *mockExa) URL() string { return m.server.URL }
 
 // -----------------------------------------------------------------------------
 // Mock Exchange (Connect-Go handler).
 //
-// Doctrine justification (Testing Doctrine pt 6, documented-fallback): this
-// suite tests BROKER-side mechanics — ranking, refusal mapping, budget
-// arithmetic, httpsig admission, hop-budget caps, fan-out routing, batch
-// merge/back-fill/aggregation, replay pass-through, audit, and error-envelope
-// shape. The Exchange here is a controllable upstream STUB whose responses are
-// fixtures, not the system under test: its knobs (failExecute, omitOfferIDs,
-// denyOfferIDs, offerRate distinct from unit cost, scopeRestricted, ...) force
-// broker branches a real Exchange cannot be coerced into deterministically.
-// Anything that is genuinely an Exchange CONTRACT (discovery→ranking against
-// real offers, execute happy path, idempotency replay) is covered against the
-// REAL Exchange by the Docker e2e harness under tests/e2e/harness/; the one
-// broker test whose purpose was offer VERIFICATION (meaningless against a
-// stub) already lives there.
+// Testing Doctrine point 6 forbids emulating the Exchange, and this mock does.
+// It is kept only for the tests whose assertion depends on what an Exchange
+// answers or receives and that no e2e test covers yet; each of those says so in
+// a "Needs an e2e test" comment naming the missing coverage. Every other test
+// in this package puts a wireExchange at the Exchange's address instead
+// (exchange_wire_fixture_test.go): a sink, or a network condition. The
+// behaviours that need a real Exchange are proven by the e2e suite under
+// tests/e2e/harness/. A new test does not use this mock: it either asserts
+// what the Broker does without an Exchange's answer, or belongs in that suite.
 
 type mockExchange struct {
-	// The embedded Unimplemented base absorbs RPCs the broker relay never
+	// The embedded Unimplemented base absorbs RPCs the Broker never
 	// exercises (they answer CodeUnimplemented), exactly as the production
 	// ExchangeHandler embeds it — a new proto RPC must not break this stub.
 	forav1connect.UnimplementedExchangeServiceHandler
@@ -109,16 +99,6 @@ type mockExchange struct {
 	mu            sync.Mutex
 	discoverCalls int
 	executeCalls  int
-	reportCalls   int
-	// healthzStatus is what this Exchange's /healthz answers. Zero means 200:
-	// an Exchange is up unless a test says otherwise. A test flips it to take
-	// the Exchange down and back up while the broker keeps running, which is
-	// what the registry health refresher reads through the wire.
-	healthzStatus int
-	// healthzProbes counts the /healthz requests that arrived. It is how a test
-	// asserts an Exchange was NOT probed at all -- a BLOCKED Exchange must
-	// receive no traffic from the broker, health checks included.
-	healthzProbes int
 	// lastDiscoverRequesterID is the requester.id the broker actually FORWARDED on
 	// the most recent discover. The broker canonicalizes req.AgentID and writes it
 	// back onto the request, so this is where a test observes that the value which
@@ -130,30 +110,9 @@ type mockExchange struct {
 	// single-exchange fixtures use; a fixture wiring a SECOND exchange gives that
 	// one its own, so a fan-out leg addressed to the wrong sibling is refused
 	// rather than served.
-	domain string
-	// lastDiscoverExchange is the recipient the most recent discover leg named.
-	// The Broker authors each leg, so this is where a test observes that the leg
-	// which arrived here says it was meant for here.
-	lastDiscoverExchange string
-	offerUnitCost        float64
-	// offerRate, when > 0, sets the discovered offer's Pricing.rate to a value
-	// DISTINCT from its unit_cost (which always comes from offerUnitCost). The
-	// real Exchange normalises a provider's per-model rate into a per-unit
-	// unit_cost, so the two diverge whenever the provider's pricing model is not
-	// already per-unit in the base currency (catalog_pricing.go falls back
-	// unit_cost<-rate ONLY when the term omits unit_cost — i.e. they coincide
-	// only in the masked-today case). The money source-of-truth split needs rate != unit_cost to expose
-	// that the broker budget gate reads the wrong field; this knob is the minimal
-	// public-surface extension that produces such an offer. When 0 the offer's
-	// rate falls back to unit_cost, so every existing single-cost suite (which
-	// leaves this field unset) keeps rate == unit_cost and reads unchanged.
-	offerRate float64
-	signedURL string
-	// scopeRestricted makes DiscoverResources return an empty Offers slice
-	// plus an OfferGroup with OFFER_ABSENCE_REASON_SCOPE_INSUFFICIENT, the
-	// shape an Exchange uses to advertise a resource the caller's scopes
-	// don't cover.
-	scopeRestricted bool
+	domain        string
+	offerUnitCost float64
+	signedURL     string
 	// discoveryMethod is the method the mock reports on every OfferGroup it
 	// returns. It defaults to EXCHANGE in mockOfferGroup, matching the real
 	// Exchange; a test sets it to another value to prove the Broker IGNORES what
@@ -170,44 +129,9 @@ type mockExchange struct {
 	// producing no groups at all.
 	rejectURILessQuery bool
 	// offerEstimatedQuantity, when > 0, is set as the offer's
-	// Pricing.EstimatedQuantity. The Broker relay echoes this value as
-	// Usage.ConsumedQuantity on the synthesised UsageReport so tests can
-	// pin that the relay actually populated the payload.
+	// Pricing.EstimatedQuantity, which the Broker's budget gate multiplies the
+	// unit cost by.
 	offerEstimatedQuantity int32
-	// lastReport captures the most-recent UsageReport seen by ReportUsage so
-	// tests can assert the full payload (e.g. Usage.ConsumedQuantity is what
-	// the broker relay populated). Without this, a finger-counter on
-	// reportCalls cannot pin the contract.
-	lastReport *forav1.UsageReport
-	// lastExecute captures the most-recent TransactionRequest seen by
-	// ExecuteTransaction so tests can assert the broker relayed the FULL signed
-	// Offer (reflected), not just an id+signature.
-	lastExecute *forav1.TransactionRequest
-	// denyOfferIDs, when an item's offer_id is present here, makes the batch
-	// ExecuteTransaction return that item as a per-item denial (denial_reason
-	// SIGNATURE_INVALID) instead of a success — so a broker batch test can
-	// exercise a mixed (partial-failure) per-exchange response.
-	denyOfferIDs map[string]bool
-	// failExecute, when true, makes ExecuteTransaction fail the whole call with a
-	// CodeUnavailable error (no items[] response) — the broker's xclient surfaces
-	// this as a transport-level err, exercising fanOutBatch's whole-group
-	// CONTENT_UNAVAILABLE synthesis (collectGroupDenials).
-	failExecute bool
-	// omitOfferIDs, when an item's offer_id is present here, makes batchResponse
-	// DROP that item from the returned items[] — the exchange answers 200 but with
-	// fewer items than it was sent, exercising mergeBatchResults' back-fill of the
-	// missing offer_id with a CONTENT_UNAVAILABLE denial.
-	omitOfferIDs map[string]bool
-	// itemCostAmount / itemCostCurrency, when itemCostCurrency != "", make
-	// batchResponse stamp a per-item TransactionResultItem.Cost (exact decimal
-	// amount, ISO-4217 currency) on every NON-denied item, AND emit a per-group
-	// TransactionResponse.TotalCost = (amount * non-denied item count) in that
-	// currency. This is the per-group subtotal the broker's fanOutBatch must
-	// aggregate across exchanges — without it the broker aggregate is not
-	// observable through the relay HTTP surface (Testing Doctrine 9: no
-	// internal-state peeking). itemCostAmount is the per-item charge.
-	itemCostAmount   float64
-	itemCostCurrency string
 	// offerID / offerCanonicalURL, when set, override the DiscoverResources
 	// offer identity so a MULTI-URI / MULTI-EXCHANGE resolve can surface a
 	// DISTINCT offer per exchange (distinct offer_id + distinct canonical_url,
@@ -242,8 +166,8 @@ type mockExchange struct {
 //
 // groupURIFor resolves that single URI: the first requested one, or fallback for
 // the suites that drive this mock with no URIs at all. It lives beside the
-// builder because all three return paths need the same resolution and had a copy
-// of it each.
+// builder because both return paths need the same resolution and had a copy of
+// it each.
 func groupURIFor(req *connect.Request[forav1.ResourceQuery], fallback string) string {
 	if uris := req.Msg.GetUris(); len(uris) > 0 {
 		return uris[0]
@@ -262,10 +186,7 @@ func (m *mockExchange) DiscoverResources(_ context.Context, req *connect.Request
 	m.mu.Lock()
 	m.discoverCalls++
 	m.lastDiscoverRequesterID = req.Msg.GetRequester().GetId()
-	m.lastDiscoverExchange = req.Msg.GetExchange()
 	cost := m.offerUnitCost
-	rate := m.offerRate
-	scopeRestricted := m.scopeRestricted
 	signingKey := m.offerSigningKey
 	method := m.discoveryMethod
 	rejectURILess := m.rejectURILessQuery
@@ -276,24 +197,10 @@ func (m *mockExchange) DiscoverResources(_ context.Context, req *connect.Request
 	if rejectURILess && len(req.Msg.GetUris()) == 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("at least one uri required"))
 	}
-	if scopeRestricted {
-		group := mockOfferGroup(groupURIFor(req, "https://acme.example/article-42"), method)
-		group.AbsenceReason = forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_SCOPE_INSUFFICIENT.Enum()
-		return connect.NewResponse(&forav1.ResourceResponse{
-			Ver:         helpers.ProtocolVersion,
-			OfferGroups: []*forav1.OfferGroup{group},
-		}), nil
-	}
 	costStr := mustMoney(cost)
-	// rate defaults to unit_cost (the masked-today coincidence) unless the test
-	// set offerRate to force the divergence the money source-of-truth split turns on.
-	rateStr := costStr
-	if rate > 0 {
-		rateStr = mustMoney(rate)
-	}
 	unit := "accesses"
 	pricing := &forav1.Pricing{
-		Rate:     rateStr,
+		Rate:     costStr,
 		Currency: "USD",
 		UnitCost: &costStr,
 		// R7: the discovered Offer now rides on the agent-facing DiscoveryResponse
@@ -305,9 +212,15 @@ func (m *mockExchange) DiscoverResources(_ context.Context, req *connect.Request
 		Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT,
 		Unit:  &unit,
 	}
-	if est := m.offerEstimatedQuantity; est > 0 {
-		pricing.EstimatedQuantity = &est
+	// The double's metered offer states an estimate, which the pinned protocol
+	// allows and requires to be positive when stated (offer.metered.estimate_positive).
+	// One unit is what the Broker's charge projection and the Exchange's biller
+	// both clamp an unset estimate to, so the default changes no charge.
+	est := int32(1)
+	if m.offerEstimatedQuantity > 0 {
+		est = m.offerEstimatedQuantity
 	}
+	pricing.EstimatedQuantity = &est
 	url := "https://acme.example/article-42"
 	if m.offerCanonicalURL != "" {
 		url = m.offerCanonicalURL
@@ -346,7 +259,8 @@ func (m *mockExchange) DiscoverResources(_ context.Context, req *connect.Request
 			// verbatim and never derives semantics).
 			Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
 			Scopes:    []string{"ai-training"},
-			Pricing:   pricing,
+			// The offer states its price once, in Offer.pricing: the term it
+			// sells carries none (offer.terms.pricing_unset).
 		}},
 	}
 
@@ -377,7 +291,6 @@ func (m *mockExchange) DiscoverResources(_ context.Context, req *connect.Request
 			Terms: []*forav1.LicenseTerm{{
 				Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
 				Scopes:    []string{"ai-training"},
-				Pricing:   pricing,
 			}},
 		}
 		validSig, err := helpers.SignOffer(signingKey, validOffer)
@@ -408,7 +321,6 @@ func (m *mockExchange) DiscoverResources(_ context.Context, req *connect.Request
 			Terms: []*forav1.LicenseTerm{{
 				Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
 				Scopes:    []string{"ai-training"},
-				Pricing:   pricing,
 			}},
 		}
 		secondSig, err := helpers.SignOffer(signingKey, secondOffer)
@@ -463,50 +375,13 @@ func (m *mockExchange) identity() string {
 	return m.domain
 }
 
-// setHealthz takes this Exchange up or down for the health refresher by setting
-// the status its /healthz answers. Safe to call while the broker is running:
-// the refresher reads it over HTTP on its next pass.
-func (m *mockExchange) setHealthz(status int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.healthzStatus = status
-}
-
-// healthzProbeCount reports how many /healthz requests reached this Exchange.
-func (m *mockExchange) healthzProbeCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.healthzProbes
-}
-
-// serveHealthz answers the liveness probe the registry health refresher sends,
-// recording that it arrived. Unset healthzStatus answers 200.
-func (m *mockExchange) serveHealthz(w http.ResponseWriter, _ *http.Request) {
-	m.mu.Lock()
-	m.healthzProbes++
-	status := m.healthzStatus
-	m.mu.Unlock()
-	if status == 0 {
-		status = http.StatusOK
-	}
-	w.WriteHeader(status)
-}
-
 func (m *mockExchange) ExecuteTransaction(_ context.Context, req *connect.Request[forav1.TransactionRequest]) (*connect.Response[forav1.TransactionResponse], error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.executeCalls++
-	m.lastExecute = req.Msg
-	// Whole-call failure: surface a transport-class error so the broker relay
-	// treats this exchange's entire group as unreachable (collectGroupDenials).
-	if m.failExecute {
-		return nil, connect.NewError(connect.CodeUnavailable,
-			errors.New("mockExchange: simulated upstream unavailable"))
-	}
 	// Batch mode: respond with one TransactionResultItem per inbound item,
-	// mirroring the real Exchange's first-class items[] path. Each item gets its
-	// own signed retrieval endpoint unless its offer_id is in denyOfferIDs, in
-	// which case it comes back as an in-body per-item denial (non-atomic).
+	// mirroring the real Exchange's first-class items[] path, each with its own
+	// signed retrieval endpoint.
 	if items := req.Msg.GetItems(); len(items) > 0 {
 		return connect.NewResponse(m.batchResponse(req.Msg.GetIdempotencyKey(), items)), nil
 	}
@@ -520,65 +395,33 @@ func (m *mockExchange) ExecuteTransaction(_ context.Context, req *connect.Reques
 
 // batchResponse builds a TransactionResponse.items[] mirroring the real
 // Exchange's first-class batch path: one TransactionResultItem per inbound
-// item, each with its own signed retrieval endpoint, except offer_ids listed in
-// denyOfferIDs which come back as in-body per-item denials. The signed URL
-// carries the offer_id so a multi-exchange test can attribute each item to the
-// exchange that minted it. Caller holds m.mu.
+// item, each with its own signed retrieval endpoint. The signed URL carries the
+// offer_id so a multi-exchange test can attribute each item to the exchange
+// that minted it. Caller holds m.mu.
 func (m *mockExchange) batchResponse(idem string, items []*forav1.TransactionItem) *forav1.TransactionResponse {
 	results := make([]*forav1.TransactionResultItem, 0, len(items))
-	groupTotal := decimal.Zero
 	for _, it := range items {
 		offerID := it.GetOffer().GetOfferId()
-		if m.omitOfferIDs[offerID] {
-			// Exchange returns fewer items than sent: drop this one entirely.
-			continue
-		}
-		if m.denyOfferIDs[offerID] {
-			reason := forav1.DenialReason_DENIAL_REASON_SIGNATURE_INVALID
-			results = append(results, &forav1.TransactionResultItem{
-				OfferId:      offerID,
-				DenialReason: &reason,
-			})
-			continue
-		}
-		txID := "tx-" + idem + ":" + offerID
-		billID := "bill-" + idem + ":" + offerID
 		endpoint := m.signedURL + "&offer=" + offerID
-		result := &forav1.TransactionResultItem{
+		results = append(results, &forav1.TransactionResultItem{
 			OfferId:           offerID,
-			TransactionId:     txID,
-			BillingId:         billID,
+			TransactionId:     "tx-" + idem + ":" + offerID,
+			BillingId:         "bill-" + idem + ":" + offerID,
 			RetrievalEndpoint: &endpoint,
-		}
-		// Per-item Cost: an exact decimal charge in this exchange's currency,
-		// authoritative per the Core Invariant (items[].cost is the source of
-		// truth). The per-group TotalCost is the exact decimal sum of these.
-		if m.itemCostCurrency != "" {
-			result.Cost = &forav1.Cost{
-				Amount:   mustMoney(m.itemCostAmount),
-				Currency: m.itemCostCurrency,
-			}
-			groupTotal = groupTotal.Add(decimal.NewFromFloat(m.itemCostAmount))
-		}
-		results = append(results, result)
+		})
 	}
-	resp := &forav1.TransactionResponse{Ver: helpers.ProtocolVersion, Items: results}
-	if m.itemCostCurrency != "" {
-		resp.TotalCost = &forav1.Cost{
-			Amount:   mustMoney(groupTotal.InexactFloat64()),
-			Currency: m.itemCostCurrency,
-		}
+	// The identity hash names this Exchange, so a purchase across two Exchanges
+	// can tell which Exchange's request-level state landed in which outcome.
+	return &forav1.TransactionResponse{
+		Ver: helpers.ProtocolVersion, Items: results, AgentIdentityHash: "thumb-of-" + m.identity(),
 	}
-	return resp
 }
 
-func (m *mockExchange) ReportUsage(_ context.Context, req *connect.Request[forav1.UsageReport]) (*connect.Response[forav1.UsageReportResponse], error) {
-	m.mu.Lock()
-	m.reportCalls++
-	m.lastReport = req.Msg
-	m.mu.Unlock()
-	return connect.NewResponse(&forav1.UsageReportResponse{Ver: helpers.ProtocolVersion, ReportId: "rep-" + req.Msg.GetIdempotencyKey()}), nil
-}
+// refusingOrigin is an address that refuses a connection at once: nothing
+// listens on port 1 of the loopback interface. Tests use it for an origin or an
+// exchange that is down, rather than starting and closing a server, whose freed
+// port another listener could take before the test dials it.
+const refusingOrigin = "http://127.0.0.1:1"
 
 // fakeEndpointResolver stands in for resolvers.WellKnownEndpointResolver in the
 // broker integration tests: it maps a registered exchange DOMAIN to the mock
@@ -627,9 +470,8 @@ func (f *fakeEndpointResolver) stopRefusing(domain string) {
 	delete(f.refuse, domain)
 }
 
-// startMockExchange serves the mock Exchange stub over loopback HTTP. See the
-// doctrine justification on mockExchange: broker-side mechanics are under
-// test here; real-Exchange contract coverage lives in tests/e2e/harness/.
+// startMockExchange serves the mock Exchange over loopback HTTP. See the note on
+// mockExchange for the only tests that may use it.
 func startMockExchange(tb testing.TB, m *mockExchange) string {
 	tb.Helper()
 	mux := http.NewServeMux()
@@ -644,82 +486,9 @@ func startMockExchange(tb testing.TB, m *mockExchange) string {
 		connect.WithInterceptors(audiencetest.MustInterceptor(tb, m.identity())),
 		connect.WithCodec(connectserver.EmitUnpopulatedJSONCodec()))
 	mux.Handle(path, h)
-	// The liveness probe the broker's registry health refresher polls. A real
-	// Exchange mounts this route in its own composition root (the handler is
-	// healthzHandler in src/exchange/cmd/server/probes.go; internal/runhttp
-	// supplies only ProbeHealthz, the client half the healthcheck subcommand
-	// runs). The stub must serve it too — without it every mock Exchange
-	// answers 404 and the refresher reads the whole suite as permanently down.
-	mux.HandleFunc("GET /healthz", m.serveHealthz)
 	srv := httptest.NewServer(mux)
 	tb.Cleanup(srv.Close)
 	return srv.URL
-}
-
-// startProviderFixture serves a /.well-known/fora.json pointing at the given
-// Exchange endpoint. Returns the provider's domain.
-func startProviderFixture(tb testing.TB, exchangeEndpoint string) *httptest.Server {
-	tb.Helper()
-	return startProviderFixtureAtVersion(tb, exchangeEndpoint, "1.0")
-}
-
-// startProviderFixtureAtVersion is startProviderFixture with the document
-// version the caller names in place of the one a publisher serves.
-//
-// It exists so a test can drive the consumer-side version gate through the real
-// resolve path with every other member exactly as the working fixture serves it
-// — the two share one body, so a document staged for that gate differs from the
-// accepted one in the version and in nothing else. Pass "" to stage a manifest
-// with no version member at all.
-func startProviderFixtureAtVersion(tb testing.TB, exchangeEndpoint, ver string) *httptest.Server {
-	tb.Helper()
-	verMember := ""
-	if ver != "" {
-		verMember = `"ver":"` + ver + `",`
-	}
-	body := `{` + verMember + `"role":"ROLE_PUBLISHER","domain":"acme.example","exchanges":[{"domain":"mp.acme.example","endpoint":"` + exchangeEndpoint + `","relationship":"PROVIDER_RELATIONSHIP_DIRECT"}],"supported_profiles":["fora-news-v1"]}`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != forawellknown.Path {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		_, _ = io.WriteString(w, body)
-	}))
-	tb.Cleanup(srv.Close)
-	return srv
-}
-
-// startProviderFixtureFor serves a /.well-known/fora.json for an ARBITRARY
-// publisher domain that names an ARBITRARY exchange domain at the given
-// endpoint. It generalises startProviderFixture (which hardcodes
-// acme.example / mp.acme.example) for the multi-publisher resolve fixture: the
-// second provider must advertise its OWN domain + its OWN exchange so the
-// broker's buildRoutePlan routes the second URI to the second exchange,
-// producing a SECOND OfferGroup distinct from the first.
-func startProviderFixtureFor(tb testing.TB, providerDomain, exchangeDomain, exchangeEndpoint string) *httptest.Server {
-	tb.Helper()
-	body := `{"ver":"1.0","role":"ROLE_PUBLISHER","domain":"` + providerDomain +
-		`","exchanges":[{"domain":"` + exchangeDomain + `","endpoint":"` + exchangeEndpoint +
-		`","relationship":"PROVIDER_RELATIONSHIP_DIRECT"}],"supported_profiles":["fora-news-v1"]}`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != forawellknown.Path {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		_, _ = io.WriteString(w, body)
-	}))
-	tb.Cleanup(srv.Close)
-	return srv
-}
-
-// noForaProvider serves 404 for /.well-known/fora.json — used for bare-URL test.
-func startUnlicensedProvider(tb testing.TB) *httptest.Server {
-	tb.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	tb.Cleanup(srv.Close)
-	return srv
 }
 
 // rewritingHTTPClient maps probes for arbitrary domains onto a loopback address
@@ -744,15 +513,22 @@ func (c *rewritingHTTPClient) Do(req *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(req)
 }
 
+// RoundTrip lets the rewriting client stand as an http.Client's Transport, for
+// a collaborator that takes a whole *http.Client rather than a Do method.
+func (c *rewritingHTTPClient) RoundTrip(req *http.Request) (*http.Response, error) {
+	return c.Do(req)
+}
+
 // fixtureOfferVerifier is the per-fixture offer-verification seam. When the mock
-// exchange is ARMED with an offer-signing key (the offer-verification tests), it
-// verifies STRICTLY via the SDK Verifier, resolving the exchange's key through
-// the PRODUCTION offerkeys.Resolver — which FETCHES the exchange's WBA directory
-// (FetchWBA + ActiveKeyWithExpiry) exactly as production newOfferVerifier does,
-// never an injected key. When unarmed it surfaces offers under mode Off so the
-// legacy 'sig-x' fixtures stay green. The armed-key check reads the mock's pub at
-// Sort time only to SELECT the mode (Strict vs Off); the key itself is resolved
-// from the served directory, so a broken WBA-fetch path drops the valid offer.
+// exchange is ARMED with an offer-signing key, it verifies STRICTLY via the SDK
+// Verifier, resolving the exchange's key through the production
+// offerkeys.Resolver, which reads the exchange's WBA directory through the SDK's
+// directory fetcher, never an injected key. It is not production's wiring: it
+// verifies at time.Now rather than an injected clock, and is strict only while
+// armed. When unarmed it surfaces offers under mode Off so the legacy 'sig-x'
+// fixtures stay green. The armed-key check reads the mock's pub at Sort time only
+// to SELECT the mode (Strict vs Off); the key itself is resolved from the served
+// directory, so a broken directory read drops the valid offer.
 type fixtureOfferVerifier struct {
 	ex       *mockExchange
 	resolver *offerkeys.Resolver
@@ -766,30 +542,4 @@ func (v fixtureOfferVerifier) Sort(ctx context.Context, offers []*forav1.Offer) 
 		return core.NewVerifier(core.Off, nil, time.Now).Sort(ctx, offers)
 	}
 	return core.NewVerifier(core.Strict, v.resolver, time.Now).Sort(ctx, offers)
-}
-
-// assertRelayAudit fails unless the captured relay audit carries want as an
-// outcome. The record is the operator's only view of a relay refusal — the
-// agent gets a status code and a message, and neither says which endpoint the
-// broker declined — so the action is asserted as behavior, not treated as
-// incidental output.
-func assertRelayAudit(t *testing.T, logs, want string) {
-	t.Helper()
-	if !strings.Contains(logs, `"outcome":"`+want+`"`) {
-		t.Errorf("no relay audit record with outcome %q; got: %s", want, logs)
-	}
-}
-
-// assertNoRelayAudit fails if the captured relay audit carries the outcome.
-// It is how a test pins that two different refusals are recorded apart: an
-// outage must not land under REJECTED_ENDPOINT, which records an address the
-// operator never authorized and is the shape an SSRF attempt takes. Without
-// this clause a route that answered correctly on the wire but filed the wrong
-// action would still pass.
-func assertNoRelayAudit(t *testing.T, logs, unwanted string) {
-	t.Helper()
-	if strings.Contains(logs, `"outcome":"`+unwanted+`"`) {
-		t.Errorf("relay audit recorded outcome %q, which names the wrong kind of "+
-			"refusal for this rejection; got: %s", unwanted, logs)
-	}
 }

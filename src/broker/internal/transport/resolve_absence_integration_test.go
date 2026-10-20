@@ -13,12 +13,17 @@ import (
 // them and kept together because they are one decision seen twice.
 //
 // v1 requires every publisher to host /.well-known/fora.json. A publisher can
-// fail that in two ways that are both VERDICTS — it hosts nothing, or it hosts a
-// document this Broker cannot read — and both owe the agent the same settled
-// answer, NOT_IN_CATALOG. The third way, an origin that did not respond, is an
-// outage and owes TEMPORARILY_UNAVAILABLE. Splitting a verdict from an outage is
-// the whole job of this group: the wrong answer either strands a publisher that
-// is merely down, or loops an agent against a document that will never change.
+// fail that in three ways that are all VERDICTS — it hosts nothing, it hosts a
+// document at a version this Broker does not implement, or it hosts one that
+// broke a document rule — and all three owe the agent the same settled answer,
+// NOT_IN_CATALOG. The fourth way, an origin that did not respond, is an outage
+// and owes TEMPORARILY_UNAVAILABLE. Splitting a verdict from an outage is the
+// whole job of this group: the wrong answer either strands a publisher that is
+// merely down, or loops an agent against a document that will never change.
+//
+// Every refusal here lands on the publisher's manifest, before any Exchange is
+// contacted, so the Exchange address is a sink that fails the test if the
+// Broker sends it anything.
 
 // TestResolve_NoForaJSON_RefusesNotInCatalog locks in the v1 contract:
 // a publisher that does not host /.well-known/fora.json is refused with
@@ -27,17 +32,15 @@ import (
 // hand back the bare URL" tolerance.
 func TestResolve_NoForaJSON_RefusesNotInCatalog(t *testing.T) {
 	ctx := context.Background()
-	fx := newFixture(t, ctx, fixtureOpts{providerDomain: "bare.example", unlicensed: true})
+	fx := newSinkFixture(t, ctx, fixtureOpts{providerDomain: "bare.example", unlicensed: true})
 
-	srv, out := resolveOverConnect(t, fx, "agent-1", reqOpts{uri: "https://bare.example/item"})
+	_, out := resolveOverConnect(t, fx, reqOpts{uri: "https://bare.example/item"})
 
 	wantReason := forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_NOT_IN_CATALOG
 	if got := out.GetAbsenceReason(); got != wantReason {
 		t.Errorf("typed absence_reason = %v, want %v", got, wantReason)
 	}
-	if srv.exchange.executeCalls != 0 {
-		t.Errorf("no transaction should happen: executeCalls = %d", srv.exchange.executeCalls)
-	}
+	assertNothingSent(t, fx.wire)
 }
 
 // TestResolve_RefusedManifestVersion_RefusesNotInCatalog drives the second
@@ -62,12 +65,12 @@ func TestResolve_RefusedManifestVersion_RefusesNotInCatalog(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
-			fx := newFixture(t, ctx, fixtureOpts{
+			fx := newSinkFixture(t, ctx, fixtureOpts{
 				providerDomain: "acme.example",
 				providerVer:    &ver,
 			})
 
-			srv, out := resolveOverConnect(t, fx, "agent-1", reqOpts{uri: "https://acme.example/item"})
+			_, out := resolveOverConnect(t, fx, reqOpts{uri: "https://acme.example/item"})
 
 			wantReason := forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_NOT_IN_CATALOG
 			if got := out.GetAbsenceReason(); got != wantReason {
@@ -80,9 +83,42 @@ func TestResolve_RefusedManifestVersion_RefusesNotInCatalog(t *testing.T) {
 			if len(out.GetOfferGroups()) != 0 {
 				t.Errorf("a refused publisher produced %d offer groups", len(out.GetOfferGroups()))
 			}
-			if srv.exchange.executeCalls != 0 {
-				t.Errorf("no transaction should happen: executeCalls = %d", srv.exchange.executeCalls)
-			}
+			assertNothingSent(t, fx.wire)
 		})
 	}
+}
+
+// TestResolve_BrokenManifestDocument_RefusesNotInCatalog drives the third settled
+// cause through the RPC that owns it.
+//
+// The publisher hosts a manifest, it arrives, it parses, and it describes a role
+// that is not a publisher's. Nothing about that changes on a retry: the origin
+// serves those bytes, and the next fetch reads them again. Before this arm
+// existed the refusal was folded in with the transport failures and reached the
+// agent as TEMPORARILY_UNAVAILABLE, so the Broker re-probed a publisher whose
+// manifest names the wrong role for as long as it stayed wrong.
+//
+// It is driven through Resolve for the reason the refused-version sibling above
+// states: probe_test.go stops at Probe returning the sentinel and
+// responses_test.go starts from a hand-built probeOutcome, so neither crosses
+// probeDomains — the line that joins them, and the one where counting the
+// refusal as transient again would pass both.
+func TestResolve_BrokenManifestDocument_RefusesNotInCatalog(t *testing.T) {
+	ctx := context.Background()
+	fx := newSinkFixture(t, ctx, fixtureOpts{
+		providerDomain: "acme.example",
+		providerRole:   "ROLE_EXCHANGE",
+	})
+
+	_, out := resolveOverConnect(t, fx, reqOpts{uri: "https://acme.example/item"})
+
+	wantReason := forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_NOT_IN_CATALOG
+	if got := out.GetAbsenceReason(); got != wantReason {
+		t.Errorf("typed absence_reason = %v, want %v — a manifest that broke a document "+
+			"rule is settled, and reporting it as retryable loops the agent", got, wantReason)
+	}
+	if len(out.GetOfferGroups()) != 0 {
+		t.Errorf("a refused publisher produced %d offer groups", len(out.GetOfferGroups()))
+	}
+	assertNothingSent(t, fx.wire)
 }

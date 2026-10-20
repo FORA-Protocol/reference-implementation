@@ -19,6 +19,7 @@ any test runs.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterable
 
 from .conftest import REPO_ROOT
 
@@ -81,3 +82,15 @@ def first_entry(name: str) -> str:
             "with and would assert nothing. Give the array an entry, or drop the case."
         )
     return entries[0]
+
+
+def held_back(path: str, entries: Iterable[str]) -> bool:
+    """Whether DENY_PATHS-shaped ``entries`` hold back the repository path ``path``.
+
+    A directory entry, which ends with "/", holds back everything under it; a file
+    entry holds back exactly itself. These are the two rules the publish tool's
+    hold-back step applies.
+    """
+    return any(
+        path.startswith(entry) if entry.endswith("/") else path == entry for entry in entries
+    )

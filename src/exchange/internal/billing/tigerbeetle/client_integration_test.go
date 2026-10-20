@@ -12,8 +12,13 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing/tigerbeetle"
 )
 
-// testLedger is the ISO 4217 numeric code for EUR; Phase 1 is single-currency.
-const testLedger uint32 = 978
+// testLedger is the ISO 4217 numeric code for EUR and testCurrency its alpha
+// code; these package-level ledger tests exercise one ledger, and the account-id
+// derivation needs the alpha code.
+const (
+	testLedger   uint32 = 978
+	testCurrency        = "EUR"
+)
 
 func newTestClient(t *testing.T) *tigerbeetle.Client {
 	t.Helper()
@@ -30,7 +35,7 @@ func newTestClient(t *testing.T) *tigerbeetle.Client {
 func TestConnection_SmokeCreateAndLookup(t *testing.T) {
 	ctx := context.Background()
 	c := newTestClient(t)
-	id, err := tigerbeetle.AccountID(tigerbeetle.PrefixOwner, sharedTB.Salt(t)+"-owner")
+	id, err := tigerbeetle.AccountID(tigerbeetle.PrefixOwner, testCurrency, sharedTB.Salt(t)+"-owner")
 	if err != nil {
 		t.Fatalf("AccountID: %v", err)
 	}
@@ -58,7 +63,7 @@ func TestConnection_SmokeCreateAndLookup(t *testing.T) {
 func TestEnsureAccount_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	c := newTestClient(t)
-	id, err := tigerbeetle.AccountID(tigerbeetle.PrefixAgent, sharedTB.Salt(t)+"-agent")
+	id, err := tigerbeetle.AccountID(tigerbeetle.PrefixAgent, testCurrency, sharedTB.Salt(t)+"-agent")
 	if err != nil {
 		t.Fatalf("AccountID: %v", err)
 	}
@@ -77,7 +82,7 @@ func TestEnsureAccount_Idempotent(t *testing.T) {
 func TestEnsureAccount_ConflictSurfaced(t *testing.T) {
 	ctx := context.Background()
 	c := newTestClient(t)
-	id, err := tigerbeetle.AccountID(tigerbeetle.PrefixOwner, sharedTB.Salt(t)+"-conflict")
+	id, err := tigerbeetle.AccountID(tigerbeetle.PrefixOwner, testCurrency, sharedTB.Salt(t)+"-conflict")
 	if err != nil {
 		t.Fatalf("AccountID: %v", err)
 	}

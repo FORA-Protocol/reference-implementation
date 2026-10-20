@@ -4,40 +4,26 @@ package transport_test
 
 import (
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
-	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	"google.golang.org/protobuf/types/known/structpb"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 )
 
-// The request envelope every message in this package repeats: the protocol
-// version, and the Exchange these tests address.
-//
-// One required field cost this package 179 hand edits, because each of the
-// messages below was written out at its call sites — 63 pushes, 43 reports, 19
-// queries, 50 requesters and 37 account calls, each restating what never
-// varies. The builders put
-// the envelope in one place; a message with something deliberately wrong in it
-// keeps its literal, because that IS the test.
+// The messages every test in this package sends, addressed to this harness's
+// Exchange. The envelope itself is written once, in exchangetest, which the
+// console's suites build the same messages through; these only fix the
+// Exchange the package addresses.
 //
 // The file carries the integration tag because every caller does: the lint pass
 // runs without tags, and a helper it can see but no caller can is reported as
 // dead. One untagged test drives a handler below the mount and writes its own
 // literal for that reason.
-//
-// Every builder returns the message rather than sending it, so a caller that
-// needs one more field sets it on the result. That keeps the parameter lists at
-// what actually varies instead of growing an argument per rare case.
 
 // newPushRequest builds a catalog push under tenantID, sent as callerID.
 func newPushRequest(
 	tenantID, callerID string, entries []*forav1.ResourceEntry,
 ) *forav1.PushResourcesRequest {
-	return &forav1.PushResourcesRequest{
-		Exchange: harnessExchangeDomain,
-		Ver:      helpers.ProtocolVersion,
-		TenantId: tenantID,
-		CallerId: callerID,
-		Entries:  entries,
-	}
+	return exchangetest.PushRequest(harnessExchangeDomain, tenantID, callerID, entries)
 }
 
 // newUsageReport builds a report against the obligation transactionID names.
@@ -45,67 +31,34 @@ func newPushRequest(
 func newUsageReport(
 	idempotencyKey, transactionID, billingID string, usage *forav1.Usage,
 ) *forav1.UsageReport {
-	return &forav1.UsageReport{
-		Exchange:       harnessExchangeDomain,
-		Ver:            helpers.ProtocolVersion,
-		IdempotencyKey: idempotencyKey,
-		TransactionId:  transactionID,
-		BillingId:      billingID,
-		Usage:          usage,
-	}
+	return exchangetest.UsageReport(harnessExchangeDomain, idempotencyKey, transactionID, billingID, usage)
 }
 
 // newResourceQuery builds a discovery query for uris on behalf of requester.
 func newResourceQuery(requester *forav1.Requester, uris []string) *forav1.ResourceQuery {
-	return &forav1.ResourceQuery{
-		Exchange:  harnessExchangeDomain,
-		Ver:       helpers.ProtocolVersion,
-		Uris:      uris,
-		Requester: requester,
-	}
+	return exchangetest.ResourceQuery(harnessExchangeDomain, requester, uris)
 }
 
 // newRegisterRequest builds an agent registration. data is the free-form
 // registration payload the agent supplies; nil for a registration that carries
 // none, which is the common case in these tests.
 func newRegisterRequest(data *structpb.Struct) *forav1.RegisterRequest {
-	return newRegisterRequestWithTerms(data, "")
+	return exchangetest.RegisterRequest(harnessExchangeDomain, data, "")
 }
 
 // newRegisterRequestWithTerms is newRegisterRequest naming the terms revision
 // the caller accepts. An empty digest leaves the field unset, which is the
 // "accepted nothing" case an Exchange publishing a digest refuses.
 func newRegisterRequestWithTerms(data *structpb.Struct, termsDigest string) *forav1.RegisterRequest {
-	req := &forav1.RegisterRequest{
-		Exchange:         harnessExchangeDomain,
-		Ver:              helpers.ProtocolVersion,
-		RegistrationData: data,
-	}
-	// The field is optional on the wire, so an empty digest leaves it UNSET
-	// rather than sending an empty string. Those are different messages, and
-	// "sent nothing" is the case the terms gate has to answer.
-	if termsDigest != "" {
-		req.TermsDigest = &termsDigest
-	}
-	return req
+	return exchangetest.RegisterRequest(harnessExchangeDomain, data, termsDigest)
 }
 
-// newAccountStatusRequest builds the account-status call. The message carries
-// nothing else on purpose: the Exchange resolves the account from the verified
-// signature, so the envelope IS the request.
+// newAccountStatusRequest builds the account-status call.
 func newAccountStatusRequest() *forav1.GetAccountStatusRequest {
-	return &forav1.GetAccountStatusRequest{
-		Exchange: harnessExchangeDomain,
-		Ver:      helpers.ProtocolVersion,
-	}
+	return exchangetest.AccountStatusRequest(harnessExchangeDomain)
 }
 
 // newRequester builds the agent identity a query or an execute carries.
 func newRequester(id, domain string, scopes ...string) *forav1.Requester {
-	return &forav1.Requester{
-		Id:     id,
-		Domain: domain,
-		Type:   forav1.RequesterType_REQUESTER_TYPE_AGENT,
-		Scopes: scopes,
-	}
+	return exchangetest.Requester(id, domain, scopes...)
 }

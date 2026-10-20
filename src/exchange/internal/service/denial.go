@@ -2,10 +2,13 @@ package service
 
 import (
 	"errors"
+	"strings"
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forareason"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/exchange"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
 )
 
 // denialReasonByKind maps the Exchange's domain denial kinds onto the canonical
@@ -40,6 +43,7 @@ var denialReasonByKind = map[exchange.Kind]forav1.DenialReason{
 	exchange.KindSubscriptionLapsed:    forav1.DenialReason_DENIAL_REASON_SUBSCRIPTION_LAPSED,
 	exchange.KindEntitlementNotGranted: forav1.DenialReason_DENIAL_REASON_ENTITLEMENT_NOT_GRANTED,
 	exchange.KindReportingOverdue:      forav1.DenialReason_DENIAL_REASON_REPORTING_OVERDUE,
+	exchange.KindRelayNotAccepted:      forav1.DenialReason_DENIAL_REASON_RELAY_NOT_ACCEPTED,
 }
 
 // DenialReasonForKind returns the canonical DenialReason for a transaction-denial
@@ -54,4 +58,52 @@ func DenialReasonForKind(err error) (forav1.DenialReason, bool) {
 	}
 	reason, ok := denialReasonByKind[de.Kind]
 	return reason, ok
+}
+
+// denialPrefix starts every proto DenialReason name. The fora.denial_reason
+// enum spells each value without it, which is the whole of the mapping between
+// the two: the database parity test pins that the enum and the proto name the
+// same reasons.
+const denialPrefix = "DENIAL_REASON_"
+
+// denialFromLabel is the proto DenialReason a journal label names. ok is false
+// for a label the proto does not name, and for UNSPECIFIED, which is never a
+// denial: a label the proto does not name looks up as zero, which is
+// UNSPECIFIED, so one rule refuses both.
+//
+// That rule, a value the protocol declares and never zero, is
+// forareason.EnumName's. denialLabel and the console's wire mapping ask it too,
+// so none of them can disagree on what counts as a denial.
+func denialFromLabel(l repo.DenialReason) (forav1.DenialReason, bool) {
+	r := forav1.DenialReason(forav1.DenialReason_value[denialPrefix+string(l)])
+	return r, forareason.EnumName(r) != ""
+}
+
+// denialLabel is the journal label of a proto DenialReason: its name without
+// denialPrefix. ok is false for UNSPECIFIED, which is never a denial, and for a
+// number the proto does not name.
+func denialLabel(r forav1.DenialReason) (repo.DenialReason, bool) {
+	name := forareason.EnumName(r)
+	if name == "" {
+		return "", false
+	}
+	return repo.DenialReason(strings.TrimPrefix(name, denialPrefix)), true
+}
+
+// batchDenialResult classifies a per-item execution error: a denial Kind
+// (DenialReasonForKind ok) becomes an in-body TransactionResultItem carrying the
+// denial_reason and offer_id; any other Kind (envelope-invalid / internal /
+// not-found) returns ok=false so the caller aborts the whole batch.
+func batchDenialResult(
+	item *forav1.TransactionItem, err error,
+) (*forav1.TransactionResultItem, bool) {
+	reason, ok := DenialReasonForKind(err)
+	if !ok {
+		return nil, false
+	}
+	r := reason
+	return &forav1.TransactionResultItem{
+		OfferId:      item.GetOffer().GetOfferId(),
+		DenialReason: &r,
+	}, true
 }

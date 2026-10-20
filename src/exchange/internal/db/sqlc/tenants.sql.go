@@ -12,7 +12,7 @@ import (
 )
 
 const getTenantByDomain = `-- name: GetTenantByDomain :one
-SELECT tenant_id, domain, ed25519_key_ref, reporting_policy, created_at, signing_scheme, rsa_key_ref, cloudfront_key_pair_id, allow_broker_relay, fee_rate_bps, fee_rate_notes, activate_new_agents_by_default, default_agent_credit FROM fora.tenants WHERE domain = $1
+SELECT tenant_id, domain, ed25519_key_ref, reporting_policy, created_at, rsa_key_ref, allow_broker_relay, fee_rate_bps, fee_rate_notes, activate_new_agents_by_default FROM fora.tenants WHERE domain = $1
 `
 
 func (q *Queries) GetTenantByDomain(ctx context.Context, domain string) (ForaTenant, error) {
@@ -24,20 +24,17 @@ func (q *Queries) GetTenantByDomain(ctx context.Context, domain string) (ForaTen
 		&i.Ed25519KeyRef,
 		&i.ReportingPolicy,
 		&i.CreatedAt,
-		&i.SigningScheme,
 		&i.RsaKeyRef,
-		&i.CloudfrontKeyPairID,
 		&i.AllowBrokerRelay,
 		&i.FeeRateBps,
 		&i.FeeRateNotes,
 		&i.ActivateNewAgentsByDefault,
-		&i.DefaultAgentCredit,
 	)
 	return i, err
 }
 
 const getTenantByID = `-- name: GetTenantByID :one
-SELECT tenant_id, domain, ed25519_key_ref, reporting_policy, created_at, signing_scheme, rsa_key_ref, cloudfront_key_pair_id, allow_broker_relay, fee_rate_bps, fee_rate_notes, activate_new_agents_by_default, default_agent_credit FROM fora.tenants WHERE tenant_id = $1
+SELECT tenant_id, domain, ed25519_key_ref, reporting_policy, created_at, rsa_key_ref, allow_broker_relay, fee_rate_bps, fee_rate_notes, activate_new_agents_by_default FROM fora.tenants WHERE tenant_id = $1
 `
 
 func (q *Queries) GetTenantByID(ctx context.Context, tenantID string) (ForaTenant, error) {
@@ -49,45 +46,42 @@ func (q *Queries) GetTenantByID(ctx context.Context, tenantID string) (ForaTenan
 		&i.Ed25519KeyRef,
 		&i.ReportingPolicy,
 		&i.CreatedAt,
-		&i.SigningScheme,
 		&i.RsaKeyRef,
-		&i.CloudfrontKeyPairID,
 		&i.AllowBrokerRelay,
 		&i.FeeRateBps,
 		&i.FeeRateNotes,
 		&i.ActivateNewAgentsByDefault,
-		&i.DefaultAgentCredit,
 	)
 	return i, err
 }
 
 const insertTenant = `-- name: InsertTenant :one
 INSERT INTO fora.tenants (
-    tenant_id, domain, ed25519_key_ref, reporting_policy,
-    signing_scheme, rsa_key_ref, cloudfront_key_pair_id
-) VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING tenant_id, domain, ed25519_key_ref, reporting_policy, created_at, signing_scheme, rsa_key_ref, cloudfront_key_pair_id, allow_broker_relay, fee_rate_bps, fee_rate_notes, activate_new_agents_by_default, default_agent_credit
+    tenant_id, domain, ed25519_key_ref, reporting_policy, rsa_key_ref
+) VALUES ($1, $2, $3, $4, $5)
+RETURNING tenant_id, domain, ed25519_key_ref, reporting_policy, created_at, rsa_key_ref, allow_broker_relay, fee_rate_bps, fee_rate_notes, activate_new_agents_by_default
 `
 
 type InsertTenantParams struct {
-	TenantID            string            `json:"tenant_id"`
-	Domain              string            `json:"domain"`
-	Ed25519KeyRef       string            `json:"ed25519_key_ref"`
-	ReportingPolicy     []byte            `json:"reporting_policy"`
-	SigningScheme       ForaSigningScheme `json:"signing_scheme"`
-	RsaKeyRef           pgtype.Text       `json:"rsa_key_ref"`
-	CloudfrontKeyPairID pgtype.Text       `json:"cloudfront_key_pair_id"`
+	TenantID        string      `json:"tenant_id"`
+	Domain          string      `json:"domain"`
+	Ed25519KeyRef   string      `json:"ed25519_key_ref"`
+	ReportingPolicy []byte      `json:"reporting_policy"`
+	RsaKeyRef       pgtype.Text `json:"rsa_key_ref"`
 }
 
+// Creates one Exchange seat. `domain` is the hostname the seat answers on --
+// the value EXCHANGE_DOMAIN carries -- not a publisher's site. The signing
+// scheme and the CloudFront key-pair id are NOT here: those describe one site
+// and live on fora.publisher_domains. What the seat holds is the private-key
+// side, ed25519_key_ref and rsa_key_ref.
 func (q *Queries) InsertTenant(ctx context.Context, arg InsertTenantParams) (ForaTenant, error) {
 	row := q.db.QueryRow(ctx, insertTenant,
 		arg.TenantID,
 		arg.Domain,
 		arg.Ed25519KeyRef,
 		arg.ReportingPolicy,
-		arg.SigningScheme,
 		arg.RsaKeyRef,
-		arg.CloudfrontKeyPairID,
 	)
 	var i ForaTenant
 	err := row.Scan(
@@ -96,14 +90,11 @@ func (q *Queries) InsertTenant(ctx context.Context, arg InsertTenantParams) (For
 		&i.Ed25519KeyRef,
 		&i.ReportingPolicy,
 		&i.CreatedAt,
-		&i.SigningScheme,
 		&i.RsaKeyRef,
-		&i.CloudfrontKeyPairID,
 		&i.AllowBrokerRelay,
 		&i.FeeRateBps,
 		&i.FeeRateNotes,
 		&i.ActivateNewAgentsByDefault,
-		&i.DefaultAgentCredit,
 	)
 	return i, err
 }
@@ -133,7 +124,7 @@ func (q *Queries) SetTenantActivateNewAgentsByDefault(ctx context.Context, arg S
 	return result.RowsAffected(), nil
 }
 
-const setTenantAllowBrokerRelay = `-- name: SetTenantAllowBrokerRelay :exec
+const setTenantAllowBrokerRelay = `-- name: SetTenantAllowBrokerRelay :execrows
 UPDATE fora.tenants
    SET allow_broker_relay = $2
  WHERE tenant_id = $1
@@ -147,30 +138,10 @@ type SetTenantAllowBrokerRelayParams struct {
 // Flips the broker-relay opt-in for a tenant. Admin / fixture path; the
 // column defaults to FALSE on insert so this is only needed when a tenant
 // explicitly opts into broker-on-behalf reporting.
-func (q *Queries) SetTenantAllowBrokerRelay(ctx context.Context, arg SetTenantAllowBrokerRelayParams) error {
-	_, err := q.db.Exec(ctx, setTenantAllowBrokerRelay, arg.TenantID, arg.AllowBrokerRelay)
-	return err
-}
-
-const setTenantDefaultAgentCredit = `-- name: SetTenantDefaultAgentCredit :execrows
-UPDATE fora.tenants
-   SET default_agent_credit = $2
- WHERE tenant_id = $1
-`
-
-type SetTenantDefaultAgentCreditParams struct {
-	TenantID           string         `json:"tenant_id"`
-	DefaultAgentCredit pgtype.Numeric `json:"default_agent_credit"`
-}
-
-// Replaces the per-tenant default credit granted to a newly registered agent
-// (deployment ledger currency; 0 disables the grant). Written by the boot-time
-// env seeding (EXCHANGE_DEFAULT_AGENT_CREDIT); otherwise set out of band like
-// activate_new_agents_by_default — there is no admin RPC.
 // Returns rows-affected so a call for a missing tenant is a detectable no-op
 // rather than a silent success.
-func (q *Queries) SetTenantDefaultAgentCredit(ctx context.Context, arg SetTenantDefaultAgentCreditParams) (int64, error) {
-	result, err := q.db.Exec(ctx, setTenantDefaultAgentCredit, arg.TenantID, arg.DefaultAgentCredit)
+func (q *Queries) SetTenantAllowBrokerRelay(ctx context.Context, arg SetTenantAllowBrokerRelayParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setTenantAllowBrokerRelay, arg.TenantID, arg.AllowBrokerRelay)
 	if err != nil {
 		return 0, err
 	}

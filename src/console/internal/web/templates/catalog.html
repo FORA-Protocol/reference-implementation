@@ -1,0 +1,52 @@
+{{define "content"}}
+{{with .Catalog}}
+<h1 class="h3">Catalog</h1>
+<p class="text-body-secondary small">
+  The pages agents can buy from you. Open one to see the terms it is offered under and its
+  sales. The operator imports them from the sources you set when you added each domain.
+</p>
+<form class="period d-flex flex-wrap align-items-end gap-2 mb-3" method="get">
+  {{template "domain-filter" .}}
+  <button class="btn btn-sm btn-outline-primary" type="submit">Apply</button>
+</form>
+{{if .Rows}}
+{{/* The pager is repeated above the table, beside the row numbers, so a long
+   page can be left without scrolling to its end. */}}
+<div class="d-flex flex-wrap align-items-center gap-3 mb-2">
+  {{template "pager" .Page}}
+  <p class="text-body-secondary small mb-0 page-position">Resources {{.Page.First}}–{{.Page.Last}}, newest first</p>
+</div>
+<div class="table-responsive-stack">
+<table class="table align-middle rows">
+  <thead>
+    <tr>
+      <th scope="col">Title</th>
+      <th scope="col">Updated (UTC)</th>
+    </tr>
+  </thead>
+  <tbody>
+  {{range .Rows}}
+    <tr class="row-link">
+      {{/* The headline as plain text, cut with an ellipsis. The terms and the
+           sales are on the resource's own page, which a click anywhere on the
+           row opens; a resource listed without a title shows its address. */}}
+      <td data-label="Title" class="cell-clip" title="{{.URI}}">
+        {{if .Title}}{{.Title}}{{else}}{{.URI}}{{end}}
+        <a class="stretched-link" href="{{.Link}}">
+          <span class="visually-hidden">Open this resource</span></a>
+      </td>
+      <td data-label="Updated (UTC)">{{.Updated}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{template "pager" .Page}}
+{{else}}
+<div class="empty-state" role="status">
+  <p class="h5 mb-1">Nothing is listed yet.</p>
+  <p class="text-body-secondary mb-0">{{if .Domain}}Nothing is listed for this domain. Choose another, or show all domains.{{else}}Your pages appear here once the operator has imported them from your domains.{{end}}</p>
+</div>
+{{end}}
+{{end}}
+{{end}}

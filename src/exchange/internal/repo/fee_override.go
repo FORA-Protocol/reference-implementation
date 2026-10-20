@@ -7,14 +7,9 @@ import (
 	"math"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
 )
-
-// pgCheckViolation is the SQLSTATE class Postgres returns for a CHECK constraint
-// violation (e.g. fee_rate_bps outside [0, 10000)).
-const pgCheckViolation = "23514"
 
 // ErrFeeRateOutOfRange is returned when a fee rate violates the
 // 0 <= fee_rate_bps < 10000 CHECK constraint at write time.
@@ -34,39 +29,26 @@ func guardFeeRateBps(bps int) (int32, error) {
 	return int32(bps), nil
 }
 
-// mapCheckWriteErr maps the error from a guarded write: a Postgres CHECK
-// violation becomes the caller's sentinel, and any other error is wrapped with
-// op for context. The Go-side guard runs before the round-trip and names the
-// specific cause; the CHECK is the in-store backstop, so a violation that slips
-// past the guard still surfaces as the caller's domain sentinel rather than a
-// raw pgconn.PgError. Returns nil for a nil err so callers can tail-return it.
-// The read-back count, when there is one, is the caller's to return alongside.
-// Shared by every guarded write port (fee rates, default agent credit).
-func mapCheckWriteErr(err error, op string, sentinel error) error {
-	if err == nil {
-		return nil
-	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == pgCheckViolation {
-		return sentinel
-	}
-	return fmt.Errorf("%s: %w", op, err)
-}
-
 // FeeOverrideRepo reads and writes the per-(tenant, resource_owner) commission
 // override. The tenant-level default lives on repo.Tenant (FeeRateBps); a row
 // here supersedes it for one resource owner under one tenant, so an aggregator
 // tenant can charge a different commission per owner it represents. The rate is
 // a server-side commercial term, never on the wire.
 type FeeOverrideRepo interface {
+	FeeOverrideReadRepo
+	// Set upserts the override rate for (tenant, owner). Returns
+	// ErrFeeRateOutOfRange when bps violates the CHECK bound.
+	Set(ctx context.Context, tenantID, resourceOwnerID string, bps int) error
+}
+
+// FeeOverrideReadRepo is the read half of FeeOverrideRepo, for a caller that
+// only resolves the rate.
+type FeeOverrideReadRepo interface {
 	// ByOwner returns the override rate in basis points for (tenant, owner), or
 	// nil when no override row exists — the caller then falls back to the tenant
 	// default. A missing override is the normal "no override" outcome, not an
 	// error.
 	ByOwner(ctx context.Context, tenantID, resourceOwnerID string) (*int, error)
-	// Set upserts the override rate for (tenant, owner). Returns
-	// ErrFeeRateOutOfRange when bps violates the CHECK bound.
-	Set(ctx context.Context, tenantID, resourceOwnerID string, bps int) error
 }
 
 // NewFeeOverrideRepo composes a FeeOverrideRepo over a sqlc.Querier.

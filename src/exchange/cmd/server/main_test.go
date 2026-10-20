@@ -69,7 +69,7 @@ func TestBuildHTTPSigDeps_AnnouncesPerProcessReplayStore(t *testing.T) {
 	t.Cleanup(cancel)
 
 	//nolint:errcheck // only the log line is under test
-	_, _, _ = buildHTTPSigDeps(ctx, logger, http.DefaultClient)
+	_, _, _, _ = buildHTTPSigDeps(ctx, logger, http.DefaultClient)
 
 	if !strings.Contains(logged.String(), "exchange.httpsig.replay_store_disabled") {
 		t.Fatalf("no exchange.httpsig.replay_store_disabled line with REDIS_URL unset; logged: %s", logged.String())

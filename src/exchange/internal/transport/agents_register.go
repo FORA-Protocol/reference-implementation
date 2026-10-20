@@ -4,15 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"strings"
-	"sync"
 
 	"golang.org/x/time/rate"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/agentid"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/iplimit"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/agentreg"
 )
@@ -43,9 +41,7 @@ type AgentsRegisterOptions struct {
 type AgentsRegisterHandler struct {
 	registry     agentreg.Registry
 	maxBodyBytes int64
-	newLimiter   func() *rate.Limiter
-	mu           sync.Mutex
-	limiters     map[string]*rate.Limiter
+	limiter      *iplimit.Limiter
 }
 
 // NewAgentsRegisterHandler constructs the handler. The registry is required.
@@ -60,22 +56,20 @@ func NewAgentsRegisterHandler(
 	if maxBody <= 0 {
 		maxBody = defaultMaxBodyBytes
 	}
-	factory := opts.LimiterFactory
-	if factory == nil {
-		rpm := opts.RatePerMinutePerIP
-		if rpm <= 0 {
-			rpm = defaultRatePerMinutePerIP
-		}
-		perSecond := float64(rpm) / 60.0
-		factory = func() *rate.Limiter {
-			return rate.NewLimiter(rate.Limit(perSecond), 1)
-		}
+	rpm := opts.RatePerMinutePerIP
+	if rpm <= 0 {
+		rpm = defaultRatePerMinutePerIP
 	}
 	return &AgentsRegisterHandler{
 		registry:     registry,
 		maxBodyBytes: maxBody,
-		newLimiter:   factory,
-		limiters:     make(map[string]*rate.Limiter),
+		// Burst 1 keeps the shape this endpoint has always had: the very first
+		// over-budget call trips 429 rather than a burst absorbing it.
+		limiter: iplimit.New(iplimit.Options{
+			RatePerMinute: rpm,
+			Burst:         1,
+			Factory:       opts.LimiterFactory,
+		}),
 	}
 }
 
@@ -105,8 +99,12 @@ func (h *AgentsRegisterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	clientIP := clientIPFromRequest(r)
-	if !h.allow(clientIP) {
+	// This endpoint is served by a directly-bound listener, so the connection's
+	// own address is the caller's. A deployment that puts a proxy in front of
+	// it has to pass the trust flag through here, or every caller shares one
+	// bucket.
+	clientIP := iplimit.ClientIP(r, false)
+	if !h.limiter.Allow(clientIP) {
 		reqctx.FromContext(r.Context()).WarnContext(r.Context(), "agents.register rate-limited",
 			"client_ip", clientIP)
 		writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded")
@@ -183,18 +181,6 @@ func (h *AgentsRegisterHandler) decodeRequest(r *http.Request) (registerRequest,
 	return req, 0, ""
 }
 
-// allow returns true when the client IP is under its per-minute budget.
-func (h *AgentsRegisterHandler) allow(ip string) bool {
-	h.mu.Lock()
-	lim, ok := h.limiters[ip]
-	if !ok {
-		lim = h.newLimiter()
-		h.limiters[ip] = lim
-	}
-	h.mu.Unlock()
-	return lim.Allow()
-}
-
 // classifyRegisterError maps registry errors to HTTP status + client message.
 //
 // agentreg.IsCallerFault decides the status, and it is the ONLY thing that does.
@@ -227,8 +213,8 @@ func classifyRegisterError(err error) (int, string) {
 		return http.StatusBadRequest, "agent_id or discovery_url does not name a host"
 	case errors.Is(err, agentreg.ErrAgentIDMismatch):
 		return http.StatusBadRequest, "discovery_url host does not match agent_id"
-	case errors.Is(err, forawellknown.ErrNoDocument):
-		// The fetch SUCCEEDED and the origin answered 404. Saying the fetch
+	case errors.Is(err, agentreg.ErrNoDirectory):
+		// The read SUCCEEDED and the origin answered 404. Saying the fetch
 		// failed described the caller's network, when the repair is to publish
 		// the document.
 		return http.StatusBadRequest, "the agent serves no key directory at discovery_url"
@@ -239,18 +225,6 @@ func classifyRegisterError(err error) (int, string) {
 	default:
 		return http.StatusBadRequest, "the agent's key directory cannot establish this identity"
 	}
-}
-
-// clientIPFromRequest extracts the caller's IP. We prefer RemoteAddr split on
-// port to avoid trusting spoofable forwarding headers; deployments that need
-// X-Forwarded-For honoring should terminate TLS at a trusted proxy and strip
-// the header.
-func clientIPFromRequest(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {

@@ -15,12 +15,11 @@
 //
 // The join between the hops is auth.go: the verified token's subject (the
 // developer's subdomain) goes onto the request context, and the outbound signer
-// reads it from there. Each tool additionally re-reads that identity from the
+// reads it from there. The endpoint is stateless, so the context a tool handler
+// receives is that same request's. Each tool also re-reads the identity from the
 // SDK's per-request TokenInfo and fails closed if the two disagree (see
-// callerFrom in caller.go) — because the context a tool handler receives belongs
-// to the session, not to the request being served, so the context alone would
-// answer "whoever opened the session". No tool takes an agent argument, so a
-// caller cannot ask to be someone else.
+// callerFrom in caller.go). No tool takes an agent argument, so a caller cannot
+// ask to be someone else.
 //
 // # Tool shapes follow the protocol
 //
@@ -42,8 +41,10 @@
 // Five tools, all named fora_*: fora_register, fora_status, fora_discover,
 // fora_execute, fora_report.
 //
-// fora_execute returns the signed delivery URL per item AND the content itself,
-// fetched here rather than by the agent (ADR-023). The Exchange binds each
+// fora_execute returns the signed delivery URL per item AND, by default, the
+// content itself, fetched here rather than by the agent (ADR-023). An agent that
+// sets embed_content to false gets only the URLs, which it can use alone only
+// where the edge does not enforce the binding described next. The Exchange binds each
 // delivery URL to the key that signed the offer acceptance, and a capable edge
 // makes the fetcher prove possession of it; in the custodial flow that key lives
 // in Vault and never reaches the agent, so an agent-side fetch could only ever
@@ -84,18 +85,9 @@ const (
 	serverVersion = "1.0"
 )
 
-// SessionTimeout closes a session that has gone this long without a request.
-//
-// Sized for an agent workload rather than a human one: a tool call and the FORA
-// legs behind it complete in seconds, and an agent that has more to do sends the
-// next call promptly. Ten minutes is generous for that and still bounds how long
-// an abandoned session holds its goroutines. A client that is merely slow
-// reconnects; nothing but the session's own liveness depends on it.
-const SessionTimeout = 10 * time.Minute
-
 // Config wires the MCP adapter. Every collaborator is required, and validate()
 // below is the enumeration: an adapter with no token issuer cannot
-// authenticate, with no account service cannot register, with no FORA client
+// authenticate, with no account service cannot register, with no purchaser
 // cannot buy, and with no issuer URL cannot tell a client where to sign in.
 //
 // Two kinds of field are exempt, and both mean something when left unset.
@@ -108,25 +100,19 @@ type Config struct {
 	// for us, and is still live.
 	Tokens *token.Issuer
 
-	// FORA is the relay purchase, and only that: it goes to the Broker's relay
-	// route rather than to the ExchangeService RPC the SDK's Execute calls, which
-	// is why this package still sends it itself. Signed per request as the
-	// authenticated agent. Typed as the narrow port this package actually calls
-	// (see ports.go for why the seam is declared here); *foraclient.Client
-	// satisfies it.
+	// Purchases buys offers through the Broker's ExecuteTransaction, signed per
+	// request as the authenticated agent. Typed as the narrow port this package
+	// actually calls (see ports.go); *forasdk.Client satisfies it.
 	//
 	// Registration and account status are NOT on this port. They travel through
-	// Accounts below, which owns the workflow they belong to. This is the field a
-	// reader opens Config to see what the adapter is wired with, so it says where
-	// the other two went rather than leaving a reader to find out from ports.go.
-	FORA foraCaller
+	// Accounts below, which owns the workflow they belong to.
+	Purchases purchaser
 
 	// Discovery resolves offers through the Broker and returns them already
-	// verified. Separate from FORA because the SDK serves it (see ports.go).
+	// verified.
 	Discovery discoverer
 
 	// Reports files a usage report with the Exchange that issued the offer.
-	// Separate from FORA for the same reason as Discovery.
 	Reports reporter
 
 	// Accounts opens and reports the caller's Exchange accounts. It owns the
@@ -141,10 +127,10 @@ type Config struct {
 	// Content fetches licensed bytes from the delivery edge, signed as the calling
 	// agent. Typed as the narrow port this package calls (see ports.go).
 	//
-	// Required, like everything else here. fora_execute promises the content, so
-	// an adapter wired without a fetcher cannot honour its own contract — and
-	// discovering that per call would surface as a delivery failure on every
-	// purchase rather than as the wiring mistake it is.
+	// Required, like everything else here. fora_execute promises the content by
+	// default, so an adapter wired without a fetcher cannot honour its own
+	// contract — and discovering that per call would surface as a delivery
+	// failure on every purchase rather than as the wiring mistake it is.
 	Content contentFetcher
 
 	// CallTimeout bounds one fora_execute's whole content leg, and
@@ -162,12 +148,13 @@ type Config struct {
 	// identifier and the base the endpoint's resource identifier is derived from.
 	IssuerURL string
 
-	// AgentDirectory builds a caller's directory origin — the value a tool puts in
-	// requester.id. Pass (*agentsign.Resolver).DirectoryOrigin: that is the same
-	// function the outbound signer publishes in Signature-Agent, and the
-	// Broker/Exchange authorize a call by comparing the two. Taking the function
-	// rather than a scheme is what makes the two impossible to spell differently;
-	// a scheme here would be a second setting that could drift from the signer's.
+	// AgentDirectory builds a caller's directory origin — the identity a tool sends
+	// on the wire. Pass (*agentsign.Resolver).DirectoryOrigin: that is the same
+	// function the outbound signer publishes in Signature-Agent, which is the
+	// header the Broker and the Exchange derive the caller's identity from. Taking
+	// the function rather than a scheme is what makes the two impossible to spell
+	// differently; a scheme here would be a second setting that could drift from
+	// the signer's.
 	AgentDirectory func(subdomain string) string
 
 	// Logger receives endpoint-level events.
@@ -205,7 +192,7 @@ func New(cfg Config) (*Server, error) {
 	}, nil)
 	cfg = cfg.withDefaults()
 	tools := &toolset{
-		fora:                cfg.FORA,
+		purchases:           cfg.Purchases,
 		discovery:           cfg.Discovery,
 		reports:             cfg.Reports,
 		accounts:            cfg.Accounts,
@@ -219,18 +206,21 @@ func New(cfg Config) (*Server, error) {
 	}
 	tools.register(srv)
 
-	// One server instance serves every connection: the tools hold no per-caller
-	// state, and everything caller-specific already rides on the request context.
+	// One server instance serves every request: the tools hold no per-caller
+	// state, and everything caller-specific rides on the request context.
 	//
-	// SessionTimeout is set explicitly because the SDK's zero value means idle
-	// sessions are NEVER closed: a session leaves the handler's map only on an
-	// explicit DELETE, so a client that opens sessions and does not delete them —
-	// self-service sign-up makes that one account's choice, and a crash-looping
-	// client does it by accident — leaks a live ServerSession, its connection, and
-	// its goroutines per initialize.
+	// Stateless, because nothing this endpoint serves needs a session, and because
+	// the SDK serves MCP 2026-07-28 only in this mode. Each POST gets a temporary
+	// session that the SDK closes when the request completes, so no idle session
+	// can outlive its request and no instance affinity is needed behind a load
+	// balancer. GET and DELETE are answered 405 with Allow: POST.
+	//
+	// JSONResponse answers each POST with one application/json body instead of an
+	// SSE stream: no tool sends progress or server-initiated messages, so a stream
+	// would only ever carry the one response.
 	streamable := mcpsdk.NewStreamableHTTPHandler(
 		func(*http.Request) *mcpsdk.Server { return srv },
-		&mcpsdk.StreamableHTTPOptions{SessionTimeout: SessionTimeout},
+		&mcpsdk.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
 	)
 	return &Server{
 		handler:     requireBearer(streamable, cfg.Tokens, metadataURL),
@@ -243,8 +233,8 @@ func (c Config) validate() error {
 	switch {
 	case c.Tokens == nil:
 		return errors.New("mcp: Config.Tokens is required")
-	case c.FORA == nil:
-		return errors.New("mcp: Config.FORA is required")
+	case c.Purchases == nil:
+		return errors.New("mcp: Config.Purchases is required")
 	case c.Discovery == nil:
 		return errors.New("mcp: Config.Discovery is required")
 	case c.Reports == nil:

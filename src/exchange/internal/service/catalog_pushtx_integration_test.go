@@ -17,6 +17,7 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo/repotest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/service"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/service/servicetest"
 )
@@ -25,6 +26,11 @@ import (
 // attests resource_owner_id on an AuthorizedExchange entry for it, and the service
 // is constructed with the same value, so the resource-owner gate accepts.
 const pushTestExchangeDomain = "exchange.test"
+
+// pushTestSiteDomain is the publisher site the entries are pushed for. It is a
+// different namespace from pushTestExchangeDomain above: the seat answers on
+// one, the publisher serves its own manifest on the other.
+const pushTestSiteDomain = "pub.example"
 
 // authorizeAllManifests authorizes any caller pushing for its own domain and
 // attests a resource_owner_id for pushTestExchangeDomain: Get returns a publisher
@@ -79,35 +85,55 @@ func TestPushResources_AtomicRollbackOnMidBatchFailure(t *testing.T) {
 	ctx := context.Background()
 	pool := servicetest.AcquireTestDB(t, ctx)
 
-	// pt9 documented corner: no public tenant-provisioning RPC exists yet, and
+	// The seat row's domain is this Exchange's own domain: the push resolves the
+	// seat from EXCHANGE_DOMAIN, not from the entry's domain.
+	//
+	// Documented corner: no public seat-provisioning RPC exists yet, and
 	// TenantReadRepo exposes only ByID/ByDomain (no insert) — so this test arranges
-	// its tenant prerequisite through the sqlc InsertTenant query, the same
+	// its seat prerequisite through the sqlc InsertTenant query, the same
 	// surface every sibling Exchange test uses, rather than a raw SQL string.
 	if _, err := sqlc.New(pool).InsertTenant(ctx, sqlc.InsertTenantParams{
 		TenantID:        "t1",
-		Domain:          "pub.example",
+		Domain:          pushTestExchangeDomain,
 		Ed25519KeyRef:   "k",
 		ReportingPolicy: []byte(`{}`),
-		SigningScheme:   sqlc.ForaSigningSchemeED25519,
 	}); err != nil {
-		t.Fatalf("seed tenant: %v", err)
+		t.Fatalf("seed seat: %v", err)
 	}
+	// The site both entries are pushed for, under the payee its manifest
+	// attests, listed active on the seat. Without all three the push is refused
+	// before any upsert runs and the rollback under test never happens.
+	repotest.SeedSite(t, ctx, pool, repotest.Site{
+		SeatTenantID: "t1",
+		Domain:       pushTestSiteDomain,
+		PublisherID:  "owner-" + pushTestSiteDomain,
+		NewPublisher: true,
+	})
 
 	realRepo := repo.NewCatalogRepo(sqlc.New(pool))
 	failing := &failOnNthUpsertTx{CatalogRepo: realRepo, failAt: 2}
-	svc := service.NewCatalogService(failing, repo.NewTenantReadRepo(sqlc.New(pool)), nopRegistry{}, authorizeAllManifests{},
-		sharedb.PoolRunner{Pool: pool}, pushTestExchangeDomain)
+	queries := sqlc.New(pool)
+	svc := service.NewCatalogService(service.CatalogDeps{
+		Catalog:        failing,
+		Tenants:        repo.NewTenantReadRepo(queries),
+		Sites:          repo.NewPublisherDomainReadRepo(queries),
+		Listings:       repo.NewPublisherListingReadRepo(queries),
+		Registry:       nopRegistry{},
+		Manifests:      authorizeAllManifests{},
+		TxRunner:       sharedb.PoolRunner{Pool: pool},
+		ExchangeDomain: pushTestExchangeDomain,
+	})
 
 	_, err := svc.PushResources(ctx, &forav1.PushResourcesRequest{
 		Exchange: pushTestExchangeDomain,
 		Ver:      helpers.ProtocolVersion,
 		TenantId: "t1",
-		CallerId: "pub.example",
+		CallerId: pushTestSiteDomain,
 		Entries: []*forav1.ResourceEntry{
-			{Domain: "pub.example", Path: "/a"},
-			{Domain: "pub.example", Path: "/b"},
+			{Domain: pushTestSiteDomain, Path: "/a"},
+			{Domain: pushTestSiteDomain, Path: "/b"},
 		},
-	})
+	}, service.PushSourceOther)
 	if err == nil {
 		t.Fatal("expected PushResources to fail on the injected mid-batch error")
 	}

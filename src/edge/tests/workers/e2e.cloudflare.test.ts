@@ -31,9 +31,9 @@ beforeAll(async () => {
 // The edge resolves the verify key by fetching the exchange's WBA directory
 // (/.well-known/http-message-signatures-directory) and matching the URL's `kid`
 // (thumbprint) against a locally-computed thumbprint of each published key.
-beforeEach(() => {
+beforeEach(async () => {
   fetchMock.reset();
-  setupWbaDirectoryMock(keypair);
+  await setupWbaDirectoryMock(keypair);
   setupOriginMock();
 });
 
@@ -77,10 +77,12 @@ describe('well-known routes', () => {
     expect(body.invalidation_url).toBeUndefined();
   });
 
-  it('serves the WBA directory as a JWK Set (no kid)', async () => {
+  it('serves the WBA directory under the Web Bot Auth media type (no kid)', async () => {
     const res = await SELF.fetch(`${PUB_ORIGIN}/.well-known/http-message-signatures-directory`);
     expect(res.status).toBe(200);
-    expect(res.headers.get('content-type')).toContain('application/jwk-set+json');
+    expect(res.headers.get('content-type')).toBe(
+      'application/http-message-signatures-directory+json',
+    );
     const body = (await res.json()) as {
       keys: Array<Record<string, unknown>>;
     };

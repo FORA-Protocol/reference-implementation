@@ -25,7 +25,7 @@
 #
 #   - the publishing workflow's build matrix under .github/workflows/. It
 #     carries different data — a service name and a Dockerfile path — and GitHub
-#     Actions YAML cannot source a shell file. A fourth service is still two
+#     Actions YAML cannot source a shell file. A new service is still two
 #     edits: this array and that matrix.
 #   - the harness fixture that tests the gate. It keeps its own copy on purpose:
 #     a fixture derived from the thing it tests agrees with a bug in it, and
@@ -40,11 +40,12 @@
 # reads the copy in the repository it was invoked in, because it edits that
 # tree's documents and runs that tree's gate.
 
-# The services that ship a container image, in the order a reader meets them.
-# Adding one here is half the change; the workflow matrix above is the other
-# half.
+# The services whose image the publishing workflow ships, in the order a reader
+# meets them. Adding one here is half the change; the workflow matrix above is
+# the other half.
 DEPLOYMENT_DOCS=(
   src/exchange/DEPLOYMENT.md
   src/broker/DEPLOYMENT.md
   src/identity/DEPLOYMENT.md
+  src/console/DEPLOYMENT.md
 )

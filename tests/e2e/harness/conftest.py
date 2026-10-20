@@ -1,9 +1,14 @@
 """Shared fixtures for the docker-compose E2E harness.
 
 Scope: a `compose_stack` session fixture that either (a) assumes the stack
-is already up (``FORA_E2E_REUSE_STACK=1``) or (b) runs
-``docker compose -f docker-compose.e2e.yml up -d --build --wait`` before tests
-and ``down -v`` after.
+is already up (``FORA_E2E_REUSE_STACK=1``, which the runner container sets) or
+(b) brings a stack up from the host before tests and takes it down after. The
+host run reaches the stack through published ports, so (b) adds the opt-in
+``docker-compose.e2e.ports.yml``; the stack goes through
+``scripts/e2e-stack.sh``, which gives it its own network, under the project
+``_compose.host_project()`` names: ``E2E_PROJECT``, or by default
+``<checkout>-e2e``, which is also the Makefile's default unless
+``COMPOSE_PROJECT`` or ``COMPOSE_PROJECT_NAME`` is set.
 """
 
 from __future__ import annotations
@@ -15,17 +20,30 @@ from pathlib import Path
 
 import pytest
 
-from ._compose import COMPOSE_FILE, REPO_ROOT, resolve_host_port
+# COMPOSE_FILE and REPO_ROOT are resolved in _compose.py, beside the port lookup
+# that reads them, and re-exported from here under the names every suite already
+# imports.
+from ._compose import COMPOSE_FILE, REPO_ROOT, host_project, resolve_host_port
+from .e2e_catalog import SeededFixture
+from .fresh_agent import AgentFactory, FreshAgent
+from .publisher_accounts import PublisherFactory
 from .exchanges import (
     EXCHANGE_A_INTERNAL_URL,
     EXCHANGE_B_INTERNAL_URL,
     EXCHANGE_C_INTERNAL_URL,
+    EXCHANGE_D_INTERNAL_URL,
 )
 from .lambda_edge import wait_ready as wait_lambda_ready
+from .mcp_agents import McpAgentFactory
+from .capture_proxy import CONTROL_URL as CAPTURE_PROXY_URL
+from .capture_proxy import CaptureProxy
+from .misbehaving_exchange import CONTROL_URL as MISBEHAVING_EXCHANGE_URL
+from .misbehaving_exchange import MisbehavingExchange
 from .mcp_session import (
     await_identity,
     mcp_session_agent,
     mcp_session_bearer,
+    mcp_spending_agent,
     mcp_unregistered_agent,
     require_in_network,
 )
@@ -37,22 +55,28 @@ from .readiness import wait_healthy
 # without touching a pytest-convention file.
 from .publish_harness import make_public_remote, make_source_repo
 from .stack_urls import StackURLs
+from .wba_oracle_ts import TSOracle
+
+# The obligation registry and its report (ADR-028 D1).
+pytest_plugins = ["harness.obligation_registry"]
 
 
-# COMPOSE_FILE and REPO_ROOT are resolved in _compose.py, beside the port lookup
-# that reads them, and re-exported here under the names every suite already
-# imports.
-__all__ = ["COMPOSE_FILE", "REPO_ROOT"]
+@pytest.fixture(scope="session")
+def ts_oracle() -> TSOracle:
+    oracle = TSOracle()
+    oracle.wait_ready()
+    return oracle
 
 
 def _resolve_stack_urls(compose_file: Path) -> StackURLs:
     """Resolve service URLs for the running stack.
 
     Inside the compose network (``FORA_E2E_IN_NETWORK=1``) services
-    reach each other by docker-DNS name. From the host we ask compose
-    for the ephemeral host ports it assigned -- compose project name
-    auto-derives from the cwd, so two stacks brought up from different
-    cwds (main tree + worktree) report distinct port sets.
+    reach each other by docker-DNS name. From the host we read the
+    ephemeral host ports Docker published for the stack ``host_project()``
+    names, whether this session brought it up or reuses it
+    (``FORA_E2E_REUSE_STACK=1``). The project is passed, never discovered:
+    other stacks of this checkout may be running from the same compose file.
     """
     # The edges now listen on port 80 so the demo publisher-domain aliases
     # resolve natively for both the manifest fetch and the signed-URL content
@@ -63,6 +87,7 @@ def _resolve_stack_urls(compose_file: Path) -> StackURLs:
             exchange=EXCHANGE_A_INTERNAL_URL,
             exchange_b=EXCHANGE_B_INTERNAL_URL,
             exchange_c=EXCHANGE_C_INTERNAL_URL,
+            exchange_d=EXCHANGE_D_INTERNAL_URL,
             broker="http://broker:8082",
             edge="http://edge:80",
             aws_edge="http://aws-edge:80",
@@ -71,27 +96,55 @@ def _resolve_stack_urls(compose_file: Path) -> StackURLs:
             lambda_edge_no_wba="http://lambda-edge-no-wba:8080",
             identity="http://identity",
             zitadel="http://zitadel:8080",
+            console="http://console:8085",
+            agent_directory="http://agent-directory",
+            sites="http://sites",
+            misbehaving_exchange=MISBEHAVING_EXCHANGE_URL,
+            capture_proxy=CAPTURE_PROXY_URL,
+            zitadel_publishers="http://zitadel-publishers:8080",
+            mailpit="http://mailpit:8025",
         )
+    project = host_project()
+
+    def url(service: str, container_port: int) -> str:
+        port = resolve_host_port(compose_file, service, container_port, project=project)
+        return f"http://127.0.0.1:{port}"
+
     return StackURLs(
-        exchange=f"http://127.0.0.1:{resolve_host_port(compose_file, 'exchange', 8081)}",
-        exchange_b=f"http://127.0.0.1:{resolve_host_port(compose_file, 'exchange-b', 8081)}",
-        exchange_c=f"http://127.0.0.1:{resolve_host_port(compose_file, 'exchange-c', 8081)}",
-        broker=f"http://127.0.0.1:{resolve_host_port(compose_file, 'broker', 8082)}",
-        edge=f"http://127.0.0.1:{resolve_host_port(compose_file, 'edge', 80)}",
-        aws_edge=f"http://127.0.0.1:{resolve_host_port(compose_file, 'aws-edge', 80)}",
-        fastly_edge=f"http://127.0.0.1:{resolve_host_port(compose_file, 'fastly-edge', 80)}",
-        lambda_edge=f"http://127.0.0.1:{resolve_host_port(compose_file, 'lambda-edge', 8080)}",
-        lambda_edge_no_wba=(
-            f"http://127.0.0.1:{resolve_host_port(compose_file, 'lambda-edge-no-wba', 8080)}"
-        ),
+        exchange=url("exchange", 8081),
+        exchange_b=url("exchange-b", 8081),
+        exchange_c=url("exchange-c", 8081),
+        exchange_d=url("exchange-d", 8081),
+        broker=url("broker", 8082),
+        edge=url("edge", 80),
+        aws_edge=url("aws-edge", 80),
+        fastly_edge=url("fastly-edge", 80),
+        lambda_edge=url("lambda-edge", 8080),
+        lambda_edge_no_wba=url("lambda-edge-no-wba", 8080),
         identity="",
         zitadel="",
+        console=url("console", 8085),
+        agent_directory=url("agent-directory", 80),
     )
 
 
+_E2E_STACK = REPO_ROOT / "scripts" / "e2e-stack.sh"
+_HOST_PORTS_FILE = REPO_ROOT / "docker-compose.e2e.ports.yml"
+
+
 def _compose(*args: str) -> None:
-    cmd = ["docker", "compose", "-f", str(COMPOSE_FILE), *args]
+    """Run compose against the host run's own stack, creating its network for ``up``.
+
+    The network is created before ``up`` and removed after ``down``, as the
+    Makefile's e2e-up and e2e-down do.
+    """
+    project = host_project()
+    if args[0] == "up":
+        subprocess.run([str(_E2E_STACK), "network-up", project], check=True, cwd=REPO_ROOT)
+    cmd = [str(_E2E_STACK), "compose", project, "-f", str(_HOST_PORTS_FILE), *args]
     subprocess.run(cmd, check=True, cwd=REPO_ROOT)
+    if args[0] == "down":
+        subprocess.run([str(_E2E_STACK), "network-down", project], check=True, cwd=REPO_ROOT)
 
 
 @pytest.fixture(scope="session")
@@ -99,19 +152,97 @@ def seeded(compose_stack: StackURLs):
     """Seed the demo catalog once per session and expose its resources.
 
     Runs the production ``fora-ingest`` binary over the three demo feeds
-    (one signed PushResources RPC per feed) after registering the demo tenants,
-    buyers, contributor, and broker exchange row. Shared session-wide so the
+    (one signed PushResources RPC per feed) after provisioning each exchange's
+    seat and demo sites and registering the buyers. Shared session-wide so the
     ingest runs once; every suite consumes the same demo-catalog resources.
     """
-    from .seed import SeededFixture, seed_stack
+    from .seed import seed_stack, wait_until_broker_routes
 
     fixture: SeededFixture = seed_stack(
         str(COMPOSE_FILE),
         compose_stack.exchange,
         exchange_b_host_url=compose_stack.exchange_b,
         exchange_c_host_url=compose_stack.exchange_c,
+        exchange_d_host_url=compose_stack.exchange_d,
     )
+    wait_until_broker_routes(compose_stack)
     return fixture
+
+
+@pytest.fixture
+def fresh_agent_factory(
+    compose_stack: StackURLs,
+    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed opens the seats a fresh agent funds itself at
+    tmp_path: Path,
+) -> Iterator[AgentFactory]:
+    """Mints agents of this test's own: ``agent = fresh_agent_factory()``, once per agent needed.
+
+    For a test that needs more than one party. Every agent is new to the stack:
+    a new key under a new host, known to no Exchange before its first call, so
+    nothing a previous test or a previous run did reaches it (ADR-028 D7). See
+    ``fresh_agent.py``.
+    """
+    factory = AgentFactory(compose_stack, tmp_path)
+    yield factory
+    factory.close()
+
+
+@pytest.fixture
+def fresh_agent(fresh_agent_factory: AgentFactory) -> FreshAgent:
+    """One agent of this test's own; ``fresh_agent.fund(...)`` opens its accounts."""
+    return fresh_agent_factory()
+
+
+@pytest.fixture
+def misbehaving_exchange(
+    compose_stack: StackURLs,
+    seeded: SeededFixture,  # noqa: ARG001 — ordering: the Broker routes once the seed waited for it
+) -> MisbehavingExchange:
+    """The Exchange impostor the Broker's fault-path suites buy through.
+
+    In-network only: the impostor publishes no host port, and the Broker reaches it
+    by network aliases only the compose network resolves. See
+    ``misbehaving_exchange.py``.
+    """
+    if not compose_stack.misbehaving_exchange:
+        pytest.skip("the Exchange impostor is reachable only inside the compose network")
+    return MisbehavingExchange(compose_stack.misbehaving_exchange)
+
+
+@pytest.fixture
+def capture_proxy(compose_stack: StackURLs) -> CaptureProxy:
+    """The record of what the stack's services sent the Broker and the Exchanges.
+
+    In-network only: the proxy publishes no host port. A test reads only the
+    traffic of a scope of its own, through ``capture_proxy.watch(...)``. See
+    ``capture_proxy.py``.
+    """
+    if not compose_stack.capture_proxy:
+        pytest.skip("the capture proxy is reachable only inside the compose network")
+    return CaptureProxy(compose_stack.capture_proxy)
+
+
+@pytest.fixture
+def fresh_publisher(
+    compose_stack: StackURLs,
+    seeded: SeededFixture,  # noqa: ARG001 — ordering: registration needs the seed's seat
+) -> Iterator[PublisherFactory]:
+    """Mints publishers of this test's own: ``fresh_publisher(verified=True)``, once per publisher.
+
+    Each call creates a login the login provider has never seen and signs it in to
+    the console, so no account, publisher, domain or sale a previous test or run
+    made reaches it (ADR-028 D7). ``verified=False`` creates the login with an
+    address the provider has not verified. See ``publisher_accounts.py``.
+
+    In-network only: the sign-in goes through the provider, whose address resolves
+    only inside the compose network, and the runner holds the provider's admin
+    token only there.
+    """
+    if os.environ.get("FORA_E2E_IN_NETWORK") != "1" or not compose_stack.sites:
+        pytest.skip("a fresh publisher signs in through the provider, in-network only")
+    factory = PublisherFactory(compose_stack)
+    yield factory
+    factory.close()
 
 
 @pytest.fixture(scope="session")
@@ -126,12 +257,14 @@ def compose_stack() -> Iterator[StackURLs]:
     try:
         urls = _resolve_stack_urls(COMPOSE_FILE)
         wait_healthy(f"{urls.exchange}/healthz")
-        # Multi-exchange topology: exchange-b/c must be reachable too.
+        # Multi-exchange topology: exchange-b/c/d must be reachable too.
         wait_healthy(f"{urls.exchange_b}/healthz")
         wait_healthy(f"{urls.exchange_c}/healthz")
+        wait_healthy(f"{urls.exchange_d}/healthz")
         wait_healthy(f"{urls.broker}/healthz")
         wait_healthy(f"{urls.edge}/healthz")
         wait_healthy(f"{urls.aws_edge}/healthz")
+        wait_healthy(f"{urls.console}/healthz")
         # Fastly Compute (Viceroy) has no /healthz; its readiness probe is the
         # well-known manifest. Docker reports the container healthy once its
         # internal 127.0.0.1 probe passes, but Viceroy may not yet be bound on
@@ -150,65 +283,45 @@ def compose_stack() -> Iterator[StackURLs]:
 
 
 # ---------------------------------------------------------------------------
-# ADR-008 D5 — `shared-clean-fixtures` cleanup chain registration.
+# ADR-008 D5 — `shared-clean-fixtures` cleanup chain.
 #
 # The `stack_isolation` marker scaffolding — the marker registration,
 # the collection check and the autouse dispatch fixture — is defined
-# further down this same file. This block registers the exchange-health
-# cleanup function onto the shared chain under the agreed contract:
-# (function, autouse=False, ordering not required). The dispatch fixture
-# reads the declared mode and runs the chain; tests do NOT call
-# ``promote_drifted_exchange_health`` directly.
+# further down this same file. ``SHARED_CLEAN_FIXTURES`` is a plain list
+# of zero-argument callables the dispatch fixture runs, in list order,
+# before each test in that mode; a test in any other isolation mode never
+# runs it. Further cleanup callables are appended to it without any of
+# them having to know about the others.
 #
-# Module-import-time append rather than a fresh re-bind, so further
-# cleanup callables can be added to the same list without any of them
-# having to know about the others. ``SHARED_CLEAN_FIXTURES`` is a plain
-# list of zero-argument callables, consumed by the autouse dispatch
-# fixture below; a test in any other isolation mode never runs it.
+# The chain is empty. Its one entry used to write probe_state='LIVE' into
+# the Broker's database before every test, for any Exchange row a probe
+# pass had moved off LIVE. That is test-side state the Broker owns, and
+# the Broker's own refresher already maintains it: every pass probes every
+# unblocked row, so a row a pass marked DOWN comes back on the next pass
+# once the Exchange answers. What an Exchange "answering" means is now the
+# Exchange's own to say: the Broker probes the health_endpoint its
+# manifest names, and each Exchange this stack seeds publishes one. A row
+# that stays off LIVE is an Exchange that really is not answering, which a
+# test should see rather than have rewritten under it.
+#
+# There is no reporting-obligation purge either. An unreported obligation
+# counts against an agent only once its deadline has passed, and the
+# deployment's default window is 24 hours. The tests that shorten a seat's
+# window (the money-report, reporting-overdue, admin-plane and tenant-isolation
+# suites) buy as their own fresh agent while it is short and restore the
+# default however they end, and each obligation keeps the window it was minted
+# with. So on a stack brought up for the run no obligation of the fixed demo
+# buyers comes due, and a purge would restore nothing a test reads. A stack kept up for more than a day
+# is different: the fixed demo buyers then carry due, unreported
+# obligations and are refused REPORTING_OVERDUE. The remedy for that is a
+# buyer per test (ADR-028 D7), not a truncate of the Exchange's table: a
+# test arranges state only through the public surfaces, never by writing a
+# datastore. The ``fresh_agent`` fixture below is that buyer; the money-path,
+# ledger, idempotency and reporting suites buy as one.
 # ---------------------------------------------------------------------------
 from collections.abc import Callable  # noqa: E402
 
-from .fixtures.exchange_health import promote_drifted_exchange_health  # noqa: E402
-from .fixtures.obligations import purge_reporting_obligations  # noqa: E402
-
-
-def _resolve_pg_dsn_for_cleanup() -> str:
-    """Resolve the same Postgres DSN the seed module uses, deferred.
-
-    Imported lazily so the cleanup chain doesn't drag the entire seed
-    surface (and its docker-compose `port` shell-out) into module
-    import time, which would slow every collection.
-    """
-    from .seed import _resolve_pg_dsn
-
-    return _resolve_pg_dsn(str(COMPOSE_FILE))
-
-
-def cleanup_obligations() -> int:
-    """Cleanup-chain entry for `fora.reporting_obligations` (ADR-008 D5).
-
-    First entry in the chain because every later gate (signed-URL,
-    billing, exchange-health) reads from a baseline this purge
-    guarantees.
-    """
-    dsn = _resolve_pg_dsn_for_cleanup()
-    return purge_reporting_obligations(dsn)
-
-
-def cleanup_exchange_health() -> int:
-    """Cleanup-chain entry for exchange.healthy drift (ADR-008 D5)."""
-    dsn = _resolve_pg_dsn_for_cleanup()
-    return promote_drifted_exchange_health(dsn)
-
-
-# Chain order is load-bearing: obligations FIRST so subsequent gates run
-# against a known baseline, then exchange-health, then anything added
-# later. Tests do NOT invoke these functions directly — the autouse
-# dispatch fixture below reads the declared mode and runs the chain.
-SHARED_CLEAN_FIXTURES: list[Callable[[], object]] = [
-    cleanup_obligations,
-    cleanup_exchange_health,
-]
+SHARED_CLEAN_FIXTURES: list[Callable[[], object]] = []
 
 
 # ---------------------------------------------------------------------------
@@ -223,8 +336,7 @@ SHARED_CLEAN_FIXTURES: list[Callable[[], object]] = [
 #                                 persistent state irrecoverably.
 #   * "shared-clean-fixtures"   — DEFAULT for the bulk of the suite. The
 #                                 `SHARED_CLEAN_FIXTURES` chain runs before
-#                                 each such test (obligations purge → market-
-#                                 place-health re-promote → …).
+#                                 each such test.
 #   * "shared-without-cleanup"  — no setup/teardown. Reserved for tests
 #                                 that observe stable cross-test invariants
 #                                 (service-health probes, version sentinels)
@@ -293,8 +405,7 @@ def _stack_isolation_dispatch(request: pytest.FixtureRequest) -> Iterator[None]:
     """Per-test hook that reads the declared mode and runs the right chain.
 
     `shared-clean-fixtures` (default for declared tests) runs every callable
-    in `SHARED_CLEAN_FIXTURES` before the test — obligations FIRST,
-    exchange-health second, etc. `isolated` and `shared-without-cleanup`
+    in `SHARED_CLEAN_FIXTURES` before the test, in list order. `isolated` and `shared-without-cleanup`
     are no-ops at the per-test boundary; `isolated` relies on the
     orchestration layer to rebuild the stack between tests.
 
@@ -314,8 +425,8 @@ def _stack_isolation_dispatch(request: pytest.FixtureRequest) -> Iterator[None]:
 def publish_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     """A source repo, a bare stand-in for the public remote, and a worktree path.
 
-    Shared by the two publish guard suites. It sits here rather than in
-    ``publish_harness`` so both can request it by name without re-exporting a
+    Shared by the three publish guard suites. It sits here rather than in
+    ``publish_harness`` so each can request it by name without re-exporting a
     fixture, which pytest reads as a redefinition.
     """
     source = tmp_path / "source"
@@ -343,6 +454,18 @@ def identity_ready(compose_stack: StackURLs) -> StackURLs:
     require_in_network(compose_stack)
     await_identity(compose_stack)
     return compose_stack
+
+
+@pytest.fixture
+def fresh_mcp_agent_factory(identity_ready: StackURLs) -> McpAgentFactory:
+    """Signs up MCP agents of this test's own: ``agent = fresh_mcp_agent_factory()``.
+
+    Each call imports a login the provider has never seen and signs it up at the
+    identity service, so the agent holds no account, purchase or report any other
+    test or run made (ADR-028 D7). See ``mcp_agents.py``. A sign-up costs a login
+    flow, so a test asks for only as many agents as its claim needs.
+    """
+    return McpAgentFactory(identity_ready)
 
 
 @pytest.fixture(scope="session")
@@ -387,3 +510,15 @@ def unregistered_agent(identity_ready: StackURLs) -> str:
 def unregistered_bearer(unregistered_agent: str) -> str:
     """A bearer for the unregistered agent, minted per test like ``mcp_bearer``."""
     return mcp_session_bearer(unregistered_agent)
+
+
+@pytest.fixture(scope="session")
+def spending_agent(identity_ready: StackURLs) -> str:
+    """The agent only the balance suite registers and spends as, signed up once."""
+    return mcp_spending_agent(identity_ready)
+
+
+@pytest.fixture
+def spending_bearer(spending_agent: str) -> str:
+    """A bearer for the spending agent, minted per test like ``mcp_bearer``."""
+    return mcp_session_bearer(spending_agent)

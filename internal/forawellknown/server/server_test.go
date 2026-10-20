@@ -14,6 +14,7 @@ import (
 	"time"
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	jose "github.com/go-jose/go-jose/v4"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
@@ -160,9 +161,12 @@ func (m *mutableKeys) Keys() []*forawellknown.Key { return m.keys }
 
 func TestWBAHandler_ServeAndRebuild(t *testing.T) {
 	t.Parallel()
-	_, b1 := testutil.NewSigningKey("b1", anchor.Add(-time.Hour), anchor.Add(time.Hour))
+	p1, b1 := testutil.NewSigningKey("b1", anchor.Add(-time.Hour), anchor.Add(time.Hour))
+	p2, b2 := testutil.NewSigningKey("b2", anchor.Add(-time.Hour), anchor.Add(time.Hour))
 	src := &mutableKeys{keys: []*forawellknown.Key{b1}}
-	h, err := server.NewWBAHandler(server.WBAConfig{Keys: src})
+	h, err := server.NewWBAHandler(server.WBAConfig{
+		Keys: src, Signers: []helpers.Signer{testutil.DirectorySigner(p1), testutil.DirectorySigner(p2)},
+	})
 	if err != nil {
 		t.Fatalf("NewWBAHandler: %v", err)
 	}
@@ -176,8 +180,8 @@ func TestWBAHandler_ServeAndRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "application/jwk-set+json" {
-		t.Fatalf("WBA content-type = %q, want application/jwk-set+json", ct)
+	if ct := resp.Header.Get("Content-Type"); ct != server.DirectoryMediaType {
+		t.Fatalf("WBA content-type = %q, want %s", ct, server.DirectoryMediaType)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
@@ -191,7 +195,6 @@ func TestWBAHandler_ServeAndRebuild(t *testing.T) {
 
 	// Rotate the KeySource, then Rebuild: the new key must replace the old one,
 	// proving Rebuild re-reads the source rather than serving a stale snapshot.
-	_, b2 := testutil.NewSigningKey("b2", anchor.Add(-time.Hour), anchor.Add(time.Hour))
 	src.keys = []*forawellknown.Key{b2}
 	if err := h.Rebuild(); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -244,9 +247,13 @@ func (c *recordCounter) WithGroup(string) slog.Handler             { return c }
 // goes dark because one rebuild attempt failed.
 func TestRunRefresher_FailedRebuildKeepsServingOldDocument(t *testing.T) {
 	t.Parallel()
-	_, good := testutil.NewSigningKey("keep-serving", anchor.Add(-time.Hour), anchor.Add(time.Hour))
+	goodPriv, good := testutil.NewSigningKey("keep-serving", anchor.Add(-time.Hour), anchor.Add(time.Hour))
+	healedPriv, healed := testutil.NewSigningKey("healed", anchor.Add(-time.Hour), anchor.Add(time.Hour))
 	src := &lockedKeys{keys: []*forawellknown.Key{good}}
-	wba, err := server.NewWBAHandler(server.WBAConfig{Keys: src})
+	wba, err := server.NewWBAHandler(server.WBAConfig{
+		Keys:    src,
+		Signers: []helpers.Signer{testutil.DirectorySigner(goodPriv), testutil.DirectorySigner(healedPriv)},
+	})
 	if err != nil {
 		t.Fatalf("NewWBAHandler: %v", err)
 	}
@@ -299,7 +306,6 @@ func TestRunRefresher_FailedRebuildKeepsServingOldDocument(t *testing.T) {
 
 	// Heal the source: the loop must still be running and pick the new key up
 	// without intervention — a failure is a skipped tick, not an exit.
-	_, healed := testutil.NewSigningKey("healed", anchor.Add(-time.Hour), anchor.Add(time.Hour))
 	src.set(healed)
 	healedTP := testutil.MustThumbprintKey(t, healed)
 	deadline = time.Now().Add(5 * time.Second)

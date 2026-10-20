@@ -110,6 +110,43 @@ func TestValidateWBA(t *testing.T) {
 	}
 }
 
+// TestValidate_PureCallersAreNotToldAFetchFailed pins the half of the sentinel
+// split that has no other test, and the one a caller actually reads.
+//
+// These three entry points are documented as the path for someone who already
+// has the bytes -- a producer checking its own output, a service reading an
+// operator's file off disk. The Broker does exactly that: it reads a revocation
+// file with os.ReadFile and renders whatever comes back as "revocation file
+// invalid". While the validator answered ErrFetch, that sentence continued
+// "well-known document fetch failed", sending an operator to look at a network
+// for a file sitting in front of them.
+//
+// Asserting the ABSENCE of ErrFetch is the load-bearing half. The presence of
+// ErrNotJSON alone would still pass if the wrap were reinstated here, because
+// both sentinels match through it -- which is exactly how a fetch-boundary
+// wrap is supposed to behave, and exactly why it must not happen at this layer.
+func TestValidate_PureCallersAreNotToldAFetchFailed(t *testing.T) {
+	t.Parallel()
+	notJSON := []byte(`<html>502 Bad Gateway</html>`)
+	for name, validate := range map[string]func([]byte) error{
+		"a manifest":        forawellknown.ValidateManifest,
+		"a WBA directory":   forawellknown.ValidateWBA,
+		"a revocation list": forawellknown.ValidateRevocation,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			err := validate(notJSON)
+			if !errors.Is(err, forawellknown.ErrNotJSON) {
+				t.Fatalf("err = %v, want it to name a body that is not JSON", err)
+			}
+			if errors.Is(err, forawellknown.ErrFetch) {
+				t.Errorf("err = %v claims a fetch failed; nothing was fetched, and a "+
+					"caller that read a local file is sent to look at a network", err)
+			}
+		})
+	}
+}
+
 func TestValidateRevocation(t *testing.T) {
 	t.Parallel()
 	good := testutil.MarshalRevocation(anchor, "revoked-thumbprint")
@@ -185,6 +222,12 @@ func TestParseManifest_RefusesProtocolRuleViolations(t *testing.T) {
 // a version refusal. null is the row that matters most: it decodes into a struct
 // as a no-op, so a gate that read `ver` through a struct refused it as "ver is
 // absent" and diagnosed an origin serving nothing as a version mismatch.
+//
+// A body that is not JSON at all is the third sentinel and neither of the other
+// two. Those two are facts about a document that arrived and broke a rule, so
+// the next fetch returns the same bytes and the same answer; bytes that never
+// parsed establish nothing about what the origin publishes, and the fetch paths
+// state them as transient for that reason.
 func TestValidateManifest_Refusals(t *testing.T) {
 	t.Parallel()
 	t.Run("same major, higher minor is accepted", func(t *testing.T) {
@@ -215,7 +258,7 @@ func TestValidateManifest_Refusals(t *testing.T) {
 				`{"domain":"x","endpoint":"https://x/v1","relationship":"DIRECT"}]}`,
 			forawellknown.ErrSchemaInvalid,
 		},
-		{"not JSON", `{`, forawellknown.ErrSchemaInvalid},
+		{"not JSON", `{`, forawellknown.ErrNotJSON},
 		{"JSON null", `null`, forawellknown.ErrSchemaInvalid},
 		{"JSON array", `[]`, forawellknown.ErrSchemaInvalid},
 		{"JSON string", `"x"`, forawellknown.ErrSchemaInvalid},
@@ -227,12 +270,18 @@ func TestValidateManifest_Refusals(t *testing.T) {
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("want %v, got %v", tc.want, err)
 			}
-			other := forawellknown.ErrSchemaInvalid
-			if errors.Is(tc.want, forawellknown.ErrSchemaInvalid) {
-				other = forawellknown.ErrVersionRefused
-			}
-			if errors.Is(err, other) {
-				t.Fatalf("a refusal must name one failure, not both: got %v, which also reads as %v", err, other)
+			for _, other := range []error{
+				forawellknown.ErrVersionRefused,
+				forawellknown.ErrSchemaInvalid,
+				forawellknown.ErrNotJSON,
+			} {
+				if errors.Is(tc.want, other) {
+					continue
+				}
+				if errors.Is(err, other) {
+					t.Fatalf("a refusal must name one failure, not several: got %v, which also reads as %v",
+						err, other)
+				}
 			}
 		})
 	}

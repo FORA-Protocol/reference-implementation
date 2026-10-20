@@ -14,7 +14,7 @@ path with no seam involved, so it is guarded in the same block and covered here.
 
 These cases are separate from the gate suite because every case there passes a
 worktree path that does not exist, so none of them can reach either guard. The
-scaffolding both suites share lives in ``publish_harness``.
+scaffolding the publish suites share lives in ``publish_harness``.
 """
 
 from __future__ import annotations

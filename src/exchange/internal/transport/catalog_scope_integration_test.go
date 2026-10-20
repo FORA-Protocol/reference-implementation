@@ -42,7 +42,7 @@ func requesterWithScopes(id string, scopes ...string) requesterSpec {
 // no eligible priced term => no offer — never an empty-terms stub).
 //
 // The matrix exercises every branch of scopeCovered: exact equality, the global
-// "*", the hierarchical "prefix:*", scope-insufficient exclusion, and the
+// "*", the hierarchical "prefix:*", exclusion of an uncovered scope, and the
 // AND-coverage requirement of scopesCovered (every term scope must be covered).
 func TestDiscover_SelectByScope(t *testing.T) {
 	h := newPushHarness(t)
@@ -119,7 +119,83 @@ func TestDiscover_SelectByScope(t *testing.T) {
 				return
 			}
 			if offers := discoverOffersAs(t, h, uri, req); len(offers) != 0 {
-				t.Fatalf("%s: offers = %d, want 0 (scope-insufficient => no eligible priced term => no offer)", tc.name, len(offers))
+				t.Fatalf("%s: offers = %d, want 0 (scope not covered => no eligible priced term => no offer)", tc.name, len(offers))
+			}
+		})
+	}
+}
+
+// TestDiscover_ScopeShortStatesNoReason pins the answer to a requester whose
+// scopes cover none of a resource's terms: the group carries no offer and NO
+// absence reason. In particular it never says
+// OFFER_ABSENCE_REASON_SCOPE_INSUFFICIENT. The Requester.scopes comment in the
+// pinned protocol module is the rule: a resource outside the requester's scopes
+// is not returned, and the requester never learns it exists. A reason naming
+// the scope would tell it exactly that.
+//
+// Three requesters ask about the same catalog state:
+//
+//   - one without the scope gets no offer and no reason;
+//   - one holding the scope gets the offer for that same resource and no
+//     reason. This is the control: the term is there to be sold, so the empty
+//     group above is the scope's doing;
+//   - one without the scope, asking about a resource with a gated term and a
+//     public term, gets the public offer and no reason. Scope removed one
+//     term, and the other is still offered.
+//
+// Round-trip: pushed through the public CatalogService.PushResources surface,
+// read back through the public ExchangeService.DiscoverResources surface.
+func TestDiscover_ScopeShortStatesNoReason(t *testing.T) {
+	h := newPushHarness(t)
+	callerID := "caller.example"
+	client := setupTermContributor(t, h, callerID)
+
+	const scope = "subscription:premium"
+	pushTerms(t, h, client, callerID, "/scope/reason/gated", scopedTerm("gated", scope))
+	pushTerms(t, h, client, callerID, "/scope/reason/mixed", scopedTerm("gated", scope), scopedTerm("public"))
+	gated := "https://" + h.publisherDom + "/scope/reason/gated"
+	mixed := "https://" + h.publisherDom + "/scope/reason/mixed"
+
+	cases := []struct {
+		name       string
+		uri        string
+		spec       requesterSpec
+		wantLabels []string
+	}{
+		{
+			name: "scope not held: no offer, no reason",
+			uri:  gated,
+			spec: requesterWithScopes("agent-reason-none"),
+		},
+		{
+			name:       "scope held: the same resource is offered, no reason",
+			uri:        gated,
+			spec:       requesterWithScopes("agent-reason-held", scope),
+			wantLabels: []string{"gated"},
+		},
+		{
+			name:       "scope removes one of two terms: the public offer, no reason",
+			uri:        mixed,
+			spec:       requesterWithScopes("agent-reason-mixed"),
+			wantLabels: []string{"public"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := discoverAs(t, h, tc.uri, tc.spec)
+			groups := resp.GetOfferGroups()
+			if len(groups) != 1 {
+				t.Fatalf("offer_groups = %d, want 1 (one requested URI)", len(groups))
+			}
+			group := groups[0]
+			assertStrs(t, tc.name, labels(offerTerms(t, tc.uri, group.GetOffers())), tc.wantLabels)
+			if got := len(resp.GetOffers()); got != len(tc.wantLabels) {
+				t.Fatalf("flat offers = %d, want %d (the same offers as the group)", got, len(tc.wantLabels))
+			}
+			if group.AbsenceReason != nil {
+				t.Fatalf("absence_reason = %v, want unset: a scope that covers no term is never named",
+					group.GetAbsenceReason())
 			}
 		})
 	}

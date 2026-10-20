@@ -114,15 +114,11 @@ describe('AWS entry pass-through (no origin mode)', () => {
     expect(body.domain).toBe('pub.example.com');
   });
 
-  it('serves an empty rsl.txt as a generated response, never a pass-through', async () => {
-    // RSL_BODY is unset, so this route produces a 200 with an empty body —
-    // the exact shape that makes "empty 200" unusable as the pass-through
-    // signal. It must still return to the viewer as a generated response.
+  it('serves an unconfigured rsl.txt as a generated 404, never a pass-through', async () => {
     const result = await handler(makeEvent(`${PUB_ORIGIN}/rsl.txt`));
     expect(isRequest(result)).toBe(false);
     if (isRequest(result)) return;
-    expect(result.status).toBe('200');
-    expect(result.body ?? '').toBe('');
+    expect(result.status).toBe('404');
   });
 
   it('never leaks the authorization marker on generated responses', async () => {

@@ -98,7 +98,7 @@ func TestExecuteTransaction_MixedBatchRetryReplaysOriginal(t *testing.T) {
 	dire := discoverOffer(t, h, direURI)
 
 	const reqKey = "tx-mixed-replay"
-	requester := agentRequester("agent-test")
+	requester := agentRequester()
 	itemFor := func(o *forav1.Offer) *forav1.TransactionItem {
 		return &forav1.TransactionItem{
 			Offer:           o,
@@ -196,7 +196,7 @@ func TestExecuteTransaction_ConcurrentDuplicateBothReceiveOriginal(t *testing.T)
 	if _, err := repo.NewTransactionRepo(h.queries).ByIdempotencyKey(h.ctx, derivedTxKey(idem, offer)); err != nil {
 		t.Fatalf("exactly one persisted transaction expected: %v", err)
 	}
-	bal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	bal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestExecuteTransaction_ConcurrentDuplicateLoserKeepsSharedHold(t *testing.T
 	if _, err := repo.NewTransactionRepo(h.queries).ByIdempotencyKey(h.ctx, derivedTxKey(idem, offer)); err != nil {
 		t.Fatalf("exactly one persisted transaction expected: %v", err)
 	}
-	bal, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	bal, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestExecuteTransaction_AllDeniedReplayAfterRestart(t *testing.T) {
 	if err := h.billing.Credit(h.ctx, h.billingRef, mustBillingAmount(t, "100.00", "USD"), "topup-denied-restart"); err != nil {
 		t.Fatalf("credit top-up: %v", err)
 	}
-	balBeforeReplay, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	balBeforeReplay, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after top-up: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestExecuteTransaction_AllDeniedReplayAfterRestart(t *testing.T) {
 		t.Fatalf("restart retry minted a retrieval endpoint %q — it re-executed against the "+
 			"topped-up balance instead of replaying the denial", replayed.GetRetrievalEndpoint())
 	}
-	balAfterReplay, err := h.billing.GetBalance(h.ctx, h.billingRef)
+	balAfterReplay, err := h.billing.GetBalance(h.ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after replay: %v", err)
 	}

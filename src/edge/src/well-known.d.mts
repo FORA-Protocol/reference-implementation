@@ -1,4 +1,4 @@
-import type { CatalogContributor, Manifest, WbaFile, WbaKey } from './types.js';
+import type { CatalogContributor, Manifest, SignedWbaDirectory, WbaFile, WbaKey } from './types.js';
 
 // Type declaration for the plain-JS well-known.mjs (which carries no
 // types so the build-step-less aws-edge shim can import it). types.ts re-exports
@@ -9,10 +9,17 @@ export function buildPublisherManifest(
   contributors?: CatalogContributor[],
 ): Manifest;
 
-// buildPublisherWba assembles the publisher's Web Bot Auth directory (a JWK Set
-// of the publisher's Ed25519 signing keys, no kid, plus an optional
-// directory-level revocation_url).
+// buildPublisherWba assembles the publisher's Web Bot Auth directory (the
+// publisher's Ed25519 signing keys, no kid, plus an optional directory-level
+// revocation_url).
 export function buildPublisherWba(keys: WbaKey[], revocationUrl?: string): WbaFile;
+
+// signedDirectoryFrom reads a WBA_SIGNED_DIRECTORY_JSON value, checking its
+// envelope only, and throws on a malformed one.
+export function signedDirectoryFrom(raw: string): SignedWbaDirectory;
+
+// signedDirectoryHeaders is the header set a pre-signed directory is served with.
+export function signedDirectoryHeaders(signed: SignedWbaDirectory): Record<string, string>;
 
 // Fixed discovery paths + WBA content type, single-sourced in
 // well-known.mjs.

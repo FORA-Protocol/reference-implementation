@@ -57,6 +57,18 @@ func (s *Ed25519Signer) PublicKeyB64URL() string {
 	return base64.RawURLEncoding.EncodeToString(s.public)
 }
 
+// DirectorySigner returns the key as the signer of the Exchange's key directory
+// response: the directory lists this key, so the response must carry its
+// signature, under the key's RFC 7638 thumbprint as keyid. The private key stays
+// inside the returned SDK signer.
+func (s *Ed25519Signer) DirectorySigner() (helpers.Signer, error) {
+	keyID, err := helpers.Thumbprint(s.public)
+	if err != nil {
+		return nil, fmt.Errorf("ed25519: directory signer thumbprint: %w", err)
+	}
+	return helpers.NewEd25519Signer(keyID, s.private)
+}
+
 // SignatureAlgorithm is the algorithm name "EdDSA" carried on
 // Offer.signature_algorithm (which the canonical payload clears before signing).
 // It mirrors helpers.OfferSignatureAlgorithm. The name is the one JOSE registers

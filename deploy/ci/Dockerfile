@@ -16,12 +16,14 @@
 FROM golang:1.26
 
 # ---- system packages (union of the three jobs' apt installs) ----
-#   build/scripting : bash curl git make ca-certificates gcc gnupg
+#   build/scripting : bash curl git make ca-certificates gcc gnupg jq
+#                     (jq: operator scripts and their guard tests parse
+#                     JSON with it)
 #   node + python   : nodejs npm python3 python3-cryptography
 #   docker client   : docker-ce-cli + compose plugin (integration/e2e drive DinD)
 RUN apt-get update -qq \
  && apt-get install -y --no-install-recommends \
-      bash curl git make ca-certificates gcc gnupg \
+      bash curl git make ca-certificates gcc gnupg jq \
       nodejs npm python3 python3-cryptography \
  && install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL https://download.docker.com/linux/debian/gpg \
@@ -66,6 +68,7 @@ RUN GOBIN=/usr/local/bin go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest \
 
 # ---- fail the build if any tool is missing (catches drift early) ----
 RUN go version && node --version && npm --version && python3 --version \
+ && jq --version \
  && uv --version && sqlc version && gofumpt --version \
  && gitleaks version \
  && golangci-lint version && biome --version && jscpd --version \

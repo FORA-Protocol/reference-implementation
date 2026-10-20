@@ -1,0 +1,10 @@
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  // The oracle sidecar follows the edge worker's rules: one rule set for the
+  // repository's TypeScript, kept in one file.
+  "extends": ["../../../src/edge/biome.jsonc"],
+  "files": {
+    "include": ["*.json", "*.jsonc", "src/**"],
+    "ignore": ["node_modules", "package-lock.json"]
+  }
+}

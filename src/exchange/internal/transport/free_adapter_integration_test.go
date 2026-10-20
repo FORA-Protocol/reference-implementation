@@ -15,6 +15,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	rwtestutil "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/testutil"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
@@ -32,7 +33,7 @@ func TestFreeAdapter_DropInForExchangeService(t *testing.T) {
 
 	// Seed catalog via CatalogService.
 	if _, err := h.catalogClient.PushResources(ctx, connect.NewRequest(newPushRequest(h.tenantID, "agent-free", []*forav1.ResourceEntry{{
-		Domain: h.tenantDomain, Path: "/articles/free",
+		Domain: h.siteDomain, Path: "/articles/free",
 		// A priced term is required for an offer; the FreeAdapter
 		// ignores the amount but the entry still needs a real term to price.
 		Terms: []*forav1.LicenseTerm{seedPricedTerm()},
@@ -41,7 +42,7 @@ func TestFreeAdapter_DropInForExchangeService(t *testing.T) {
 	}
 
 	// Discover to get the signed offer.
-	discovered, err := h.exchangeClient.DiscoverResources(ctx, connect.NewRequest(newResourceQuery(newRequester("agent-free", "agent.example"), []string{"https://" + h.tenantDomain + "/articles/free"})))
+	discovered, err := h.exchangeClient.DiscoverResources(ctx, connect.NewRequest(newResourceQuery(newRequester("agent-free", "agent.example"), []string{"https://" + h.siteDomain + "/articles/free"})))
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}
@@ -102,7 +103,7 @@ type freeAdapterHarness struct {
 	exchangeClient foraconnect.ExchangeServiceClient
 	catalogClient  foraconnect.CatalogServiceClient
 	tenantID       string
-	tenantDomain   string
+	siteDomain     string
 	// callerPriv signs the body offer-acceptance with agent-free's registered
 	// key.
 	callerPriv ed25519.PrivateKey
@@ -112,7 +113,7 @@ func newFreeAdapterHarness(t *testing.T) *freeAdapterHarness {
 	t.Helper()
 	fx := setupExchangeTestDB(t, "agent-free")
 	ctx, logger, pool, queries, keystore := fx.ctx, fx.logger, fx.pool, fx.queries, fx.keystore
-	tenantID, tenantDomain := fx.tenantID, fx.tenantDomain
+	tenantID, siteDomain := fx.tenantID, fx.siteDomain
 
 	offerSigner, err := signing.GenerateEd25519Signer()
 	if err != nil {
@@ -123,8 +124,8 @@ func newFreeAdapterHarness(t *testing.T) *freeAdapterHarness {
 	// Sign with the seeded agent's key so the verified key matches the pinned
 	// agents-row key for callerID (identity↔key binding).
 	callerPub, callerPriv := fx.agentPub, fx.agentPriv
-	registry := newAllowAllRegistry()
-	registry.put(callerID, callerPub)
+	registry := exchangetest.NewRegistry()
+	registry.Put(callerID, callerPub)
 	manifests := newAllowAllManifestCache(callerID)
 
 	srv := startExchangeServer(t, exchangeServerDeps{
@@ -135,7 +136,7 @@ func newFreeAdapterHarness(t *testing.T) *freeAdapterHarness {
 		// activation policy from, so agent-free can billing-register
 		// before its paid transaction. billingRefGen stays nil → uuid (the
 		// FreeAdapter keeps no ledger, so the ref value is never asserted).
-		defaultTenantDomain: tenantDomain,
+		defaultTenantDomain: harnessExchangeDomain,
 	})
 	if err := srv.catalogSvc.Bootstrap(ctx); err != nil {
 		t.Fatalf("catalog bootstrap: %v", err)
@@ -154,7 +155,7 @@ func newFreeAdapterHarness(t *testing.T) *freeAdapterHarness {
 		exchangeClient: exchangeClient,
 		catalogClient:  foraconnect.NewCatalogServiceClient(signingClient, srv.server.URL, connect.WithGRPC()),
 		tenantID:       tenantID,
-		tenantDomain:   tenantDomain,
+		siteDomain:     siteDomain,
 		callerPriv:     callerPriv,
 	}
 }

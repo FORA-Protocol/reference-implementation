@@ -8,6 +8,19 @@
 	# real environment.
 	acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
 %{ endif ~}
+%{ if acme_ca != null ~}
+	# The CA chosen by the operator, for example while Let's Encrypt
+	# rate-limits these hostnames. It replaces Caddy's default issuers.
+	acme_ca ${acme_ca}
+%{ endif ~}
+%{ if acme_eab ~}
+	# External Account Binding for that CA. Both values come from Caddy's
+	# environment (the compose file), so this file holds no secret.
+	acme_eab {
+		key_id {$ACME_EAB_KEY_ID}
+		mac_key {$ACME_EAB_MAC_KEY}
+	}
+%{ endif ~}
 	# Agent directories live on subdomains that do not exist until a developer
 	# signs up, so their certificates cannot be provisioned ahead of time.
 	# on-demand issuance mints one per subdomain on its first request.
@@ -28,19 +41,16 @@ ${exchange_hostname} {
 %{ if terms_enabled ~}
 	# Terms revisions, served from the directory cloud-init writes and the
 	# compose bundle mounts into this container. handle_path, not handle:
-	# handle matches WITHOUT stripping the prefix, so /terms/revision-1.txt
-	# would be looked for at /srv/exchange-terms/terms/revision-1.txt.
+	# handle matches WITHOUT stripping the public document prefix.
 	#
-	# Paths are immutable and revisioned. Never collapse them to a mutable
-	# /terms — a digest published against a replaced document identifies
-	# nothing, and registrations accepted under the old one stop resolving.
-	handle_path /terms/* {
+	# Terms revisions are immutable; privacy.txt is the current privacy notice.
+	handle_path ${legal_path}/* {
 		root * /srv/exchange-terms
 		file_server
 	}
 
 	# Wrapped because the terms route above is a handler block: an unwrapped
-	# reverse_proxy alongside it would swallow /terms/* before file_server saw
+	# reverse_proxy alongside it would swallow document requests before file_server saw
 	# it. This arm exists only when terms are configured — the else arm below
 	# keeps the rendering byte-identical for every deployment that has none.
 	handle {
@@ -60,6 +70,18 @@ ${broker_hostname} {
 ${identity_hostname} {
 	reverse_proxy identity:8083
 }
+%{ if mcp_split ~}
+
+# The MCP endpoint under its own name. Same container, same routes: only the
+# agent-directory routes dispatch on the Host header, /mcp and the OAuth
+# routes answer on any name. What ties this name to the service is the token
+# audience in the compose file, which the endpoint advertises as its protected
+# resource. Kept out of the wildcard block below so the certificate is issued
+# at startup, not on demand.
+${mcp_hostname} {
+	reverse_proxy identity:8083
+}
+%{ endif ~}
 
 # Agent Web Bot Auth directories, one subdomain per provisioned agent. The
 # service dispatches on the Host header and 404s anything that is not a single
@@ -75,8 +97,50 @@ ${identity_hostname} {
 
 # Upstream OIDC provider. Public because the developer sign-up flow redirects
 # a browser here, and because the issuer string must resolve identically for
-# that browser and for the Identity Service validating the tokens.
-${zitadel_hostname} {
+# that browser and for the Identity Service validating the tokens. With the
+# publisher console on, the publishers' instance of the same Zitadel answers
+# at its own hostname from this site: Zitadel picks the instance by hostname.
+${zitadel_hostname}%{ if console_login_hostname != null }, ${console_login_hostname}%{ endif } {
+%{ if system_api_enabled ~}
+	# The System API user holds SYSTEM_OWNER. That role creates and deletes
+	# instances through the System API, and it sets the system-wide features
+	# of the FeatureService, which every instance follows: one of them sends
+	# every sign-in to another login page. These are all the routes Zitadel
+	# v3.4.9 opens to a system permission, over REST and over gRPC. Nothing
+	# outside the VM calls them; the bootstrap reaches the System API over the
+	# compose network. Caddy compares paths decoded and ignoring case.
+	@system {
+		path /system/* /zitadel.system.v1.SystemService/*
+		path /v2/features/system /v2/features/system/* /v2beta/features/system /v2beta/features/system/*
+		path /zitadel.feature.v2.FeatureService/SetSystemFeatures /zitadel.feature.v2.FeatureService/ResetSystemFeatures /zitadel.feature.v2.FeatureService/GetSystemFeatures
+		path /zitadel.feature.v2beta.FeatureService/SetSystemFeatures /zitadel.feature.v2beta.FeatureService/ResetSystemFeatures /zitadel.feature.v2beta.FeatureService/GetSystemFeatures
+	}
+	respond @system 404
+%{ endif ~}
+	# Override each instance's stylesheet; import the pinned upstream CSS
+	# through the same route with fora-original=1. Auth HTML is never rewritten.
+	@developer_css {
+		host ${zitadel_hostname}
+		path /ui/login/resources/themes/zitadel/css/zitadel.css
+		not query fora-original=1
+	}
+	header @developer_css Content-Type "text/css; charset=utf-8"
+	header @developer_css Cache-Control "no-cache"
+	respond @developer_css <<FORA_DEVELOPER_CSS
+${developer_login_css}
+FORA_DEVELOPER_CSS
+%{ if console_login_hostname != null ~}
+	@publisher_css {
+		host ${console_login_hostname}
+		path /ui/login/resources/themes/zitadel/css/zitadel.css
+		not query fora-original=1
+	}
+	header @publisher_css Content-Type "text/css; charset=utf-8"
+	header @publisher_css Cache-Control "no-cache"
+	respond @publisher_css <<FORA_CSS
+${publisher_login_css}
+FORA_CSS
+%{ endif ~}
 	# h2c: the Zitadel console talks gRPC-Web to the backend, which needs
 	# HTTP/2 on a connection Caddy is not terminating TLS on. Plain HTTP/1.1
 	# proxying serves the login pages but breaks the console.
@@ -94,18 +158,51 @@ ${origin_hostname} {
 	reverse_proxy publisher:80
 }
 %{ endif ~}
-%{ for wba_hostname in static_wba_hostnames }
+%{ if onboarding_hostname != null }
+# Onboarding preview service, under one path prefix. handle, not handle_path:
+# the service mounts its routes under /onboarding and expects the prefix
+# forwarded unchanged, so there is no rewriting on either side. Its health
+# route is /onboarding/healthz through here. Everything else on this hostname
+# is 404 on purpose — the prefix is the entire surface.
+${onboarding_hostname} {
+	handle /onboarding/* {
+		reverse_proxy onboarding:8084
+	}
+	respond 404
+}
+%{ endif ~}
+%{ if console_hostname != null ~}
+
+# Publisher console. Every path goes to the service, which serves its pages,
+# /healthz, and its own key directory at
+# /.well-known/http-message-signatures-directory, the address the Exchange
+# verifies the console's calls against.
+${console_hostname} {
+	reverse_proxy console:8085
+}
+%{ endif ~}
+%{ for wba_hostname, wba_site in static_wba_sites }
 # Static Web Bot Auth key directory: the public keys of a signer whose private
 # key deliberately never reaches this VM (an operator-held identity, e.g. the
 # smoke signer). The Exchange and Broker verify that signer's requests by
-# fetching this one path. The document is served from a file cloud-init wrote
-# — never interpolated into this Caddyfile, so no byte of a document can ever
-# parse as proxy configuration.
+# fetching this one path. The Web Bot Auth profile has them take a key only
+# from a response signed by it for this host, so the directory was signed
+# where the key lives and arrives pre-signed: the body is served from a file
+# cloud-init wrote, never interpolated into this Caddyfile, so no byte of a
+# document can ever parse as proxy configuration; the three signature headers
+# below are interpolated, each as a backtick-quoted token, after the variable
+# validation held them to shapes that admit no backtick, brace or newline.
+# The Range header is dropped so the answer is always 200 with the whole body,
+# the bytes the signatures cover.
 ${wba_hostname} {
 	handle /.well-known/http-message-signatures-directory {
 		root * /srv/wba
 		rewrite * /${wba_hostname}.json
-		header Content-Type application/jwk-set+json
+		request_header -Range
+		header Content-Type application/http-message-signatures-directory+json
+		header Content-Digest `${wba_site.content_digest}`
+		header Signature-Input `${wba_site.signature_input}`
+		header Signature `${wba_site.signature}`
 		file_server
 	}
 	# Everything else — the overlay manifest included — is 404 on purpose:

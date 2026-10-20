@@ -6,10 +6,12 @@ package testutil
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"strings"
 	"sync"
+	"testing"
 )
 
 // DiscardLogger returns a *slog.Logger that drops every record — the standard
@@ -39,9 +41,13 @@ type LogCapture struct {
 // NewLogCapture returns a capture and the logger that writes into it. JSON,
 // because a test asserting on a specific attribute should look for the key
 // rather than for a substring of a formatted line.
+//
+// It records every level, DEBUG included. A service can be run at DEBUG, so a
+// record's level is something a test asserts by reading the "level" key — the
+// capture must not hide a record just because it sits below INFO.
 func NewLogCapture() (*LogCapture, *slog.Logger) {
 	c := &LogCapture{}
-	return c, slog.New(slog.NewJSONHandler(c, nil))
+	return c, slog.New(slog.NewJSONHandler(c, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
 // Write makes the capture the handler's destination. It is not called by tests.
@@ -69,4 +75,57 @@ func (c *LogCapture) Find(event string) []string {
 		}
 	}
 	return out
+}
+
+// Records returns the captured records whose msg is exactly event, decoded, so
+// a test reads a record's level and fields by key.
+func (c *LogCapture) Records(tb testing.TB, event string) []map[string]any {
+	tb.Helper()
+	c.mu.Lock()
+	raw := append([]byte(nil), c.buf.Bytes()...)
+	c.mu.Unlock()
+	var out []map[string]any
+	for _, rec := range DecodeRecords(tb, raw) {
+		if rec["msg"] == event {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// AssertLoggedOnce fails the test unless exactly one captured record is event,
+// logged at level, and returns that record so the caller can check its other
+// fields. The count is part of the assertion: a duplicate fails as surely as a
+// record at the wrong level.
+func (c *LogCapture) AssertLoggedOnce(tb testing.TB, event, level string) map[string]any {
+	tb.Helper()
+	recs := c.Records(tb, event)
+	if len(recs) != 1 {
+		tb.Fatalf("%d %s records, want exactly 1: %v", len(recs), event, recs)
+	}
+	if recs[0]["level"] != level {
+		tb.Errorf("%s logged at %v, want %s: %v", event, recs[0]["level"], level, recs[0])
+	}
+	return recs[0]
+}
+
+// DecodeRecords parses output as one JSON log record per line. A line that is
+// not a JSON object fails the test: the services write nothing but records to
+// their log stream, and any other line there is one an operator's log pipeline
+// cannot parse.
+func DecodeRecords(tb testing.TB, output []byte) []map[string]any {
+	tb.Helper()
+	var records []map[string]any
+	for line := range strings.Lines(string(output)) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			tb.Fatalf("output line is not a JSON log record (%v): %q", err, line)
+		}
+		records = append(records, rec)
+	}
+	return records
 }

@@ -1,36 +1,32 @@
 package oauthserver
 
 import (
+	"errors"
 	"net/http"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/oidcup"
 )
 
-// handleCallback is where Zitadel returns. It reopens the sealed authorize context,
-// checks the upstream state, exchanges the code, provisions the identity, and sends
-// the browser on to the consent screen, which is where the downstream code is
-// issued.
+// handleCallback is where Zitadel returns. The shared upstream flow reopens the
+// sealed authorize context, checks the upstream state in constant time and
+// exchanges the code; this handler then provisions the identity and sends the
+// browser on to the consent screen, which is where the downstream code is issued.
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
-	var flow authFlow
-	if err := s.readSealed(r, authFlowCookie, &flow); err != nil {
+	flow, claims, err := s.flow.Finish(w, r)
+	switch {
+	case errors.Is(err, oidcup.ErrNoFlow):
 		userError(w, http.StatusBadRequest, "sign-in session missing or expired; start again")
 		return
-	}
-	s.clearCookie(w, authFlowCookie)
-
-	q := r.URL.Query()
-	if q.Get("state") != flow.UpstreamState {
+	case errors.Is(err, oidcup.ErrStateMismatch):
 		userError(w, http.StatusBadRequest, "sign-in state mismatch")
 		return
-	}
-	if q.Get("error") != "" {
+	case errors.Is(err, oidcup.ErrDenied):
 		// The redirect target is now trusted; report a fixed denial rather than
 		// reflecting the upstream's error string back to the client.
-		redirectError(w, r, flow.RedirectURI, flow.ClientState,
+		s.redirectError(w, r, flow.RedirectURI, flow.ClientState,
 			oauthErr{code: "access_denied", desc: "upstream sign-in was denied"})
 		return
-	}
-
-	claims, err := s.cfg.Upstream.Exchange(r.Context(), q.Get("code"), flow.UpstreamVerifier, flow.UpstreamNonce)
-	if err != nil {
+	case err != nil:
 		logError(r, "oauthserver.callback.exchange", err)
 		userError(w, http.StatusBadGateway, "upstream sign-in failed")
 		return
@@ -42,7 +38,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	logInfo(r, "oauthserver.signin.ok", "subdomain", subdomain)
 
-	csrf, err := randomToken(16)
+	csrf, err := oidcup.RandomToken(16)
 	if err != nil {
 		s.serverError(w, r, "oauthserver.callback.entropy", err)
 		return
@@ -76,5 +72,5 @@ func (s *Server) issueCodeAndRedirect(w http.ResponseWriter, r *http.Request, cg
 		s.unavailableOrServerError(w, r, "oauthserver.code.issue", err)
 		return
 	}
-	redirectSuccess(w, r, cg.redirectURI, code, cg.clientState)
+	s.redirectSuccess(w, r, cg.redirectURI, code, cg.clientState)
 }

@@ -3,6 +3,7 @@ package transport
 import (
 	"net/http"
 
+	foraconnect "github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
 	sdkconnect "github.com/FORA-Protocol/protocol/sdk/go/connect"
 	"github.com/FORA-Protocol/protocol/sdk/go/connectserver"
 	"github.com/FORA-Protocol/protocol/sdk/go/core"
@@ -43,34 +44,42 @@ func BrokerMountOptions(
 		// Zero-valued response fields stay on the wire (platform JSON contract).
 		connectserver.WithEmitUnpopulated(),
 		// The same recipient check the Exchange mounts, from the one shared
-		// definition. Nothing this interceptor sees names a recipient today: the
-		// only agent-facing BrokerService RPC is discovery, and DiscoveryRequest
-		// carries no recipient field, so there is nothing to compare rather than
-		// a comparison that passes. It is mounted so an agent-facing RPC that
-		// gains a recipient later is guarded the day it does rather than the day
-		// somebody remembers.
+		// definition. Nothing this interceptor sees names the Broker today:
+		// DiscoveryRequest carries no recipient field, and the items of a
+		// TransactionRequest sent to ExecuteTransaction name the Exchanges the
+		// Broker routes to, which the interceptor knows not to compare. It is
+		// mounted so an agent-facing RPC that gains a recipient later is guarded
+		// the day it does rather than the day somebody remembers.
 		connectserver.WithInterceptors(audience),
-		// A /fora. request must clear the seam iff it PRESENTS a signature: an
-		// unsigned Resolve reaches the handler, which finds no verified context
-		// and returns the typed Unauthenticated fault (ADR-019 error detail) —
-		// the no-caller negative path the contract tests drive.
+		// A purchase always clears the seam, signed or not, so an unsigned
+		// ExecuteTransaction is refused the way an Exchange refuses one:
+		// UNAUTHENTICATED with request_auth_failure SIGNATURE_MISSING.
+		//
+		// Any other /fora. request clears the seam iff it PRESENTS a signature:
+		// an unsigned Resolve reaches the handler, which finds no verified
+		// context and returns the typed Unauthenticated fault (ADR-019 error
+		// detail) — the no-caller negative path the contract tests drive.
 		connectserver.WithVerifyGate(func(r *http.Request) bool {
-			return r.Header.Get("Signature-Input") != ""
+			return r.URL.Path == foraconnect.BrokerServiceExecuteTransactionProcedure ||
+				r.Header.Get("Signature-Input") != ""
 		}),
+		// The pre-auth read bound every agent-facing body gets. The seam
+		// buffers a signed body to check its Content-Digest before anything
+		// verifies it, so without this cap an unauthenticated caller could make
+		// the Broker hold the SDK's default 4 MiB per request.
+		connectserver.WithMaxRequestBytes(maxAgentBodyBytes),
 		// Audit-log every gate rejection with its outcome: the four the SDK's
 		// own classifier names (replay / broken_chain / hop_budget / signature)
-		// plus body_too_large, which its enum has no value for. That fifth one
-		// is reachable here even though this set names no request cap, because
-		// an unset cap leaves the SDK's own default in force rather than no
-		// bound at all, and a body past it is refused before verification.
+		// plus body_too_large, which its enum has no value for: a body past the
+		// cap set above, refused before verification.
 		//
-		// Reachable for a SIGNED request only, on this service. The observer
-		// runs from inside the verify seam, and the gate above admits an
-		// unsigned request to the handler without entering it, so an unsigned
-		// body past the cap is refused by the same bound and audited by
-		// nothing. Closing that would take a body-cap wrapper outside the seam,
-		// the shape the Exchange's catalog mount uses; the runbook records the
-		// gap rather than the code pretending it is not there.
+		// The cap bounds every request on this mount (the SDK applies it outside
+		// the verify seam), but this observer runs inside the seam, so it records
+		// only what the gate above sends through it: every ExecuteTransaction,
+		// signed or not, and any other request that presents a signature. An
+		// unsigned Resolve past the cap is refused by the same bound and audited
+		// by nothing; the runbook records that gap rather than the code pretending
+		// it is not there.
 		connectserver.WithOnReject(LogHTTPSigReject),
 	}, nil
 }

@@ -6,83 +6,12 @@ package agentid_test
 // outbound directory fetch is aimed at.
 
 import (
-	"net/http"
 	"strings"
 	"testing"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/agentid"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/agentid/agentidtest"
 )
-
-// TestDirectoryFromHeader_acceptedForms pins the two Signature-Agent wire forms.
-// The quoted one is what Web Bot Auth defines the value to be — quoting is not
-// optional in structured fields — and reading it verbatim carried the quotes into
-// the directory URI, where no host could be found and the request was refused.
-func TestDirectoryFromHeader_acceptedForms(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		header string
-		want   string
-	}{
-		{"quoted sf-string (conformant)", `"https://agent.example"`, "https://agent.example"},
-		{"bare token (FORA's own)", "https://agent.example", "https://agent.example"},
-		{"quoted bare host", `"agent.example"`, "agent.example"},
-		{"bare host:port", "identity:8080", "identity:8080"},
-		{"surrounding whitespace", `  "https://agent.example"  `, "https://agent.example"},
-		{"empty", "", ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := agentid.DirectoryFromHeader(tc.header); got != tc.want {
-				t.Errorf("DirectoryFromHeader(%q) = %q; want %q", tc.header, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestDirectoryFromHeader_unsupportedFormsNotUnwrapped pins the refusals as
-// deliberate. Unwrapping the sf-dictionary form would also admit its data: member,
-// which inlines a whole key directory into the header — and key resolution rests on
-// FETCHING the directory from a location the signer had to control. These values
-// pass through unchanged and die at FromDirectory, which finds no host in them.
-func TestDirectoryFromHeader_unsupportedFormsNotUnwrapped(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		header string
-	}{
-		{"sf-dictionary", `agent2="https://agent.example"`},
-		{"inline data: directory", `data:application/http-message-signatures-directory;utf8,{"keys":[]}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := agentid.DirectoryFromHeader(tc.header); got != tc.header {
-				t.Errorf("DirectoryFromHeader(%q) = %q; want it passed through unchanged", tc.header, got)
-			}
-			if _, err := agentid.FromDirectory(tc.header); err == nil {
-				t.Errorf("FromDirectory(%q) accepted an unsupported form as an identity", tc.header)
-			}
-		})
-	}
-}
-
-// TestDirectoryFromHeader_thenFromDirectory covers the two steps as the pipeline
-// they are: whatever form the header arrived in, the identity that comes out is the
-// same host. This is the property every caller downstream depends on.
-func TestDirectoryFromHeader_thenFromDirectory(t *testing.T) {
-	for _, header := range []string{
-		`"https://agent.example"`,
-		"https://agent.example",
-		`"http://agent.example"`,
-		"agent.example",
-		`"agent.example"`,
-	} {
-		got, err := agentid.FromDirectory(agentid.DirectoryFromHeader(header))
-		if err != nil {
-			t.Fatalf("header %q: %v", header, err)
-		}
-		if got != "agent.example" {
-			t.Errorf("header %q resolved to identity %q; want %q", header, got, "agent.example")
-		}
-	}
-}
 
 // TestFromDirectory_collapsesSpellings is the property the ticket asks for: one
 // host is one agent, however the caller spelled it. The scheme was the axis the
@@ -360,8 +289,8 @@ func TestFromDirectory_distinctHostsStayDistinct(t *testing.T) {
 }
 
 // TestFromDirectory_idempotent matters because normalization happens at more than
-// one boundary — the Exchange normalizes what it stores, the Broker normalizes both
-// sides of its self-action comparison, and agentreg normalizes again on a value a
+// one boundary — the Exchange normalizes what it stores, the Broker normalizes the
+// verified caller directory and the execute relay's requester.domain, and agentreg normalizes again on a value a
 // caller already normalized. A second pass must be a no-op, or the boundaries could
 // disagree about an already-normalized value. This is the property that lets the
 // double normalization be a documented no-op rather than a latent bug, so every
@@ -395,36 +324,6 @@ func TestFromDirectory_idempotent(t *testing.T) {
 				t.Errorf("not idempotent: %q -> %q -> %q", ref, once, twice)
 			}
 		})
-	}
-}
-
-// TestDirectoryFromRequest_repeatedHeaderRefused pins the parity that matters at an
-// authentication boundary. A field repeated across two lines contributes BOTH
-// values to the RFC 9421 signature base, joined by ", ", so the signature commits
-// to both. Reading only the first line would derive the identity from one value
-// while the signature covered two — the divergence the SDK's own reader documents
-// and refuses, and this stack has to refuse it identically or a request would
-// authorize differently depending on which door it came through.
-func TestDirectoryFromRequest_repeatedHeaderRefused(t *testing.T) {
-	h := http.Header{}
-	h.Add(agentid.SignatureAgentHeader, `"https://victim.example"`)
-	h.Add(agentid.SignatureAgentHeader, `"https://attacker.example"`)
-
-	directory := agentid.DirectoryFromRequest(h)
-	if _, err := agentid.FromDirectory(directory); err == nil {
-		t.Errorf("a repeated Signature-Agent resolved to an identity (%q); "+
-			"want refusal — the signature committed to both values", directory)
-	}
-	// A single occurrence still reads normally: this refuses ambiguity, not the
-	// header.
-	single := http.Header{}
-	single.Add(agentid.SignatureAgentHeader, `"https://agent.example"`)
-	got, err := agentid.FromDirectory(agentid.DirectoryFromRequest(single))
-	if err != nil {
-		t.Fatalf("single Signature-Agent: %v", err)
-	}
-	if got != "agent.example" {
-		t.Errorf("single Signature-Agent -> %q; want %q", got, "agent.example")
 	}
 }
 

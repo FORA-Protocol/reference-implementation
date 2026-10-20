@@ -7,6 +7,7 @@
 name: fora
 
 services:
+%{ if !external_database ~}
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -32,6 +33,7 @@ services:
       timeout: 3s
       retries: 20
 
+%{ endif ~}
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -56,8 +58,8 @@ services:
     command:
       - |
         set -e
-        [ -f /data/0_0.tigerbeetle ] || /tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development /data/0_0.tigerbeetle
-        exec /tigerbeetle start --addresses=0.0.0.0:3000 --cache-grid=256MiB --development /data/0_0.tigerbeetle
+        [ -f /data/0_0.tigerbeetle ] || /tigerbeetle format --cluster=0 --replica=0 --replica-count=1%{ if tigerbeetle_development } --development%{ endif } /data/0_0.tigerbeetle
+        exec /tigerbeetle start --addresses=0.0.0.0:3000 --cache-grid=${tigerbeetle_cache_grid}%{ if tigerbeetle_development } --development%{ endif } /data/0_0.tigerbeetle
     security_opt:
       - "seccomp=unconfined"
     cap_add:
@@ -80,14 +82,14 @@ services:
       - "seccomp=unconfined"
 %{ endif }
     environment:
-      EXCHANGE_DSN: "postgres://fora:${postgres_password}@postgres:5432/fora?sslmode=disable"
+      EXCHANGE_DSN: "${database_dsns.fora}"
       # System of Record — its OWN logical database, a second pool distinct from
       # EXCHANGE_DSN above. FORA_SOR_ADAPTER defaults to postgres and there is
       # no "off", so this is required: unset, the Exchange exits at boot with
       # "sor: EXCHANGE_SOR_DSN is required for FORA_SOR_ADAPTER=postgres". The
       # database is created by the init SQL (see main.tf locals.databases) —
       # the Exchange migrates it but never creates it.
-      EXCHANGE_SOR_DSN: "postgres://fora:${postgres_password}@postgres:5432/sor?sslmode=disable"
+      EXCHANGE_SOR_DSN: "${database_dsns.sor}"
       EXCHANGE_ADDR: ":8081"
       # Source addresses allowed to call the admin listener. An empty value
       # denies EVERY request (the middleware is fail-closed), so leaving this
@@ -106,6 +108,15 @@ services:
       # Broker fetches https://<domain>/.well-known/fora.json from it.
       EXCHANGE_DOMAIN: "${exchange_hostname}"
       EXCHANGE_PUBLIC_ORIGIN: "https://${exchange_hostname}"
+%{ if terms_currency != null ~}
+      # The denomination publishers' licensing is priced in. The catalog
+      # importer below gets the same two values: it prices imported entries in
+      # them, and they must be what the console previewed to the publisher.
+      EXCHANGE_TERMS_CURRENCY: "${terms_currency}"
+%{ endif ~}
+%{ if terms_unit != null ~}
+      EXCHANGE_TERMS_UNIT: "${terms_unit}"
+%{ endif ~}
       # The tenant whose activation policy agent Register reads. It is the
       # PUBLISHER's domain, not the Exchange's: the seed step creates the tenant
       # row under the publisher hostname. Left unset the binary falls back to
@@ -164,6 +175,15 @@ services:
       # the same failure.
       EXCHANGE_TERMS_DIGEST: "${terms_digest}"
 %{ endif ~}
+%{ if console_enabled ~}
+      # Turns the publisher console's routes on. The first names the console's
+      # key directory, at the console's own origin, which the console's calls
+      # are verified against. The second is the contributor host every
+      # publisher's file must name, the same value the console writes into
+      # it. The Exchange refuses to boot with the first set and not the second.
+      EXCHANGE_CONSOLE_WELLKNOWN_URL: "${console_origin}/.well-known/http-message-signatures-directory"
+      EXCHANGE_CATALOG_CONTRIBUTOR_HOST: "${console_contributor_host}"
+%{ endif ~}
     ports:
       # The admin listener (ADMIN_ADDR, default :8082). The container-side 8082
       # is this container's own port — the Broker's :8082 belongs to a different
@@ -179,6 +199,9 @@ services:
       # compromise of one service does not hand over another service's signing
       # identity.
       - /opt/fora/keys/exchange:/keys:ro
+%{ if external_database ~}
+      - /opt/fora/database/ca.pem:/db-ca/ca.pem:ro
+%{ endif ~}
     # The image is distroless (no shell/curl), so the probe is the service
     # binary itself (`exchange healthcheck` GETs the local /healthz). While
     # the service is still coming up on first boot the container reports
@@ -190,20 +213,68 @@ services:
       timeout: 3s
       retries: 20
     depends_on:
+%{ if !external_database ~}
       postgres:
         condition: service_healthy
+%{ endif ~}
 %{ if tigerbeetle_enabled }
       tigerbeetle:
         condition: service_started
 %{ endif }
       broker:
         condition: service_healthy
+%{ if importer_enabled ~}
+
+  # The automatic catalog importer: the Exchange image with its second
+  # entrypoint, and its OWN key directory. It is a job, not a daemon: the
+  # systemd timer cloud-init installs runs it as
+  #   docker compose --profile importer run --rm importer
+  # and the profile keeps `docker compose up` from starting it. A separate
+  # service rather than `docker compose run` on the exchange service, on
+  # purpose: `run` inherits the service's volumes, which would hand the
+  # Exchange process the contributor key the importer signs with.
+  importer:
+    image: ${exchange_image}
+    entrypoint: ["/fora-import"]
+    profiles: ["importer"]
+    restart: "no"
+    environment:
+      EXCHANGE_DSN: "${database_dsns.fora}"
+      EXCHANGE_DOMAIN: "${exchange_hostname}"
+      # Dialled at the public hostname through Caddy, like every other
+      # contributor: the push is signed over that authority and verified
+      # against it.
+      IMPORT_EXCHANGE_URL: "https://${exchange_hostname}"
+      IMPORT_KEY_FILE: "/keys/contributor-key.json"
+      # Per-run bounds, applied to one listing at a time. These are the
+      # binary's own defaults, written out so an operator sees and changes
+      # them in one place.
+      IMPORT_REQUEST_TIMEOUT: "10s"
+      IMPORT_MAX_DOC_BYTES: "1048576"
+      IMPORT_MAX_DOCUMENTS: "100"
+      IMPORT_MAX_RESOURCES: "10000"
+      IMPORT_LISTING_TIMEOUT: "5m"
+%{ if terms_currency != null ~}
+      # The Exchange service's denomination, from the same inputs: the price a
+      # publisher saw in the console is the price their pages are imported at.
+      EXCHANGE_TERMS_CURRENCY: "${terms_currency}"
+%{ endif ~}
+%{ if terms_unit != null ~}
+      EXCHANGE_TERMS_UNIT: "${terms_unit}"
+%{ endif ~}
+    volumes:
+      # Only the contributor key, and only here.
+      - /opt/fora/keys/importer:/keys:ro
+%{ if external_database ~}
+      - /opt/fora/database/ca.pem:/db-ca/ca.pem:ro
+%{ endif ~}
+%{ endif ~}
 
   broker:
     image: ${broker_image}
     restart: unless-stopped
     environment:
-      BROKER_DSN: "postgres://fora:${postgres_password}@postgres:5432/fora?sslmode=disable"
+      BROKER_DSN: "${database_dsns.fora}"
       REDIS_URL: "redis://redis:6379/0"
       BROKER_ADDR: ":8082"
       BROKER_ID: "${broker_id}"
@@ -221,15 +292,33 @@ services:
       # A key FILE, not a BROKER_ED25519_SEED env value: this compose file is
       # world-readable on the VM, the mounted key directory is not. The loader
       # wants a raw 64-byte ed25519 key as the PEM payload — a shape openssl
-      # does not write; gen-staging-keys.sh derives it from the seed into
+      # does not write; gen-keys.sh derives it from the seed into
       # keys/broker-identity-key.pem.
       BROKER_ED25519_KEY_FILE: "/keys/broker-identity-key.pem"
       BROKER_REVOCATION_URL: "https://${broker_hostname}/.well-known/fora-key-revocations.json"
 %{ if exa_api_key != null }
       EXA_API_KEY: "${exa_api_key}"
 %{ endif }
+%{ if query_discovery != null ~}
+      # Catalog search: a free-text query is matched against this feed through
+      # the model. The Broker's key pair for the model is a file in its own
+      # key directory, so it is not in this environment; the metadata service
+      # is never asked.
+      BROKER_QUERY_DISCOVERY: "on"
+      BROKER_QUERY_CATALOG_FILE: "/catalog/feed.jsonl"
+      BROKER_QUERY_MODEL: "${query_discovery.model}"
+      AWS_REGION: "${query_discovery.aws_region}"
+      AWS_SHARED_CREDENTIALS_FILE: "/keys/aws-credentials"
+      AWS_EC2_METADATA_DISABLED: "true"
+%{ endif ~}
     volumes:
       - /opt/fora/keys/broker:/keys:ro
+%{ if query_discovery != null ~}
+      - /opt/fora/catalog/feed.jsonl:/catalog/feed.jsonl:ro
+%{ endif ~}
+%{ if external_database ~}
+      - /opt/fora/database/ca.pem:/db-ca/ca.pem:ro
+%{ endif ~}
     # Same distroless-image constraint as the exchange: the binary is the probe.
     healthcheck:
       test: ["CMD", "/broker", "healthcheck"]
@@ -237,8 +326,10 @@ services:
       timeout: 3s
       retries: 20
     depends_on:
+%{ if !external_database ~}
       postgres:
         condition: service_healthy
+%{ endif ~}
       redis:
         condition: service_healthy
 
@@ -248,6 +339,7 @@ services:
   # agent's Web Bot Auth directory on its own subdomain, and exposes the MCP
   # endpoint agents connect to.
 
+%{ if vault_mode == "dev" ~}
   # Agent key custody. DEV MODE, and that is a deliberate staging trade-off:
   # the store is in-memory, so restarting this container destroys every agent
   # key it holds and the developers who own them must sign up again. Dev mode
@@ -268,7 +360,90 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+%{ else ~}
+  # Agent key custody, SERVER MODE: raft storage on the vaultdata volume,
+  # TLS and the server configuration from /opt/fora/vault on the host. The
+  # stack that turns server mode on writes those three directories, as
+  # deploy/storage/vault/DEPLOYMENT.md describes; this bundle only mounts them
+  # (server config as a read-only directory — the image's entrypoint chowns
+  # it and logs a warning about the read-only mount, which is harmless).
+  # `server` alone: the entrypoint appends -config=/vault/config itself.
+  #
+  # Host networking so the seal (a cloud KMS) and the Proxy's auth below reach
+  # the instance metadata service in one hop; the bridge would add a second.
+  # Nothing else in the bundle addresses this container by name — the
+  # Identity Service talks to the Proxy's socket, never to Vault directly.
+  identity-vault:
+    image: hashicorp/vault:1.20
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - "IPC_LOCK"
+    environment:
+      # For the healthcheck's CLI call: Vault itself listens where the server
+      # config says, and the config is what puts it on 127.0.0.1:8200 TLS.
+      VAULT_ADDR: "https://127.0.0.1:8200"
+      VAULT_CACERT: "/vault/tls/vault.crt"
+    command: ["server"]
+    volumes:
+      - vaultdata:/vault/file
+      - vaultlogs:/vault/logs
+      - /opt/fora/vault/server:/vault/config:ro
+      - /opt/fora/vault/tls:/vault/tls:ro
+    # `vault status` exits 2 when Vault is sealed or not yet initialised, and
+    # it IS sealed on first boot until the operator initialises it. That
+    # counts as healthy here: the container answers. Only a Vault that does
+    # not answer at all (exit 1) is unhealthy. Compose reads $VAR itself, so
+    # the shell's `$?` is doubled to survive its interpolation.
+    healthcheck:
+      test: ["CMD-SHELL", "vault status >/dev/null 2>&1; rc=$$?; [ $$rc -eq 0 ] || [ $$rc -eq 2 ]"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
+  # Vault Proxy: authenticates to the Vault above on the Identity Service's
+  # behalf (the auth method and its role are in the proxy config the stack
+  # writes) and proxies its API calls, so the service holds no Vault
+  # token at all. The listener is a Unix socket in the vaultproxy volume,
+  # mounted by this service and by identity ONLY: no TCP port, so no other
+  # container in the bundle can borrow the Identity Service's Vault access.
+  # The config is read from /vault/proxy, deliberately NOT /vault/config —
+  # the server loads that whole directory and would refuse a proxy stanza.
+  #
+  # The socket crosses a uid boundary: the image runs vault as uid 100, the
+  # Identity Service is distroless nonroot, uid and gid 65532. The shape
+  # chosen: the proxy process runs as 100:65532, so the socket it creates is
+  # group-owned by 65532, and the proxy config opens it 0660. A fresh named
+  # volume mounted where the image has no directory is root-owned 0755, and
+  # uid 100 could not create the socket in it — so the container starts as
+  # root, hands the socket directory to 100:65532 first, then drops to that
+  # identity with the image's own su-exec. That replaces the image
+  # entrypoint, which only ever chowns the server's directories anyway.
+  # That the Identity Service can connect as 65532 is a deployment-time
+  # check on the host; the template tests only prove who mounts the volume.
+  vault-proxy:
+    image: hashicorp/vault:1.20
+    restart: unless-stopped
+    network_mode: host
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        chown 100:65532 /vault-proxy && chmod 0750 /vault-proxy
+        exec su-exec 100:65532 vault proxy -config=/vault/proxy/proxy.hcl
+    environment:
+      VAULT_ADDR: "https://127.0.0.1:8200"
+      VAULT_CACERT: "/vault/tls/vault.crt"
+    volumes:
+      - /opt/fora/vault/proxy:/vault/proxy:ro
+      - /opt/fora/vault/tls:/vault/tls:ro
+      - vaultproxy:/vault-proxy
+    depends_on:
+      identity-vault:
+        condition: service_started
+%{ endif ~}
+
+%{ if !external_database ~}
   # Zitadel's own database, deliberately not the `fora` cluster: Zitadel runs
   # heavy schema migrations under its own roles, and keeping them off the
   # cluster that serves the Exchange and Broker means neither can take the
@@ -288,6 +463,7 @@ services:
       timeout: 3s
       retries: 20
 
+%{ endif ~}
   # Upstream OIDC provider for developer sign-up. ExternalDomain/Secure
   # describe the PUBLIC address because the OIDC issuer must be one URL
   # everywhere: the developer's browser is redirected to it, and the Identity
@@ -301,7 +477,7 @@ services:
     # deployment pre-creates the volume with the image's own uid instead.
     user: "0"
     command:
-      - start-from-init
+      - ${external_database ? "start-from-setup" : "start-from-init"}
       - --masterkey
       - "${zitadel_masterkey}"
       - --tlsMode
@@ -314,22 +490,28 @@ services:
       ZITADEL_EXTERNALSECURE: "true"
       ZITADEL_PORT: "8080"
       ZITADEL_TLS_ENABLED: "false"
-      ZITADEL_DATABASE_POSTGRES_HOST: zitadel-db
-      ZITADEL_DATABASE_POSTGRES_PORT: "5432"
+      ZITADEL_DATABASE_POSTGRES_HOST: "${external_database ? database_host : "zitadel-db"}"
+      ZITADEL_DATABASE_POSTGRES_PORT: "${external_database ? database_port : 5432}"
       ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
       ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
       ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: "${zitadel_db_password}"
+%{ if external_database ~}
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: verify-full
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_ROOTCERT: /db-ca/ca.pem
+%{ else ~}
       ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
       ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: zitadel
       ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: "${zitadel_db_password}"
       ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+%{ endif ~}
 %{ if smtp_enabled ~}
       # Outbound mail, for the confirmation code self-registration sends. Read
-      # ONLY while Zitadel creates its instance on the first start: after that
-      # the provider is stored in Zitadel's database and these values are
-      # ignored. Editing them here changes the VM's user data, which rebuilds
-      # the whole deployment; editing the running provider is a console or
-      # Admin API job.
+      # ONLY while Zitadel creates an instance: on the first start, and when
+      # the System API creates the publishers' instance. After that each
+      # instance's provider is stored in Zitadel's database and these values
+      # are ignored. Editing them here changes the VM's user data, which
+      # rebuilds the whole deployment; editing a running provider is a console
+      # or Admin API job, once per instance.
       #
       # jsonencode on every interpolated value: a JSON string literal is also
       # a valid YAML scalar, so a password holding a quote or a backslash
@@ -341,30 +523,55 @@ services:
       ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_FROM: ${jsonencode(smtp_from)}
       ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_FROMNAME: ${jsonencode(smtp_from_name)}
 %{ endif ~}
+%{ if zitadel_system_api_users != null ~}
+      # The System API user that creates the publishers' instance, and in a
+      # recovery window mints that instance a new bootstrap token. Only the
+      # public half of its key is here; Caddy answers 404 for the System API
+      # on every public hostname, so only the compose network reaches it.
+      ZITADEL_SYSTEMAPIUSERS: ${jsonencode(zitadel_system_api_users)}
+%{ endif ~}
     volumes:
       - /opt/fora/zitadel/init-steps.yaml:/etc/zitadel/init-steps.yaml:ro
+%{ if external_database ~}
+      - /opt/fora/database/ca.pem:/db-ca/ca.pem:ro
+%{ endif ~}
       # First init writes the bootstrap machine user's PAT here; the identity
       # bootstrap script reads it, and writes the minted OIDC client id and
       # secret back into the same volume for the identity service to read.
       - zitadelbootstrap:/bootstrap
+%{ if !external_database ~}
     depends_on:
       zitadel-db:
         condition: service_healthy
+%{ endif ~}
 
   identity:
     image: ${identity_image}
     restart: unless-stopped
     environment:
       IDENTITY_ADDR: ":8083"
-      IDENTITY_DSN: "postgres://fora:${postgres_password}@postgres:5432/identity?sslmode=disable"
+      IDENTITY_DSN: "${database_dsns.identity}"
       # Its own zone: agent directories are served at <slug>.<this>, and the
       # service refuses any host that is not a single label under it.
       IDENTITY_BASE_DOMAIN: "${identity_hostname}"
       IDENTITY_WELLKNOWN_SCHEME: "https"
+%{ if mcp_split ~}
+      # The service's own public origin: the OAuth issuer and the base of the
+      # /callback URL registered with Zitadel — changing it invalidates that
+      # registration. The MCP endpoint is served under its own name, so the
+      # audience of the bearers the service mints, which is also the protected
+      # resource the endpoint advertises, follows that name instead: an MCP
+      # client refuses to sign in when the advertised resource is not the
+      # origin it connected to. Changing the audience invalidates every bearer
+      # issued before the change.
+      IDENTITY_AUTH_ISSUER: "https://${identity_hostname}"
+      IDENTITY_TOKEN_AUDIENCE: "https://${mcp_hostname}"
+%{ else ~}
       # The service's own public origin. It is the OAuth issuer, the audience
       # of the bearers it mints, and the base of the /callback URL registered
       # with Zitadel — changing it invalidates that registration.
       IDENTITY_AUTH_ISSUER: "https://${identity_hostname}"
+%{ endif ~}
       IDENTITY_OIDC_ISSUER: "https://${zitadel_hostname}"
       # Minted by the identity bootstrap script into the shared volume. Until
       # it has run, this container crash-loops on the missing files;
@@ -377,9 +584,16 @@ services:
       # session and every bearer it has issued on each restart.
       IDENTITY_SESSION_KEY: "${identity_session_key}"
       IDENTITY_TOKEN_SIGNING_KEY: "${identity_token_signing_key}"
+%{ if vault_mode == "dev" ~}
       VAULT_ADDR: "http://identity-vault:8200"
       VAULT_TOKEN: "${vault_root_token}"
-      IDENTITY_KV_MOUNT: "secret"
+%{ else ~}
+      # The Vault Proxy's socket, and no VAULT_TOKEN: the Proxy authenticates
+      # and attaches its own token to every proxied call. The Vault client
+      # library dials unix:// addresses natively.
+      VAULT_ADDR: "unix:///vault-proxy/proxy.sock"
+%{ endif ~}
+      IDENTITY_KV_MOUNT: "${vault_kv_mount}"
       # The one in-network hop the MCP tools still take. Discovery goes to the
       # Broker; everything Exchange-facing is resolved per call.
       IDENTITY_MCP_BROKER_URL: "http://broker:8082"
@@ -392,6 +606,14 @@ services:
       IDENTITY_MCP_WELLKNOWN_SCHEME: "https"
     volumes:
       - zitadelbootstrap:/bootstrap:ro
+%{ if external_database ~}
+      - /opt/fora/database/ca.pem:/db-ca/ca.pem:ro
+%{ endif ~}
+%{ if vault_mode == "server" ~}
+      # Read-only is enough to connect to the Proxy's socket: connecting is
+      # a permission check on the socket inode, not a write to the mount.
+      - vaultproxy:/vault-proxy:ro
+%{ endif ~}
     # The image is distroless (no shell/curl), so the probe is the service
     # binary itself (`identity healthcheck` GETs the local /healthz) — same
     # shape as the Exchange and Broker. During the documented first-boot
@@ -403,10 +625,26 @@ services:
       timeout: 3s
       retries: 20
     depends_on:
+%{ if !external_database ~}
       postgres:
         condition: service_healthy
+%{ endif ~}
+%{ if vault_mode == "dev" ~}
       identity-vault:
         condition: service_healthy
+%{ else ~}
+      # service_started, NOT service_healthy, for both: on first boot Vault
+      # is sealed until the operator initialises it, and the Proxy cannot
+      # authenticate before that. Waiting on health here would hold the
+      # Identity Service back forever. The service does not probe Vault at
+      # start-up: it comes up, reports healthy, and its key operations fail
+      # until the Proxy is listening on the socket — then they succeed with
+      # no restart needed.
+      identity-vault:
+        condition: service_started
+      vault-proxy:
+        condition: service_started
+%{ endif ~}
       zitadel:
         condition: service_started
 
@@ -422,9 +660,121 @@ services:
       timeout: 3s
       retries: 20
 %{ endif }
+%{ if onboarding_enabled }
+  # Onboarding preview service: the server behind the public publisher
+  # onboarding page. No state, no other service, reached through Caddy only —
+  # no ports: mapping, so 8084 stays on the compose network. Its address guard
+  # stays armed: the two environment overrides that drop the private-address
+  # check before a dial and permit plain http are deliberately not inputs of
+  # this module, because with either set a visitor can point the service at
+  # this host's own network. Their names never appear in the rendered bundle,
+  # and the module's tests assert exactly that.
+  onboarding:
+    image: ${jsonencode(onboarding_image)}
+    restart: unless-stopped
+    environment:
+      ONBOARDING_ADDR: ":8084"
+      # Caddy forwards this prefix unchanged; the service mounts its routes
+      # under it, so there is no rewrite on either side.
+      ONBOARDING_PATH_PREFIX: "/onboarding"
+      ONBOARDING_ALLOWED_ORIGINS: ${jsonencode(onboarding_allowed_origins)}
+      ONBOARDING_EXCHANGE_DOMAIN: ${jsonencode(onboarding_exchange_domain)}
+      ONBOARDING_EXCHANGE_ENDPOINT: ${jsonencode(onboarding_exchange_endpoint)}
+      # Caddy terminates TLS in front: read the forwarded scheme and spend the
+      # rate-limit budget from the forwarded address. Unset, every request
+      # arrives from the proxy and the whole internet shares one bucket.
+      FORA_TRUST_PROXY_HEADERS: "true"
+%{ if onboarding_contact_enabled ~}
+      # The contact form's relay: the same SES sender and credential Zitadel
+      # uses. The visitor's address is Reply-To, never the sender.
+      ONBOARDING_CONTACT_RECIPIENTS: ${jsonencode(onboarding_contact_recipients)}
+      ONBOARDING_CONTACT_FROM: ${jsonencode(onboarding_contact_from)}
+      ONBOARDING_SMTP_ADDR: ${jsonencode(smtp_host)}
+      ONBOARDING_SMTP_USERNAME: ${jsonencode(smtp_user)}
+      ONBOARDING_SMTP_PASSWORD: ${jsonencode(smtp_password)}
+%{ endif ~}
+    healthcheck:
+      # Distroless image: no shell, no curl. The binary is its own probe.
+      test: ["CMD", "/onboarding", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+%{ endif }
+%{ if console_enabled ~}
+  # Publisher console: the web application a publisher signs in to, registers
+  # their sites through, and downloads their setup files from. Reached through
+  # Caddy only: no ports: mapping, so 8085 stays on the compose network. Its
+  # address guard stays on, because it reads pages from publishers' own sites:
+  # the overrides that drop the private-address check and permit plain http
+  # are not inputs of this module.
+  console:
+    image: ${jsonencode(console_image)}
+    restart: unless-stopped
+    environment:
+      CONSOLE_ADDR: ":8085"
+      CONSOLE_DSN: "${database_dsns.console}"
+      # Generated once and held in Terraform state. The console has no
+      # per-process fallback, and a new value signs every publisher out.
+      CONSOLE_SESSION_KEY: "${console_session_key}"
+      CONSOLE_SIGNING_KEY_FILE: "/keys/console-signing-key.pem"
+      # The console's public origin: the Exchange reads its key directory
+      # here, and the sign-in redirect below returns here.
+      CONSOLE_PUBLIC_ORIGIN: "${console_origin}"
+      # The publishers' own Zitadel instance at its public issuer, through
+      # Caddy, as the Identity Service reaches the developers' instance. It is
+      # the only issuer the console trusts. The client id and secret are read
+      # from a host directory of the console's own, never the shared bootstrap
+      # volume: that volume also holds the developer instance's admin token.
+      # Until both files exist the console exits at boot, and
+      # restart: unless-stopped starts it again.
+      CONSOLE_OIDC_ISSUER: "${console_login_url}"
+      CONSOLE_OIDC_CLIENT_ID_FILE: "/console-oidc/console_client_id"
+      CONSOLE_OIDC_CLIENT_SECRET_FILE: "/console-oidc/console_client_secret"
+      CONSOLE_OIDC_REDIRECT_URL: "${console_origin}/auth/callback"
+      CONSOLE_OIDC_SCOPES: "openid profile email"
+      # The public Exchange, not an internal address: the console also writes
+      # these values into every publisher's fora.json.
+      CONSOLE_EXCHANGE_URL: "https://${exchange_hostname}"
+      CONSOLE_EXCHANGE_DOMAIN: "${exchange_hostname}"
+      CONSOLE_EXCHANGE_WBA_URL: "https://${exchange_hostname}/.well-known/http-message-signatures-directory"
+      CONSOLE_CONTRIBUTOR_HOST: "${console_contributor_host}"
+      CONSOLE_SUPPORT_EMAIL: ${jsonencode(console_support_email)}
+%{ if console_default_rate != null ~}
+      CONSOLE_DEFAULT_RATE: "${console_default_rate}"
+%{ endif ~}
+    volumes:
+      # Only the console's own key directory, and only here.
+      - /opt/fora/keys/console:/keys:ro
+      - /opt/fora/console-oidc:/console-oidc:ro
+%{ if external_database ~}
+      - /opt/fora/database/ca.pem:/db-ca/ca.pem:ro
+%{ endif ~}
+    healthcheck:
+      # Distroless image: no shell, no curl. The binary is its own probe.
+      test: ["CMD", "/console", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # Caddy must not wait on the console: at boot the console reads the login
+    # provider's discovery document through Caddy.
+    depends_on:
+%{ if !external_database ~}
+      postgres:
+        condition: service_healthy
+%{ endif ~}
+      zitadel:
+        condition: service_started
+
+%{ endif ~}
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+%{ if acme_eab_key_id != null ~}
+    # The EAB credentials the Caddyfile's acme_eab block reads.
+    environment:
+      ACME_EAB_KEY_ID: ${jsonencode(acme_eab_key_id)}
+      ACME_EAB_MAC_KEY: ${jsonencode(acme_eab_mac_key)}
+%{ endif ~}
     ports:
       - "80:80"
       - "443:443"
@@ -441,7 +791,13 @@ services:
       # the host — without this mount file_server would serve nothing.
       - /opt/fora/exchange-terms:/srv/exchange-terms:ro
 %{ endif ~}
+%{ if caddy_data_dir != null ~}
+      # The certificates and the ACME account, on the EBS volume cloud-init
+      # mounts here, so they outlive the VM. Read-write: Caddy renews in place.
+      - ${caddy_data_dir}:/data
+%{ else ~}
       - caddydata:/data
+%{ endif ~}
       - caddyconfig:/config
     depends_on:
       # Deliberately NOT service_healthy: the Exchange's first boot needs
@@ -468,17 +824,32 @@ networks:
         - subnet: ${network_subnet}
 
 volumes:
+%{ if !external_database ~}
   pgdata:
+%{ endif ~}
   redisdata:
 %{ if tigerbeetle_enabled }
   tbdata:
 %{ endif }
+%{ if !external_database ~}
   zitadeldata:
+%{ endif ~}
   # Zitadel's first-init PAT plus the OIDC client id/secret the bootstrap
-  # script mints from it. Wiping this without also wiping zitadeldata (or the
-  # other way round) leaves the two out of step — treat them as one unit.
+  # script mints from it. Keep it consistent with the Zitadel database
+  # when restoring, whether that database is local or external.
   zitadelbootstrap:
+%{ if caddy_data_dir == null ~}
   caddydata:
+%{ endif ~}
   caddyconfig:
+%{ if vault_mode == "dev" ~}
   # identity-vault runs in dev mode and stores nothing on disk, so it has no
   # volume here. That is what makes a restart lose the agent keys.
+%{ else ~}
+  # Vault's raft store — the ONLY copy of every agent key — and its audit
+  # log. Both must sit on storage that outlives the host.
+  vaultdata:
+  vaultlogs:
+  # The Proxy's socket directory: mounted by vault-proxy and identity only.
+  vaultproxy:
+%{ endif ~}

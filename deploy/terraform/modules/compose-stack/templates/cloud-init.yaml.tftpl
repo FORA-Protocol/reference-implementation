@@ -30,10 +30,21 @@ write_files:
     permissions: "0644"
     content: |
       ${indent(6, caddyfile)}
+%{ if !external_database ~}
   - path: /opt/fora/init-sql/10-create-exchange-dbs.sql
     permissions: "0644"
     content: |
       ${indent(6, init_sql)}
+%{ else ~}
+  - path: /opt/fora/database/connection.json
+    permissions: "0600"
+    content: |
+      ${indent(6, database_config_json)}
+  - path: /opt/fora/database/ca.pem
+    permissions: "0644"
+    content: |
+      ${indent(6, database_ca_pem)}
+%{ endif ~}
   # Zitadel's FirstInstance provisioning. Carries the console admin password,
   # so it is root-only — like the compose file, and unlike the Caddyfile
   # above, nothing in a container reads it as a non-root user (Zitadel runs
@@ -60,15 +71,55 @@ write_files:
     permissions: "0600"
     content: |
       ${indent(6, broker_identity_key_pem)}
-%{ for wba_hostname, wba_document in static_wba_directories }
-  # Public JWK Set (public keys only, never private material) served verbatim
-  # by Caddy at this hostname's well-known path. Base64-delivered so any byte
-  # of the document is safe inside this YAML and inside the file — the
-  # document never passes through shell or proxy-config quoting.
-  - path: /opt/fora/wba/${wba_hostname}.json
+%{ if importer_key_json != null }
+  # The catalog importer's contributor key: its own directory, mounted only by
+  # the importer service (see the compose file), never by the Exchange.
+  - path: /opt/fora/keys/importer/contributor-key.json
+    permissions: "0600"
+    content: |
+      ${indent(6, importer_key_json)}
+%{ endif }
+%{ if console_signing_key_pem != null ~}
+  # The publisher console's signing key: its own directory, mounted only by
+  # the console service (see the compose file), never by the Exchange.
+  - path: /opt/fora/keys/console/console-signing-key.pem
+    permissions: "0600"
+    content: |
+      ${indent(6, console_signing_key_pem)}
+%{ endif ~}
+%{ for unit_name, unit in importer_units ~}
+  # The importer's schedule lives in systemd, not in the compose bundle: a
+  # oneshot service running the compose job, and the timer that fires it.
+  - path: /etc/systemd/system/${unit_name}
+    permissions: "0644"
+    content: |
+      ${indent(6, unit)}
+%{ endfor ~}
+%{ if query_discovery != null ~}
+  # The catalog feed the Broker's catalog search reads. Public catalog data.
+  # Base64-delivered so the JSONL lines reach the file byte for byte.
+  - path: /opt/fora/catalog/feed.jsonl
     permissions: "0644"
     encoding: b64
-    content: ${base64encode(wba_document)}
+    content: ${base64encode(query_discovery.catalog_feed)}
+  # The Broker's key pair for the model, in the AWS shared-credentials format.
+  # In the Broker's own key directory, so no other service can read it.
+  - path: /opt/fora/keys/broker/aws-credentials
+    permissions: "0600"
+    encoding: b64
+    content: ${base64encode("[default]\naws_access_key_id = ${query_discovery.aws_access_key_id}\naws_secret_access_key = ${query_discovery.aws_secret_access_key}\n")}
+%{ endif ~}
+%{ for wba_path, wba_body in static_wba_files }
+  # The body of a pre-signed key directory, a public JWK Set (public keys
+  # only, never private material), served byte for byte by Caddy at its
+  # hostname's well-known path with the response signatures made over exactly
+  # these bytes. Base64-delivered so any byte of the document is safe inside
+  # this YAML and inside the file, and arrives unchanged: the document never
+  # passes through shell or proxy-config quoting.
+  - path: /opt/fora/${wba_path}
+    permissions: "0644"
+    encoding: b64
+    content: ${base64encode(wba_body)}
 %{ endfor }
 %{ for terms_filename, terms_document in terms_documents ~}
   # Terms revisions served by Caddy under /terms/. Base64-delivered for the
@@ -99,6 +150,27 @@ write_files:
 %{ endif }
 
 runcmd:
+%{ if caddy_data_volume_id != null ~}
+  # Caddy's /data volume, mounted before Docker exists so Caddy never starts
+  # on an empty directory. Terraform attaches the volume only after the
+  # instance exists, so wait for it. Format only a blank device: a replacement
+  # VM must find the previous VM's certificates. Any failure stops runcmd
+  # here, before Docker is installed, rather than letting Caddy request new
+  # certificates on the root disk.
+  - |
+    dev=""
+    for _ in $(seq 1 60); do
+      for c in /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${replace(caddy_data_volume_id, "-", "")} /dev/sdf /dev/xvdf; do
+        [ -b "$c" ] && dev="$c" && break 2
+      done
+      sleep 5
+    done
+    [ -n "$dev" ] || { echo "Caddy data volume ${caddy_data_volume_id} not attached after 5 minutes" >&2; exit 1; }
+    [ -n "$(blkid -o value -s TYPE "$dev")" ] || mkfs.ext4 -q -L caddy-data "$dev" || exit 1
+    grep -q '^LABEL=caddy-data ' /etc/fstab || echo 'LABEL=caddy-data ${caddy_data_dir} ext4 defaults,nofail 0 2' >> /etc/fstab
+    mkdir -p ${caddy_data_dir} && mount -a
+    mountpoint -q ${caddy_data_dir} || { echo "${caddy_data_dir} is not mounted" >&2; exit 1; }
+%{ endif ~}
   # Docker Engine + Compose plugin via the official convenience script.
   - curl -fsSL https://get.docker.com | sh
 %{ if registry_server != null }
@@ -113,3 +185,9 @@ runcmd:
   - find /opt/fora/keys -type d -exec chmod 0750 {} +
   - find /opt/fora/keys -type f -exec chmod 0640 {} +
   - docker compose -f /opt/fora/docker-compose.yml up -d
+%{ if length(importer_units) > 0 ~}
+  # Enabling the timer is what schedules the importer; the units above were
+  # written before systemd read its unit files, so reload first.
+  - systemctl daemon-reload
+  - systemctl enable --now fora-import.timer
+%{ endif ~}

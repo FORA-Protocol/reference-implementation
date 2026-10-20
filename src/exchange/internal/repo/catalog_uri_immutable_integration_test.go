@@ -9,6 +9,7 @@ import (
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo/repotest"
 )
 
 // TestCatalogUpsert_URIMoveRefused pins the DATABASE backstop for catalog URI
@@ -32,10 +33,15 @@ func TestCatalogUpsert_URIMoveRefused(t *testing.T) {
 	const tenantID = "t-uri-immutable"
 	if _, err := q.InsertTenant(ctx, sqlc.InsertTenantParams{
 		TenantID: tenantID, Domain: "uri-immutable.example", Ed25519KeyRef: "k",
-		ReportingPolicy: []byte(`{}`), SigningScheme: sqlc.ForaSigningSchemeED25519,
+		ReportingPolicy: []byte(`{}`),
 	}); err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
+	// The payee is a real record now: catalog.resource_owner_id references
+	// fora.publishers, so the entry below cannot be written until its owner is
+	// registered. Seeded through the production write port.
+	const ownerID = "pub-uri-immutable"
+	repotest.SeedPublisher(t, ctx, pool, ownerID, "Stoa Press")
 	catalog := repo.NewCatalogRepo(q)
 
 	entry := repo.CatalogEntry{
@@ -43,9 +49,10 @@ func TestCatalogUpsert_URIMoveRefused(t *testing.T) {
 		TenantID:        tenantID,
 		URI:             "https://uri-immutable.example/articles/old",
 		URIPrefix:       "https://uri-immutable.example/articles/old",
+		Domain:          "uri-immutable.example",
 		PricingJSON:     []byte(`{}`),
 		DeliveryMethod:  "INSTRUCTIONS",
-		ResourceOwnerID: "owner-1",
+		ResourceOwnerID: ownerID,
 	}
 	if _, err := catalog.Upsert(ctx, entry); err != nil {
 		t.Fatalf("initial upsert: %v", err)

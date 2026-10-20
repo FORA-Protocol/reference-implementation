@@ -79,10 +79,16 @@ variable "broker_subdomain" {
 }
 
 variable "identity_subdomain" {
-  description = "Label for the Identity Service hostname, under the publisher label — the MCP endpoint agents connect to and the OAuth issuer developers sign up against. Agent Web Bot Auth directories are published one label below it, at <agent-slug>.<identity_subdomain>.<publisher_subdomain>.<domain>, which is why the stack also creates a wildcard record for it."
+  description = "Label for the Identity Service hostname, under the publisher label — the OAuth issuer developers sign up against, and the MCP endpoint agents connect to unless mcp_subdomain gives that endpoint its own label. Agent Web Bot Auth directories are published one label below it, at <agent-slug>.<identity_subdomain>.<publisher_subdomain>.<domain>, which is why the stack also creates a wildcard record for it."
   type        = string
   default     = "mcp"
   nullable    = false
+}
+
+variable "mcp_subdomain" {
+  description = "Optional label, under the publisher label, for the MCP endpoint when it should answer under a name of its own. Set, the token audience follows <mcp_subdomain>.<publisher_subdomain>.<domain> while the issuer and the agent-directory wildcard stay on identity_subdomain. Null keeps the MCP endpoint on the Identity hostname. Changing it on a running demo replaces the VM (the compose file is in its user data) and invalidates every issued bearer."
+  type        = string
+  default     = null
 }
 
 variable "zitadel_subdomain" {
@@ -100,7 +106,7 @@ variable "origin_subdomain" {
 }
 
 variable "smoke_agent_subdomain" {
-  description = "Label for the smoke agent's Web Bot Auth directory hostname, under the publisher label. The full hostname <label>.<publisher_subdomain>.<domain> IS the smoke agent's identity: gen-staging-keys.sh mints the agent key with that kid, seed-staging.sh registers it, and Caddy serves the public key directory at it so the services can verify the smoke signatures. The default matches the label scripts/lib/staging-env.sh derives ids with (run key generation with STAGING_DOMAIN set to the publisher hostname, <publisher_subdomain>.<domain>); seeding and smoke verify the two agree before running."
+  description = "Label for the smoke agent's Web Bot Auth directory hostname, under the publisher label. The full hostname <label>.<publisher_subdomain>.<domain> IS the smoke agent's identity: gen-keys.sh mints the agent key with that kid, seed-staging.sh registers it, and Caddy serves the public key directory at it so the services can verify the smoke signatures. The default matches the label scripts/lib/staging-env.sh derives ids with (run key generation with STAGING_DOMAIN set to the publisher hostname, <publisher_subdomain>.<domain>); seeding and smoke verify the two agree before running."
   type        = string
   default     = "smoke-agent"
   nullable    = false
@@ -111,6 +117,35 @@ variable "catalog_contributor_subdomain" {
   type        = string
   default     = "catalog-contributor"
   nullable    = false
+}
+
+variable "onboarding_subdomain" {
+  description = "Label for the onboarding preview service hostname, under the publisher label. The public publisher onboarding page calls https://<label>.<publisher_subdomain>.<domain>/onboarding/v1/preview, so the label has to match what that page was published with."
+  type        = string
+  default     = "pub-onboarding"
+  nullable    = false
+}
+
+# ── Onboarding preview service (optional) ────────────────────────────────────
+# The server behind the public publisher onboarding page. Enabled by naming an
+# image; a demo without one renders exactly what it rendered before.
+
+variable "onboarding_image" {
+  description = "Full onboarding image reference, by tag (<registry>/<prefix>/onboarding:<tag>) or by digest (<registry>/<prefix>/onboarding@sha256:...). Null disables the service. Separate from image_tag on purpose: build-push-images.sh builds onboarding only when named explicitly, and only from a tree that carries its source, and a live rollout pins a digest, which the <base>:<tag> shape cannot express."
+  type        = string
+  default     = null
+}
+
+variable "onboarding_allowed_origins" {
+  description = "Website origins whose pages may call the onboarding service from a browser, matched exactly — every origin the public onboarding page is served from (scheme and host, e.g. https://www.publisher.example). Required when onboarding_image is set."
+  type        = list(string)
+  default     = []
+}
+
+variable "onboarding_contact_recipients" {
+  description = "Mailboxes that receive enquiries from the onboarding page's contact form, relayed through the SES sender in ses.tf. Empty disables the form (its route answers 503). While the SES account is sandboxed, each recipient must itself be a verified SES identity in us-east-1 or SES refuses the send."
+  type        = list(string)
+  default     = []
 }
 
 # ── Container images ─────────────────────────────────────────────────────────
@@ -163,9 +198,9 @@ variable "billing_adapter" {
 }
 
 variable "default_agent_credit" {
-  description = "One-time welcome credit granted to each newly registered agent, in WHOLE units of the ledger currency — \"100\" on the default EUR ledger grants EUR 100.00 per agent, not 100 cents. The default \"0\" disables the grant; a freshly deployed stack then starts with an empty ledger and agents are funded by the operator scripts instead. Format and full semantics: the compose-stack module's variable of the same name."
+  description = "One-time welcome credit granted to each newly registered agent, PER CURRENCY, as comma-separated CODE=AMOUNT pairs — \"EUR=100\" on the default EUR ledger grants EUR 100.00 per agent, not 100 cents. Empty (the default) disables the grant; a freshly deployed stack then starts with an empty ledger and agents are funded by the operator scripts instead. Format and full semantics: the compose-stack module's variable of the same name."
   type        = string
-  default     = "0"
+  default     = ""
   nullable    = false
 }
 
@@ -182,11 +217,50 @@ variable "acme_staging" {
   nullable    = false
 }
 
+variable "acme_ca" {
+  description = "ACME directory URL of another CA for Caddy's certificates, for example Google Trust Services (https://dv.acme-v02.api.pki.goog/directory) while Let's Encrypt rate-limits the demo hostnames. null (the default) keeps Let's Encrypt, with ZeroSSL as Caddy's fallback. See the compose-stack module's variable of the same name."
+  type        = string
+  default     = null
+}
+
+variable "acme_eab_key_id" {
+  description = "Key id of the External Account Binding credentials acme_ca requires (Google Trust Services: `gcloud publicca external-account-keys create`). Set together with acme_eab_mac_key."
+  type        = string
+  default     = null
+}
+
+variable "acme_eab_mac_key" {
+  description = "HMAC key of the EAB credentials (b64MacKey). Put it in secrets.auto.tfvars."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
 variable "exa_api_key" {
   description = "Optional EXA API key for Broker discovery."
   type        = string
   default     = null
   sensitive   = true
+}
+
+variable "query_discovery_enabled" {
+  description = "Turn on the Broker's catalog search: an agent's free-text query is matched against the catalog feed through a Bedrock model. Adds an IAM user that may invoke only that model, whose access key is delivered to the Broker alone. Off by default."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "query_discovery_model" {
+  description = "Bedrock model the Broker calls for catalog search, available on demand in aws_region."
+  type        = string
+  default     = "amazon.nova-lite-v1:0"
+  nullable    = false
+}
+
+variable "query_discovery_catalog_file" {
+  description = "Path to the JSONL catalog feed the Broker searches: the same feed ingested into the Exchange. Only each record's domain, path and music.<field> ext keys reach the VM. Null uses the demo music feed at deploy/fixtures/demo/music.jsonl."
+  type        = string
+  default     = null
 }
 
 variable "resource_owner_id" {
@@ -217,5 +291,16 @@ variable "fora_enforce_binding" {
   validation {
     condition     = var.fora_enforce_binding == null || contains(["true", "false"], coalesce(var.fora_enforce_binding, "true"))
     error_message = "fora_enforce_binding must be \"true\", \"false\", or null."
+  }
+}
+
+variable "licensed_paths" {
+  description = "Path prefixes the demo edge sells, rendered into lambda_edge_config as LICENSED_PATHS_JSON. An unsigned AI-bot read is sent to negotiate only under these prefixes; every other path, the landing page and the license documents included, passes to the origin. All demo publishers share this one edge, so the list must name every prefix that is for sale. Changing it means re-rendering the config, rebuilding the zip, and re-applying."
+  type        = list(string)
+  default     = ["/articles/", "/lyrics/", "/tracks/", "/sfx/"]
+
+  validation {
+    condition     = length(var.licensed_paths) > 0 && alltrue([for p in var.licensed_paths : startswith(p, "/") && p != "/"])
+    error_message = "licensed_paths must name at least one prefix, each starting with \"/\"; \"/\" alone would license the whole site, which is what leaving the setting out already does."
   }
 }

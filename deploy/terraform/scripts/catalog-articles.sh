@@ -20,6 +20,4 @@ LIST_SQL="SELECT tenant_id AS tenant, uri AS article, jsonb_array_length(terms) 
 
 echo "== list catalog articles (read-only, via ${SSH_CMD[*]}) =="
 echo "${LIST_SQL}"
-"${SSH_CMD[@]}" \
-    "sudo docker compose -f ${VM_COMPOSE_FILE} exec -T postgres \
-        psql -P pager=off -v ON_ERROR_STOP=1 -U fora -d fora -c $(printf '%q' "${LIST_SQL}")"
+remote_psql fora -P pager=off -v ON_ERROR_STOP=1 -c "${LIST_SQL}"

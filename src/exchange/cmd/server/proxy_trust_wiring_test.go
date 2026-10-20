@@ -12,6 +12,6 @@ import (
 // rationale live in testutil.AssertProxyTrustExactOptIn.
 func TestBuildWrapped_ProxyTrustRequiresExactOptIn(t *testing.T) {
 	testutil.AssertProxyTrustExactOptIn(t, func(inner http.Handler) http.Handler {
-		return buildWrapped(discardLogger(), inner)
+		return buildWrapped(discardLogger(), inner, consoleDeps{})
 	})
 }

@@ -38,6 +38,7 @@ func roundTrip(t *testing.T, base stubRoundTripper) (*CaptureBody, []byte) {
 	if err != nil {
 		t.Fatalf("round trip: %v", err)
 	}
+	defer func() { _ = resp.Body.Close() }()
 	served, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read re-served body: %v", err)

@@ -61,7 +61,7 @@ func TestExecuteTransaction_ReplayReturnsOriginalResult(t *testing.T) {
 	if origURL == "" || origTxID == "" {
 		t.Fatalf("first call missing retrieval_endpoint/transaction_id: url=%q tx=%q", origURL, origTxID)
 	}
-	balAfterFirst, err := h.billing.GetBalance(ctx, h.billingRef)
+	balAfterFirst, err := h.billing.GetBalance(ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after first: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestExecuteTransaction_ReplayReturnsOriginalResult(t *testing.T) {
 	}
 
 	// No second charge: balance unchanged from after the first call.
-	balAfterReplay, err := h.billing.GetBalance(ctx, h.billingRef)
+	balAfterReplay, err := h.billing.GetBalance(ctx, h.billingRef, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance after replay: %v", err)
 	}

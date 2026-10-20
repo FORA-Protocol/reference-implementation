@@ -17,8 +17,7 @@ import (
 // derive the RFC 7638 thumbprint of the PUBLIC half, and hand the private half
 // over under that thumbprint as the key id. The signer refuses to sign when the
 // id and the key disagree, so a copy that derived the thumbprint from the wrong
-// half would fail at signing time with an error about custody. It was written
-// twice, once in each of foraclient's two test packages.
+// half would fail at signing time with an error about custody.
 //
 // This package depends on forahttpsig and never the reverse, so a fixture here
 // cannot be reached from forahttpsig's own internal tests.

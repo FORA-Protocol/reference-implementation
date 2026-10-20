@@ -45,7 +45,6 @@ func TestTenantHMACSecretRefMigration(t *testing.T) {
 		Domain:          tenantID + ".example",
 		Ed25519KeyRef:   "secret://ed25519/" + tenantID,
 		ReportingPolicy: []byte(`{}`),
-		SigningScheme:   sqlc.ForaSigningSchemeED25519,
 	}); err != nil {
 		t.Fatalf("InsertTenant: %v", err)
 	}
@@ -84,14 +83,21 @@ func TestTenantHMACSecretRefMigration(t *testing.T) {
 		t.Error("after down 000031: hmac_secret_ref did not come back appended after default_agent_credit")
 	}
 
-	// The seeded row survived the backfill. Head's generated query names its
-	// columns, none of which is hmac_secret_ref, so it reads the widened table.
-	after := sharedb.OpenForTest(t, ctx, dsn)
-	got, err := sqlc.New(after).GetTenantByID(ctx, tenantID)
-	if err != nil {
-		t.Fatalf("GetTenantByID after down 000031: %v", err)
-	}
-	if got.TenantID != tenantID {
-		t.Errorf("after down 000031: tenant row: got %q want %q", got.TenantID, tenantID)
+	// The seeded row survived the backfill, with hmac_secret_ref filled in so
+	// the restored NOT NULL actually holds.
+	//
+	// Read with a query naming only columns 000001 declared, NOT with head's
+	// generated query: head names every column the CURRENT schema has, and a
+	// migration added after 000031 leaves the generated query asking for a column
+	// this older schema does not have yet. That coupling broke once already, when
+	// the welcome credit became a per-currency map.
+	if !schemaProbe.Exists(t, ctx, dsn, `
+		SELECT EXISTS (
+			SELECT 1 FROM fora.tenants
+			 WHERE tenant_id = 't_hmac_secret_ref_down'
+			   AND hmac_secret_ref IS NOT NULL
+		)`) {
+		t.Errorf("after down 000031: tenant row %q did not survive with a backfilled "+
+			"hmac_secret_ref", tenantID)
 	}
 }

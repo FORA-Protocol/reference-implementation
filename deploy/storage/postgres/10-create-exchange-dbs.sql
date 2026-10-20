@@ -1,6 +1,6 @@
 -- NOT A DEPLOYMENT STEP. This file sits beside the PostgreSQL operator documents
 -- but is not part of them: it exists only for the automated end-to-end test stack,
--- which runs three Exchanges at once. Do not run it against a deployment — see
+-- which runs four Exchanges at once. Do not run it against a deployment — see
 -- CONFIGURATION.md §3 for the databases a real deployment does need.
 --
 -- How it runs: docker-compose.e2e.yml bind-mounts this file into
@@ -15,10 +15,11 @@
 -- Catalog databases. Each Exchange instance owns a SEPARATE catalog database, so
 -- DiscoverResources (which reads the whole catalog without filtering by tenant —
 -- exchange/internal/service/catalog.go) cannot expose one publisher's catalog on
--- another Exchange. exchange-a uses the default POSTGRES_DB (fora); exchange-b and
--- exchange-c need their own.
+-- another Exchange. exchange-a uses the default POSTGRES_DB (fora); exchange-b,
+-- exchange-c and exchange-d need their own.
 CREATE DATABASE fora_b;
 CREATE DATABASE fora_c;
+CREATE DATABASE fora_d;
 
 -- System-of-Record (SoR) databases. Each Exchange keeps its account registry
 -- (schema `sor`, table `sor.agent_accounts`) in a SEPARATE logical database from its
@@ -29,7 +30,14 @@ CREATE DATABASE fora_c;
 CREATE DATABASE fora_sor;
 CREATE DATABASE fora_sor_b;
 CREATE DATABASE fora_sor_c;
+CREATE DATABASE fora_sor_d;
 
 -- Identity Service (registry / MCP adapter). It migrates at boot against
 -- IDENTITY_DSN, so its database is created here alongside the exchange/SoR ones.
 CREATE DATABASE identity;
+
+-- The publisher console's own database. It holds one table -- who has signed in
+-- -- and nothing a publisher owns, which all lives in the Exchange. It is a
+-- separate database rather than a schema inside fora because the two services
+-- run their own migrations and a shared migration table would collide.
+CREATE DATABASE console;

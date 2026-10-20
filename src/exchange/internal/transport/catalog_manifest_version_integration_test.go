@@ -55,11 +55,11 @@ func TestPushResources_PublisherManifestVersionRejectsOnlyWhatItCannotRead(t *te
 			h.publisher.setContributors(callerID)
 			h.publisher.serveVersion(tc.ver)
 
-			pub, priv, err := ed25519.GenerateKey(rand.Reader)
+			_, priv, err := ed25519.GenerateKey(rand.Reader)
 			if err != nil {
 				t.Fatalf("gen: %v", err)
 			}
-			h.publishAgent(t, callerID, pub)
+			h.publishAgent(t, callerID, priv)
 
 			const path = "/articles/manifest-version"
 			uri := "https://" + h.publisherDom + path

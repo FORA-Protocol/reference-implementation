@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -52,7 +53,7 @@ type registerHarness struct {
 	rewriteMu     *sync.Mutex
 	rewrite       map[string]string
 	tenantID      string
-	tenantDomain  string
+	siteDomain    string
 	// logs captures the server's structured output when the harness was built
 	// with a capturing logger; nil under the default discard logger.
 	logs *safeBuffer
@@ -99,6 +100,14 @@ type registerHarnessOptions struct {
 	// audit append from INSIDE the registration transaction. nil leaves the real
 	// repo in place.
 	auditWrap func(repo.AuditRepo) repo.AuditRepo
+	// ledgerCurrencies are the currencies this Exchange bills in; nil → the
+	// suite's single-currency default. Set it together with a billing adapter
+	// configured for the same set.
+	ledgerCurrencies []string
+	// defaultAgentCredits is the welcome credit the Exchange is configured to
+	// grant at Register, the harness's EXCHANGE_DEFAULT_AGENT_CREDIT. nil → no
+	// grant.
+	defaultAgentCredits map[string]*big.Rat
 }
 
 // newRegisterHarnessWith is newRegisterHarness with explicit options, so the
@@ -153,11 +162,13 @@ func newRegisterHarnessWith(t *testing.T, opts registerHarnessOptions) *register
 		logger:              harnessLogger(fx.logger, opts.logs),
 		httpsigKeys:         map[string]ed25519.PublicKey{},
 		sor:                 sorAdapter,
-		defaultTenantDomain: fx.tenantDomain,
+		defaultTenantDomain: harnessExchangeDomain,
 		billingRefGen:       gen,
 		regSchema:           opts.regSchema,
 		termsDigest:         opts.termsDigest,
 		auditWrap:           opts.auditWrap,
+		ledgerCurrencies:    opts.ledgerCurrencies,
+		defaultAgentCredits: opts.defaultAgentCredits,
 	}
 	srv := startExchangeServer(t, deps)
 
@@ -166,7 +177,7 @@ func newRegisterHarnessWith(t *testing.T, opts registerHarnessOptions) *register
 		baseTransport: srv.baseTransport, resolver: srv.resolver,
 		sorAdapter: sorAdapter, billing: billingAdapter,
 		rewriteMu: rewriteMu, rewrite: rewrite,
-		tenantID: fx.tenantID, tenantDomain: fx.tenantDomain,
+		tenantID: fx.tenantID, siteDomain: fx.siteDomain,
 		logs: opts.logs, deps: deps,
 	}
 }
@@ -188,14 +199,23 @@ func newRegisterHarnessWith(t *testing.T, opts registerHarnessOptions) *register
 // be heard; clientOn does that.
 func (h *registerHarness) republishingTerms(t *testing.T, digest string) *registerHarness {
 	t.Helper()
+	return h.restartedWith(t, func(deps *exchangeServerDeps) { deps.termsDigest = digest })
+}
+
+// restartedWith starts a SECOND Exchange over the SAME database with the
+// settings change applies, for the same reason and with the same client rules
+// as republishingTerms.
+func (h *registerHarness) restartedWith(t *testing.T, change func(*exchangeServerDeps)) *registerHarness {
+	t.Helper()
 	deps := h.deps
-	deps.termsDigest = digest
+	change(&deps)
 	srv := startExchangeServer(t, deps)
 
 	revised := *h
 	revised.server = srv.server.URL
 	revised.baseTransport = srv.baseTransport
 	revised.resolver = srv.resolver
+	revised.billing = deps.bill
 	revised.deps = deps
 	return &revised
 }
@@ -227,10 +247,8 @@ func (h *registerHarness) registerHost(host, target string) {
 // registerAgent is a fresh, unregistered agent plus a client that signs with its
 // directory key. On its first signed Register the Exchange self-signs it up
 // (lazy registration) from origin, then runs the account flow. client is built
-// ONCE and reused for every self-signed call: each signing transport seeds its
-// uniqueness counter from the wall clock, so two transports for the same key
-// built in the same second would produce colliding signatures the replay store
-// rejects.
+// once and reused for every self-signed call; every signature it makes carries a
+// fresh nonce, so repeated identical calls never collide in the replay store.
 type registerAgent struct {
 	id     string
 	pub    ed25519.PublicKey
@@ -246,7 +264,7 @@ type registerAgent struct {
 // the signature reaches resolveCaller, and build the signing client.
 func newSignupAgent(
 	t *testing.T, agentID string,
-	publish func(*testing.T, string, ed25519.PublicKey) *pushAgentOrigin,
+	publish func(*testing.T, string, ed25519.PrivateKey) *pushAgentOrigin,
 	resolver *helpers.StaticKeyResolver,
 	clientFor func(string, ed25519.PrivateKey) foraconnect.ExchangeServiceClient,
 ) *registerAgent {
@@ -255,7 +273,7 @@ func newSignupAgent(
 	if err != nil {
 		t.Fatalf("agent keypair: %v", err)
 	}
-	origin := publish(t, agentID, pub)
+	origin := publish(t, agentID, priv)
 	resolver.Put(rwktestutil.MustThumbprintPriv(priv), pub)
 	return &registerAgent{
 		id: agentID, pub: pub, priv: priv, origin: origin,
@@ -268,18 +286,18 @@ func newSignupAgent(
 // the one publish operation both harnesses' publishAgent methods delegate to,
 // and the shape of the publish closure newSignupAgent takes.
 func publishAgentOrigin(
-	t *testing.T, registerHost func(host, target string), agentID string, pub ed25519.PublicKey,
+	t *testing.T, registerHost func(host, target string), agentID string, priv ed25519.PrivateKey,
 ) *pushAgentOrigin {
 	t.Helper()
-	origin := newPushAgentOrigin(t, agentID, pub)
+	origin := newPushAgentOrigin(t, agentID, priv)
 	registerHost(agentID, origin.server.URL)
 	return origin
 }
 
 // publishAgent runs the shared publishAgentOrigin operation on this harness's
 // rewrite table.
-func (h *registerHarness) publishAgent(t *testing.T, agentID string, pub ed25519.PublicKey) *pushAgentOrigin {
-	return publishAgentOrigin(t, h.registerHost, agentID, pub)
+func (h *registerHarness) publishAgent(t *testing.T, agentID string, priv ed25519.PrivateKey) *pushAgentOrigin {
+	return publishAgentOrigin(t, h.registerHost, agentID, priv)
 }
 
 // newAgent stands up a fresh agent whose WBA directory serves the given key.
@@ -369,7 +387,7 @@ func TestExchangeRegister_HappyPath(t *testing.T) {
 
 	// Ledger account exists under the billing_ref with a zero balance, observed
 	// through the billing surface production uses.
-	bal, err := h.billing.GetBalance(h.ctx, ref)
+	bal, err := h.billing.GetBalance(h.ctx, ref, harnessCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance(%q): %v", ref, err)
 	}
@@ -450,7 +468,7 @@ func TestExchangeRegister_KeyRotationSameRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rotated keypair: %v", err)
 	}
-	originB := newPushAgentOrigin(t, a.id, keyBPub)
+	originB := newPushAgentOrigin(t, a.id, keyBPriv)
 	h.registerHost(a.id, originB.server.URL)
 	h.resolver.Put(rwktestutil.MustThumbprintPriv(keyBPriv), keyBPub)
 
@@ -510,7 +528,7 @@ func TestExchangeRegister_Negatives(t *testing.T) {
 		// The directory serves keyA, but the caller signs with keyB. The signature
 		// clears the gate (keyB registered there), yet the directory-binding check
 		// fails: the proven key is not the one the directory publishes.
-		dirPub, _, err := ed25519.GenerateKey(rand.Reader)
+		_, dirPriv, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
 			t.Fatalf("directory key: %v", err)
 		}
@@ -519,7 +537,7 @@ func TestExchangeRegister_Negatives(t *testing.T) {
 			t.Fatalf("signing key: %v", err)
 		}
 		const agentID = "mismatch.example"
-		origin := newPushAgentOrigin(t, agentID, dirPub)
+		origin := newPushAgentOrigin(t, agentID, dirPriv)
 		h.registerHost(agentID, origin.server.URL)
 		h.resolver.Put(rwktestutil.MustThumbprintPriv(signPriv), signPub)
 

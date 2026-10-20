@@ -29,7 +29,7 @@ import (
 // allowlist (e.g. "127.0.0.0/8" to admit the httptest loopback client, or a non-loopback
 // range to drive the 403 path). Returns the client and the base URL (the latter for the
 // raw-HTTP codec/403 tests).
-func startAdminServer(t *testing.T, h *testHarness, allowCIDRs string) (foraadminv1connect.AdminServiceClient, string) {
+func startAdminServer(t testing.TB, h *testHarness, allowCIDRs string) (foraadminv1connect.AdminServiceClient, string) {
 	t.Helper()
 	return startAdminServerWithLogger(t, h, allowCIDRs, testutil.DiscardLogger())
 }
@@ -40,7 +40,7 @@ func startAdminServer(t *testing.T, h *testHarness, allowCIDRs string) (foraadmi
 // context — which is exactly the path a request-id correlation test has to
 // exercise.
 func startAdminServerWithLogger(
-	t *testing.T, h *testHarness, allowCIDRs string, logger *slog.Logger,
+	t testing.TB, h *testHarness, allowCIDRs string, logger *slog.Logger,
 ) (foraadminv1connect.AdminServiceClient, string) {
 	t.Helper()
 	adminSvc := service.NewAdminServiceFromPool(h.pool, h.queries)
@@ -108,12 +108,13 @@ func TestAdmin_SetTenantFeeRate_AppliedAtRecord(t *testing.T) {
 	h.assertSplitBalances(t, salt, "9.00", "0.90", "0.10")
 }
 
-// TestAdmin_SetReportingPolicy_ZeroTolerance_ExactMatch drives quantity_tolerance=0
-// through the admin RPC and proves it is enforced as exact-match end to end (the
-// bug fixed in this ticket: 0 previously fell back to ±20%). Order matters: the
-// policy is snapshotted onto the obligation at Execute, so it is set BEFORE
-// ExecuteTransaction.
-func TestAdmin_SetReportingPolicy_ZeroTolerance_ExactMatch(t *testing.T) {
+// TestAdmin_SetReportingPolicy_DeprecatedToleranceIsIgnored sets the deprecated
+// quantity_tolerance to 0 through the admin RPC and shows it has no effect. The
+// pinned protocol deprecates the field and says an Exchange must not refuse a
+// usage report on it, so a report one unit above the estimate is accepted. The
+// validator's own default still applies; that refusal for quantity is a known
+// defect, the one behind the e2e obligation for an unrestricted quantity.
+func TestAdmin_SetReportingPolicy_DeprecatedToleranceIsIgnored(t *testing.T) {
 	h := newTestHarness(t)
 	admin, _ := startAdminServer(t, h, "127.0.0.0/8")
 
@@ -122,9 +123,10 @@ func TestAdmin_SetReportingPolicy_ZeroTolerance_ExactMatch(t *testing.T) {
 
 	txID, billingID := executeTransactionFor(t, h, 100)
 	_, err := h.exchangeClient.ReportUsage(h.ctx, connect.NewRequest(newUsageReport("r-tol0", txID, billingID, &forav1.Usage{ConsumedQuantity: 101})))
-	assertConnectError(t, err, connect.CodeInvalidArgument, "outside")
-	assertReportRejectionField(t, err, "consumed_quantity")
-	assertObligationState(t, h, txID, "PENDING", "REJECTED_TOLERANCE")
+	if err != nil {
+		t.Fatalf("a report one unit above the estimate was refused under the ignored tolerance: %v", err)
+	}
+	assertObligationState(t, h, txID, "RECEIVED", "VALIDATED")
 }
 
 // TestAdmin_SetReportingPolicy_RequiredFields_Enforced drives a required_fields
@@ -173,14 +175,13 @@ func TestAdmin_SetReportingPolicy_PersistsAndAudits(t *testing.T) {
 	if resp.Msg.GetVer() != "1.0" {
 		t.Errorf("ver = %q, want 1.0", resp.Msg.GetVer())
 	}
-	if got := resp.Msg.GetPolicy().GetQuantityTolerance(); got != tol {
-		t.Errorf("echoed quantity_tolerance = %v, want %v", got, tol)
-	}
 	if got := resp.Msg.GetPolicy().GetWindowSeconds(); got != win {
 		t.Errorf("echoed window_seconds = %d, want %d", got, win)
 	}
 
 	// Persisted reporting_policy JSONB (tier-2 repo fallback — no public read RPC).
+	// The deprecated quantity_tolerance is not read, so it is neither persisted
+	// nor audited.
 	tenant := readTenant(t, h)
 	var policy reportingPolicyJSON
 	if err := json.Unmarshal(tenant.ReportingPolicy, &policy); err != nil {
@@ -189,16 +190,22 @@ func TestAdmin_SetReportingPolicy_PersistsAndAudits(t *testing.T) {
 	if len(policy.RequiredFields) != 2 || policy.RequiredFields[0] != "billing_id" {
 		t.Errorf("persisted required_fields = %v, want [billing_id timestamp]", policy.RequiredFields)
 	}
-	if policy.QuantityTolerance == nil || *policy.QuantityTolerance != tol {
-		t.Errorf("persisted quantity_tolerance = %v, want %v", policy.QuantityTolerance, tol)
+	if policy.QuantityTolerance != nil {
+		t.Errorf("persisted quantity_tolerance = %v, want none", *policy.QuantityTolerance)
 	}
 	if policy.WindowSeconds == nil || *policy.WindowSeconds != win {
 		t.Errorf("persisted window_seconds = %v, want %d", policy.WindowSeconds, win)
 	}
 
-	// Audit row: action + attribution + the applied-values detail. On a plane with
-	// no per-operator identity source_addr is the only attribution signal, so assert
-	// the caller attribution here too (parity with the fee-rate twin).
+	assertPolicyAuditRow(t, h, win)
+}
+
+// assertPolicyAuditRow checks the audit row a successful SetReportingPolicy
+// writes: action, attribution, and the applied-values detail. On a plane with
+// no per-operator identity source_addr is the only attribution signal, so the
+// caller attribution is asserted too (parity with the fee-rate twin).
+func assertPolicyAuditRow(t *testing.T, h *testHarness, win int32) {
+	t.Helper()
 	r := readSingleAuditRow(t, h, h.tenantID)
 	if r.Action != "SetReportingPolicy" {
 		t.Errorf("audit action = %q, want SetReportingPolicy", r.Action)
@@ -211,8 +218,8 @@ func TestAdmin_SetReportingPolicy_PersistsAndAudits(t *testing.T) {
 	if len(detail.RequiredFields) != 2 {
 		t.Errorf("detail required_fields = %v, want 2 entries", detail.RequiredFields)
 	}
-	if detail.QuantityTolerance == nil || *detail.QuantityTolerance != tol {
-		t.Errorf("detail quantity_tolerance = %v, want %v", detail.QuantityTolerance, tol)
+	if detail.QuantityTolerance != nil {
+		t.Errorf("detail quantity_tolerance = %v, want none", *detail.QuantityTolerance)
 	}
 	if detail.WindowSeconds == nil || *detail.WindowSeconds != win {
 		t.Errorf("detail window_seconds = %v, want %d", detail.WindowSeconds, win)

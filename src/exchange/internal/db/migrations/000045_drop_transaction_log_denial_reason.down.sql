@@ -1,0 +1,22 @@
+-- Restores fora.transaction_log.denial_reason as 000001 declared it: a nullable
+-- fora.denial_reason. No row ever held a value, so there is nothing to restore
+-- but the column.
+--
+-- POSITIONS. ADD COLUMN appends, and Postgres cannot reorder, so the column
+-- comes back after result_payload rather than before created_at, where 000001
+-- put it. That is cosmetic: every generated query names its columns explicitly
+-- in its SELECT list and its RETURNING clause.
+--
+-- WHY THIS FILE MATTERS. The down files of 000027, 000022 and 000014 each
+-- rebuild fora.denial_reason and ALTER this column's type onto the rebuilt enum,
+-- so stepping the schema below 000027 needs the column present again.
+--
+-- ORDER. Applying the up migration needs the previous tag stopped first. The
+-- Exchange applies migrations at boot, and the previous tag's generated queries
+-- name denial_reason in the transaction_log INSERT and in every SELECT list on
+-- the table, so an instance of that tag still running when 000045 applies fails
+-- every purchase and every replay from that moment. Starting the previous tag
+-- after 000045 has applied fails the same way. This file is what would repair
+-- that, but nothing runs it: down files ship inside the image and stay there.
+-- Reversing 000045 is an escalation, not a step an operator runs by hand.
+ALTER TABLE fora.transaction_log ADD COLUMN denial_reason fora.denial_reason;

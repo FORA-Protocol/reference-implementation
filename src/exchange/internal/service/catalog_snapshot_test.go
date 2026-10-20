@@ -6,6 +6,8 @@ import (
 
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/metadatacodec"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/metadatacodec/metadatacodectest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
 )
 
@@ -13,7 +15,7 @@ import (
 // rebuild: a row carrying metadata decodes to the projected ResourceEntry, and a
 // row with no metadata (NULL column) decodes to nil.
 func TestDecodeRowMetadata(t *testing.T) {
-	raw, err := marshalResourceMetadata(metadataEntry(t))
+	raw, err := metadatacodec.Marshal(metadatacodectest.FullEntry(t))
 	if err != nil {
 		t.Fatalf("marshal metadata: %v", err)
 	}
@@ -34,7 +36,7 @@ func TestDecodeRowMetadata(t *testing.T) {
 // cached entry for a known resource, nil for an unknown id, and is nil-safe.
 func TestSnapshotDecodedMetadata(t *testing.T) {
 	snap := newEmptySnapshot()
-	want := metadataEntry(t)
+	want := metadatacodectest.FullEntry(t)
 	snap.metadata["r1"] = want
 
 	if got := snap.DecodedMetadata("r1"); got != want {

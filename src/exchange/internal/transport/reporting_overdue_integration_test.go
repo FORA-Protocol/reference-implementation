@@ -57,6 +57,13 @@ func TestExecuteTransaction_ReportingOverdue_Denied(t *testing.T) {
 		`reporting overdue: 1 unreported, out of 1 past their deadline`,
 		`file the missing usage reports`,
 	)
+	// A refusal is WARN, the level an operator running at WARN still sees.
+	refusal := findLogRecord(t, logs.String(), "exchange.execute_transaction", func(rec map[string]any) bool {
+		return rec["outcome"] == "REJECTED_REPORTING_OVERDUE"
+	})
+	if got := refusal["level"]; got != "WARN" {
+		t.Errorf("REJECTED_REPORTING_OVERDUE audit line level = %v, want WARN", got)
+	}
 
 	// The gate runs before resolveBilling, so the denied tx reserves no funds.
 	// The only Authorize must be the seed's; if "tx-gated" authorized, a reorder

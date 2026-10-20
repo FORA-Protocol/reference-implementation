@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"testing"
-	"time"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/testutil"
@@ -27,31 +26,6 @@ func TestFetch_HappyPathAssertsRole(t *testing.T) {
 	}
 	if m.GetDomain() != "agent.example" || m.GetRole() != forawellknown.RoleAgent {
 		t.Fatalf("unexpected manifest: domain=%s role=%s", m.GetDomain(), m.GetRole())
-	}
-}
-
-func TestFetchWBA_HappyPath(t *testing.T) {
-	t.Parallel()
-	priv, key := testutil.NewSigningKey("k", anchor.Add(-time.Hour), anchor.Add(time.Hour))
-	origin := testutil.NewOrigin(nil)
-	defer origin.Close()
-	origin.SetWBA(testutil.MarshalWBA(testutil.WBAFile(key)))
-
-	f, err := forawellknown.FetchWBA(context.Background(), origin.URL, forawellknown.FetchOptions{
-		Client: testutil.Client(),
-	})
-	if err != nil {
-		t.Fatalf("FetchWBA: %v", err)
-	}
-	if len(f.GetKeys()) != 1 {
-		t.Fatalf("want 1 key, got %d", len(f.GetKeys()))
-	}
-	pub, err := forawellknown.PublicKey(f.GetKeys()[0])
-	if err != nil {
-		t.Fatalf("PublicKey: %v", err)
-	}
-	if !pub.Equal(priv.Public()) {
-		t.Fatal("fetched key mismatch")
 	}
 }
 
@@ -91,10 +65,24 @@ func TestFetch_Errors(t *testing.T) {
 			wantErr: forawellknown.ErrNoDocument,
 		},
 		{
-			// A recognised version and nothing else: the shape is what fails.
-			name:    "garbage body yields ErrSchemaInvalid",
+			// JSON, a document, and a version this reader accepts — the wire
+			// shape is what fails. The next fetch returns the same bytes, so
+			// this is a verdict about what the origin publishes.
+			name:    "a document breaking the schema yields ErrSchemaInvalid",
 			arrange: func(o *testutil.Origin) { o.SetManifest([]byte(`{"ver":"1.0"}`)) },
 			wantErr: forawellknown.ErrSchemaInvalid,
+		},
+		{
+			// Not a document at all, which is the other side of that line and the
+			// reason the two sentinels differ. A proxy answering 200 with an error
+			// page produces this, and it says nothing about what the origin
+			// publishes — so it must not read as a verdict a caller stops retrying.
+			// The version gate stands aside: a body that is not a JSON object has
+			// no `ver` to read, so this stays one refusal instead of becoming a
+			// second spelling of the same failure.
+			name:    "a body that is not JSON yields ErrFetch",
+			arrange: func(o *testutil.Origin) { o.SetManifest([]byte(`<html>502 Bad Gateway</html>`)) },
+			wantErr: forawellknown.ErrFetch,
 		},
 		{
 			// A complete, well-shaped document at a major this reader does not

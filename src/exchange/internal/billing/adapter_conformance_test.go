@@ -20,6 +20,12 @@ import (
 // the real attested-payee path on both.
 const confResourceOwner = "conf-owner"
 
+// confCurrency is the currency every conformance amount is denominated in and
+// every balance read asks for. The in-memory tier keeps billing.DemoCurrency and
+// the TigerBeetle conformance ledger is that same currency's ISO 4217 numeric,
+// so one constant covers both factories.
+const confCurrency = billing.DemoCurrency
+
 type conformanceSeed struct {
 	Balances map[string]billing.Amount
 	Quotas   map[string]int64
@@ -70,6 +76,9 @@ func runAdapterConformance(t *testing.T, f adapterFactory) {
 		t.Run("Credit_SameKey_NoDoubleCredit", func(t *testing.T) { confCreditSameKeyNoDouble(t, f) })
 		t.Run("Credit_DistinctKeys_Accumulate", func(t *testing.T) { confCreditDistinctKeys(t, f) })
 		t.Run("Credit_BadArguments_Rejected", func(t *testing.T) { confCreditBadArgs(t, f) })
+		t.Run("AvailableBalance_ExcludesHold", func(t *testing.T) { confAvailableExcludesHold(t, f) })
+		t.Run("AvailableBalance_NoLedgerAccount", func(t *testing.T) { confAvailableNoLedgerAccount(t, f) })
+		t.Run("AvailableBalance_UnbilledCurrency", func(t *testing.T) { confAvailableUnbilledCurrency(t, f) })
 		t.Run("Record_Debits_ReservedAmount", func(t *testing.T) { confRecordDebits(t, f) })
 		t.Run("Release_FreesReservation", func(t *testing.T) { confReleaseFrees(t, f) })
 		t.Run("Authorize_Idempotent_WhileLive", func(t *testing.T) { confAuthorizeIdempotent(t, f) })
@@ -142,7 +151,7 @@ func assertBalance(t *testing.T, a billing.Adapter, want string) {
 // assertBalanceFor asserts the settled USD balance of an arbitrary billing_ref.
 func assertBalanceFor(t *testing.T, a billing.Adapter, ref, want string) {
 	t.Helper()
-	bal, err := a.GetBalance(context.Background(), ref)
+	bal, err := a.GetBalance(context.Background(), ref, confCurrency)
 	if err != nil {
 		t.Fatalf("GetBalance(%q): %v", ref, err)
 	}

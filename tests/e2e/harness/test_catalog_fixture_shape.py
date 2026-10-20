@@ -8,13 +8,13 @@ unrelated test failing for an unexplained reason, or not at all.
 This test states the properties the suite depends on directly, so an edit that
 breaks one fails here, at the file that changed.
 
-The currency spread is the load-bearing one. The in-memory billing adapter
-denominates every balance in ``billing.DemoCurrency`` ("USD"), so a USD term is
-the only kind a funded buyer can transact: lose the USD terms and the priced
-path loses its coverage while the suite still reports green. The EUR and GBP
-terms are the currency-mismatch cases. The counts are pinned rather than merely
-"more than one currency" because a silent drop of five of the nine USD terms
-would still satisfy the looser check.
+The currency spread is the load-bearing one. Every Exchange in the stack bills
+in USD and EUR, one TigerBeetle ledger each, so the USD and EUR terms are the
+priced paths a funded buyer can transact: lose them and the priced paths lose
+their coverage while the suite still reports green. No Exchange bills in GBP, so
+the GBP terms are the currency-mismatch cases. The counts are pinned rather than
+merely "more than one currency" because a silent drop of five of the eleven USD
+terms would still satisfy the looser check.
 
 Reading the feeds is not reaching past a layer: this asserts on the fixture
 INPUT, not on the state the system under test produced from it.
@@ -36,11 +36,11 @@ pytestmark = pytest.mark.stack_isolation("isolated")
 
 CATALOG_DIR = Path(__file__).resolve().parent / "fixtures" / "catalog"
 
-FEEDS = ("philosophy.jsonl", "music.jsonl", "sfx.jsonl")
+FEEDS = ("philosophy.jsonl", "music.jsonl", "sfx.jsonl", "archive.jsonl")
 
-EXPECTED_CURRENCIES = {"EUR": 11, "USD": 9, "GBP": 6}
-EXPECTED_RECORDS = 22
-EXPECTED_TERMS = 26
+EXPECTED_CURRENCIES = {"EUR": 23, "USD": 11, "GBP": 6}
+EXPECTED_RECORDS = 28
+EXPECTED_TERMS = 40
 
 
 def _records(name: str) -> list[dict]:
@@ -76,17 +76,18 @@ def test_record_and_term_counts() -> None:
 def test_currency_spread_is_preserved() -> None:
     """The three-currency mix the priced and mismatch paths both need.
 
-    A drop to one currency silently removes either the funded-buyer priced path
-    (USD) or the currency-mismatch cases (EUR, GBP).
+    A drop to one currency silently removes a funded-buyer priced path (USD or
+    EUR) or the currency-mismatch cases (GBP, which no Exchange bills in).
     """
     counts = Counter(term["pricing"]["currency"] for term in _all_terms())
     assert dict(counts) == EXPECTED_CURRENCIES
 
 
 def test_every_feed_has_a_free_term() -> None:
-    """The EUR buyer is unfunded by construction, so it can only reach FREE terms.
+    """A zero charge never reaches the billing gate, so a FREE term needs no account.
 
-    One per feed keeps that buyer usable on all three edge runtimes.
+    One per feed keeps a path open on every Exchange for an agent that holds no
+    money there.
     """
     for name in FEEDS:
         rates = [

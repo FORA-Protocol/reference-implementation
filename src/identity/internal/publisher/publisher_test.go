@@ -3,6 +3,7 @@ package publisher_test
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,14 @@ type stubKeys struct {
 func (s *stubKeys) List(_ context.Context, _ string) ([]keystore.Key, error) {
 	s.calls++
 	return s.keys, s.err
+}
+
+// noSigners is the directory-signing custody for tests that never ask for a
+// signed directory: Directory() does not consult it.
+type noSigners struct{}
+
+func (noSigners) Signer(context.Context, keystore.Ref) (crypto.Signer, error) {
+	return nil, keystore.ErrNotFound
 }
 
 type stubCards struct {
@@ -130,6 +139,9 @@ func newSvc(t *testing.T, cfg publisher.Config) *publisher.Service {
 	t.Helper()
 	if cfg.Clock == nil {
 		cfg.Clock = clock.NewDeterministic(anchor)
+	}
+	if cfg.Signers == nil {
+		cfg.Signers = noSigners{}
 	}
 	if cfg.Revocations == nil {
 		cfg.Revocations = &stubRevocations{}
@@ -395,12 +407,13 @@ func TestNewRejectsMissingDependencies(t *testing.T) {
 	t.Parallel()
 	full := func() publisher.Config {
 		return publisher.Config{
-			Keys: &stubKeys{}, Cards: &stubCards{},
+			Keys: &stubKeys{}, Signers: noSigners{}, Cards: &stubCards{},
 			Revocations: &stubRevocations{}, Registrations: registered(),
 		}
 	}
 	cases := map[string]func(*publisher.Config){
 		"Keys":          func(c *publisher.Config) { c.Keys = nil },
+		"Signers":       func(c *publisher.Config) { c.Signers = nil },
 		"Cards":         func(c *publisher.Config) { c.Cards = nil },
 		"Revocations":   func(c *publisher.Config) { c.Revocations = nil },
 		"Registrations": func(c *publisher.Config) { c.Registrations = nil },

@@ -119,10 +119,10 @@ func (s *ExchangeService) awaitFinalizedResponse(
 }
 
 // serveFinalizedResponse is the ownership-gated serve of a stored finalized
-// response. The claim row is keyed by the agentID resolved from requester.id,
-// which is caller-supplied — so possession of that identity's registered key was
-// proven ONCE at admission and its request-level
-// binding is passed in here, the same binding the per-item replay path uses. When
+// response. The claim row is keyed by the agentID resolveAgent derived from the
+// transport, and possession of that identity's registered key was proven ONCE at
+// admission; its request-level binding is passed in here, the same binding the
+// per-item replay path uses. When
 // the stored response carries an agent identity thumbprint (any successful item),
 // it must match the proven binding; an all-denied response carries none (and no
 // retrieval URLs either), so the proven possession alone gates it.

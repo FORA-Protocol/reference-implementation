@@ -152,7 +152,6 @@ func hasVerKey(lit *ast.CompositeLit) bool {
 var omissionAllowlist = map[string]string{
 	"internal/guards/items_only_descriptor_test.go":        "descriptor probes — (&forav1.X{}).ProtoReflect() reads the shape and sends nothing",
 	"src/broker/internal/xclient/pool_constructor_test.go": "empty query handed to a deliberately short-circuited transport; the call is expected to fail",
-	"src/broker/internal/signing/cosign_test.go":           "a SignForward input, not a wire envelope — the signature covers domain|id|query|ts",
 }
 
 // literalAllowlist names the files whose bare Ver literals are not stamps. Only

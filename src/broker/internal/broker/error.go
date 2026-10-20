@@ -23,6 +23,20 @@ const (
 	KindUpstreamUnavailable
 	KindUpstreamRejected
 	KindInternal
+	// KindUnimplemented is a valid request this Broker does not serve in its
+	// current configuration, for example search filters without catalog search.
+	KindUnimplemented
+	// KindSignatureInvalid is a request whose signature verified, but not as the
+	// party the body claims: a purchase whose requester.domain is not the host
+	// of the directory the request was signed from. It is UNAUTHENTICATED, and
+	// the transport attaches request_auth_failure SIGNATURE_INVALID, the reason
+	// the verify seam gives a signature that does not verify.
+	KindSignatureInvalid
+	// KindExchangeNotAdmitted is a purchase naming an Exchange this Broker
+	// cannot route to or does not approve for purchases. It is
+	// FAILED_PRECONDITION, and the error names the Exchange under
+	// metadata["exchange"].
+	KindExchangeNotAdmitted
 )
 
 // Error is the canonical Broker domain error.
@@ -100,6 +114,12 @@ func (k Kind) String() string {
 		return "upstream_rejected"
 	case KindInternal:
 		return "internal"
+	case KindUnimplemented:
+		return "unimplemented"
+	case KindSignatureInvalid:
+		return "signature_invalid"
+	case KindExchangeNotAdmitted:
+		return "exchange_not_admitted"
 	default:
 		return "unknown"
 	}
@@ -112,7 +132,7 @@ func (k Kind) ConnectCode() connect.Code {
 		return connect.CodeInvalidArgument
 	case KindNotFound:
 		return connect.CodeNotFound
-	case KindUnauthenticated:
+	case KindUnauthenticated, KindSignatureInvalid:
 		return connect.CodeUnauthenticated
 	case KindPermissionDenied:
 		return connect.CodePermissionDenied
@@ -120,8 +140,10 @@ func (k Kind) ConnectCode() connect.Code {
 		return connect.CodeResourceExhausted
 	case KindUpstreamUnavailable:
 		return connect.CodeUnavailable
-	case KindUpstreamRejected:
+	case KindUpstreamRejected, KindExchangeNotAdmitted:
 		return connect.CodeFailedPrecondition
+	case KindUnimplemented:
+		return connect.CodeUnimplemented
 	default:
 		return connect.CodeInternal
 	}

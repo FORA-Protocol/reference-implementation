@@ -48,7 +48,7 @@ func discoverOffer(t *testing.T, h *testHarness, uri string) *forav1.Offer {
 // discoverPath discovers the offers for a single path under the harness tenant.
 func discoverPath(t *testing.T, h *testHarness, path string) []*forav1.Offer {
 	t.Helper()
-	return discoverURI(t, h, "https://"+h.tenantDomain+path)
+	return discoverURI(t, h, "https://"+h.siteDomain+path)
 }
 
 // discoverFirst discovers the offers for the default seeded path.
@@ -87,7 +87,7 @@ func pushDiscoverTermOfferForTenant(
 // term exercise the identical public path.
 func pushDiscoverTermOffer(t *testing.T, h *testHarness, path string, term *forav1.LicenseTerm) *forav1.Offer {
 	t.Helper()
-	return pushDiscoverTermOfferForTenant(t, h, h.tenantID, h.tenantDomain, path, term)
+	return pushDiscoverTermOfferForTenant(t, h, h.tenantID, h.siteDomain, path, term)
 }
 
 // pushDiscoverOffer pushes a catalog entry under the harness tenant with the

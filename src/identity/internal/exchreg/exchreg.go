@@ -40,11 +40,21 @@ import (
 
 	lru "github.com/hashicorp/golang-lru/v2"
 
+	"github.com/FORA-Protocol/protocol/sdk/go/connect"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+	"github.com/FORA-Protocol/protocol/sdk/go/resolvers"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/account"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/agentsign"
 )
+
+// The SDK's registration verb reads what an Exchange asks of a registration
+// through this seam, so a deployment can supply a reader with its own policy and
+// its own strictness. This assertion is what keeps that a compile-time fact
+// rather than a wiring accident discovered on the first register.
+var _ connect.RegistrationRequirementsReader = (*Reader)(nil)
 
 // DefaultCacheSize is how many distinct compiled schemas one Reader holds.
 //
@@ -105,7 +115,8 @@ func New(cfg Config) (*Reader, error) {
 	if cfg.Fetch == nil {
 		return nil, errors.New(
 			"exchreg: Config.Fetch is required; inject the SSRF-guarded client the " +
-				"composition root builds")
+				"composition root builds",
+		)
 	}
 	size := cfg.CacheSize
 	switch {
@@ -127,8 +138,15 @@ func New(cfg Config) (*Reader, error) {
 	}, nil
 }
 
-// Requirements fetches exchange's manifest and reports what it asks of a
-// registration. The fetch is never served from a cache; see the package doc.
+// ResolveRegistrationRequirements fetches exchange's manifest and reports what
+// it asks of a registration. The fetch is never served from a cache; see the
+// package doc.
+//
+// It is the SDK's registration-requirements seam. A refusal that is a VERDICT
+// about the document carries the sentinel that seam classifies on as well as
+// this repository's own; a refusal that is a failed READ carries only ours, so
+// the SDK goes on reading it as retryable. See unread for which refusals fall
+// on which side and why the split has to be kept.
 //
 // Two refusals come before anything is dialled: a value that is not a bare
 // domain, and a domain the deployment's policy excludes.
@@ -154,12 +172,15 @@ func New(cfg Config) (*Reader, error) {
 // The tool layer keeps its own copy of this check, which is not redundant: what
 // it adds is a sentence naming what a bare domain is, where this one is the
 // structural guarantee underneath. Same split as the policy check above it.
-func (r *Reader) Requirements(ctx context.Context, exchange string) (account.Requirements, error) {
+func (r *Reader) ResolveRegistrationRequirements(
+	ctx context.Context, exchange string,
+) (resolvers.RegistrationRequirements, error) {
+	none := resolvers.RegistrationRequirements{}
 	if !helpers.IsBareDomain(exchange) {
-		return account.Requirements{}, fmt.Errorf("%w: %q", account.ErrNotBareDomain, exchange)
+		return none, fmt.Errorf("%w: %w: %q", account.ErrNotBareDomain, helpers.ErrInvalidHost, exchange)
 	}
 	if r.allow != nil && !r.allow(exchange) {
-		return account.Requirements{}, fmt.Errorf("%w: %s", account.ErrNotPermitted, exchange)
+		return none, fmt.Errorf("%w: %w: %s", account.ErrNotPermitted, resolvers.ErrExchangeNotPermitted, exchange)
 	}
 	doc, err := forawellknown.FetchDocument(ctx, exchange, forawellknown.FetchOptions{
 		Client:  r.fetch,
@@ -171,24 +192,148 @@ func (r *Reader) Requirements(ctx context.Context, exchange string) (account.Req
 		ExpectRole: forawellknown.RoleExchange,
 	})
 	if err != nil {
-		if errors.Is(err, forawellknown.ErrVersionRefused) {
-			// A verdict about the document, named with the port's sentinel so a
-			// consumer can tell it from a peer that did not answer without
-			// importing the reader.
-			return account.Requirements{}, fmt.Errorf("%w: %s: %w", account.ErrManifestVersionRefused, exchange, err)
-		}
-		return account.Requirements{}, fmt.Errorf("exchreg: read %s registration requirements: %w", exchange, err)
+		return none, fmt.Errorf("exchreg: read %s registration requirements: %w", exchange, unread(err))
 	}
 	raw, published, err := doc.RegistrationSchemaBytes()
 	if err != nil {
-		return account.Requirements{}, fmt.Errorf("exchreg: read %s registration schema: %w", exchange, err)
+		return none, fmt.Errorf("exchreg: read %s registration schema: %w", exchange, unread(err))
 	}
-	reqs := account.Requirements{
+	reqs := resolvers.RegistrationRequirements{
 		TermsDigest: doc.Manifest.TermsDigest,
 		Verdict:     helpers.SchemaNotPublished,
 	}
 	if published {
 		reqs.Schema, reqs.Verdict = r.compile(raw)
 	}
+	if schemaRefused(reqs.Verdict) {
+		// The operator is told the local pre-check was skipped, and why. It is
+		// reported from here because this is the last layer that can see it: the
+		// SDK verb reads the schema and the digest off this answer and discards
+		// the verdict, so nothing above knows a published schema was refused.
+		//
+		// It names the agent as well as the exchange and the verdict, because the
+		// question an operator brings to this line is which agents registered
+		// with no local pre-check, and every sibling identity.mcp.* line opens
+		// with the subdomain. Correlating through the request id instead would
+		// make this the one line on the surface that has to be joined to another
+		// before it answers anything.
+		//
+		// The subdomain comes off the context, never from an argument, so it is
+		// the identity the bearer token authenticated rather than one a caller
+		// could name. It is absent only where nothing authenticated the request,
+		// and it is omitted rather than logged empty there: a blank attribute
+		// reads as an agent whose name we lost.
+		log := reqctx.FromContext(ctx)
+		if subdomain := agentsign.SubdomainFromContext(ctx); subdomain != "" {
+			log = log.With("subdomain", subdomain)
+		}
+		log.WarnContext(ctx, "identity.mcp.register.schema_unusable",
+			"exchange", exchange, "verdict", reqs.Verdict.String())
+	}
 	return reqs, nil
+}
+
+// unread marks a failure to READ the manifest, as opposed to a verdict about
+// what the manifest said.
+//
+// Two vocabularies are attached because two layers ask different questions of
+// the same error. The SDK classifies a reader's refusal on its own verdict
+// sentinels and reads everything else as a transport failure worth retrying. The
+// service above needs to tell a failed READ apart from a failed SEND, which
+// arrives wearing the same SDK class, and account.ErrRequirementsUnread is what
+// carries that distinction through -- so it is attached whatever the verdict.
+//
+// THREE of the failures reaching here are verdicts rather than failed reads. A
+// manifest describing another role arrived and said it is not an Exchange. A
+// manifest carrying a document version this build does not accept arrived and
+// was refused before any other member was read. A manifest this reader cannot
+// use arrived and failed the document rules -- the wire shape the embedded
+// schema decides, or the protocol's own field and cross-field constraints. The
+// next fetch returns the same bytes in all three cases, so a caller told to
+// retry retries forever.
+//
+// WHICH sentinel stops that retry is a property of the SEAM rather than of the
+// condition, and the SDK keeps two seams with two different verdict sets. The
+// routing tier's set is the one internal/foraroute mirrors, and a refused
+// version is in it. The registration-requirements tier -- the one this reader
+// plugs into -- reads a different four: an unusable host, a domain the
+// deployment excludes, a manifest that is not an Exchange, and a manifest this
+// reader cannot use. Everything else it calls a transport failure worth
+// retrying, and the version sentinel is NOT among the four. So on THIS seam
+// finality comes from the unusable-manifest sentinel and from nothing else.
+//
+// The version arm therefore carries two SDK sentinels doing two different jobs.
+// The unusable-manifest one is what the requirements tier classifies on, and
+// without it the one refusal that can never change on a retry is the one
+// reported as transient -- which is the answer a refused manifest version is
+// required not to get: it is a verdict, never cached and never retried
+// (ADR-025 D4). The version one names the CONDITION rather than the class. It is
+// what the routing tier reads when the status leg meets the same document, and
+// keeping it here means one spelling of the condition reaches both legs. The
+// SDK's own doc for the unusable-manifest sentinel names this reader in as many
+// words: one that validates the whole document, or applies a narrower version
+// rule, holds a final answer the seam would otherwise report as transient.
+//
+// The version verdict stays a separate sentinel from the schema one in this
+// repository's own vocabulary because the repair differs: the origin runs a
+// manifest layout this build does not implement, which no correction of the
+// document's shape resolves. It is read off the raw bytes before the shape is
+// checked at all, so it never arrives wearing the schema sentinel.
+//
+// Every cause under the schema sentinel is a verdict, and that is a property of
+// the sentinel rather than a choice made here. It carries only facts about a
+// document that ARRIVED and broke a rule; a body that never parsed is a fetch
+// failure and never reaches this arm. The Exchange's agent registry draws the
+// same line from the same two sentinels, and its shared caller-fault split
+// classifies the served-but-broken document as permanent while leaving the
+// unparsed one retryable.
+//
+// This reader is STRICTER than the SDK's own, and the unusable-manifest sentinel
+// is what lets it say so. The SDK's reader reaches that sentinel for exactly one
+// thing: a document version it cannot classify. Its other two disappointments it
+// treats as absence or as a transport failure -- it validates nothing beyond the
+// role and reads an off-spec member as absent, so the document rules this reader
+// applies are ones the SDK's never reaches a verdict on. A reader that validates
+// the whole document, or applies a narrower version rule than that one, reaches
+// for the same word, and would otherwise hold a final answer the seam reported
+// as transient.
+//
+// Everything left is a genuinely failed read -- no document served, a non-2xx, a
+// transport error, or a body that is not JSON at all -- and carries NO verdict
+// sentinel, so the SDK reads it as retryable. The last of those is the one worth
+// naming: a proxy answering 200 with an error page establishes nothing about
+// what the Exchange publishes, and the next fetch may return the real document.
+// The fetch this reader makes is what states that one as a transport failure;
+// the validator underneath reports only that the body never parsed.
+// That absence is asserted rather than assumed: the reader-contract table has a
+// row that fails if a verdict sentinel ever appears on one.
+func unread(err error) error {
+	switch {
+	case errors.Is(err, forawellknown.ErrVersionRefused):
+		// ErrManifestUnusable is what makes this final at the requirements seam;
+		// ErrManifestVersionRefused names the condition and is what the routing
+		// seam reads on the status leg. Dropping the first reports a refusal that
+		// answers the same on every attempt as one worth retrying.
+		return fmt.Errorf("%w: %w: %w: %w: %w",
+			account.ErrRequirementsUnread, account.ErrManifestVersionRefused,
+			resolvers.ErrManifestUnusable, resolvers.ErrManifestVersionRefused, err)
+	case errors.Is(err, forawellknown.ErrRoleMismatch):
+		return fmt.Errorf("%w: %w: %w",
+			account.ErrRequirementsUnread, resolvers.ErrManifestNotExchange, err)
+	case errors.Is(err, forawellknown.ErrSchemaInvalid):
+		return fmt.Errorf("%w: %w: %w",
+			account.ErrRequirementsUnread, resolvers.ErrManifestUnusable, err)
+	}
+	return fmt.Errorf("%w: %w", account.ErrRequirementsUnread, err)
+}
+
+// schemaRefused reports whether the Exchange published a schema this service
+// could not use. That is the state worth a log line: the agent is about to
+// register with no local pre-check against requirements that do exist.
+//
+// A function over the verdict rather than a method, because the value it
+// describes is now the SDK's type and this repository cannot hang a method on
+// it.
+func schemaRefused(v helpers.SchemaVerdict) bool {
+	return v != helpers.SchemaAccepted && v != helpers.SchemaNotPublished
 }

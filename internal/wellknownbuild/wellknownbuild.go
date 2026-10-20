@@ -11,6 +11,10 @@
 package wellknownbuild
 
 import (
+	"time"
+
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/server"
 )
 
@@ -20,10 +24,16 @@ import (
 // revocation_url the WBA directory advertises (Broker-only today: the
 // Exchange retires its offer-signing key by rotation with a dual-key grace
 // period, not by a keyed revocation list, so it leaves the field empty).
+//
+// Signers hold the private halves of the published keys; the directory
+// response is signed once per listed key (server.WBAConfig.Signers). Now dates
+// those signatures; nil means time.Now.
 type Config struct {
 	Manifest      server.Config
 	Keys          server.KeySource
 	RevocationURL string
+	Signers       []helpers.Signer
+	Now           func() time.Time
 }
 
 // Build constructs the overlay-manifest handler plus the WBA directory
@@ -38,6 +48,8 @@ func Build(cfg Config) (server.Handlers, error) {
 	wba, err := server.NewWBAHandler(server.WBAConfig{
 		Keys:          cfg.Keys,
 		RevocationURL: cfg.RevocationURL,
+		Signers:       cfg.Signers,
+		Now:           cfg.Now,
 	})
 	if err != nil {
 		return server.Handlers{}, err

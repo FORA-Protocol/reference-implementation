@@ -1,6 +1,11 @@
 # ADR-024 — Container Image Distribution
 
 **Status:** Accepted (2026-08-03)
+
+**Amended 2026-10-01.** The workflow publishes five images, not three: the onboarding preview service and the publisher console as well. The console image carries the release tag it was built from. See the [Amendment (2026-10-01)](#amendment-2026-10-01--five-images-and-the-console-in-the-release) section.
+
+**Amended 2026-10-16.** The public workflow publishes four images: the onboarding preview service is not part of the published tree, so the workflow has nothing to build its image from. See the [Amendment (2026-10-16)](#amendment-2026-10-16--four-images-onboarding-leaves-the-public-tree) section.
+
 **Relates to:** ADR-020 (FORA SDK layered libraries) — the same question asked about library packages rather than container images.
 
 ---
@@ -159,3 +164,77 @@ artifacts.
 default shape and needs no decision. It reads as though the repository were part of
 the artifact's identity, and it makes every command in every deployment document
 longer for no gain to the reader.
+
+---
+
+## Amendment (2026-10-01) — five images, and the console in the release
+
+**Status of this amendment:** Accepted (2026-10-01).
+
+**What D1 says today.** Three images are published: `ghcr.io/fora-protocol/exchange`,
+`ghcr.io/fora-protocol/broker` and `ghcr.io/fora-protocol/identity`. The Context, D4
+and D5 count the same three.
+
+**What changes.**
+
+- **The workflow publishes five images.** It also builds the onboarding preview
+  service as `ghcr.io/fora-protocol/onboarding`, and the publisher console from
+  `src/console/` as `ghcr.io/fora-protocol/console`. Both names are flat, as D1
+  requires. The 2026-10-16 amendment below withdraws the onboarding image from the
+  public workflow.
+- **The console image carries its release tag.** The console tells every publisher
+  which version of the edge packages to build from, and it reads that version from
+  `CONSOLE_EDGE_RELEASE_REF`. The console's Dockerfile takes the build argument
+  `EDGE_RELEASE_REF` and keeps it in the image as that setting. The workflow passes
+  `github.ref_name`: the git tag's own name, with its leading `v`. A tag `v1.2.3`
+  therefore gives the image tag `1.2.3`, as D2 requires, and the value `v1.2.3`,
+  which names the git tag the edge packages are built from. The console is the only
+  image built with a build argument, and
+  `tests/e2e/harness/test_guards_workflow_scripts.py` checks this on the real
+  workflow.
+- **The GitLab release builds the same five images.** The maintainers' GitLab
+  release calls `deploy/terraform/scripts/build-push-images.sh`, one of the push
+  paths the Context places outside this decision. It builds the five images from a `vX.Y.Z` tag,
+  pushes them to the project's own registry under that tag, leading `v` included,
+  and passes the same tag to the console's build as `EDGE_RELEASE_REF`. Its release
+  manifest names four of the images as production services: the Exchange, the
+  Broker, the Identity service and the console. The onboarding image is published
+  only, so that one version names one complete set of builds.
+
+**What does not change.**
+
+- D2 to D5 apply to all five images: one immutable version tag without the leading
+  `v`, no `latest`, `linux/amd64` only, the per-run token, and source and images
+  published as separate acts.
+- The Edge worker and the upstream images stay outside this decision.
+- An operator can still set `CONSOLE_EDGE_RELEASE_REF` on the container, and that
+  value overrides the one in the image; the e2e stack does this. An image built
+  without the build argument carries an empty value, which the console treats as
+  unset.
+
+---
+
+## Amendment (2026-10-16) — four images: onboarding leaves the public tree
+
+**Status of this amendment:** Accepted (2026-10-16).
+
+**What the 2026-10-01 amendment says.** The workflow publishes five images, the
+onboarding preview service's among them.
+
+**What changes.**
+
+- **The public workflow publishes four images:** `ghcr.io/fora-protocol/exchange`,
+  `ghcr.io/fora-protocol/broker`, `ghcr.io/fora-protocol/identity` and
+  `ghcr.io/fora-protocol/console`. The onboarding preview service is not part of
+  the published tree, so the workflow that runs on that tree has nothing to build
+  its image from. `ghcr.io/fora-protocol/onboarding` was never published: no
+  published snapshot carried the service or its matrix entry.
+- **The GitLab release still builds all five**, from the maintainers' own tree,
+  which carries the service, and its manifest still records the onboarding digest.
+  `deploy/terraform/scripts/build-push-images.sh` builds a named service only when
+  the tree carries its Dockerfile, and refuses one whose Dockerfile is absent, so
+  no tree can publish a tag it built nothing for.
+- `tests/e2e/harness/test_guards_workflow_scripts.py` checks that every matrix
+  entry's Dockerfile is in the tree and is not held back from the publish.
+
+**What does not change.** D1 to D5 apply to the four images as they did to five.

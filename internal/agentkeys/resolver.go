@@ -3,16 +3,21 @@
 // middleware's per-agent fallback (ADR-009 D3/D4).
 //
 // After the WBA split the RFC 9421 keyid is the RFC 7638 thumbprint of the
-// signing key (proof of key possession), no longer the signer's domain. The
-// signer names its own directory origin in the covered Signature-Agent header;
-// the verifier threads that origin into the resolver context
-// (helpers.WithSignatureAgent). This resolver hands it to the SDK's
-// WBAKeyResolver, which fetches that origin's WBA directory (through the
-// injected SSRF-guarded client, TTL-cached) and matches the incoming thumbprint
-// against the directory's locally-computed key thumbprints. A never-before-seen
-// signer authenticates at the transport layer this way, so the service can
-// lazy-register it (service.resolveAgentLazily) keyed on the Signature-Agent
-// domain.
+// signing key (proof of key possession), no longer the signer's domain. Each
+// signature names its signer's directory as an https origin in its own covered
+// Signature-Agent member; the verifier threads that origin into the resolver
+// context per signature (helpers.WithSignatureAgent). This resolver hands it to
+// the SDK's WBAKeyResolver, which fetches that origin's WBA directory over https
+// (through the injected SSRF-guarded client, TTL-cached, never through a
+// redirect, and keeping only the keys that signed the directory response) and
+// matches the incoming thumbprint against the directory's locally-computed key
+// thumbprints. A never-before-seen signer authenticates at the transport layer
+// this way, so the service can lazy-register it (service.resolveAgentLazily)
+// keyed on the Signature-Agent host.
+//
+// No deployment setting reshapes that origin. A member that is not an https
+// origin is refused here as well as by the verifier, so no scheme or port knob
+// can make a plaintext directory acceptable.
 //
 // The directory is cached (TTL) because a signer's key is re-resolved here on
 // every request — caching is what keeps that from issuing one outbound fetch
@@ -25,17 +30,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 	"github.com/FORA-Protocol/protocol/sdk/go/resolvers"
 
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/agentid"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/keypolicy"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/runhttp"
 )
 
 // Config wires the per-agent resolver.
@@ -48,11 +50,6 @@ type Config struct {
 	// Concrete *http.Client because it feeds the SDK's resolvers.WBAKeyResolver,
 	// whose HTTP option is a concrete *http.Client.
 	Client *http.Client
-	// Scheme/Port shape the WBA-directory URL for bare-host Signature-Agent
-	// origins on local/compose stacks (FORA_WELLKNOWN_{SCHEME,PORT}); empty
-	// means https + default port.
-	Scheme string
-	Port   string
 	// TTL bounds how long a fetched WBA directory is cached; 0 uses the SDK
 	// resolver default.
 	TTL time.Duration
@@ -104,33 +101,26 @@ func New(ctx context.Context, cfg Config) helpers.KeyResolver {
 		PollInterval: cfg.PollInterval,
 		Now:          clk.Now,
 		After:        clk.After,
-		Scheme:       cfg.Scheme,
 		Logger:       logger,
 		OnPollArmed:  cfg.OnPollArmed,
 		OnPollCycle:  cfg.OnPollCycle,
 	})
 	return keypolicy.ResolverFunc(func(ctx context.Context, keyID string) (ed25519.PublicKey, error) {
-		raw := helpers.SignatureAgentFromContext(ctx)
-		if raw == "" || keyID == "" {
+		directory := helpers.SignatureAgentFromContext(ctx)
+		if directory == "" || keyID == "" {
 			return nil, fmt.Errorf("%w: no Signature-Agent directory for keyid=%q", helpers.ErrUnknownKey, keyID)
 		}
-		// Canonicalize before the fetch, for the same reason agentreg keys its
-		// refresh debounce on the canonical host: the SDK's directory cache keys on
-		// the host exactly as parsed, so "a.example", "A.Example", "a.example." and
-		// "a.example:443" would be four cache entries and four outbound fetches per
-		// TTL window — one budget per spelling a caller can invent, on the path that
-		// runs for every request and before agentreg is reached.
-		//
-		// Authorization is unaffected either way: the thumbprint still has to appear
-		// in whatever directory is fetched. What changes is the fetch budget and the
-		// cache.
-		directory, err := agentid.FromDirectory(raw)
-		if err != nil {
-			return nil, fmt.Errorf("%w: signature-agent %q does not name a host: %w",
-				helpers.ErrUnknownKey, raw, err)
+		// The member must be an https origin, the one form the profile admits, and
+		// it is used exactly as it arrived: the SDK verifier has already refused
+		// any other form, and the check is repeated here so a resolver handed a
+		// value some other way cannot fetch a plaintext directory. The origin form
+		// is also canonical — lowercase, no default port, nothing after the host —
+		// so one directory is one cache entry and one fetch budget however a caller
+		// tried to spell it.
+		if err := helpers.CheckHTTPSOrigin(directory); err != nil {
+			return nil, fmt.Errorf("%w: signature-agent %q: %w", helpers.ErrUnknownKey, directory, err)
 		}
-		shaped := withConfiguredPort(directory, cfg.Port)
-		pub, err := resolver.Resolve(helpers.WithSignatureAgent(ctx, shaped), keyID)
+		pub, err := resolver.Resolve(helpers.WithSignatureAgent(ctx, directory), keyID)
 		if err != nil {
 			// Absent directory / unreachable / thumbprint-mismatch / revoked /
 			// expired all mean "cannot verify against this signer's published
@@ -140,34 +130,17 @@ func New(ctx context.Context, cfg Config) helpers.KeyResolver {
 			// resolver runs only on the request path). Falls back to the default
 			// logger when no request context is present.
 			reqctx.FromContext(ctx).DebugContext(ctx, "agent WBA key resolution miss",
-				"keyid", keyID, "directory", shaped, "err", err)
-			return nil, fmt.Errorf("%w: keyid=%q at %q: %w", helpers.ErrUnknownKey, keyID, shaped, err)
+				"keyid", keyID, "directory", directory, "err", err)
+			return nil, fmt.Errorf("%w: keyid=%q at %q: %w", helpers.ErrUnknownKey, keyID, directory, err)
 		}
 		return pub, nil
 	})
 }
 
-// NewFromEnv builds the per-agent WBA key resolver from the process environment:
-// it reads the FORA_WELLKNOWN_SCHEME + FORA_WELLKNOWN_PORT knobs that shape
-// bare-host Signature-Agent directory URLs on local/compose stacks and threads
-// the shared fetch client + logger. Broker and Exchange share this
-// construction. A wiring change (a knob rename, an env-defaulted TTL) now
-// lands here once instead of drifting between services.
-func NewFromEnv(ctx context.Context, fetch *http.Client, logger *slog.Logger) helpers.KeyResolver {
-	return New(ctx, Config{
-		Client: fetch,
-		Scheme: runhttp.EnvOr("FORA_WELLKNOWN_SCHEME", "https"),
-		Port:   runhttp.EnvOr("FORA_WELLKNOWN_PORT", ""),
-		Logger: logger,
-	})
-}
-
-// withConfiguredPort appends the configured fetch port to a bare-host
-// Signature-Agent origin (compose stacks name services by bare host). An origin
-// that already carries a scheme or a port is left untouched.
-func withConfiguredPort(directory, port string) string {
-	if port == "" || strings.Contains(directory, "://") || strings.Contains(directory, ":") {
-		return directory
-	}
-	return directory + ":" + port
+// NewService builds the per-agent WBA key resolver the Broker and the Exchange
+// share, over the shared fetch client and logger, so a wiring change lands here
+// once instead of drifting between services. It reads no deployment setting:
+// the directory a signature names is fetched over https from that origin.
+func NewService(ctx context.Context, fetch *http.Client, logger *slog.Logger) helpers.KeyResolver {
+	return New(ctx, Config{Client: fetch, Logger: logger})
 }

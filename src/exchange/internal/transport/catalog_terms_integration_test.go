@@ -28,11 +28,11 @@ func TestPushResources_TermsRoundTrip(t *testing.T) {
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 
 	// Two distinct terms: an ENUMERATED term with explicit pricing and a
 	// REFERENCE_ONLY term governed by a license document. Together they
@@ -43,10 +43,11 @@ func TestPushResources_TermsRoundTrip(t *testing.T) {
 		{
 			Semantics: forav1.TermSemantics_TERM_SEMANTICS_ENUMERATED,
 			Pricing: &forav1.Pricing{
-				Model:    forav1.PricingModel_PRICING_MODEL_PER_UNIT,
-				Rate:     rate,
-				Currency: "USD",
-				Unit:     proto.String("accesses"),
+				Model:             forav1.PricingModel_PRICING_MODEL_PER_UNIT,
+				Rate:              rate,
+				Currency:          "USD",
+				Unit:              proto.String("accesses"),
+				EstimatedQuantity: proto.Int32(1),
 			},
 		},
 		{
@@ -81,13 +82,17 @@ func TestPushResources_TermsRoundTrip(t *testing.T) {
 		t.Fatalf("accepted=%d rejected=%d, want 1/0", resp.Msg.GetAccepted(), resp.Msg.GetRejected())
 	}
 
-	gotTerms := discoverTerms(t, h, "https://"+h.publisherDom+path)
-	if len(gotTerms) != len(wantTerms) {
-		t.Fatalf("terms len = %d, want %d", len(gotTerms), len(wantTerms))
+	// Each term round-trips on its own offer: the term copy is the pushed term
+	// without its pricing, and the offer's own price is the term's (one price per
+	// offer, on Offer.pricing).
+	offers := discoverOffers(t, h, "https://"+h.publisherDom+path)
+	if len(offers) != len(wantTerms) {
+		t.Fatalf("offers = %d, want one per term (%d)", len(offers), len(wantTerms))
 	}
 	for i := range wantTerms {
-		if !proto.Equal(gotTerms[i], wantTerms[i]) {
-			t.Fatalf("term %d round-trip mismatch:\n got = %v\nwant = %v", i, gotTerms[i], wantTerms[i])
+		if !sellsTerm(offers[i], wantTerms[i]) {
+			t.Fatalf("term %d round-trip mismatch:\n got term = %v, price = %v\nwant term = %v, price = %v",
+				i, offers[i].GetTerms(), offers[i].GetPricing(), unpriced(wantTerms[i]), wantTerms[i].GetPricing())
 		}
 	}
 }
@@ -104,11 +109,11 @@ func TestPushResources_NoTermsYieldsNoOffer(t *testing.T) {
 	callerID := "caller.example"
 	h.publisher.setContributors(callerID)
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("gen: %v", err)
 	}
-	h.publishAgent(t, callerID, pub)
+	h.publishAgent(t, callerID, priv)
 
 	const path = "/articles/no-terms"
 	contentID := "res-" + uuid.NewString()
