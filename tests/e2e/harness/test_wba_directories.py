@@ -7,8 +7,9 @@ directory (draft-ietf-webbotauth-httpsig-protocol-00, "WG-00", Section 5.5, as
 the Web Bot Auth profile of the pinned protocol module
 ``github.com/FORA-Protocol/protocol`` adopts it): the Broker, the four
 Exchanges, the console, an agent subdomain the identity service hosts, the three
-publisher edges, the harness's own static agent agent-e2e, and the Lambda@Edge
-function, whose directory is checked on the response it generates. Each is
+publisher edges, every fixed identity the key-directories service serves (each
+under its own host name, one nginx for them all), and the Lambda@Edge function,
+whose directory is checked on the response it generates. Each is
 fetched over https with the stack's local CA and checked by the Python oracle's
 directory check (``wba_directory.py``): 200 with no redirect followed, the
 profile's media type, a JWKS of public keys whose kid, when present, is the
@@ -40,6 +41,10 @@ https, and the Exchange mints http URLs in this stack). The AWS runtime fronted
 by CloudFront signed URLs is not among them: its RSA URLs carry no agent_id and
 bind nothing.
 
+The directory checks claim KEYS-001, which the SDK's own reader also drives in
+``obligations/test_key_directories.py``; the delivered fetch claims the
+positive of DELIVERY-004.
+
 Surfaces: the directories' public https URLs; the Broker's Resolve and
 ExecuteTransaction for the arrange step; the edges' content URLs, and the Lambda
 runtime's invoke endpoint, for the fetch.
@@ -50,7 +55,6 @@ host port.
 
 from __future__ import annotations
 
-import json
 import os
 import secrets
 from dataclasses import dataclass
@@ -58,9 +62,13 @@ from dataclasses import dataclass
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fora_sdk.b64 import b64url_nopad
+from fora_sdk.resolvers import DocumentNotFoundError
 
+from .constants import KEY_DIRECTORIES_SERVICE, STATIC_KEY_HOSTS
 from .e2e_catalog import SeededFixture
 from .edge_fetch import present
+from .exchanges import EXCHANGE_B_DOMAIN
+from .fresh_agent import FreshAgent
 from .lambda_edge import (
     ARTICLE_PATH,
     PUBLISHER,
@@ -69,15 +77,17 @@ from .lambda_edge import (
     mint_delivery_url,
     viewer_request_event,
 )
+from .obligation_registry import Obligation, obligation
+from .protocol_documents import wba_directory_at
 from .stack_urls import StackURLs
 from .wba_conformance import (
-    AGENT_ORIGIN,
     EXPECTED_JWK_ALG,
-    agent_key,
+    agent_origin,
     buy_as_agent,
     check_participant_directory,
     https_jwks,
     lambda_edge_directory,
+    lambda_edge_directory_keys,
 )
 from .wba_oracle import check_directory_response, fresh_key, key_thumbprint, message, public_jwk
 from .wba_oracle import sign
@@ -93,7 +103,10 @@ pytestmark = [
 
 # Every participant directory the capture proxy serves over https. "agent"
 # stands for the agent subdomain this session signed up at the identity service,
-# known only at run time.
+# known only at run time. The fixed identities share one key-directories service,
+# so each of their names is checked: the check verifies the response signature
+# over the request's own authority, which a directory served under another
+# identity's name fails.
 _DIRECTORY_HOSTS = [
     "broker",
     "exchange",
@@ -105,7 +118,7 @@ _DIRECTORY_HOSTS = [
     "demo.fora-protocol.org",
     "music.demo.fora-protocol.org",
     "sfx.demo.fora-protocol.org",
-    "agent-e2e",
+    *STATIC_KEY_HOSTS,
 ]
 
 
@@ -115,13 +128,26 @@ def _origin(host: str, request: pytest.FixtureRequest) -> str:
     return f"https://{host}"
 
 
+@obligation(Obligation.KEYS_001)
 @pytest.mark.parametrize("host", _DIRECTORY_HOSTS)
 def test_each_participant_directory_passes_the_wba_directory_check(
     host: str, request: pytest.FixtureRequest
 ) -> None:
+    """Each participant's directory, fetched over https, passes the WG-00 directory check."""
     origin = _origin(host, request)
     result = check_participant_directory(origin)
     assert result.ok, f"{origin}: {result.failed}: {result.detail}"
+
+
+def test_the_key_directories_service_serves_no_keys_under_its_own_name() -> None:
+    """A name that is no fixed identity's reaches the catch-all, which serves nobody's keys.
+
+    One nginx serves every fixed identity's directory, each under its own name.
+    A request under any other name must not fall through to one of them: a
+    verifier would then hold a key under a name the key does not belong to.
+    """
+    with pytest.raises(DocumentNotFoundError):
+        wba_directory_at(f"http://{KEY_DIRECTORIES_SERVICE}")
 
 
 @pytest.mark.parametrize("host", _DIRECTORY_HOSTS)
@@ -146,6 +172,7 @@ def test_the_import_check_refuses_a_registry_named_alg(ts_oracle: TSOracle) -> N
     assert "EdDSA" in refused.refused[0], refused
 
 
+@obligation(Obligation.KEYS_001)
 @pytest.mark.xdist_group("lambda-edge")
 def test_the_lambda_edge_directory_passes_the_wba_directory_check(compose_stack: StackURLs) -> None:
     """The AWS edge's directory is held to the same WG-00 rules as every other one."""
@@ -160,30 +187,28 @@ def test_every_lambda_edge_directory_key_imports_into_the_cloudflare_verifier(
     compose_stack: StackURLs, ts_oracle: TSOracle
 ) -> None:
     """The library imports every key the Lambda@Edge directory publishes."""
-    response = lambda_edge_directory(compose_stack)
-    assert response.status_code == 200, response.text[:200]
-    jwks = json.loads(response.content)
-    imported = ts_oracle.import_keys(jwks)
+    keys = lambda_edge_directory_keys(compose_stack)
+    imported = ts_oracle.import_keys({"keys": keys})
     assert imported.refused == (), f"lambda-edge: the library refused {imported.refused}"
-    assert sorted(imported.keyids) == sorted(key_thumbprint(k) for k in jwks["keys"]), imported
+    assert sorted(imported.keyids) == sorted(key_thumbprint(k) for k in keys), imported
 
 
 # ---- Retrieval proof of possession as a WBA signature ------------------------
 
 
-def _wba_possession_headers(url: str, key: Ed25519PrivateKey) -> dict[str, str]:
+def _wba_possession_headers(url: str, key: Ed25519PrivateKey, origin: str) -> dict[str, str]:
     """A WG-00 signature over a GET, on @target-uri, plus @method: the profile's proof.
 
     The protocol's retrieval proof of possession is the WG-00 base (its
     ``@authority`` or ``@target-uri``, the covered Signature-Agent member, the tag
     and a 64-byte nonce) plus ``@method`` and ``@target-uri``. The base here takes
     ``@target-uri``, so the proof covers exactly those three components, the set
-    the edge checks. Signed by the Python oracle with ``key``, and
+    the edge checks. Signed by the Python oracle with ``key`` under ``origin``, and
     X-FORA-Agent-Key presenting that key's public half, as the edge's offline
     check needs.
     """
     signature = sign(
-        message("GET", url), key, AGENT_ORIGIN, target="@target-uri", extra_components=("@method",)
+        message("GET", url), key, origin, target="@target-uri", extra_components=("@method",)
     )
     public = key.public_key().public_bytes_raw()
     return {**signature, "X-FORA-Agent-Key": b64url_nopad(public)}
@@ -199,22 +224,18 @@ class Fetched:
     text: str
 
 
-def _reason(body: str) -> str | None:
-    """The ``reason`` of an edge's JSON refusal, if the body is one."""
-    try:
-        payload = json.loads(body)
-    except ValueError:
-        return None
-    reason = payload.get("reason") if isinstance(payload, dict) else None
-    return str(reason) if reason is not None else None
-
-
 @dataclass(frozen=True)
 class BoundURL:
-    """A delivery URL bound to agent-e2e, and how to fetch it on its runtime."""
+    """A delivery URL bound to the test's own agent, and how to fetch it on its runtime.
+
+    ``origin`` and ``ed25519`` are the agent's: the https origin it signs under and
+    the private key whose thumbprint the URL names.
+    """
 
     url: str
     marker: str
+    origin: str
+    ed25519: Ed25519PrivateKey
     lambda_base: str | None = None
 
     def fetch(self, headers: dict[str, str]) -> Fetched:
@@ -222,40 +243,57 @@ class BoundURL:
             result = invoke(self.lambda_base, viewer_request_event(self.url, headers=headers))
             if result.pass_through:
                 return Fetched(result.uri == self.marker, "pass-through", None, str(result))
-            body = result.body or ""
-            return Fetched(False, str(result.status), _reason(body), body)
+            return Fetched(False, str(result.status), result.reason, result.body or "")
         answer = present(self.url, headers=headers)
         delivered = answer.status == 200 and self.marker in answer.text
-        return Fetched(delivered, str(int(answer.status)), _reason(answer.text), answer.text)
+        return Fetched(delivered, str(int(answer.status)), answer.reason, answer.text)
 
 
-def _purchased_bound_url(stack: StackURLs, uri: str, marker: str) -> BoundURL:
-    """Buy ``uri`` through the Broker as agent-e2e and keep the delivery URL it is bound to."""
-    item = buy_as_agent(stack, uri, request_id=f"wba-pop-{secrets.token_hex(8)}")
+def _purchased_bound_url(agent: FreshAgent, uri: str, marker: str) -> BoundURL:
+    """Buy ``uri`` through the Broker as ``agent`` and keep the delivery URL it is bound to."""
+    item = buy_as_agent(agent, uri, request_id=f"wba-pop-{secrets.token_hex(8)}")
     bound = item.retrieval_endpoint or ""
     assert "agent_id=" in bound, f"the purchase minted no bound URL: {item}"
-    return BoundURL(url=bound, marker=marker)
+    return BoundURL(url=bound, marker=marker, origin=agent_origin(agent), ed25519=agent.ed25519)
 
 
 @pytest.fixture(params=["edge", "fastly-edge", "lambda-edge"])
 def bound_url(
-    request: pytest.FixtureRequest, compose_stack: StackURLs, seeded: SeededFixture
+    request: pytest.FixtureRequest,
+    compose_stack: StackURLs,
+    seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> BoundURL:
-    """A URL bound to agent-e2e's thumbprint, on each runtime that enforces the binding."""
+    """A URL bound to the test's own agent's thumbprint, on each runtime that enforces it.
+
+    The Fastly leg buys a priced item, so the agent opens an account at exchange-b,
+    which sells it, first.
+    """
     if request.param == "edge":
-        return _purchased_bound_url(compose_stack, seeded.cloudflare.uri, "Socrates")
+        return _purchased_bound_url(fresh_agent, seeded.cloudflare.uri, "Socrates")
     if request.param == "fastly-edge":
-        return _purchased_bound_url(compose_stack, seeded.fastly.uri, "Paper Satellites")
+        fresh_agent.fund(EXCHANGE_B_DOMAIN)
+        return _purchased_bound_url(fresh_agent, seeded.fastly.uri, "Paper Satellites")
     exchange_key = load_exchange_delivery_key(compose_stack.exchange)
     url = mint_delivery_url(
-        exchange_key, f"https://{PUBLISHER}{ARTICLE_PATH}", agent_id=key_thumbprint(agent_key())
+        exchange_key, f"https://{PUBLISHER}{ARTICLE_PATH}", agent_id=fresh_agent.thumbprint
     )
-    return BoundURL(url=url, marker=ARTICLE_PATH, lambda_base=compose_stack.lambda_edge)
+    return BoundURL(
+        url=url,
+        marker=ARTICLE_PATH,
+        origin=agent_origin(fresh_agent),
+        ed25519=fresh_agent.ed25519,
+        lambda_base=compose_stack.lambda_edge,
+    )
 
 
+@obligation(Obligation.DELIVERY_004)
 @pytest.mark.xdist_group("lambda-edge")
 def test_a_bound_url_fetched_with_a_wba_signature_is_delivered(bound_url: BoundURL) -> None:
-    fetched = bound_url.fetch(_wba_possession_headers(bound_url.url, agent_key()))
+    """A delivery URL bound to the agent, fetched with a library's WBA proof, is delivered."""
+    fetched = bound_url.fetch(
+        _wba_possession_headers(bound_url.url, bound_url.ed25519, bound_url.origin)
+    )
     assert fetched.delivered, (
         f"{bound_url.url}: {fetched.status} {fetched.reason}: {fetched.text[:200]}"
     )
@@ -264,7 +302,7 @@ def test_a_bound_url_fetched_with_a_wba_signature_is_delivered(bound_url: BoundU
 @pytest.mark.xdist_group("lambda-edge")
 def test_a_wba_signature_by_another_key_is_refused_without_content(bound_url: BoundURL) -> None:
     """Same request, signed and presented by a key that is not the one the URL names."""
-    fetched = bound_url.fetch(_wba_possession_headers(bound_url.url, fresh_key()))
+    fetched = bound_url.fetch(_wba_possession_headers(bound_url.url, fresh_key(), bound_url.origin))
     assert fetched.status == "403", f"{bound_url.url}: {fetched.status}: {fetched.text[:200]}"
     assert not fetched.delivered and bound_url.marker not in fetched.text, fetched.text[:200]
     assert fetched.reason in ("keyid_mismatch", "thumbprint_mismatch"), (

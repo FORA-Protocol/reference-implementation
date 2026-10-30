@@ -1,102 +1,71 @@
-// The two checks that gate the wizard's file and edge steps. Each answers one
-// question about the publisher's own live site, and each one's answer is what
-// unlocks the step's Next button -- the browser decides nothing.
+// The wizard's last step, Connect your site: one check of the publisher's own
+// site that answers for both of the step's tasks, and verifies the domain when
+// both are done. The browser decides nothing: it draws what the check answers
+// and asks again.
 
 package web
 
 import (
 	"net/http"
 
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/exchangeclient"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/wizard"
 )
 
-// checkBody is the shape both checks answer in: did it pass, and if not, what
-// the publisher has to change. One shape for both, because the wizard treats
-// them identically -- it enables a button and lists sentences.
-type checkBody struct {
-	Passed  bool     `json:"passed"`
-	Reasons []string `json:"reasons"`
+// fileTaskBody is the file task on the wire.
+type fileTaskBody struct {
+	Passed  bool             `json:"passed"`
+	State   wizard.FileState `json:"state"`
+	Status  string           `json:"status"`
+	Reasons []string         `json:"reasons"`
 }
 
-// checkBodyOf renders the Exchange's reason codes as what a publisher reads.
-func checkBodyOf(res exchangeclient.PreflightResult) checkBody {
-	return checkBody{Passed: res.Passed, Reasons: checkReasonText(res.Reasons)}
+// packageTaskBody is the package task on the wire.
+type packageTaskBody struct {
+	Passed bool               `json:"passed"`
+	State  wizard.EdgeState   `json:"state"`
+	Status string             `json:"status"`
+	Checks []wizard.EdgeCheck `json:"checks"`
 }
 
-// CheckManifest answers whether the domain's discovery document proves the
-// publisher controls it. The Exchange reads the document; nothing is written.
-func (a *WizardAPI) CheckManifest(w http.ResponseWriter, r *http.Request) {
+// Check is the last step's question, asked when the step opens, again every
+// few seconds while it is shown, and when the publisher presses Check now:
+// where the domain's file and its package stand, and whether the domain is
+// verified now.
+func (a *WizardAPI) Check(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Domain string `json:"domain"`
 	}
 	if !readAPI(w, r, &req) {
 		return
 	}
-	res, err := a.wizard.CheckManifest(r.Context(), actorOf(r.Context()), req.Domain)
+	at, err := a.resumer.Check(r.Context(), actorOf(r.Context()), req.Domain)
 	if err != nil {
 		apiFailure(w, r, err)
 		return
 	}
-	writeAPI(w, r, checkBodyOf(res))
-}
-
-// CheckEdge answers what the publisher's own site now says to an agent, to a
-// visitor, and at its discovery document's address.
-func (a *WizardAPI) CheckEdge(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Domain string `json:"domain"`
-		Paths  string `json:"content_paths"`
-	}
-	if !readAPI(w, r, &req) {
-		return
-	}
-	report, err := a.wizard.CheckEdge(r.Context(), req.Domain, req.Paths)
-	if err != nil {
-		apiFailure(w, r, err)
-		return
-	}
-	writeAPI(w, r, edgeBodyOf(report))
-}
-
-// edgeBody is the package check on the wire: whether it lets the publisher on,
-// what the site answered, and each question that did not come back clean.
-type edgeBody struct {
-	Passed  bool               `json:"passed"`
-	State   wizard.EdgeState   `json:"state"`
-	Message string             `json:"message"`
-	Checks  []wizard.EdgeCheck `json:"checks"`
-}
-
-func edgeBodyOf(report wizard.EdgeReport) edgeBody {
-	return edgeBody{
-		Passed: report.CanAdvance(), State: report.State, Message: report.Message, Checks: report.Checks,
-	}
-}
-
-// Progress answers where the setup of a saved domain stands: verified, or the
-// step the wizard reopens on, with what the checks on the way there found.
-func (a *WizardAPI) Progress(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Domain string `json:"domain"`
-	}
-	if !readAPI(w, r, &req) {
-		return
-	}
-	at, err := a.resumer.Progress(r.Context(), actorOf(r.Context()), req.Domain)
-	if err != nil {
-		apiFailure(w, r, err)
-		return
-	}
+	file, pkg := at.Connection.File, at.Connection.Package
 	writeAPI(w, r, struct {
-		Verified bool      `json:"verified"`
-		Step     string    `json:"step,omitempty"`
-		Document checkBody `json:"document"`
-		Edge     edgeBody  `json:"edge"`
+		Domain   string          `json:"domain"`
+		Verified bool            `json:"verified"`
+		File     fileTaskBody    `json:"file"`
+		Package  packageTaskBody `json:"package"`
 	}{
+		Domain:   at.Domain,
 		Verified: at.Verified,
-		Step:     at.Step,
-		Document: checkBodyOf(at.Document),
-		Edge:     edgeBodyOf(at.Edge),
+		File: fileTaskBody{
+			Passed: file.Passed, State: file.State, Status: file.Status, Reasons: nonNil(file.Reasons),
+		},
+		Package: packageTaskBody{
+			Passed: pkg.Passed, State: pkg.State, Status: pkg.Status, Checks: nonNil(pkg.Checks),
+		},
 	})
+}
+
+// nonNil is list, or an empty list for none, so the browser always reads an
+// array.
+func nonNil[T any](list []T) []T {
+	if list == nil {
+		return []T{}
+	}
+	return list
 }

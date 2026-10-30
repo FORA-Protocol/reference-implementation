@@ -14,11 +14,15 @@ import json
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import pytest
 from fora_sdk.resolvers import guarded_client, read_license_document
 from wire.models import License
 
 from .conftest import StackURLs
 from .constants import BROWSER_UA
+
+# ADR-008 D5 — declare stack-isolation contract.
+pytestmark = pytest.mark.stack_isolation("shared-without-cleanup")
 
 _FEED = Path(__file__).resolve().parent / "fixtures" / "catalog" / "music.jsonl"
 

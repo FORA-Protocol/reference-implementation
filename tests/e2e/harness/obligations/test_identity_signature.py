@@ -53,6 +53,7 @@ from ..identity_requests import (
 )
 from ..malformed import Alteration, Mutation, malformed
 from ..obligation_registry import Obligation, obligation
+from ..signature_fields import declared_signatures
 
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
@@ -80,7 +81,8 @@ def test_a_covered_header_sent_empty_is_accepted(fresh_agent: FreshAgent) -> Non
     client = fresh_agent.exchange_client(EXCHANGE_A_DOMAIN, http=capture.client())
     answered_with_offer()(client.discover(probe_query()))
     sent = capture.header_values("signature-input")
-    assert all('"authorization"' in value for _, value in sent), f"not covered: {sent}"
+    declared = [s for _, value in sent for s in declared_signatures([value]).values()]
+    assert declared and all("authorization" in s.names for s in declared), f"not covered: {sent}"
     assert all(value == "" for _, value in capture.header_values("authorization"))
 
 

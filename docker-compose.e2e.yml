@@ -1,7 +1,7 @@
 # Local full-stack E2E compose: brings up Postgres, Redis, Exchange, Broker,
-# Miniflare + Fastly + AWS edges, a mock publisher origin, a publisher-JWKS host,
-# and the Identity service (Go MCP adapter) with its Zitadel + Vault + wildcard-DNS
-# supporting cast.
+# Miniflare + Fastly + AWS edges, a mock publisher origin, one host serving the
+# fixed identities' key directories, and the Identity service (Go MCP adapter)
+# with its Zitadel + Vault + wildcard-DNS supporting cast.
 #
 #   make test-e2e     # a fresh stack under its own project name → pytest in `runner` → down
 #   make e2e-up       # bring the stack up (project E2E_PROJECT, default <checkout>-e2e)
@@ -109,10 +109,7 @@ x-through-capture-proxy: &through-capture-proxy
   archive.demo.fora-protocol.org: *capture-proxy-address
   examplenews: *capture-proxy-address
   catalog-contributor-e2e: *capture-proxy-address
-  lazy-agent-e2e: *capture-proxy-address
-  agent-e2e: *capture-proxy-address
   agent-nobilling-e2e: *capture-proxy-address
-  agent-demo-eur: *capture-proxy-address
   test-signer-e2e.v1: *capture-proxy-address
 
 # How a client trusts the local CA tls-keygen mints for the proxy. SSL_CERT_FILE
@@ -152,58 +149,64 @@ x-ephemeral-postgres: &ephemeral-postgres
   tmpfs:
     - /var/lib/postgresql/data:rw,size=1g
 
-# One single-replica TigerBeetle ledger, as one unit. Each Exchange bills on its
-# OWN replica (tigerbeetle-a/-b/-c/-d below), never on a shared one: the platform
-# liquidity and fee accounts are derived from fixed names, and a publisher's
-# revenue account from its publisher id alone, with no per-Exchange salt, so two
-# Exchanges on one cluster would post into the same accounts. Every seat here
-# sells for the same publisher, which makes that collision certain rather than
-# possible.
+# The timing every health check in the stack shares. Docker runs a check every
+# start_interval while its container is starting and still inside start_period,
+# and every interval once it is healthy. A container that starts again, after a
+# restart or after a test stops it, is starting again, so it is checked often
+# until it answers. Readiness is still seen within 2 s, while a healthy stack
+# runs about one check every three seconds in all instead of a dozen a second,
+# each of them a process Docker starts inside a container.
 #
-# The data file lives on a named volume that `make e2e-down` (`down -v`)
-# deletes, so every stack starts with an empty ledger. Not tmpfs, unlike
-# Postgres: `format` allocates the whole data file up front (about 1 GiB), and
-# on tmpfs that is RAM. The format step is skipped when the file exists, so a
-# restarted replica keeps its balances.
+# Failures inside start_period do not count against retries. The period is long
+# so the frequent checks outlast a slow start on a loaded CI host. The cost: a
+# service that never comes up turns unhealthy only after start_period plus
+# retries x interval, so locally the up --wait timeout (E2E_WAIT_TIMEOUT) ends
+# the wait first.
 #
-# seccomp=unconfined and IPC_LOCK are mandatory: Docker >= 25 blocks io_uring in
-# its default seccomp profile, and TigerBeetle locks its memory. --development
-# relaxes the Direct IO requirement a Docker volume cannot meet. --cache-grid is
-# the one memory knob that is not marked experimental; each replica still holds
-# about 1.4 GiB, most of it the fixed journal and message buffers.
+# The timeout is ten seconds, not three: six checks start a node process (the
+# three edge runtimes, the two Lambda emulators and the WBA oracle), and on a
+# loaded CI host node alone can take longer than three seconds to start. A long
+# timeout costs nothing, because Docker starts the next check only after the
+# previous one ends.
 #
-# OPTIMIZATION: Reduced cache from 32MiB to 16MiB for e2e tests.
-# Tests create minimal load (few accounts/transactions), so smaller cache is sufficient.
-# This reduces RAM usage by ~200-400 MiB per TigerBeetle instance (4 instances = ~1.6 GiB saved).
-# Production should use 32MiB or higher based on load testing.
-#
-# The health check proves the replica accepts connections, and format runs
-# before start, so the port opening is the honest readiness edge. The Exchange
-# connects at boot and refuses to start when the ledger does not answer, which
-# is why each Exchange waits for its ledger to be healthy.
-x-tigerbeetle: &tigerbeetle
-  image: ghcr.io/tigerbeetle/tigerbeetle:0.17.8
-  entrypoint: ["sh", "-c"]
-  command:
-    - |
-      set -e
-      [ -f /data/0_0.tigerbeetle ] || /tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development /data/0_0.tigerbeetle
-      exec /tigerbeetle start --addresses=0.0.0.0:3000 --cache-grid=64MiB --development /data/0_0.tigerbeetle
-  security_opt:
-    - "seccomp=unconfined"
-  cap_add:
-    - "IPC_LOCK"
-  healthcheck:
-    test: ["CMD", "nc", "-z", "127.0.0.1", "3000"]
-    interval: 2s
-    timeout: 3s
-    retries: 30
-    start_period: 10s
+# start_interval needs Docker Engine 25 or later and a Compose that passes it
+# on; scripts/check-compose-version.sh refuses older tools before e2e-up.
+# Anchors cannot cross files, so an overlay that defines a service writes these
+# values out, and tests/e2e/harness/test_guards_health_timing.py holds every
+# check in every file the stack loads to them.
+x-health-timing: &health-timing
+  interval: 60s
+  timeout: 10s
+  retries: 3
+  start_period: 300s
+  start_interval: 2s
 
-# The billing settings every Exchange shares. Each one adds only the address
-# of its own ledger (EXCHANGE_BILLING_TB_ADDRESS), which must be an IP and port:
-# the TigerBeetle client does not resolve hostnames, so each ledger holds a
-# static address on this network.
+# The three edge runtimes' check: the edge's own /healthz answering 200, read
+# through a node process because their images ship node but no curl or wget.
+# Not the publisher's fora.json: the edge passes that address through to the
+# origin, which has a healthcheck of its own.
+x-edge-healthcheck: &edge-healthcheck
+  <<: *health-timing
+  test:
+    - "CMD-SHELL"
+    - 'node -e "require(''http'').get(''http://127.0.0.1:80/healthz'', r => process.exit(r.statusCode===200?0:1)).on(''error'', () => process.exit(1))"'
+
+# Each demo publisher's origin: the publisher service on a port of its own. Every
+# port serves the same content; the port picks whose discovery documents answer
+# (/.well-known/fora.json and /rsl.txt, from tests/e2e/mock-publisher/documents/,
+# routed in deploy/publisher/nginx.conf). The edge in front of each publisher
+# forwards to its own port. test_guards_publisher_documents.py holds these ports,
+# the nginx map and the documents to one another.
+x-origin-philosophy: &origin-philosophy "http://publisher:8001"
+x-origin-music: &origin-music "http://publisher:8002"
+x-origin-sfx: &origin-sfx "http://publisher:8003"
+
+# The billing settings every Exchange shares, the ledger's address included:
+# every Exchange bills on the one TigerBeetle cluster (the tigerbeetle service),
+# and adds only its own id namespace, EXCHANGE_BILLING_TB_ID_NAMESPACE (see that
+# service for why). The address must be an IP and port: the TigerBeetle client
+# does not resolve hostnames, so the ledger holds a static address on this
+# network.
 #
 # EXCHANGE_BILLING_LEDGER lists the ISO 4217 numeric codes billed in, one ledger
 # each: 840 is USD and 978 is EUR. The FIRST entry is what the manifest
@@ -211,13 +214,13 @@ x-tigerbeetle: &tigerbeetle
 #
 # EXCHANGE_DEFAULT_AGENT_CREDIT is the welcome credit an agent receives once per
 # currency, at its first Register on an Exchange whose seat activates new
-# agents. It is how every funded buyer gets its money: the e2e seed registers
-# each funded buyer through the SDK, and nothing writes a balance directly. The
-# Exchange reads this value once at boot and grants from it, so it applies even
-# though, on a fresh stack, the Exchange boots before the seed creates its seat.
+# agents. It is how every funded agent gets its money: a test registers its own
+# agent through the SDK, and nothing writes a balance directly. The
+# Exchange reads this value once at boot and grants from it.
 # This is the only place the map is written.
 x-exchange-billing: &exchange-billing
   FORA_BILLING_ADAPTER: "tigerbeetle"
+  EXCHANGE_BILLING_TB_ADDRESS: "${FORA_E2E_NET}.211:3000"
   EXCHANGE_BILLING_LEDGER: "840,978"
   EXCHANGE_DEFAULT_AGENT_CREDIT: "USD=100.00,EUR=100.00"
 
@@ -272,33 +275,6 @@ x-identity-auth: &identity-auth
   # run (32-byte Ed25519 seed, base64). e2e-only, not a real secret.
   IDENTITY_TOKEN_SIGNING_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
-# One agent well-known host (universal well-known key discovery). Every agent
-# jwks service below is this block plus exactly two per-identity values: the
-# key-file mount (bound at the fixed /keys/signing-key.json path the anchored
-# SIGNING_KEY_FILE names) and the network alias (== the identity's kid, which
-# the harness sends as the covered Signature-Agent header). Each host mounts
-# ONLY its own key file — never the whole fixtures directory — so a wrong
-# mount fails at container start instead of serving another identity's key
-# while healthy (the ghost negative control depends on its key being served
-# NOWHERE, so a mixed-up mount here would hollow that test out silently).
-x-jwks-host: &jwks-host
-  build:
-    # Repo-root context (the same shape the service images use) so the
-    # Dockerfile can copy scripts/lib/ed25519_keys.py — the entrypoint renders
-    # its WBA directory through the same shared helpers the key-gen scripts
-    # use, instead of a shell-side copy kept in sync by hand.
-    context: .
-    dockerfile: deploy/publisher-jwks/Dockerfile
-  environment:
-    SIGNING_KEY_FILE: "/keys/signing-key.json"
-    MANIFEST_ROLE: "ROLE_AGENT"
-  healthcheck:
-    test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/healthz || exit 1"]
-    interval: 3s
-    timeout: 3s
-    retries: 20
-    start_period: 5s
-
 # Build args passed to Go builder stages: concurrency cap, module proxy fallback, and sumdb.
 x-go-build-args: &go-build-args
   - GO_BUILD_P
@@ -320,24 +296,20 @@ services:
       # they never race a missing DB. `down -v` wipes the volume → re-runs init.
       - ./deploy/storage/postgres/10-create-exchange-dbs.sql:/docker-entrypoint-initdb.d/10-create-exchange-dbs.sql:ro
     healthcheck:
+      <<: *health-timing
       # -h 127.0.0.1 forces a TCP check: during first-boot init (creating the
       # extra databases) postgres listens only on the unix socket, and a
       # socket-based pg_isready would report healthy while TCP 5432 is still
       # closed — letting the exchanges start and hit connection-refused. Checking
       # TCP keeps the container unhealthy until it actually accepts app connections.
       test: ["CMD-SHELL", "pg_isready -U fora -d fora -h 127.0.0.1"]
-      interval: 2s
-      timeout: 3s
-      retries: 30
 
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--save", "", "--loglevel", "warning"]
     healthcheck:
+      <<: *health-timing
       test: ["CMD", "redis-cli", "ping"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
 
   publisher:
     image: nginx:alpine
@@ -348,204 +320,98 @@ services:
       # read-only baseline docroot, which the daemon cannot create child
       # mountpoints in. deploy/publisher/nginx.conf routes the demo path
       # prefixes (/articles, /lyrics, /tracks, /sfx) to this tree. The edge
-      # forwards the signed-URL path verbatim to ORIGIN_URL
-      # (http://publisher:80), so these mounts are what the canary fetch reads.
+      # forwards the signed-URL path verbatim to ORIGIN_URL (its publisher's
+      # port, x-origin-*), so these mounts are what the canary fetch reads.
       - ./deploy/content/demo:/usr/share/nginx/demo:ro
+      # Each demo publisher's own discovery documents, one directory per
+      # publisher domain, answered on that publisher's port (x-origin-*).
+      - ./tests/e2e/mock-publisher/documents:/usr/share/nginx/documents:ro
       - ./deploy/publisher/nginx.conf:/etc/nginx/nginx.conf:ro
     healthcheck:
+      <<: *health-timing
       test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/premium/article-42.html || exit 1"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
-    networks:
-      default:
-        aliases:
-          # The domain the console onboarding test adds. The console works out
-          # which network serves a domain by reading its response headers, and
-          # a hostname that resolves to nothing has none to read -- so the
-          # wizard would stop at its first step and the test could never reach
-          # the file it exists to check. This origin answers for that hostname
-          # and announces itself as a network the console supports.
-          - stoa.example
-          # The domain the not-verified test saves with the last button. Saving
-          # holds a hostname for the whole deployment, so it is a hostname of its
-          # own, and the tests that only check stoa.example never find it held.
-          - harmonia.example
 
 
-  # ───── Publisher JWKS host (catalog-contributor pubkey manifest) ─────
-  # Plain-HTTP host that serves the catalog-contributor's
-  # /.well-known/fora.json (§6.6 schema) so the
-  # CatalogSignatureMiddleware self-signup path can resolve the
-  # contributor's pubkey. The entrypoint reads the Ed25519 private key
-  # under /keys and publishes the corresponding pubkey on every
-  # cold start.
+  # ───── Static key directories: one host for every fixed identity ─────
+  # One nginx (deploy/publisher-jwks) serves the discovery documents of every
+  # identity the stack holds fixed: its Web Bot Auth key directory and its
+  # fora.json overlay. There is no static key registry: every signing identity
+  # publishes its own keys at its own host name, and the Exchanges and the Broker
+  # learn a key only by fetching the signer's directory, the same path production
+  # uses. So each identity keeps a host name of its own, one of the aliases below;
+  # for an agent it equals the identity's kid, which the harness sends as the
+  # covered Signature-Agent header. The entrypoint serves each identity's
+  # documents under its own name only, and a request under any other name gets
+  # 404 and no keys.
   #
-  # The service is reached via the `examplenews` network alias matching
-  # the contributor fixture's domain, so URL templating
-  # (http://examplenews/.well-known/fora.json) lands on this service.
-  publisher-jwks:
-    <<: *jwks-host
-    # The whole environment map is restated (a YAML merge key replaces nested
-    # maps, it does not deep-merge): this host serves a ROLE_PUBLISHER manifest
-    # (the anchor's ROLE_AGENT must not apply) with its own key path and kid.
+  # Each key is mounted as its own read-only file at /keys/<host>.json, which is
+  # how the entrypoint learns the hosts. Never mount the fixtures directory: it
+  # would carry every private key in it, the broker relay key included, into a
+  # container whose job is serving public documents. A key mounted under the wrong
+  # host's name stops the container at start, because the entrypoint refuses a
+  # key whose issuer is not its host.
+  #
+  # The identities:
+  #   * examplenews: the demo subscription publisher (its key comes from
+  #     scripts/gen-examplenews-publisher-key.sh). Its fora.json lists the
+  #     harness contributor and advertises exchange-a, because the Broker's
+  #     publisher probe refuses a resolve with NOT_IN_CATALOG when a publisher
+  #     lists no exchanges, even though the contributor is listed;
+  #   * catalog-contributor-e2e: the third-party catalog contributor. The
+  #     Exchange's self-signup (agentreg.RegisterFromDirectory) fetches its
+  #     directory to learn the contributor's key, with NO fora.agents pre-seed,
+  #     and the demo publishers list it in the fora.json their origin serves. A
+  #     self-hosting
+  #     contributor authorizes no third party of its own, so its list is empty;
+  #   * archive.demo.fora-protocol.org: the archive publisher (Lyceum Archive, a
+  #     fictional cast member like the other demo publishers), the one site
+  #     exchange-d sells. It has no edge and no content route. Its directory
+  #     holds the publisher's self-publish key, which exchange-d fetches to
+  #     verify the seed's catalog push, and its fora.json names exchange-d,
+  #     which is what the Broker reads to route a resolve of an archive URI;
+  #   * agent-nobilling-e2e: the deliberately-unfunded buyer for the billing
+  #     deny-path obligations;
+  #   * test-signer-e2e.v1: a static agent identity that stays served, although
+  #     no current test signs as it. Its dotted kid is why the entrypoint takes
+  #     each manifest's domain from the key's issuer and never from the kid.
+  # PUBLISHER_HOSTS_JSON holds the manifest fields of the three publishers; a
+  # host it does not name is served as an agent.
+  key-directories:
+    build:
+      # Repo-root context (the same shape the service images use) so the
+      # Dockerfile can copy scripts/lib/ed25519_keys.py — the entrypoint renders
+      # each WBA directory through the same shared helpers the key-gen scripts
+      # use, instead of a shell-side copy kept in sync by hand.
+      context: .
+      dockerfile: deploy/publisher-jwks/Dockerfile
     environment:
-      SIGNING_KEY_FILE: "/keys/examplenews-subscription-key.json"
-      SIGNING_KID_OVERRIDE: "examplenews.sub.2026q2"
-      # Phase-2 demo: the rendered fora.json also advertises the Exchange so the
-      # Broker's publisher-probe (which fetches this same /.well-known/fora.json
-      # for the demo domains aliased below) can route a demo-resource resolve to
-      # exchange.e2e.local. Without exchanges[] the Broker refuses with
-      # NOT_IN_CATALOG even though the contributor is listed.
-      EXCHANGES_JSON: '[{"domain":"exchange:8081","endpoint":"http://exchange:8081","supported_profiles":["fora-news-v1","fora-comp-v1","fora-music-v1"],"ext":{"resource_owner_id":"demo-resource-owner"}}]'
+      PUBLISHER_HOSTS_JSON: >-
+        {"examplenews": {"exchanges": [{"domain": "exchange:8081",
+        "endpoint": "http://exchange:8081",
+        "supported_profiles": ["fora-news-v1", "fora-comp-v1", "fora-music-v1"],
+        "ext": {"resource_owner_id": "demo-resource-owner"}}]},
+        "catalog-contributor-e2e": {"catalog_contributors": []},
+        "archive.demo.fora-protocol.org": {"exchanges": [{"domain": "exchange-d:8081",
+        "endpoint": "http://exchange-d:8081",
+        "supported_profiles": ["fora-news-v1", "fora-comp-v1", "fora-music-v1"],
+        "ext": {"resource_owner_id": "demo-resource-owner"}}]}}
     volumes:
-      # ONLY the one key file this host uses — never the whole directory,
-      # per the anchor's rule above: deploy/publisher-keys also collects
-      # gen-contributor-key.sh and gen-buyer-delegation-key.sh output, and a
-      # directory mount would carry every one of those private keys into a
-      # container whose job is serving public documents over HTTP.
-      - ./deploy/publisher-keys/examplenews-subscription-key.json:/keys/examplenews-subscription-key.json:ro
+      - ./deploy/publisher-keys/examplenews-subscription-key.json:/keys/examplenews.json:ro
+      - ./tests/e2e/harness/fixtures/catalog_contributor_key.json:/keys/catalog-contributor-e2e.json:ro
+      - ./tests/e2e/harness/fixtures/selfpub_archive_key.json:/keys/archive.demo.fora-protocol.org.json:ro
+      - ./tests/e2e/harness/fixtures/agent_nobilling_e2e_key.json:/keys/agent-nobilling-e2e.json:ro
+      - ./tests/e2e/harness/fixtures/test_signer_key.json:/keys/test-signer-e2e.v1.json:ro
+    healthcheck:
+      <<: *health-timing
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/healthz || exit 1"]
     networks:
       default:
         aliases:
           - examplenews
-          # Phase-2 demo publisher domains were MOVED to the edges (Phase 2b):
-          # each demo domain now aliases to its publisher's edge runtime, which
-          # serves BOTH /.well-known/fora.json (Gate 2 + Broker probe) AND the
-          # signed CONTENT on port 80. publisher-jwks keeps only its own
-          # `examplenews` alias for the subscription self-signup path.
-
-  # ───── 3rd-party catalog-contributor well-known host ─────
-  # Plain-HTTP host aliased to `catalog-contributor-e2e` that serves THAT
-  # contributor's /.well-known/fora.json with its Ed25519 signing key in
-  # public_keys[] and manifest domain == the host string. This is what the
-  # Exchange Gate-1 self-signup (agentreg.RegisterFromDirectory) fetches to learn
-  # the contributor's key — NO fora.agents pre-seed. The music edge lists this
-  # contributor in CATALOG_CONTRIBUTORS_JSON (Gate-2 3rd-party branch); the
-  # philosophy/sfx edges list it too so the existing ingest/full-path tests that
-  # push to those publishers with the contributor key clear Gate-2 via the fetch
-  # path as well. Reuses the publisher-jwks image; the harness contributor key
-  # fixture (gen-e2e-keys.sh) is mounted read-only and its pubkey is published on
-  # every cold start.
-  catalog-contributor-e2e-jwks:
-    <<: *jwks-host
-    # The whole environment map is restated (a YAML merge key replaces nested
-    # maps, it does not deep-merge): this host is a ROLE_PUBLISHER manifest
-    # (the anchor's ROLE_AGENT must not apply) with contributor extras.
-    environment:
-      SIGNING_KEY_FILE: "/keys/signing-key.json"
-      SIGNING_KID_OVERRIDE: "catalog-contributor-e2e"
-      # A belt, not a load-bearing check: registration anchors the
-      # contributor's identity to the host its directory is fetched from and
-      # never reads the served manifest's domain — pinning the domain here
-      # just keeps the published document consistent with that host string.
-      MANIFEST_DOMAIN_OVERRIDE: "catalog-contributor-e2e"
-      # A self-hosting contributor authorizes no third party of its own.
-      CATALOG_CONTRIBUTORS_JSON: "[]"
-    volumes:
-      - ./tests/e2e/harness/fixtures/catalog_contributor_key.json:/keys/signing-key.json:ro
-    networks:
-      default:
-        aliases:
           - catalog-contributor-e2e
-
-  # ───── Agent well-known hosts (universal well-known key discovery) ─────
-  # There is no static key file: EVERY signing identity publishes its own keys
-  # at its well-known address, and the Exchange and Broker learn a key only by
-  # fetching the signer's directory (the same path production uses). One host
-  # per identity; the network alias equals the identity's kid, which the
-  # harness sends as the covered Signature-Agent header, and the service name
-  # is that same kid plus "-jwks" — so a kid in a rejection log maps to its
-  # service in `docker compose ps` without a lookup table.
-  #
-  # None of these hosts needs MANIFEST_DOMAIN_OVERRIDE (unlike the
-  # catalog-contributor-e2e-jwks above, which pins it as an explicit belt):
-  # nothing on any path these hosts serve reads a manifest's `domain`. The
-  # httpsig key-resolution path fetches only the WBA directory (a JWK set
-  # matched by thumbprint), and lazy registration fetches that SAME directory
-  # — its identity check (agentreg's ErrAgentIDMismatch) compares the
-  # discovery URL's host against the agent id, never manifest content. The
-  # manifest these hosts do serve gets its domain from the key fixture's
-  # required `issuer` (stamped with the full kid by scripts/gen-e2e-keys.sh),
-  # so it equals the host's alias anyway, dotted kids (test-signer-e2e.v1)
-  # included.
-  #
-  # lazy-agent-e2e-jwks (lazy-registration e2e): serves the fresh agent's ROLE_AGENT
-  # /.well-known/fora.json on the `lazy-agent-e2e` alias (== the agent's
-  # keyID/domain). The agent is deliberately ABSENT from fora.agents, so a
-  # transaction lazily registers it after its key resolves (ADR-009 D2).
-  lazy-agent-e2e-jwks:
-    <<: *jwks-host
-    volumes:
-      - ./tests/e2e/harness/fixtures/agent_lazy_e2e_key.json:/keys/signing-key.json:ro
-    networks:
-      default:
-        aliases:
-          - lazy-agent-e2e
-
-  # The baseline funded buyer the harness signs most agent-direct calls as.
-  agent-e2e-jwks:
-    <<: *jwks-host
-    volumes:
-      - ./tests/e2e/harness/fixtures/agent_e2e_key.json:/keys/signing-key.json:ro
-    networks:
-      default:
-        aliases:
-          - agent-e2e
-
-  # The deliberately-unfunded buyer for the billing deny-path obligations.
-  agent-nobilling-e2e-jwks:
-    <<: *jwks-host
-    volumes:
-      - ./tests/e2e/harness/fixtures/agent_nobilling_e2e_key.json:/keys/signing-key.json:ro
-    networks:
-      default:
-        aliases:
-          - agent-nobilling-e2e
-
-  # The buyer the EUR-priced demo terms are bought as. Like every funded buyer it
-  # is funded by the welcome credit at its first Register, which grants both USD
-  # and EUR (see the x-exchange-billing anchor).
-  agent-demo-eur-jwks:
-    <<: *jwks-host
-    volumes:
-      - ./tests/e2e/harness/fixtures/agent_demo_eur_key.json:/keys/signing-key.json:ro
-    networks:
-      default:
-        aliases:
-          - agent-demo-eur
-
-  # The generic harness test signer (build_signed_headers' default identity).
-  test-signer-e2e.v1-jwks:
-    <<: *jwks-host
-    volumes:
-      - ./tests/e2e/harness/fixtures/test_signer_key.json:/keys/signing-key.json:ro
-    networks:
-      default:
-        aliases:
-          - test-signer-e2e.v1
-
-  # The archive publisher (Lyceum Archive, a fictional cast member like the
-  # other demo publishers): the one site exchange-d sells. It has no edge and no
-  # content route, because nothing fetches its content: it exists so that
-  # exchange-d has a catalog the Broker can discover and route to. This host
-  # serves the two documents that takes, under the site's own domain:
-  #   * its Web Bot Auth directory, with the publisher's self-publish key, which
-  #     exchange-d fetches to verify the seed's catalog push (kid == domain);
-  #   * its ROLE_PUBLISHER fora.json, naming exchange-d in exchanges[], which is
-  #     what the Broker reads to route a resolve of an archive URI there.
-  archive-jwks:
-    <<: *jwks-host
-    environment:
-      SIGNING_KEY_FILE: "/keys/signing-key.json"
-      MANIFEST_ROLE: "ROLE_PUBLISHER"
-      EXCHANGES_JSON: '[{"domain":"exchange-d:8081","endpoint":"http://exchange-d:8081","supported_profiles":["fora-news-v1","fora-comp-v1","fora-music-v1"],"ext":{"resource_owner_id":"demo-resource-owner"}}]'
-    volumes:
-      - ./tests/e2e/harness/fixtures/selfpub_archive_key.json:/keys/signing-key.json:ro
-    networks:
-      default:
-        aliases:
           - archive.demo.fora-protocol.org
+          - agent-nobilling-e2e
+          - test-signer-e2e.v1
 
   # One-shot: generate ephemeral signing keys into a shared volume at stack-up so
   # nothing is committed to git. Mints (a) the AWS_CLOUDFRONT_RSA tenant RSA pair —
@@ -554,7 +420,7 @@ services:
   # offer/URL signing key the Exchange reads via FORA_ED25519_PRIVATE_PEM_FILE.
   # The Exchange no longer generates keys in-process (it fails closed when unset),
   # so this one-shot is what provisions them for the stack. Mirrors the
-  # publisher-jwks cold-start key-derivation idiom.
+  # cold-start key derivation of the key-directories service.
   rsa-keygen:
     image: alpine:3.20
     command:
@@ -605,42 +471,65 @@ services:
       - tls-proxy-keys:/tls-proxy
     restart: "no"
 
-  # ───── Billing ledgers: one TigerBeetle per Exchange ─────────────────
-  # See the x-tigerbeetle anchor for why each Exchange has its own. The static
-  # addresses (.211 to .214) sit in the upper half of the stack's /24, outside
-  # Docker's automatic range, so no dynamically addressed container can take one
+  # ───── Billing ledger: one TigerBeetle for every Exchange ────────────
+  # One single-replica TigerBeetle cluster, which all four Exchanges bill on.
+  # TigerBeetle has no schemas: an account or transfer id is unique in the whole
+  # cluster, not per ledger. The platform fee and liquidity accounts are derived
+  # from fixed names, and a resource owner's revenue account from the owner's id
+  # alone, and every seat here sells for the same owner, so two Exchanges that
+  # derived the same ids would post into the same accounts, and every balance
+  # test would still pass. Each Exchange therefore salts every id it derives
+  # with its own namespace, EXCHANGE_BILLING_TB_ID_NAMESPACE, set to its own
+  # service name. Only the e2e build reads that setting; a production build
+  # refuses to start with it, so production ids stay unsalted.
+  #
+  # Every Exchange start registers a new client session, and the cluster keeps
+  # at most 64: once it is full, it evicts the session that committed a request
+  # longest ago. The suite's Exchange restarts stay far below that.
+  #
+  # The data file lives on a named volume that `make e2e-down` (`down -v`)
+  # deletes, so every stack starts with an empty ledger. Not tmpfs, unlike
+  # Postgres: `format` allocates the whole data file up front (about 1 GiB), and
+  # on tmpfs that is RAM. The format step is skipped when the file exists, so a
+  # restarted replica keeps its balances.
+  #
+  # seccomp=unconfined and IPC_LOCK are what TigerBeetle's Docker guide asks
+  # for: Docker >= 25 blocks io_uring in its default seccomp profile, and the
+  # capability lets the replica lock memory. --development relaxes the Direct IO
+  # requirement a Docker volume cannot meet. --cache-grid is the one memory knob
+  # that is not marked experimental, and the replica refuses a value of 32MiB or
+  # less. It still holds about 1.5 GiB, most of it buffers allocated at start
+  # whatever the load, which is why the stack runs one cluster and not one per
+  # Exchange.
+  #
+  # The static address sits in the upper half of the stack's /24, outside
+  # Docker's automatic range, so no dynamically addressed container can take it
   # first.
-  tigerbeetle-a:
-    <<: *tigerbeetle
+  #
+  # The health check proves the replica accepts connections, and format runs
+  # before start, so the port opening is the honest readiness edge. The
+  # Exchanges connect at boot and refuse to start when the ledger does not
+  # answer, which is why each waits for it to be healthy.
+  tigerbeetle:
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.17.8
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        [ -f /data/0_0.tigerbeetle ] || /tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development /data/0_0.tigerbeetle
+        exec /tigerbeetle start --addresses=0.0.0.0:3000 --cache-grid=64MiB --development /data/0_0.tigerbeetle
+    security_opt:
+      - "seccomp=unconfined"
+    cap_add:
+      - "IPC_LOCK"
+    healthcheck:
+      <<: *health-timing
+      test: ["CMD", "nc", "-z", "127.0.0.1", "3000"]
     volumes:
-      - tigerbeetle-a-data:/data
+      - tigerbeetle-data:/data
     networks:
       default:
         ipv4_address: ${FORA_E2E_NET}.211
-
-  tigerbeetle-b:
-    <<: *tigerbeetle
-    volumes:
-      - tigerbeetle-b-data:/data
-    networks:
-      default:
-        ipv4_address: ${FORA_E2E_NET}.212
-
-  tigerbeetle-c:
-    <<: *tigerbeetle
-    volumes:
-      - tigerbeetle-c-data:/data
-    networks:
-      default:
-        ipv4_address: ${FORA_E2E_NET}.213
-
-  tigerbeetle-d:
-    <<: *tigerbeetle
-    volumes:
-      - tigerbeetle-d-data:/data
-    networks:
-      default:
-        ipv4_address: ${FORA_E2E_NET}.214
 
   # ───── FORA services ─────────────────────────────────────────────────
   exchange:
@@ -679,31 +568,36 @@ services:
       # /.well-known/fora.json from in the compose network, so it is the
       # service host:port (the well-known fetch URL carries no port). The manifest
       # advertises EXCHANGE_PUBLIC_ORIGIN as the top-level endpoint; it MUST equal
-      # the broker's registered exchange endpoint (EXCHANGES_JSON) for the
-      # post-resolve SSRF equality gate.
+      # the endpoint the broker's registry and the demo publishers' fora.json
+      # name for this Exchange, for the post-resolve SSRF equality gate.
       EXCHANGE_DOMAIN: "exchange:8081"
       # The seat whose "activate new agents automatically" policy a registration
       # reads. A tenant row is the Exchange seat, so its domain is this
       # exchange's own hostname and this value repeats EXCHANGE_DOMAIN above.
       # It is stated rather than left to the binary's EXCHANGE_DOMAIN fallback
-      # so the seat the exchange reads is written where the seed and the compose
-      # guard can compare it. Point it at anything else — a publisher's domain,
-      # the way it read before the seat existed — and it matches no tenant row:
-      # every fora_register is then refused, and the exchange says so only in a
-      # boot warning.
+      # so the seat the exchange reads is written where its boot fixture and
+      # the compose guard can compare it. Point it at anything else — a
+      # publisher's domain, the way it read before the seat existed — and it
+      # matches no tenant row: every fora_register is then refused, and the
+      # exchange says so only in a boot warning.
       EXCHANGE_DEFAULT_TENANT: "exchange:8081"
+      # The rows this exchange creates at start-up when they are absent: its
+      # seat, the second seat the tenant-isolation suite names, the payee, the
+      # site it sells and that site's ACTIVE listing (ADR-029). The file and the
+      # terms it names are mounted read-only below; the harness writes no row.
+      EXCHANGE_BOOT_FIXTURE_FILE: "/boot/fixture.yml"
       EXCHANGE_PUBLIC_ORIGIN: "http://exchange:8081"
       # The admin listener (:8082) admits the runner only; see x-runner-address.
       ADMIN_ALLOWED_CIDRS: *runner-address
-      # Billing on this exchange's own TigerBeetle ledger (see the
-      # x-tigerbeetle and x-exchange-billing anchors). A buyer holds money only
-      # after it registers here and receives the welcome credit; a buyer with no
-      # money is refused INSUFFICIENT_BALANCE, which is the deny path the
-      # credit-less-buyer obligation needs. The denomination is the console
-      # seat's (see x-terms-denomination); only this exchange registers
-      # publishers.
+      # Billing on the stack's one TigerBeetle cluster, under this exchange's
+      # own id namespace (see the tigerbeetle service and the
+      # x-exchange-billing anchor). A buyer holds money only after it registers
+      # here and receives the welcome credit; a buyer with no money is refused
+      # INSUFFICIENT_BALANCE, which is the deny path the credit-less-buyer
+      # obligation needs. The denomination is the console seat's (see
+      # x-terms-denomination); only this exchange registers publishers.
       <<: [*exchange-billing, *terms-denomination]
-      EXCHANGE_BILLING_TB_ADDRESS: "${FORA_E2E_NET}.211:3000"
+      EXCHANGE_BILLING_TB_ID_NAMESPACE: "exchange"
       # Single scheme knob for the well-known / manifest-fetch resolver (HTTPS is
       # the default; the services here serve plain http).
       FORA_WELLKNOWN_SCHEME: "http"
@@ -754,6 +648,8 @@ services:
     volumes:
       - rsa-keys:/rsa-keys:ro
       - tls-ca:/tls-ca:ro
+      - ./tests/e2e/harness/fixtures/exchange-boot/exchange.yml:/boot/fixture.yml:ro
+      - ./testdata/free-listing-terms.json:/boot/free-listing-terms.json:ro
     depends_on:
       capture-proxy:
         condition: service_healthy
@@ -761,13 +657,11 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      publisher-jwks:
-        condition: service_healthy
-      catalog-contributor-e2e-jwks:
+      key-directories:
         condition: service_healthy
       rsa-keygen:
         condition: service_completed_successfully
-      tigerbeetle-a:
+      tigerbeetle:
         condition: service_healthy
     # No healthcheck: distroless image ships only the /exchange binary — no
     # shell, no wget/curl. Downstream services use depends_on:service_started.
@@ -782,10 +676,10 @@ services:
   # ───── exchange-b (music) — SEPARATE catalog DB fora_b (ripdi) ─────────────
   # A copy of `exchange` (= exchange-a) with its OWN catalog database, OWN
   # offer/URL signing keys, and OWN identity (EXCHANGE_DOMAIN/PUBLIC_ORIGIN). The
-  # music publisher's edge (fastly-edge) names exchange-b in its EXCHANGES_JSON,
-  # so the broker routes music offers here. It bills on its OWN ledger
-  # (tigerbeetle-b). The httpsig key set, fetch overrides and broker-revocation
-  # poll are identical to exchange-a.
+  # music publisher's fora.json (served by its origin, behind fastly-edge) names
+  # exchange-b, so the broker routes music offers here. It bills on the shared ledger under
+  # its OWN id namespace. The httpsig key set, fetch overrides and
+  # broker-revocation poll are identical to exchange-a.
   exchange-b:
     build:
       context: .
@@ -808,12 +702,15 @@ services:
       EXCHANGE_DOMAIN: "exchange-b:8081"
       # This exchange's own seat (see exchange-a).
       EXCHANGE_DEFAULT_TENANT: "exchange-b:8081"
+      # Its seat, the payee, the site it sells and that site's ACTIVE listing,
+      # created at start-up when absent (ADR-029; see exchange-a).
+      EXCHANGE_BOOT_FIXTURE_FILE: "/boot/fixture.yml"
       EXCHANGE_PUBLIC_ORIGIN: "http://exchange-b:8081"
       # The admin listener (:8082) admits the runner only; see x-runner-address.
       ADMIN_ALLOWED_CIDRS: *runner-address
-      # Its own ledger; see exchange-a.
+      # Its own id namespace on the shared ledger; see exchange-a.
       <<: *exchange-billing
-      EXCHANGE_BILLING_TB_ADDRESS: "${FORA_E2E_NET}.212:3000"
+      EXCHANGE_BILLING_TB_ID_NAMESPACE: "exchange-b"
       FORA_WELLKNOWN_SCHEME: "http"
       SKIP_SSRF: "true"
       ALLOW_INSECURE: "true"
@@ -846,7 +743,8 @@ services:
       EXCHANGE_TERMS_DIGEST: "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
       # Distinct ed25519 + RSA key MATERIAL (per exchange) so the well-known
       # serves a distinct offer key. Key REF names are kept identical to
-      # exchange-a so the per-DB tenant rows (seeded with the same refs) resolve.
+      # exchange-a so the per-DB seat rows, which each boot fixture declares with
+      # the same refs, resolve.
       FORA_RSA_PRIVATE_PEM_FILE: "/rsa-keys/rsa-b-private.pem"
       FORA_ED25519_PRIVATE_PEM_FILE: "/rsa-keys/ed25519-b-private.pem"
       # Trusts the local CA tls-keygen mints (x-tls-ca-bundle).
@@ -854,6 +752,8 @@ services:
     volumes:
       - rsa-keys:/rsa-keys:ro
       - tls-ca:/tls-ca:ro
+      - ./tests/e2e/harness/fixtures/exchange-boot/exchange-b.yml:/boot/fixture.yml:ro
+      - ./testdata/free-listing-terms.json:/boot/free-listing-terms.json:ro
     depends_on:
       capture-proxy:
         condition: service_healthy
@@ -861,13 +761,11 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      publisher-jwks:
-        condition: service_healthy
-      catalog-contributor-e2e-jwks:
+      key-directories:
         condition: service_healthy
       rsa-keygen:
         condition: service_completed_successfully
-      tigerbeetle-b:
+      tigerbeetle:
         condition: service_healthy
     # The name the runner reaches this Exchange's admin listener by. No hosts
     # file points it at the capture proxy, so the runner's admin calls arrive
@@ -879,8 +777,8 @@ services:
 
   # ───── exchange-c (sfx) — SEPARATE catalog DB fora_c (ripdi) ───────────────
   # A copy of `exchange` with its OWN catalog database (fora_c), OWN signing keys,
-  # and OWN identity. The sfx publisher's edge (aws-edge) names exchange-c in its
-  # EXCHANGES_JSON, so the broker routes sfx offers here.
+  # and OWN identity. The sfx publisher's fora.json (served by its origin, behind
+  # aws-edge) names exchange-c, so the broker routes sfx offers here.
   exchange-c:
     build:
       context: .
@@ -903,12 +801,15 @@ services:
       EXCHANGE_DOMAIN: "exchange-c:8081"
       # This exchange's own seat (see exchange-a).
       EXCHANGE_DEFAULT_TENANT: "exchange-c:8081"
+      # Its seat, the payee, the site it sells and that site's ACTIVE listing,
+      # created at start-up when absent (ADR-029; see exchange-a).
+      EXCHANGE_BOOT_FIXTURE_FILE: "/boot/fixture.yml"
       EXCHANGE_PUBLIC_ORIGIN: "http://exchange-c:8081"
       # The admin listener (:8082) admits the runner only; see x-runner-address.
       ADMIN_ALLOWED_CIDRS: *runner-address
-      # Its own ledger; see exchange-a.
+      # Its own id namespace on the shared ledger; see exchange-a.
       <<: *exchange-billing
-      EXCHANGE_BILLING_TB_ADDRESS: "${FORA_E2E_NET}.213:3000"
+      EXCHANGE_BILLING_TB_ID_NAMESPACE: "exchange-c"
       FORA_WELLKNOWN_SCHEME: "http"
       SKIP_SSRF: "true"
       ALLOW_INSECURE: "true"
@@ -922,9 +823,9 @@ services:
       # agent's reserved never-registered target, and that reservation is what
       # lets a refusal be asserted as a TOTAL — "no account exists here" —
       # instead of as a before-and-after comparison that cannot fail. Other
-      # agents do hold accounts here: the seed registers the funded buyers, and
-      # the balance suite registers its own agent. Accounts are per agent, so
-      # neither touches the reservation.
+      # agents do hold accounts here: the seed registers its credit-less buyer,
+      # and tests register their own agents. Accounts are per agent, so none of them
+      # touches the reservation.
       #
       # It cannot fail against an exchange the suite already holds an account at,
       # because Register is idempotent: a row that already carries a billing
@@ -948,6 +849,8 @@ services:
     volumes:
       - rsa-keys:/rsa-keys:ro
       - tls-ca:/tls-ca:ro
+      - ./tests/e2e/harness/fixtures/exchange-boot/exchange-c.yml:/boot/fixture.yml:ro
+      - ./testdata/free-listing-terms.json:/boot/free-listing-terms.json:ro
     depends_on:
       capture-proxy:
         condition: service_healthy
@@ -955,13 +858,11 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      publisher-jwks:
-        condition: service_healthy
-      catalog-contributor-e2e-jwks:
+      key-directories:
         condition: service_healthy
       rsa-keygen:
         condition: service_completed_successfully
-      tigerbeetle-c:
+      tigerbeetle:
         condition: service_healthy
     # The name the runner reaches this Exchange's admin listener by. No hosts
     # file points it at the capture proxy, so the runner's admin calls arrive
@@ -973,14 +874,16 @@ services:
 
   # ───── exchange-d (archive) — the seat that REFUSES the Broker relay ────────
   # A copy of `exchange` with its OWN catalog database (fora_d), OWN offer key,
-  # OWN identity and OWN ledger (tigerbeetle-d). It sells the archive publisher's
-  # site, whose manifest (served by archive-jwks) names this exchange.
+  # OWN identity and OWN id namespace on the shared ledger. It sells the archive
+  # publisher's site, whose manifest (served by key-directories) names this
+  # exchange.
   #
-  # What sets it apart is in the data, not here: the seed writes its seat with
-  # allow_broker_relay = FALSE, so a purchase the Broker relays here is refused
-  # with DENIAL_REASON_RELAY_NOT_ACCEPTED while the same offer bought directly
-  # succeeds. The opt-out is seeded rather than toggled by a test, so no test can
-  # leave it flipped for the next one. Every other exchange's seat opts in.
+  # What sets it apart is in its boot fixture, not here: the fixture declares
+  # its seat with allow_broker_relay false, so a purchase the Broker relays here
+  # is refused with DENIAL_REASON_RELAY_NOT_ACCEPTED while the same offer bought
+  # directly succeeds. The opt-out is declared rather than toggled by a test, so
+  # no test can leave it flipped for the next one. Every other exchange's seat
+  # opts in.
   exchange-d:
     build:
       context: .
@@ -1003,12 +906,15 @@ services:
       EXCHANGE_DOMAIN: "exchange-d:8081"
       # This exchange's own seat (see exchange-a).
       EXCHANGE_DEFAULT_TENANT: "exchange-d:8081"
+      # Its seat, the payee, the site it sells and that site's ACTIVE listing,
+      # created at start-up when absent (ADR-029; see exchange-a).
+      EXCHANGE_BOOT_FIXTURE_FILE: "/boot/fixture.yml"
       EXCHANGE_PUBLIC_ORIGIN: "http://exchange-d:8081"
       # The admin listener (:8082) admits the runner only; see x-runner-address.
       ADMIN_ALLOWED_CIDRS: *runner-address
-      # Its own ledger; see exchange-a.
+      # Its own id namespace on the shared ledger; see exchange-a.
       <<: *exchange-billing
-      EXCHANGE_BILLING_TB_ADDRESS: "${FORA_E2E_NET}.214:3000"
+      EXCHANGE_BILLING_TB_ID_NAMESPACE: "exchange-d"
       FORA_WELLKNOWN_SCHEME: "http"
       SKIP_SSRF: "true"
       ALLOW_INSECURE: "true"
@@ -1025,6 +931,8 @@ services:
     volumes:
       - rsa-keys:/rsa-keys:ro
       - tls-ca:/tls-ca:ro
+      - ./tests/e2e/harness/fixtures/exchange-boot/exchange-d.yml:/boot/fixture.yml:ro
+      - ./testdata/free-listing-terms.json:/boot/free-listing-terms.json:ro
     depends_on:
       capture-proxy:
         condition: service_healthy
@@ -1032,15 +940,14 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      # The archive publisher's directory: the seed's ingest signs as that
-      # publisher, and this exchange learns the key only by fetching it.
-      archive-jwks:
-        condition: service_healthy
-      catalog-contributor-e2e-jwks:
+      # Among the directories it serves is the archive publisher's: the seed's
+      # ingest signs as that publisher, and this exchange learns the key only by
+      # fetching it.
+      key-directories:
         condition: service_healthy
       rsa-keygen:
         condition: service_completed_successfully
-      tigerbeetle-d:
+      tigerbeetle:
         condition: service_healthy
     # The name the runner reaches this Exchange's admin listener by. No hosts
     # file points it at the capture proxy, so the runner's admin calls arrive
@@ -1063,10 +970,8 @@ services:
       - ./tests/e2e/fake-bedrock/server.py:/app/server.py:ro
       - ./tests/e2e/harness/fixtures/bedrock_script.json:/app/script.json:ro
     healthcheck:
+      <<: *health-timing
       test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8090/healthz || exit 1"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
 
   broker:
     build:
@@ -1206,8 +1111,9 @@ services:
       - ./deploy/edge-keys/edge.env
     # Cloudflare edge listens on port 80 so the demo publisher domain alias
     # (demo.fora-protocol.org) resolves natively for BOTH the port-80
-    # /.well-known/fora.json fetch (Exchange Gate 2 + Broker probe) and the
-    # port-80 signed-URL content fetch — no Host-override, no port rewrite.
+    # /.well-known/fora.json fetch (Exchange Gate 2 + Broker probe), which the
+    # edge passes through to the publisher's origin, and the port-80 signed-URL
+    # content fetch — no Host-override, no port rewrite.
     # Root user so node can bind the privileged port inside the container.
     user: "0:0"
     # Its calls to the Exchange, including the https fetch of its key
@@ -1222,24 +1128,17 @@ services:
       # directory; the edge resolves the delivery-URL verify key by thumbprint
       # from there, not from fora.json.
       EXCHANGE_WBA_URL: "https://exchange/.well-known/http-message-signatures-directory"
-      ORIGIN_URL: "http://publisher:80"
+      ORIGIN_URL: *origin-philosophy
       # Delivery-URL binding enforcement, stated explicitly rather than left to
       # the default: this is the property the MCP end-to-end test exercises, and
       # a test whose subject is implied by a default proves less than one whose
       # subject is written down. A custodied registry agent satisfies the check
       # because the identity service fetches on its behalf with the bound key.
       FORA_ENFORCE_BINDING: "true"
-      # PROVIDER is the manifest `domain` field; for the demo publisher this
-      # edge fronts the Stoa Press philosophy catalog.
-      PROVIDER: "demo.fora-protocol.org"
-      EXCHANGES_JSON: '[{"domain":"exchange:8081","endpoint":"http://exchange:8081","supported_profiles":["fora-news-v1","fora-comp-v1","fora-music-v1"],"ext":{"resource_owner_id":"demo-resource-owner"}}]'
-      # Authorized catalog pushers (Gate-2 3rd-party branch). The harness signs
-      # PushResources as `catalog-contributor-e2e`; the Exchange learns that
-      # contributor's key ONLY by fetching its /.well-known/fora.json from the
-      # catalog-contributor service (no fora.agents pre-seed) — exercising the
-      # real well-known trust path (fcrk7), not an /admin/catalog/reload shortcut.
-      CATALOG_CONTRIBUTORS_JSON: '[{"domain":"catalog-contributor-e2e","relationship":"harness"}]'
-      RSL_BODY: "# e2e rsl"
+      # No document settings: this edge fronts the Stoa Press philosophy
+      # catalog, whose fora.json (with its exchanges and its authorized catalog
+      # pusher, the harness's catalog-contributor-e2e) and rsl.txt the
+      # publisher's origin serves (x-origin-philosophy).
     volumes:
       - tls-ca:/tls-ca:ro
     networks:
@@ -1252,16 +1151,7 @@ services:
         condition: service_started
       publisher:
         condition: service_healthy
-    healthcheck:
-      test:
-        - "CMD-SHELL"
-        - 'node -e "require(''http'').get(''http://127.0.0.1:80/.well-known/fora.json'', r => process.exit(r.statusCode===200?0:1)).on(''error'', () => process.exit(1))"'
-      interval: 3s
-      # Ten seconds, not three: the probe starts a node process, and on a
-      # loaded CI host node alone can take longer than three seconds to start.
-      timeout: 10s
-      retries: 20
-      start_period: 3s
+    healthcheck: *edge-healthcheck
 
   fastly-edge:
     # Fastly Compute runtime via Viceroy (`fastly compute serve`). Same
@@ -1287,7 +1177,8 @@ services:
       # Trusts the local CA tls-keygen mints (x-tls-edge-trust).
       <<: *tls-edge-trust
       # Viceroy listens on port 80 so the music demo domain alias resolves
-      # natively for the port-80 manifest fetch + signed-URL content fetch.
+      # natively for the port-80 manifest fetch (passed through to the origin)
+      # + signed-URL content fetch.
       FASTLY_SERVE_ADDR: "0.0.0.0:80"
       # Multi-exchange topology (ripdi): the music publisher is fronted by
       # exchange-b. Its fora.json names exchange-b so the broker routes music
@@ -1296,18 +1187,11 @@ services:
       # thumbprint from exchange-b's WBA directory, not from fora.json.
       EXCHANGE_URL: "http://exchange-b:8081"
       EXCHANGE_WBA_URL: "https://exchange-b/.well-known/http-message-signatures-directory"
-      ORIGIN_URL: "http://publisher:80"
+      ORIGIN_URL: *origin-music
       # Binding enforcement stated explicitly; see the cloudflare edge above.
       FORA_ENFORCE_BINDING: "true"
-      PROVIDER: "music.demo.fora-protocol.org"
-      EXCHANGES_JSON: '[{"domain":"exchange-b:8081","endpoint":"http://exchange-b:8081","supported_profiles":["fora-news-v1","fora-comp-v1","fora-music-v1"],"ext":{"resource_owner_id":"demo-resource-owner"}}]'
-      # Authorized catalog pushers (Gate-2 3rd-party branch). The harness signs
-      # PushResources as `catalog-contributor-e2e`; the Exchange learns that
-      # contributor's key ONLY by fetching its /.well-known/fora.json from the
-      # catalog-contributor service (no fora.agents pre-seed) — exercising the
-      # real well-known trust path (fcrk7), not an /admin/catalog/reload shortcut.
-      CATALOG_CONTRIBUTORS_JSON: '[{"domain":"catalog-contributor-e2e","relationship":"harness"}]'
-      RSL_BODY: "# e2e rsl fastly"
+      # No document settings: the music publisher's fora.json and rsl.txt are
+      # served by its origin (x-origin-music).
     volumes:
       - tls-ca:/tls-ca:ro
     networks:
@@ -1322,24 +1206,15 @@ services:
       publisher:
         condition: service_healthy
     # Viceroy can report "Listening" before the TCP socket accepts
-    # connections cleanly. Poll fora.json until the server answers so
-    # downstream services (Exchange manifestcache, runner) don't race it.
-    # Image ships node but no curl/wget, so the probe uses node's http.
-    healthcheck:
-      test:
-        - "CMD-SHELL"
-        - 'node -e "require(''http'').get(''http://127.0.0.1:80/.well-known/fora.json'', r => process.exit(r.statusCode===200?0:1)).on(''error'', () => process.exit(1))"'
-      interval: 3s
-      # Ten seconds, not three: the probe starts a node process, and on a
-      # loaded CI host node alone can take longer than three seconds to start.
-      timeout: 10s
-      retries: 20
-      start_period: 5s
+    # connections cleanly. Poll until the server answers so downstream
+    # services (Exchange manifestcache, runner) don't race it. Image ships
+    # node but no curl/wget, so the probe uses node's http.
+    healthcheck: *edge-healthcheck
 
   aws-edge:
     # CloudFront canned-policy signed-URL verifier stand-in. Proves the
     # RSA chain round-trip locally without a real CloudFront distro. Built from
-    # the repo root so the shared src/edge/src/publisher-manifest.mjs builder can
+    # the repo root so the shared src/edge/src/well-known.mjs module can
     # be copied into the image (the shim imports it rather than duplicating it).
     build:
       context: .
@@ -1363,15 +1238,9 @@ services:
       # exchange-c. Its fora.json names exchange-c so the broker routes sfx
       # offers there, and the sfx catalog is ingested into exchange-c's DB.
       EXCHANGE_URL: "http://exchange-c:8081"
-      ORIGIN_URL: "http://publisher:80"
-      PROVIDER: "sfx.demo.fora-protocol.org"
-      EXCHANGES_JSON: '[{"domain":"exchange-c:8081","endpoint":"http://exchange-c:8081","supported_profiles":["fora-news-v1","fora-comp-v1","fora-music-v1"],"ext":{"resource_owner_id":"demo-resource-owner"}}]'
-      # Authorized catalog pushers (Gate-2 3rd-party branch). The harness signs
-      # PushResources as `catalog-contributor-e2e`; the Exchange learns that
-      # contributor's key ONLY by fetching its /.well-known/fora.json from the
-      # catalog-contributor service (no fora.agents pre-seed) — exercising the
-      # real well-known trust path (fcrk7), not an /admin/catalog/reload shortcut.
-      CATALOG_CONTRIBUTORS_JSON: '[{"domain":"catalog-contributor-e2e","relationship":"harness"}]'
+      # The sfx publisher's fora.json is served by its origin, which the shim
+      # forwards the address to like the content (x-origin-sfx).
+      ORIGIN_URL: *origin-sfx
       PORT: "80"
       # CloudFront RSA verify key, read from the file the rsa-keygen one-shot
       # writes into the shared volume — the matching public half of the Exchange's
@@ -1398,16 +1267,7 @@ services:
         condition: service_healthy
       rsa-keygen:
         condition: service_completed_successfully
-    healthcheck:
-      test:
-        - "CMD-SHELL"
-        - 'node -e "require(''http'').get(''http://127.0.0.1:80/.well-known/fora.json'', r => process.exit(r.statusCode===200?0:1)).on(''error'', () => process.exit(1))"'
-      interval: 3s
-      # Ten seconds, not three: the probe starts a node process, and on a
-      # loaded CI host node alone can take longer than three seconds to start.
-      timeout: 10s
-      retries: 20
-      start_period: 3s
+    healthcheck: *edge-healthcheck
 
   # ───── Lambda@Edge (AWS Lambda runtime emulator) ─────────────────────
   # The REAL src/edge worker running inside the AWS Lambda runtime image, as the
@@ -1454,19 +1314,14 @@ services:
     # it. It deliberately does NOT invoke the function: the emulator serves one
     # invocation at a time, and a probe that lands on top of the harness's
     # invocation makes the emulator abort that request and exit, taking the
-    # container down in the middle of a suite. Docker runs this every few
-    # seconds for the container's whole life, so an invoking probe collides
-    # eventually. That the bundle actually answers is proven at image build
+    # container down in the middle of a suite. Docker runs this for the
+    # container's whole life (see x-health-timing), so an invoking probe would
+    # collide eventually. That the bundle actually answers is proven at image build
     # (each bundle is smoke-invoked) and once per service by the harness before
     # any test runs; the probe script says more about what that leaves open.
     healthcheck:
+      <<: *health-timing
       test: ["CMD", "node", "/opt/healthcheck.mjs"]
-      interval: 3s
-      # Ten seconds, not three: the probe starts a node process, and on a
-      # loaded CI host node alone can take longer than three seconds to start.
-      timeout: 10s
-      retries: 20
-      start_period: 3s
 
   # The same image, running the package built WITHOUT a publisher signing key,
   # which the image keeps in no-wba/ (its own index.mjs beside its own bundle).
@@ -1492,13 +1347,8 @@ services:
       exchange:
         condition: service_started
     healthcheck:
+      <<: *health-timing
       test: ["CMD", "node", "/opt/healthcheck.mjs"]
-      interval: 3s
-      # Ten seconds, not three: the probe starts a node process, and on a
-      # loaded CI host node alone can take longer than three seconds to start.
-      timeout: 10s
-      retries: 20
-      start_period: 3s
 
   # Wildcard DNS for the two agent zones. Each agent gets a random subdomain
   # that the Broker/Exchange must resolve to fetch the agent's WBA directory and
@@ -1544,11 +1394,8 @@ services:
     # Ready once dnsmasq answers (the apk install adds a few seconds of startup);
     # backends gate on this so they never start before their resolver is up.
     healthcheck:
+      <<: *health-timing
       test: ["CMD-SHELL", "nslookup ready.foramcp.org 127.0.0.1 >/dev/null 2>&1 || exit 1"]
-      interval: 2s
-      timeout: 3s
-      retries: 30
-      start_period: 2s
 
   # The key directories of the e2e suite's per-test agents (ADR-028 D7). A test
   # mints an agent with its own key and a random host under agents.example,
@@ -1569,10 +1416,8 @@ services:
       default:
         ipv4_address: ${FORA_E2E_NET}.184
     healthcheck:
+      <<: *health-timing
       test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/healthz || exit 1"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
 
   # The origins of the e2e suite's per-test publisher sites. A publisher test
   # claims a fresh host under sites.example, registers the files that site
@@ -1599,10 +1444,8 @@ services:
       default:
         ipv4_address: ${FORA_E2E_NET}.185
     healthcheck:
+      <<: *health-timing
       test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/healthz || exit 1"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
 
   # The e2e suite's Exchange impostor, for the Broker's fault paths. The
   # reference Exchanges never refuse a whole sub-request, drop a connection,
@@ -1638,10 +1481,8 @@ services:
           - unapproved-exchange
           - unlisted-exchange
     healthcheck:
+      <<: *health-timing
       test: ["CMD", "/misbehaving-exchange", "healthcheck"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
 
   # The capture proxy (ADR-028 D8 H12): every request a service carrying the
   # x-through-capture-proxy entries sends the Broker or an Exchange arrives here,
@@ -1684,10 +1525,8 @@ services:
       default:
         ipv4_address: *capture-proxy-address
     healthcheck:
+      <<: *health-timing
       test: ["CMD", "/capture-proxy", "healthcheck"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
 
   # ───── Identity Service (registry / MCP adapter) ──────────────────
   # The Go service that replaced the Python shim. It custodies each agent's key
@@ -1708,11 +1547,8 @@ services:
     # the identity service.
     command: ["server", "-dev"]
     healthcheck:
+      <<: *health-timing
       test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
-      interval: 3s
-      timeout: 3s
-      retries: 20
-      start_period: 3s
 
   # One-shot: writes the Identity Service's policy from the shared template and
   # creates the scoped token the identity service uses, then checks that the
@@ -1742,10 +1578,8 @@ services:
       POSTGRES_PASSWORD: zitadel
       POSTGRES_DB: zitadel
     healthcheck:
+      <<: *health-timing
       test: ["CMD-SHELL", "pg_isready -U zitadel -d zitadel"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
 
   # In-network OIDC provider. ExternalDomain=zitadel so the issuer is
   # http://zitadel:8080 — resolvable by identity over the compose network (the dev
@@ -1809,10 +1643,8 @@ services:
   mailpit:
     image: axllent/mailpit:v1.31.4
     healthcheck:
+      <<: *health-timing
       test: ["CMD", "/mailpit", "readyz"]
-      interval: 2s
-      timeout: 3s
-      retries: 30
 
   # One-shot: provisions the developer instance — the `fora` project, the
   # confidential `fora-identity` OIDC client with redirect URI
@@ -2043,8 +1875,8 @@ services:
   #
   # The contributor is catalog-contributor-e2e, the host every manifest the
   # console generates authorizes. Its key directory is served by
-  # catalog-contributor-e2e-jwks, which mounts the same key file to publish the
-  # public half; no other service mounts it, the Exchange included.
+  # key-directories, which mounts the same key file to publish the public half;
+  # no other service mounts it, the Exchange included.
   #
   # SKIP_SSRF and ALLOW_INSECURE let the sitemap fetch reach the publisher sites
   # on this private, plain-http network, as they let every other service here
@@ -2089,13 +1921,8 @@ services:
     build:
       context: tests/e2e/wba-oracle-ts
     healthcheck:
+      <<: *health-timing
       test: ["CMD", "node", "src/healthcheck.ts"]
-      interval: 2s
-      # Ten seconds, not three: the probe starts a node process, and on a
-      # loaded CI host node alone can take longer than three seconds to start.
-      timeout: 10s
-      retries: 30
-      start_period: 2s
 
   runner:
     # Opt-in: `docker compose --profile test run --rm runner` executes the suite.
@@ -2136,11 +1963,6 @@ services:
       # the identity service's token and mount from the running identity
       # container, not from here, so it checks what the service is given.
       IDENTITY_VAULT_ROOT_TOKEN: *identity-vault-root-token
-      # The harness signs FORA calls as agent-e2e with this key: keyid's
-      # thumbprint resolves to the agent-e2e directory the seed registers, so the
-      # Broker/Exchange signature gate admits it. The fixture ships in the runner
-      # image at /runner/harness.
-      FORA_AGENT_KEY_FILE: "/runner/harness/fixtures/agent_e2e_key.json"
       # exchange-a's Ed25519 delivery-URL signing key, the private half of the
       # key it publishes in its WBA directory. The Lambda@Edge suite signs its
       # own delivery URLs with it because that runtime cannot be handed one the
@@ -2218,15 +2040,7 @@ services:
         condition: service_healthy
       lambda-edge-no-wba:
         condition: service_healthy
-      lazy-agent-e2e-jwks:
-        condition: service_healthy
-      agent-e2e-jwks:
-        condition: service_healthy
-      agent-nobilling-e2e-jwks:
-        condition: service_healthy
-      agent-demo-eur-jwks:
-        condition: service_healthy
-      test-signer-e2e.v1-jwks:
+      key-directories:
         condition: service_healthy
       agent-directory:
         condition: service_healthy
@@ -2240,8 +2054,6 @@ services:
         condition: service_started
       identity:
         condition: service_started
-      postgres:
-        condition: service_healthy
 
 # The stack's own network, created before `up` and removed after `down` by
 # scripts/e2e-stack.sh, which also sets the two variables this file reads:
@@ -2261,9 +2073,9 @@ services:
 #                     hosts entries point at (x-capture-proxy-address) and the
 #                     sidecar answers all three zones with; it routes each zone
 #                     on to the service above that serves it (CAPTURE_ZONES);
-#   .211-.214         the ledgers tigerbeetle-a to tigerbeetle-d, which each
-#                     Exchange dials by address (EXCHANGE_BILLING_TB_ADDRESS):
-#                     the TigerBeetle client does not resolve hostnames;
+#   .211              the ledger (tigerbeetle), which every Exchange dials by
+#                     address (EXCHANGE_BILLING_TB_ADDRESS): the TigerBeetle
+#                     client does not resolve hostnames;
 #   .220              the runner, the one source the Exchanges' admin listeners
 #                     admit (x-runner-address).
 # Every static address sits outside the automatic range, so no container started
@@ -2292,12 +2104,9 @@ volumes:
   # The console reads the private half and publishes the public one at its own
   # key directory, which the Exchange fetches.
   console-keys:
-  # One data volume per ledger. `make e2e-down` runs `down -v`, which deletes
-  # them, so each stack starts with empty ledgers.
-  tigerbeetle-a-data:
-  tigerbeetle-b-data:
-  tigerbeetle-c-data:
-  tigerbeetle-d-data:
+  # The ledger's data file. `make e2e-down` runs `down -v`, which deletes it, so
+  # each stack starts with an empty ledger.
+  tigerbeetle-data:
   # The local CA, minted at stack-up by tls-keygen and never committed: the CA
   # certificate and the bundle every client trusts it through.
   tls-ca:

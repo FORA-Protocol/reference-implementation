@@ -5,9 +5,9 @@
 .PHONY: test-production-db
 .PHONY: delivery-event-check
 .PHONY: image-version-check build-args-check sqlc-check harness-deadcode-check
-.PHONY: zitadel-up zitadel-creds zitadel-logs zitadel-down buildx-check
+.PHONY: zitadel-up zitadel-creds zitadel-logs zitadel-down buildx-check compose-check
 .PHONY: edge-%
-.PHONY: test-e2e e2e-run e2e-keys e2e-up e2e-down e2e-logs e2e-demo e2e-project ledger go-mod-download
+.PHONY: test-e2e e2e-run e2e-keys e2e-up e2e-down e2e-logs e2e-project ledger go-mod-download
 
 # Go is a single module covering the Go services under src/ and the shared code
 # under internal/. Edge (TS) has its own Makefile under src/; the Python e2e harness
@@ -19,6 +19,8 @@
 # The default value 3 must align with:
 #   - Dockerfile ARG GO_BUILD_P=3 (deliberate restatement for compose builds)
 #   - Publish gate GO_BUILD_P default of 3 (same deliberate restatement)
+#   - deploy/ci/buildkitd.toml, whose limit of two build steps at a time assumes
+#     three compiles per Go step
 GO_PARALLEL ?= 3
 COMPOSE_PARALLEL ?= $(GO_PARALLEL)
 # Only copy from PARALLEL if explicitly passed on the make command line (e.g. make PARALLEL=8),
@@ -28,7 +30,12 @@ GO_PARALLEL := $(PARALLEL)
 COMPOSE_PARALLEL := $(PARALLEL)
 endif
 
-# Default build knobs passed to in-image Go builders and Compose concurrency limit.
+# GO_BUILD_P reaches the Go builds inside the images. COMPOSE_PARALLEL_LIMIT caps
+# how many calls Compose makes to the Docker daemon at once, such as creating and
+# starting containers. It does not cap the image builds: Compose hands them all to
+# BuildKit together (a cold build with the limit at 3 still had up to 159 tasks
+# running or waiting for a CPU). The CI e2e job limits builds with
+# deploy/ci/buildkitd.toml instead.
 export GO_BUILD_P ?= $(GO_PARALLEL)
 export COMPOSE_PARALLEL_LIMIT ?= $(COMPOSE_PARALLEL)
 
@@ -269,13 +276,15 @@ go-typecheck: | go-mod-download
 	@echo "==> go vet -tags e2e (-p $(GO_PARALLEL))"
 	go vet -p $(GO_PARALLEL) -tags e2e ./...
 
-# The second run is the e2e control service's own tests, which compile only
-# under the e2e tag.
+# The second run covers what compiles differently under the e2e tag: the e2e
+# control service's own tests, and the Exchange server package, whose e2e build
+# reads the ledger id namespace its production build refuses. The whole package
+# runs, not a -run filter: a renamed test would match no filter and still pass.
 go-test: | go-mod-download
 	@echo "==> go test (-p $(GO_PARALLEL))"
 	go test -race -count=1 -p $(GO_PARALLEL) ./...
-	@echo "==> go test -tags e2e (e2e control service)"
-	go test -tags e2e -race -count=1 -p $(GO_PARALLEL) ./src/exchange/internal/e2econtrol/...
+	@echo "==> go test -tags e2e (e2e control service, Exchange server)"
+	go test -tags e2e -race -count=1 -p $(GO_PARALLEL) ./src/exchange/internal/e2econtrol/... ./src/exchange/cmd/server/...
 
 jscpd:
 	@echo "==> jscpd"
@@ -522,12 +531,13 @@ e2e-run: e2e-up
 #   * the e2e identities (contributor/agents/broker-relay/test-signer/…) —
 #     private fixtures under tests/e2e/harness/fixtures/
 #     (scripts/gen-e2e-keys.sh). There is no shared key registry file: each
-#     identity's pubkey is served only by that identity's own well-known host
-#     in docker-compose.e2e.yml. The broker-relay private fixture this mints is
-#     the one the broker container mounts (BROKER_RELAY_KEY_FILE); the broker
-#     publishes its pubkey in its own WBA directory at boot.
-#   * the demo subscription-publisher key the publisher-jwks service signs
-#     /.well-known/fora.json with (scripts/gen-examplenews-publisher-key.sh).
+#     identity's pubkey is served only under that identity's own host name, by
+#     the key-directories service in docker-compose.e2e.yml. The broker-relay
+#     private fixture this mints is the one the broker container mounts
+#     (BROKER_RELAY_KEY_FILE); the broker publishes its pubkey in its own WBA
+#     directory at boot.
+#   * the demo subscription publisher's key, which the key-directories service
+#     serves under examplenews (scripts/gen-examplenews-publisher-key.sh).
 #   * each publisher edge's pre-signed key directory, appended to its
 #     deploy/edge-keys/<service>.env as WBA_SIGNED_DIRECTORY_JSON
 #     (scripts/gen-e2e-signed-directories.sh). The signing tool runs on the edge
@@ -547,30 +557,29 @@ e2e-keys:
 # healthy. e2e-keys runs first so a clean checkout (no committed keys)
 # comes up with zero manual steps.
 #
-# buildx-check runs before either: without the plugin compose builds these 19
+# buildx-check runs before either: without the plugin compose builds the stack's
 # images on the legacy builder and says so only in a warning nobody reads, which
 # turns a ~75s stack-up into ~39 minutes. Failing here costs a second and names
 # the cause.
 #
+# compose-check runs before either too, for the same reason: every health check
+# in the stack sets start_interval, which Docker Engine before 25 lacks and
+# Compose before 2.24 is reported to drop without a word. Every check would then
+# run once a minute from the start, and the stack would come up minutes late with
+# no error to say why.
+#
 # The network goes first: the stack's subnet is allocated per stack, and the
 # compose file reads its prefix (scripts/e2e-stack.sh).
 E2E_WAIT_TIMEOUT ?= 120
-e2e-up: buildx-check e2e-keys
+e2e-up: buildx-check compose-check e2e-keys
 	scripts/e2e-stack.sh network-up $(E2E_PROJECT)
 	$(COMPOSE_E2E) up -d --build --wait --wait-timeout $(E2E_WAIT_TIMEOUT)
 
 buildx-check:
 	@scripts/check-buildx.sh
 
-# Phase-2a demo-catalog proof (items 2-5): register the three demo tenants,
-# ingest all three demo feeds via the production cmd/fora-ingest binary,
-# DiscoverResources for a demo resource, and fetch the canary article through an
-# edge. Re-runnable against an already-up stack brought up with host ports
-# (`make e2e-up E2E_HOST_PORTS=1` first): the script runs on the host. It is
-# handed E2E_PROJECT, so it reads the ports of the stack `make e2e-up` brought up
-# under that name, whatever other stacks run on the daemon.
-e2e-demo:
-	E2E_PROJECT=$(E2E_PROJECT) uv run --project tests/e2e python tests/e2e/demo_proof.py
+compose-check:
+	@scripts/check-compose-version.sh
 
 # Render the cryptographic evidence chain for one executed transaction. Reads
 # the Exchange admin plane, the Broker's selection audit, and the edge delivery
@@ -642,11 +651,6 @@ aws-roll-services:
 		aws ecs update-service --cluster fora-demo --service fora-demo-$$svc --force-new-deployment >/dev/null \
 		  && echo "  rolled fora-demo-$$svc" ; \
 	done
-
-# Real-AWS acceptance suite (noop unless FORA_E2E_AWS=1).
-test-e2e-aws:
-	@echo "==> AWS acceptance pytest"
-	cd tests/e2e && uv run --with-editable . pytest -q ../e2e-aws
 
 # golangci-lint installs from its official prebuilt binary, not `go install`.
 # Pinned for reproducibility; bump deliberately and re-run `make quality`.

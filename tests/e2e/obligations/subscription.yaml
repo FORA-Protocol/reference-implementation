@@ -1,0 +1,120 @@
+# Subscription-gated terms: a licensing term carrying one concrete 'subscription:'
+# scope is presented and sold only through a verified holder-bound JWT delegation
+# chain (Requester.delegation), rooted in the keys of the subscription record that
+# owns the scope and bound to the key the request proved. Stating the scope in
+# Requester.scopes proves nothing (PUBLIC-004 pins the hiding).
+
+- id: SUBSCRIPTION-001
+  title: A gated term is presented to a direct requester whose delegation chain verifies; plaintext mirrors change nothing
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      An Exchange MAY instead gate a term behind a verified delegation (a subscription
+      term is the usual case): then only the delegation chain's verified effective
+      scopes are matched against these scopes, and Requester.scopes is ignored for
+      that term.
+  positive: >-
+    The agent queries the Exchange directly with a chain rooted in the record's
+    trusted key and bound to its own signing key: the gated offer is presented.
+    Delegation.scopes, expires_at and principal_domain wider than the chain leave
+    the answer unchanged. Without a chain the term is absent with no reason.
+  negative: []
+
+- id: SUBSCRIPTION-002
+  title: A query the Broker originates hides gated terms whatever delegation it carries
+  level: DECISION
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      On a query a Broker originated nothing can pass that binding: the Exchange does
+      not honour the delegation, answers as if none were present, and presents no
+      term gated behind one (see LicenseTerm.scopes).
+  positive: >-
+    The chain can be bound only to a key the request proved, and a query the Broker
+    signs proves the Broker's. Until a Broker path preserves the agent's own
+    signature, the Exchange ignores the delegation on such a query and hides every
+    gated term, with no absence reason; public terms are unaffected.
+  negative: []
+
+- id: SUBSCRIPTION-003
+  title: A gated term is sold directly and relayed, bound to the agent's acceptance key
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      the key a request proves possession of MUST hash to the terminal token's
+      `cnf.jkt` (the RFC 9421 request signer on a direct call; on a purchase a Broker
+      relayed, the key each item's AgentAcceptance verifies under), so a token
+      possessed without its private key grants nothing.
+  positive: >-
+    The agent buys the gated FREE offer at the Exchange with its chain, and buys
+    another through the Broker with the same chain; both succeed, because the
+    chain is bound to the key that signed the acceptances.
+  negative: []
+
+- id: SUBSCRIPTION-004
+  title: Every delegation failure on a gated item is the per-item denial DELEGATION_INVALID
+  level: MUST
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      DENIAL_REASON_DELEGATION_INVALID = 10;  // On a purchase item: delegation
+      missing, malformed, unverifiable (chain linkage, issuer, signature), expired or
+      not yet valid, addressed to another recipient, holder binding failed, a child
+      widens its parent, or scopes/caps do not cover the request
+  positive: >-
+    The denial is in the body, the request succeeds, and nothing is sold on the
+    item: no transaction, no delivery URL. A chain whose cnf.jkt names another
+    key, an expired chain, a chain rooted in a key the record does not trust
+    (including the key a rotation of the record's issuer withdrew) and a purchase
+    without a chain are each denied DELEGATION_INVALID. On the relayed path a
+    chain bound to the Broker's own transport key is denied the same way: the
+    holder is the agent's acceptance key, never the relay's.
+  negative: []
+
+- id: SUBSCRIPTION-005
+  title: A relayed gated item without its acceptance is denied alone; its siblings are bought
+  level: DECISION
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      If a delegation rides a projected request, the wire signer is the Broker, so the
+      Exchange checks the delegation's holder binding (cnf.jkt) against the key each
+      item's AgentAcceptance verifies under, not against the wire signer (see
+      Delegation). A Broker is never delegated to and never becomes the holder.
+  positive: >-
+    The Broker forwards a gated item that carries no acceptance; the Exchange
+    denies it DELEGATION_INVALID and buys its siblings. The agent's retry with the
+    acceptance present succeeds. A public item without an acceptance is still
+    refused by the Broker before anything is sent. The complete-set proof does not
+    cover per-item acceptances, so the worst a relaying Broker can force is this
+    stored per-item denial: no transaction, no URL, no charge.
+  negative: []
+
+- id: SUBSCRIPTION-006
+  title: A term carrying more than one subscription scope, or a wildcard one, is refused at ingest
+  level: DECISION
+  actor: exchange
+  surface: sdk
+  source:
+    cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
+    quote: >-
+      A subscription term is Pricing{model:FREE} + scopes:["subscription:..."].
+  positive: >-
+    The push is refused with the entry named, so the publisher learns about it
+    before any requester could; term selection hides such a term as a backstop.
+  negative:
+    - code: INVALID_ARGUMENT
+      reason: CATALOG_REJECTION_REASON_MALFORMED_ENTRY
+      side_effect: the entry is not stored; a term with two subscription scopes or a wildcard one is refused

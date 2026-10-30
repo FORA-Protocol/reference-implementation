@@ -1,5 +1,6 @@
 // The wizard's licensing step: what the publisher's own site already says about
-// its terms, and what an agent would be shown under the answers on screen.
+// its terms, what an agent would be shown under the answers on screen, and the
+// step's Next, which saves them on the domain.
 
 package web
 
@@ -66,7 +67,7 @@ func (a *WizardAPI) Page(w http.ResponseWriter, r *http.Request) {
 	if !readAPI(w, r, &req) {
 		return
 	}
-	read, err := a.wizard.ReadPage(r.Context(), req.Domain)
+	read, err := a.wizard.ReadPage(r.Context(), actorOf(r.Context()), req.Domain)
 	if err != nil {
 		apiFailure(w, r, err)
 		return
@@ -113,4 +114,35 @@ func (a *WizardAPI) TermsPreview(w http.ResponseWriter, r *http.Request) {
 		Warning string             `json:"warning,omitempty"`
 		Summary string             `json:"summary"`
 	}{Lines: preview.Lines, Warning: preview.Warning, Summary: preview.Summary})
+}
+
+// SetTerms is the licensing step's Next: it saves the terms on screen on the
+// saved domain, with the sitemap the step found and the answer to whether the
+// automatic import may replace the terms of pages already in the catalog. The
+// terms are a pointer so a request that leaves them out is told so rather than
+// read as terms chosen.
+func (a *WizardAPI) SetTerms(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Domain                    string        `json:"domain"`
+		Terms                     *controlsJSON `json:"terms"`
+		Sitemap                   string        `json:"sitemap_url"`
+		ImportReplacesManualTerms bool          `json:"import_replaces_manual_terms"`
+	}
+	if !readAPI(w, r, &req) {
+		return
+	}
+	saved, err := a.wizard.SetTerms(r.Context(), actorOf(r.Context()), wizard.TermsAnswers{
+		Domain:                    req.Domain,
+		Controls:                  controlsOrNil(req.Terms),
+		Sitemap:                   req.Sitemap,
+		ImportReplacesManualTerms: req.ImportReplacesManualTerms,
+	})
+	if err != nil {
+		apiFailure(w, r, err)
+		return
+	}
+	writeAPI(w, r, struct {
+		Domain   string `json:"domain"`
+		Verified bool   `json:"verified"`
+	}{Domain: saved.Domain, Verified: saved.Active()})
 }

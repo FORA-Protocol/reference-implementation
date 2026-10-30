@@ -10,67 +10,62 @@ components, and every participant serves a WG-00 key directory. This module
 holds what more than one suite needs, and everything that touches HTTP, so the
 test modules read typed answers and never a raw response:
 
-- the agent the runner signs as, as a third-party signer and as an SDK signer;
-- building a bodied request the way any WBA library would, sending it with a
-  third-party signature, and reading the answer (:class:`Answer`);
-- a purchase through the Broker as that agent, optionally re-signed by a
-  third-party library after the SDK built it;
+- the test's own agent, as a third-party signer;
+- a call the SDK builds, signs and decodes, re-signed by a third-party library
+  over the same bytes in between, read back as a typed :class:`Answer`;
+- a purchase through the Broker as that agent, optionally re-signed the same way;
 - reading a captured request's signatures back and handing them to the two
   third-party verifiers;
-- fetching a key directory over https under the stack's local CA.
+- fetching a key directory over https under the stack's local CA, and reading
+  the Lambda@Edge directory as served. These read the raw answer on purpose: the
+  WG-00 directory check judges the status, the media type, the body and its
+  response signature exactly as they were served.
 
-The signing agent is agent-e2e, a registered static agent whose private key the
-harness holds. It signs with the https origin ``https://agent-e2e``: the capture
-proxy answers https for that name under the local CA (it is in the compose
-file's x-through-capture-proxy list), so the origin names a directory a WBA
-verifier can actually fetch. ``Requester.domain`` is that origin's host on every
-body built here, because a verifier refuses a request whose requester is not the
-directory its signature resolved from.
+The signing agent is the test's own (``fresh_agent``), whose private key the
+harness holds. It signs with the https origin of its own host in the agent zone:
+the stack's wildcard DNS sends every name in that zone to the capture proxy,
+which answers https for it under the local CA and routes it to the
+agent-directory service that serves the agent's directory. So the origin names a
+directory a WBA verifier can actually fetch. The SDK stamps that origin's host as
+``Requester.domain`` on every request built here, because a verifier refuses a
+request whose requester is not the directory its signature resolved from.
 
 Nothing here signs or verifies by itself. Third-party signing and verifying is
 the oracles' job (``wba_oracle.py``, ``wba_oracle_ts.py``), and the oracles never
-import FORA code. This module may, because it only builds requests, drives the
-SDK and reads answers.
+import FORA code. This module may, because it only drives the SDK, hands the
+oracles what the SDK built, and reads the SDK's answers.
 """
 
 from __future__ import annotations
 
 import json
-import uuid
-from collections.abc import Mapping
-from contextlib import closing
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, replace
-from typing import Any, cast
+from typing import Any, Literal
 
 import httpx
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from fora_sdk import ProtocolVersion
-from fora_sdk.hosts import host_of
-from fora_sdk.httpsig import content_digest
-from fora_sdk.signing_transport import SigningTransport
+from fora_sdk.client import CallError, RawBody
+from fora_sdk.core import DiscoveryResult
 from http_message_signatures import http_sfv
-from wire.models import TransactionResultItem
+from wire.models import TransactionResultItem, WBAFile
 
-from .after_signing import after_signing
-from .broker_purchase import only_item, resolve_offer, resolve_request
+from .after_signing import Alteration, after_signing
+from .broker_purchase import only_item, resolve_offer, resolve_request, resource_query
 from .capture_proxy import CapturedRequest
-from .constants import WBA_DIRECTORY_PATH, requester
-from .e2e_catalog import USD_AGENT_ID, USD_AGENT_KEY_PATH
-from .exchanges import recipient_of
-from .httpsig_signer import load_keypair, signing_transport
+from .constants import WBA_DIRECTORY_PATH
+from .exchanges import EXCHANGE_A_DOMAIN
+from .fresh_agent import FreshAgent
+from .httpsig_signer import directory_origin
+from .identity_requests import auth_reason
 from .lambda_edge import PUBLISHER, invoke, viewer_request_event
 from .local_ca import local_ca_context
-from .sdk_client import sdk_broker_client
+from .protocol_documents import parse_document
+from .signature_fields import DeclaredSignature, declared_signatures
 from .stack_urls import StackURLs
 from .wba_directory import DirectoryResult, check_directory
 from .wba_oracle import VerifyResult, private_jwk, sign, verify
 from .wba_oracle_ts import TSOracle, TSVerifyResult
-
-# The registered static agent the runner signs as, the https origin it names,
-# and that origin's host, which every body names as Requester.domain.
-AGENT_ID = USD_AGENT_ID
-AGENT_ORIGIN = "https://agent-e2e"
-AGENT_HOST = host_of(AGENT_ORIGIN)
 
 # The directory the Broker signs as in this stack.
 BROKER_ORIGIN = "https://broker"
@@ -78,8 +73,12 @@ BROKER_ORIGIN = "https://broker"
 # What the profile adds to the WG-00 minimum on a FORA RPC.
 FORA_COMPONENTS = ("@method", "@target-uri", "content-digest", "authorization")
 
-RESOLVE_PATH = "/fora.v1.BrokerService/Resolve"
-DISCOVER_PATH = "/fora.v1.ExchangeService/DiscoverResources"
+#: Which party a conformance call goes to: the Broker's Resolve, or exchange-a's
+#: DiscoverResources.
+Target = Literal["broker", "exchange"]
+
+#: A third-party signer: the request, and options such as ``legacy`` or ``tag``.
+Signer = Callable[..., dict[str, str]]
 
 # The JWK alg every directory key must carry: the JOSE name, a deliberate FORA
 # deviation from WG-00 Section 5.5.1 (the directory suite's docstring says why).
@@ -89,100 +88,58 @@ _WBA_HEADERS = frozenset({"signature", "signature-input", "signature-agent"})
 _TIMEOUT_SEC = 30.0
 
 
-def agent_key() -> Ed25519PrivateKey:
-    """agent-e2e's private key, from the fixture its directory host serves."""
-    return load_keypair(USD_AGENT_KEY_PATH)[1]
+def agent_origin(agent: FreshAgent) -> str:
+    """The https origin ``agent`` signs under: its own directory host."""
+    return directory_origin(agent.host)
 
 
-def agent_sdk_signer() -> SigningTransport:
-    """The SDK's request signer for agent-e2e, naming the same origin the oracles sign as."""
-    return signing_transport(AGENT_ORIGIN, agent_key())
+# ---- Calls a third-party library signs ------------------------------------------
 
 
-# ---- Requests a third-party library signs --------------------------------------
+def python_signer(agent: FreshAgent) -> Signer:
+    """The Python oracle, signing as ``agent`` under its origin (an ``origin`` option overrides)."""
+
+    def sign_as_agent(request: httpx.Request, **options: Any) -> dict[str, str]:
+        return sign(request, agent.ed25519, options.pop("origin", agent_origin(agent)), **options)
+
+    return sign_as_agent
 
 
-def bodied_request(url: str, body: Mapping[str, Any] | bytes) -> httpx.Request:
-    """An unsigned Connect-unary POST carrying everything a FORA signature covers.
+def cloudflare_signer(oracle: TSOracle, agent: FreshAgent) -> Signer:
+    """Cloudflare's library, signing as ``agent`` under its origin (an ``origin`` option overrides)."""
+    key = private_jwk(agent.ed25519)
 
-    ``body`` is a message, serialized here, or bytes already serialized by the
-    caller. The empty Authorization header is what an agent-direct FORA call
-    sends: the profile requires ``authorization`` to be covered, and RFC 9421
-    covers only a header that is present.
-    """
-    payload = (
-        body if isinstance(body, bytes) else json.dumps(dict(body), separators=(",", ":")).encode()
-    )
-    headers = {
-        "Content-Type": "application/json",
-        "Connect-Protocol-Version": "1",
-        "Content-Digest": content_digest(payload),
-        "Authorization": "",
-    }
-    return httpx.Request("POST", url, headers=headers, content=payload)
+    def sign_as_agent(request: httpx.Request, **options: Any) -> dict[str, str]:
+        return oracle.sign(request, key, options.pop("origin", agent_origin(agent)), **options)
 
-
-def resolve_to_broker(stack: StackURLs, uri: str) -> httpx.Request:
-    """An unsigned Broker Resolve for ``uri``, asking as agent-e2e."""
-    body = {**resolve_request([uri]), "requester": requester(AGENT_ID, AGENT_HOST)}
-    return bodied_request(f"{stack.broker}{RESOLVE_PATH}", body)
-
-
-def discover_at(exchange_url: str, uri: str) -> httpx.Request:
-    """An unsigned DiscoverResources for ``uri`` at the Exchange at ``exchange_url``.
-
-    The query names the Exchange it is addressed to by identity, not by the URL it
-    is posted to, and stamps ``ver`` from the SDK's constant, as the harness's
-    ver-wire guard requires of every body. Its ``id`` is fresh on every call.
-    """
-    url = f"{exchange_url}{DISCOVER_PATH}"
-    body = {
-        "ver": ProtocolVersion,
-        "id": f"q-{uuid.uuid4().hex}",
-        "exchange": recipient_of(url),
-        "requester": requester(AGENT_ID, AGENT_HOST),
-        "uris": [uri],
-    }
-    return bodied_request(url, body)
-
-
-def python_sign(request: httpx.Request, **options: Any) -> dict[str, str]:
-    """Sign ``request`` as agent-e2e through the Python oracle (``origin`` overrides)."""
-    return sign(request, agent_key(), options.pop("origin", AGENT_ORIGIN), **options)
-
-
-def cloudflare_sign(oracle: TSOracle, request: httpx.Request, **options: Any) -> dict[str, str]:
-    """Sign ``request`` as agent-e2e through Cloudflare's library (``origin`` overrides)."""
-    origin = options.pop("origin", AGENT_ORIGIN)
-    return oracle.sign(request, private_jwk(agent_key()), origin, **options)
-
-
-@dataclass(frozen=True)
-class Requested:
-    """One signature an Accept-Signature header asks for: its components and parameters."""
-
-    components: tuple[str, ...]
-    params: dict[str, object]
+    return sign_as_agent
 
 
 @dataclass(frozen=True)
 class Answer:
-    """A FORA answer as a WBA client reads it.
+    """A FORA answer to a third-party-signed call, read through the SDK's types.
 
-    ``offers`` are the offers an accepted Resolve or DiscoverResources carries.
-    ``requested`` is the Accept-Signature header (WG-00 Section 5.3) read as a
-    Dictionary: each label it names, with the components it asks that signature
-    to cover, written as in Signature-Input, and its parameters. A missing header
-    reads as empty. ``code`` is the Connect error code of a refusal, such as
-    ``unauthenticated``, and empty when the answer carries none. A refusal is read
-    by its code, never by its message text (ADR-028 D4).
+    ``status`` and ``code`` are a refusal's HTTP status and Connect code, such as
+    401 and ``unauthenticated``; an answered call reads as 200 and an empty code.
+    ``offers`` counts the verified offers an answered Resolve or DiscoverResources
+    carries; a refusal carries none. ``requested`` is the refusal's
+    Accept-Signature header (WG-00 Section 5.3), read from the SDK's
+    ``CallError.headers`` as a Dictionary: each label it names, with the
+    components it asks that signature to cover, written as in Signature-Input,
+    and its parameters. A missing header reads as empty. ``sent`` is the request
+    as it went on the wire, for a test that reads the signature the library made.
+    ``reason`` is the refusal's typed ``request_auth_failure`` reason as the SDK
+    decodes it, and None for an answered call or a refusal that carries none.
+    A refusal is read by its code and its typed reason, never by its message text
+    (ADR-028 D4).
     """
 
     status: int
-    offers: tuple[dict[str, Any], ...]
-    requested: dict[str, Requested]
     code: str
-    text: str
+    offers: int
+    requested: dict[str, DeclaredSignature]
+    sent: httpx.Request
+    reason: str | None = None
 
     def requests_component(self, component: str) -> bool:
         return any(component in r.components for r in self.requested.values())
@@ -199,81 +156,98 @@ class Answer:
         return any(r.params.get("tag") == tag for r in self.requested.values())
 
 
-def _offers(payload: object) -> tuple[dict[str, Any], ...]:
-    """The offers a Resolve or DiscoverResources answer carries."""
-    if not isinstance(payload, dict):
-        return ()
-    groups = cast(list[dict[str, Any]], payload.get("offer_groups") or [])
-    offers = [o for g in groups for o in cast(list[dict[str, Any]], g.get("offers") or [])]
-    return tuple(offers + cast(list[dict[str, Any]], payload.get("offers") or []))
+def _requested(raw: str | None) -> dict[str, DeclaredSignature]:
+    return declared_signatures([raw] if raw else [], field="Accept-Signature", where="the refusal")
 
 
-def _requested(raw: str | None) -> dict[str, Requested]:
-    if not raw:
-        return {}
-    parsed = http_sfv.Dictionary()
-    parsed.parse(raw.encode())
-    return {
-        label: Requested(tuple(str(c) for c in member), dict(member.params))
-        for label, member in parsed.items()
-        if isinstance(member, http_sfv.InnerList)
-    }
-
-
-def send(
-    request: httpx.Request, signature: Mapping[str, str], *, request_id: str | None = None
-) -> Answer:
-    """Send ``request`` with the signature headers a signer returned, and read the answer."""
-    headers = {**dict(request.headers), **signature}
-    if request_id is not None:
-        headers["X-Request-ID"] = request_id
-    response = httpx.post(
-        str(request.url), content=request.content, headers=headers, timeout=_TIMEOUT_SEC
-    )
-    try:
-        payload: object = response.json()
-    except ValueError:
-        payload = None
-    code = str(payload.get("code", "")) if isinstance(payload, dict) else ""
-    return Answer(
-        status=response.status_code,
-        offers=_offers(payload) if response.status_code == httpx.codes.OK else (),
-        requested=_requested(response.headers.get("Accept-Signature")),
-        code=code,
-        text=response.text,
-    )
-
-
-# ---- A purchase through the Broker as agent-e2e ----------------------------------
-
-
-def _resigned_in_the_legacy_form(request: httpx.Request) -> httpx.Request:
-    """The SDK's signed request, re-signed by the Python oracle in the legacy form.
+def resigned_by(signer: Signer, **options: Any) -> Alteration:
+    """The SDK's signed request, its signature replaced by one ``signer`` makes over the same bytes.
 
     The SDK's Signature, Signature-Input and Signature-Agent are dropped and the
-    oracle's take their place, over the same bytes: the body, its Content-Digest
-    and the empty Authorization the SDK sent all stay as they were.
+    library's take their place. The body, its Content-Digest and the empty
+    Authorization the SDK sent all stay as they were, so the library signs exactly
+    the request the SDK built, and the FORA components it covers are all present.
     """
-    signature = python_sign(request, extra_components=FORA_COMPONENTS, legacy=True)
-    kept = [
-        (k, v)
-        for k, v in request.headers.multi_items()
-        if k.lower() not in _WBA_HEADERS | {"content-length"}
-    ]
-    return httpx.Request(
-        request.method, request.url, headers=[*kept, *signature.items()], content=request.content
-    )
+
+    def alter(request: httpx.Request) -> httpx.Request:
+        signature = signer(request, **options)
+        kept = [
+            (k, v)
+            for k, v in request.headers.multi_items()
+            if k.lower() not in _WBA_HEADERS | {"content-length"}
+        ]
+        return httpx.Request(
+            request.method,
+            request.url,
+            headers=[*kept, *signature.items()],
+            content=request.content,
+        )
+
+    return alter
+
+
+def wba_call(agent: FreshAgent, target: Target, uri: str, signer: Signer, **options: Any) -> Answer:
+    """Discover ``uri`` at ``target`` as ``agent``, the transport signature made by ``signer``.
+
+    The SDK builds the request (a Resolve at the Broker; a DiscoverResources at
+    exchange-a, which sells the seeded catalog), stamps the agent's requester and
+    signs it. :func:`resigned_by` then swaps in the library's signature with
+    ``options``, and the SDK decodes the answer or the refusal. The library's
+    signature is the one part of the call the SDK did not make.
+    """
+    sent: list[httpx.Request] = []
+    with after_signing(resigned_by(signer, **options), observe=sent.append) as http:
+        try:
+            result = _discovered(agent, target, uri, http)
+        except CallError as refusal:
+            assert refusal.status is not None and sent, f"the call was not answered: {refusal}"
+            return Answer(
+                status=refusal.status,
+                code=refusal.code or "",
+                offers=0,
+                requested=_requested(refusal.headers.get("accept-signature")),
+                sent=sent[-1],
+                reason=auth_reason(refusal),
+            )
+    return Answer(status=200, code="", offers=len(result.verified()), requested={}, sent=sent[-1])
+
+
+def _discovered(agent: FreshAgent, target: Target, uri: str, http: httpx.Client) -> DiscoveryResult:
+    """The agent's discovery through a client sending on ``http``; the agent closes it."""
+    if target == "broker":
+        return agent.broker_client(http=http).resolve(resolve_request([uri]))
+    exchange = agent.exchange_client(EXCHANGE_A_DOMAIN, http=http)
+    return exchange.discover(resource_query(EXCHANGE_A_DOMAIN, [uri]))
+
+
+def probe_broker(agent: FreshAgent, request_id: str) -> None:
+    """Send the Broker a Resolve whose body is ``{"probe": request_id}``, signed by the Python oracle.
+
+    The body is deliberately no DiscoveryRequest, so the Broker sends nothing on
+    and the one request the capture holds for ``request_id`` is this one. It goes
+    as a ``RawBody``, the SDK's way to send bytes exactly as given; the SDK signs
+    it and the oracle re-signs it with the four FORA components. The answer does
+    not matter here, so a refusal is not raised.
+    """
+    alteration = resigned_by(python_signer(agent), extra_components=FORA_COMPONENTS)
+    with after_signing(alteration) as http:
+        client = agent.broker_client(http=http, request_id=lambda: request_id)
+        with suppress(CallError):
+            client.resolve(RawBody({"probe": request_id}))
+
+
+# ---- A purchase through the Broker as the test's own agent ------------------------
 
 
 def buy_as_agent(
-    stack: StackURLs, uri: str, *, request_id: str, third_party_legacy: bool = False
+    agent: FreshAgent, uri: str, *, request_id: str, third_party_legacy: bool = False
 ) -> TransactionResultItem:
-    """Resolve ``uri`` at the Broker and buy the winner through ExecuteTransaction, as agent-e2e.
+    """Resolve ``uri`` at the Broker and buy the winner through ExecuteTransaction, as ``agent``.
 
     Both calls carry ``request_id`` as X-Request-ID, which the Broker copies onto
     every request it sends for them. The SDK builds the purchase: the request,
     each item's AgentAcceptance and the request acceptance, all signed with
-    agent-e2e's key. With ``third_party_legacy`` the ExecuteTransaction's
+    the agent's key. With ``third_party_legacy`` the ExecuteTransaction's
     transport signature is then replaced, over the same bytes, by one the Python
     oracle makes in the legacy sf-string Signature-Agent form, which no FORA
     signer sends. The Resolve is always the SDK's own, so a refusal of the legacy
@@ -283,13 +257,11 @@ def buy_as_agent(
     def minted() -> str:
         return request_id
 
-    with closing(sdk_broker_client(stack, signer=agent_sdk_signer(), request_id=minted)) as c:
-        offer = resolve_offer(c, uri)
-    http = after_signing(_resigned_in_the_legacy_form) if third_party_legacy else None
-    buyer = sdk_broker_client(stack, signer=agent_sdk_signer(), http=http, request_id=minted)
-    with closing(buyer):
-        response = buyer.execute([offer])
-    return only_item(response, f"broker purchase of {uri}")
+    offer = resolve_offer(agent.broker_client(request_id=minted), uri)
+    legacy = resigned_by(python_signer(agent), extra_components=FORA_COMPONENTS, legacy=True)
+    http = after_signing(legacy) if third_party_legacy else None
+    buyer = agent.broker_client(http=http, request_id=minted)
+    return only_item(buyer.execute([offer]), f"broker purchase of {uri}")
 
 
 # ---- Reading a captured request's signatures --------------------------------------
@@ -300,25 +272,23 @@ def target_uri(entry: CapturedRequest) -> str:
     return f"{entry.scheme}://{entry.target}{entry.path}"
 
 
-def _signature_inputs(entry: CapturedRequest) -> dict[str, Any]:
-    parsed = http_sfv.Dictionary()
-    parsed.parse(entry.header("signature-input").encode())
-    return dict(parsed.items())
+def _declared(entry: CapturedRequest) -> dict[str, DeclaredSignature]:
+    return declared_signatures(entry.header_values("signature-input"), where=f"request {entry.seq}")
 
 
 def labels(entry: CapturedRequest) -> list[str]:
     """The label of every signature ``entry`` carries, in header order."""
-    return list(_signature_inputs(entry))
+    return list(_declared(entry))
 
 
 def covered(entry: CapturedRequest, label: str) -> tuple[str, ...]:
     """The components ``label`` covers, written as in Signature-Input."""
-    return tuple(str(c) for c in _signature_inputs(entry)[label])
+    return _declared(entry)[label].components
 
 
 def signature_params(entry: CapturedRequest, label: str) -> dict[str, object]:
     """The parameters of the signature ``label`` (created, keyid, alg, nonce, tag...)."""
-    return dict(_signature_inputs(entry)[label].params)
+    return dict(_declared(entry)[label].params)
 
 
 def signature_agent_members(entry: CapturedRequest) -> dict[str, str] | None:
@@ -477,3 +447,21 @@ def lambda_edge_directory(stack: StackURLs) -> httpx.Response:
         content=(result.body or "").encode(),
         request=httpx.Request("GET", url),
     )
+
+
+def lambda_edge_directory_keys(stack: StackURLs) -> list[dict[str, Any]]:
+    """The keys the Lambda@Edge directory serves, as served, for a third-party library to import.
+
+    The answer is first read as the SDK reads a document handed over as bytes
+    (``parse_document``: the published strict schema, then the generated model), so
+    an answer that is not a directory fails here. The keys are then handed on as
+    the served JSON rather than as the SDK's reading of it, because the library
+    judges what the edge sent.
+    """
+    response = lambda_edge_directory(stack)
+    assert response.status_code == httpx.codes.OK, response.text[:200]
+    parse_document(WBAFile, response.content)
+    served = json.loads(response.content)
+    keys = served.get("keys") if isinstance(served, dict) else None
+    assert isinstance(keys, list) and keys, f"the Lambda@Edge directory lists no key: {served}"
+    return keys

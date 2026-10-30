@@ -14,7 +14,9 @@ in this folder deploys the full stack.
 
 It runs in front of your content hostname and:
 
-- serves `/.well-known/fora.json` (your FORA publisher manifest),
+- passes `/.well-known/fora.json` (your FORA publisher manifest, a file you
+  serve from your origin) and `/rsl.txt` through to your origin, for every
+  client,
 - verifies signed delivery URLs minted by the Exchange and forwards valid
   requests to your origin,
 - rejects everything else with the FORA guidance headers.
@@ -54,15 +56,18 @@ terraform apply
 ## Verify
 
 ```bash
-curl https://<your-hostname>/.well-known/fora.json
+curl -A "GPTBot/1.0" https://<your-hostname>/.well-known/fora.json
 ```
 
-You should see your publisher manifest (your domain + the exchange entries).
+You should see your publisher manifest (your domain + the exchange entries) —
+the file on your origin, which the worker passes through, for an AI agent too.
+Place the `fora.json` your Exchange operator hands you on your origin at that
+address before you deploy; the worker has no setting for it.
 
 Compare it field by field against the reference copy in
 [../../publisher-wellknown/](../../publisher-wellknown/), which also covers the second
 discovery document (your Web Bot Auth key directory) and the payee id that has to
-be inside `exchanges_json` before your content can be sold.
+be inside the file before your content can be sold.
 
 ## Inputs you will actually set
 
@@ -70,8 +75,7 @@ be inside `exchanges_json` before your content can be sold.
 |---|---|
 | `worker_hostname` | Set to the hostname if it has no DNS record yet; leave out if the hostname already resolves through Cloudflare |
 | `exchange_url` | The Exchange base URL (from your Exchange operator) |
-| `provider_domain` | Your content domain — the identity in fora.json |
-| `exchanges_json` | The exchange entries advertised in fora.json (from your Exchange operator) |
+| `provider_domain` | Your content domain, the one your fora.json names; the worker routes on it |
 | `origin_url` | Where the worker forwards verified requests (your origin) |
 
 Two values are derived for you and only need setting when your setup is
@@ -128,14 +132,14 @@ hostname.
    worker_hostname = "news.staging-zone.example"
    provider_domain = "news.staging-zone.example"
    exchange_url    = "https://exchange.staging-zone.example"
-   exchanges_json  = "[{\"domain\":\"exchange.staging-zone.example\",\"endpoint\":\"https://exchange.staging-zone.example\",\"supported_profiles\":[\"fora-news-v1\",\"fora-comp-v1\",\"fora-music-v1\"],\"ext\":{\"resource_owner_id\":\"staging-resource-owner\"}}]"
    origin_url      = "https://origin.staging-zone.example"
    ```
 
-   (`route_patterns` and `exchange_wba_url` derive automatically;
-   `resource_owner_id` must match staging's `resource_owner_id` tfvar — the
-   Exchange refuses a push whose attested payee is not the registered one.)
-   Then `terraform apply` as usual.
+   (`route_patterns` and `exchange_wba_url` derive automatically.) Serve your
+   `fora.json` from the origin at `/.well-known/fora.json`, naming
+   `exchange.staging-zone.example` with `"ext":{"resource_owner_id": …}` equal
+   to staging's `resource_owner_id` tfvar — the Exchange refuses a push whose
+   attested payee is not the registered one. Then `terraform apply` as usual.
 
 3. **Onboard the publisher** in the staging Exchange — the same step an
    Exchange operator performs for a real one. It registers the site and lists it

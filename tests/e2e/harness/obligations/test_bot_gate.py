@@ -23,7 +23,9 @@ no User-Agent       403 (DECISION)  --                 --                200
   that fails verification "always gets a 403, regardless of whether the requester
   is a bot or a browser" (EDGEHINT-011).
 * the manifest is served "so protocol-aware agents discover the Exchange without
-  triggering a 403" (EDGEHINT-012).
+  triggering a 403" (EDGEHINT-012). It is the publisher's own file, which the edge
+  passes through to the origin for every client; on Lambda@Edge the request is
+  handed back to CloudFront for the origin to answer.
 
 Two cells the protocol does not state are the edge's documented contract
 (``src/edge/README.md``), recorded as DECISION entries for the protocol author to
@@ -204,9 +206,17 @@ def test_a_signed_url_that_fails_verification_is_refused_whatever_the_user_agent
 def test_the_manifest_is_served_to_every_client(
     compose_stack: StackURLs, runtime: EdgeRuntime
 ) -> None:
-    """/.well-known/fora.json answers 200 with this publisher's manifest, to a bot as to anyone."""
+    """/.well-known/fora.json reaches the publisher's own file, for a bot as for anyone.
+
+    Over HTTP the answer is 200 with this publisher's manifest, which its origin
+    serves. Lambda@Edge never answers the address itself: it hands the request
+    back to CloudFront, which fetches the origin, so the read is never refused.
+    """
     for headers in [{"User-Agent": ua} for ua in _EACH_CLASS.values()] + [{}]:
         reply = read(compose_stack, runtime, runtime.manifest_url, headers=headers)
+        if not runtime.http:
+            assert reply.forwarded, f"{runtime} {headers}: answered itself: {reply}"
+            continue
         assert reply.status == HTTPStatus.OK, f"{runtime} {headers}: answered {reply.status}"
         manifest = parse_document(WellKnownManifest, reply.body)
         assert manifest.domain == runtime.publisher, f"{runtime}: {manifest.domain}"

@@ -8,9 +8,10 @@
 // real-runtime harness at tests/e2e/fastly-edge/ (repo root) carries the
 // real-runtime coverage; this file is a fast entry-module check.
 
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { WBA_PATH } from '../../src/types.js';
+import { EARLIER_RELEASE_SETTINGS } from '../helpers/earlier-release-settings.js';
 import {
   type TestKeypair,
   boundUrl,
@@ -22,6 +23,14 @@ import {
   tamperSignature,
 } from '../helpers/ed25519.js';
 import { fetchMock } from '../helpers/fetch-mock.js';
+import {
+  DOCUMENT_PATHS,
+  ORIGIN,
+  documentReads,
+  expectOriginAnswer,
+  mockOrigin,
+  originDocument,
+} from '../helpers/publisher-documents.js';
 import { PUB_ORIGIN, setupWbaDirectoryMock } from '../helpers/test-setup.js';
 
 interface FetchEvent {
@@ -31,24 +40,23 @@ interface FetchEvent {
 
 type FetchListener = (event: FetchEvent) => void;
 
-const ORIGIN_URL = 'https://origin.pub.test';
 const ORIGIN_BODY = 'origin content';
+const ARTICLE_SCOPE = JSON.stringify(['/article/']);
+const AI_BOT = { 'user-agent': 'GPTBot/1.0' };
+const BROWSER = { 'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) Safari/605.1.15' };
 
 const env: Record<string, string> = {
   EXCHANGE_URL: 'https://exchange.test',
   EXCHANGE_WBA_URL: 'https://exchange.test/.well-known/http-message-signatures-directory',
-  PROVIDER: 'fastly-edge.test',
-  EXCHANGES_JSON: JSON.stringify([
-    { domain: 'exchange.test', endpoint: 'https://exchange.test', supported_profiles: [] },
-  ]),
-  RSL_BODY: '# test rsl',
-  ACME_TOKENS_JSON: '{"demo":"response-body"}',
+  // A configuration store an earlier release's package filled. The entry never
+  // reads those settings, so they change nothing below.
+  ...EARLIER_RELEASE_SETTINGS,
   // A Fastly deployment must name its origin — the entry refuses to serve
   // without one (see the misconfiguration test at the bottom).
-  ORIGIN_URL,
+  ORIGIN_URL: ORIGIN,
   // The bot gate applies under /article/ only; the scope tests below read
-  // this through the entry's hand-forwarded env.
-  LICENSED_PATHS_JSON: JSON.stringify(['/article/']),
+  // this through the entry's hand-forwarded env. The whole-site suite clears it.
+  LICENSED_PATHS_JSON: ARTICLE_SCOPE,
 };
 
 let keypair: TestKeypair;
@@ -84,15 +92,15 @@ beforeAll(async () => {
   // Same shared fetch mock every sibling e2e suite uses — including its
   // stronger failure mode: with net connect disabled, an unmatched fetch
   // THROWS (surfacing as the app's 502 path) instead of answering a soft 500.
-  // Both intercepts persist: they are the file's whole outbound surface.
+  // Every intercept persists: together they are the file's whole outbound
+  // surface.
   fetchMock.activate();
   fetchMock.disableNetConnect();
   await setupWbaDirectoryMock(keypair);
-  fetchMock
-    .get(ORIGIN_URL)
-    .intercept({ path: /.*/, method: 'GET' })
-    .reply(200, ORIGIN_BODY)
-    .persist();
+  // The publisher's documents before the catch-all: the mock answers a request
+  // from the first route that matches, in the order the routes were registered.
+  for (const path of DOCUMENT_PATHS) mockOrigin(path, originDocument(path));
+  fetchMock.get(ORIGIN).intercept({ path: /.*/, method: 'GET' }).reply(200, ORIGIN_BODY).persist();
 
   await import('../../src/entries/fastly.js');
 });
@@ -104,12 +112,20 @@ describe('Fastly Compute entry (stubbed runtime)', () => {
     expect(await res.text()).toBe('ok');
   });
 
-  it('serves fora.json', async () => {
-    const res = await invoke(new Request(`${PUB_ORIGIN}/.well-known/fora.json`));
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { role: string; domain: string };
-    expect(body.role).toBe('ROLE_PUBLISHER');
-    expect(body.domain).toBe('fastly-edge.test');
+  it.each(
+    documentReads([
+      ['an AI bot', AI_BOT],
+      ['a browser', BROWSER],
+    ]),
+  )('forwards %s to the origin for %s outside the licensed paths', async (path, _who, headers) => {
+    // The publisher's own document: the publisher backend answers it, and no
+    // setting the store still holds turns it into one the edge makes itself.
+    // Outside the licensed paths the gate would let it through anyway; the
+    // whole-site suite below is where only the document's own route does.
+    await expectOriginAnswer(
+      await invoke(new Request(`${PUB_ORIGIN}${path}`, { headers })),
+      originDocument(path),
+    );
   });
 
   it('answers 404 on the key directory when the publisher issues no keys', async () => {
@@ -194,6 +210,45 @@ describe('Fastly Compute entry (stubbed runtime)', () => {
     const res = await invoke(new Request(url, { headers }));
     expect(res.status).toBe(403);
     expect(((await res.json()) as { reason?: string }).reason).toBe('pop_sig_invalid');
+  });
+});
+
+// The same entry on a site that licenses its whole hostname, which is what a
+// publisher who names no paths gets. The documents sit inside the licensed paths
+// here, so only their own route keeps the bot gate off them.
+describe('Fastly Compute entry on a site licensed as a whole', () => {
+  beforeAll(async () => {
+    // fastlyEnv reads an empty value as unset, and no scope is the whole site.
+    env.LICENSED_PATHS_JSON = '';
+    vi.resetModules();
+    await import('../../src/entries/fastly.js');
+  });
+
+  afterAll(async () => {
+    env.LICENSED_PATHS_JSON = ARTICLE_SCOPE;
+    vi.resetModules();
+    await import('../../src/entries/fastly.js');
+  });
+
+  it.each(
+    documentReads([
+      ['a browser', BROWSER],
+      ['an AI bot', AI_BOT],
+      ['a client with no User-Agent', {}],
+    ]),
+  )('forwards %s to the origin for %s', async (path, _who, headers) => {
+    await expectOriginAnswer(
+      await invoke(new Request(`${PUB_ORIGIN}${path}`, { headers })),
+      originDocument(path),
+    );
+  });
+
+  it('still refuses an AI bot anywhere else on the site', async () => {
+    const res = await invoke(new Request(`${PUB_ORIGIN}/about/team`, { headers: AI_BOT }));
+    expect(res.status).toBe(403);
+    expect(res.headers.get('x-content-rules')).toBe(
+      'https://pub.example.com/.well-known/fora.json',
+    );
   });
 });
 

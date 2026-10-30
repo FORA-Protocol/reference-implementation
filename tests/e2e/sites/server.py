@@ -47,8 +47,11 @@ that request the way the package does (``denyBot`` in ``src/edge/src/app.ts``):
 package's ``{"error", "reason": "ai_bot"}`` body. Only the AI agents the
 package's deny list names are refused (``src/edge/src/bot-classification.ts``);
 its generic bot, crawler and spider patterns are left out, so the stack's own
-readers of these sites are served as before. Every other request is answered
-from the registered files.
+readers of these sites are served as before. The site's discovery document and
+RSL file are never refused, whatever the client: the package passes both
+addresses through to the origin (``mountWellKnownRoutes`` in
+``src/edge/src/app.ts``). Every other request is answered from the registered
+files.
 
 The registry lives in this process's memory, as the agent-directory service's
 does: nothing is shared through a database or a volume, and a restart forgets
@@ -76,6 +79,9 @@ _LABEL = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 _MAX_BODY = 512 * 1024
 # Where a site's discovery document is served, which a package refusal names.
 _WELL_KNOWN_PATH = "/.well-known/fora.json"
+# The site's own documents, which the package passes through for every client
+# (PUBLISHER_DOCUMENT_PATHS in src/edge/src/well-known.mjs).
+_PUBLISHER_DOCUMENTS = frozenset({_WELL_KNOWN_PATH, "/rsl.txt"})
 # The AI agents the edge package's deny list names, by the token in their
 # User-Agent (src/edge/src/bot-classification.ts).
 _AI_AGENT = re.compile(
@@ -171,6 +177,7 @@ class Handler(BaseHTTPRequestHandler):
         package = site.package
         if (
             package is not None
+            and path not in _PUBLISHER_DOCUMENTS
             and any(path.startswith(guarded) for guarded in package.paths)
             and _AI_AGENT.search(self.headers.get("User-Agent", ""))
         ):

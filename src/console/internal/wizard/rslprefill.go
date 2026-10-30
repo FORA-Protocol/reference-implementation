@@ -1,5 +1,5 @@
 // Reading what a publisher's own site already says about its licensing, so the
-// wizard's last step opens with their terms rather than with ours.
+// wizard's licensing step opens with their terms rather than with ours.
 
 package wizard
 
@@ -120,8 +120,8 @@ func controlsFromTerms(terms []*forav1.LicenseTerm, d termspreset.Defaults) (ter
 	}
 	out.AttributionRequired = attribution
 	// A prohibition the builder has no token for would pass here and be
-	// refused at the last button, so the prefill is held to what the builder
-	// accepts.
+	// refused when the terms are saved, so the prefill is held to what the
+	// builder accepts.
 	if _, err := termspreset.FromControls(out, d); err != nil {
 		return termspreset.Controls{}, false
 	}

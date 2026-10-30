@@ -22,6 +22,7 @@ import type { CloudFrontRequest } from 'hono/lambda-edge';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { handler as awsHandler } from '../../src/entries/aws-lambda.js';
+import { PUBLISHER_DOCUMENT_PATHS } from '../../src/types.js';
 import { makeViewerRequestEvent } from '../helpers/cloudfront.js';
 import { futureExp, signUrl } from '../helpers/ed25519.js';
 import { goldenSigningKey } from '../helpers/golden-key.js';
@@ -36,10 +37,10 @@ function built(name: string): string {
   return join(out, name);
 }
 
-// What the golden's settings name. Asserting on them is how a test notices the
-// golden and this suite no longer describe the same publisher.
-const PROVIDER = 'www.publisher.example';
-const ORIGIN = `https://${PROVIDER}`;
+// The publisher the golden is written for. Asserting on it is how a test
+// notices the golden and this suite no longer describe the same publisher.
+const PUBLISHER = 'www.publisher.example';
+const ORIGIN = `https://${PUBLISHER}`;
 
 type Handler = typeof awsHandler;
 type Result = Awaited<ReturnType<Handler>>;
@@ -81,18 +82,19 @@ describe('the release package behind the console index.mjs', () => {
 
   it('builds a Lambda bundle with nothing about a publisher in it', () => {
     const bundle = readFileSync(built('lambda-edge.mjs'), 'utf8');
-    expect(bundle).not.toContain(PROVIDER);
+    expect(bundle).not.toContain(PUBLISHER);
     expect(bundle).not.toContain('exchange.example');
   });
 
-  it('serves the publisher manifest from the settings in index.mjs', async () => {
-    const answer = await handler(makeViewerRequestEvent(`${ORIGIN}/.well-known/fora.json`));
-    expect(isRequest(answer)).toBe(false);
-    if (isRequest(answer)) return;
-    expect(answer.status).toBe('200');
-    // The document it serves is the publisher's, which is only true if the
-    // assignment in index.mjs reached the parser the entry runs on first use.
-    expect(JSON.parse(answer.body ?? '').domain).toBe(PROVIDER);
+  it.each(PUBLISHER_DOCUMENT_PATHS)('hands %s back to CloudFront for an AI bot', async (path) => {
+    // The publisher's own document: CloudFront fetches it from the origin, the
+    // function never answers it, whatever the client.
+    const answer = await handler(
+      makeViewerRequestEvent(`${ORIGIN}${path}`, { 'user-agent': 'ClaudeBot/1.0' }),
+    );
+    expect(isRequest(answer)).toBe(true);
+    if (!isRequest(answer)) return;
+    expect(answer.uri).toBe(path);
   });
 
   it('hands a signed read back to CloudFront with the signature params stripped', async () => {
@@ -128,6 +130,9 @@ describe('the release package behind the console index.mjs', () => {
     if (isRequest(answer)) return;
     expect(answer.status).toBe('403');
     expect(answer.headers?.['x-content-rules']?.[0]?.value).toBe(`${ORIGIN}/.well-known/fora.json`);
+    // The Exchange it names is the one the golden's index.mjs assigns, which is
+    // only true if that assignment reached the parser the entry runs on first use.
+    expect(answer.headers?.['x-fora-exchange']?.[0]?.value).toBe('https://exchange.example');
   });
 
   it('hands an unsigned AI bot outside the licensed paths back to CloudFront', async () => {

@@ -12,39 +12,40 @@ import (
 )
 
 // The Exchange's profile list is written outside Go in files that cannot
-// import it: the publisher-manifest Terraform module (pinned to
-// template-env.json by its own test), the staging seed, and the e2e stack.
-// Each copy must equal ExchangeProfiles, or a publisher's manifest and the
-// Broker's exchange row describe a different Exchange from the one that runs.
+// import it: the reference discovery document under deploy/publisher-wellknown
+// (the publisher-manifest Terraform module is pinned to fora.json.example by
+// its own test), the staging seed, and the documents the e2e stack's demo
+// publishers serve from their origin. Each copy must equal ExchangeProfiles, or
+// a publisher's manifest and the Broker's exchange row describe a different
+// Exchange from the one that runs.
 func TestProfileCopiesMatchExchangeProfiles(t *testing.T) {
 	want := forawellknown.ExchangeProfiles()
 
-	var env struct {
-		ExchangesJSON string `json:"EXCHANGES_JSON"`
+	example := documentProfiles(t, "../../deploy/publisher-wellknown/fora.json.example")
+	requireProfiles(t, "fora.json.example", [][]string{example}, want)
+
+	documents, err := filepath.Glob("../../tests/e2e/mock-publisher/documents/*/.well-known/fora.json")
+	if err != nil {
+		t.Fatalf("list the e2e origin documents: %v", err)
 	}
-	readJSON(t, "../../deploy/publisher-wellknown/template-env.json", &env)
-	requireProfiles(t, "template-env.json EXCHANGES_JSON", exchangeEntryProfiles(t, env.ExchangesJSON), want)
+	served := make([][]string, 0, len(documents))
+	for _, path := range documents {
+		served = append(served, documentProfiles(t, path))
+	}
+	requireProfiles(t, "the e2e demo publishers' origin documents", served, want)
 
 	seed := readFile(t, "../../deploy/terraform/scripts/seed-staging.sh")
 	requireLiterals(t, "seed-staging.sh", seed, regexp.MustCompile(`'(\[[^']*\])'::jsonb`), want)
-
-	compose := readFile(t, "../../docker-compose.e2e.yml")
-	requireLiterals(t, "docker-compose.e2e.yml", compose, regexp.MustCompile(`"supported_profiles":(\[[^\]]*\])`), want)
 }
 
-func exchangeEntryProfiles(t *testing.T, exchangesJSON string) [][]string {
+// documentProfiles reads the top-level supported_profiles of a fora.json file.
+func documentProfiles(t *testing.T, path string) []string {
 	t.Helper()
-	var entries []struct {
+	var document struct {
 		SupportedProfiles []string `json:"supported_profiles"`
 	}
-	if err := json.Unmarshal([]byte(exchangesJSON), &entries); err != nil {
-		t.Fatalf("decode EXCHANGES_JSON: %v", err)
-	}
-	out := make([][]string, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, e.SupportedProfiles)
-	}
-	return out
+	readJSON(t, path, &document)
+	return document.SupportedProfiles
 }
 
 // requireLiterals decodes every JSON array the pattern captures in text.

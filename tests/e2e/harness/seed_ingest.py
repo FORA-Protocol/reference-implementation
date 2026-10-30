@@ -69,7 +69,7 @@ def _ingest_feed(
 
 def ingest_all_feeds(
     url_by_exchange: dict[str, str],
-    publishers: tuple[tuple[str, str, str, Path, Path], ...],
+    publishers: tuple[tuple[str, str, Path, Path], ...],
 ) -> None:
     """Ingest each e2e feed into the catalog DB of the exchange that sells it.
 
@@ -83,7 +83,7 @@ def ingest_all_feeds(
     names a different one.
     """
     binary = _ingest_binary_path()
-    for _domain, exchange, _scheme, feed_abspath, key_path in publishers:
+    for _domain, exchange, feed_abspath, key_path in publishers:
         _ingest_feed(
             exchange_url=url_by_exchange[exchange],
             exchange=exchange,

@@ -22,6 +22,7 @@ func foraRequestToInput(rr *forav1.DiscoveryRequest) resolve.Request {
 		RequesterID:  rr.GetRequester().GetId(),
 		RequesterDom: rr.GetRequester().GetDomain(),
 		Scopes:       rr.GetRequester().GetScopes(),
+		Delegation:   rr.GetRequester().GetDelegation(),
 		Query:        rr.GetQuery(),
 	}
 	if uris := rr.GetUris(); len(uris) > 0 {

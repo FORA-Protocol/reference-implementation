@@ -124,7 +124,7 @@ func TestConsolePreflight_RefusesAGrantlessPublisherID(t *testing.T) {
 
 // TestConsolePreflight_RefusesAMalformedDomain pins that the same validation
 // registration applies runs here too. A publisher who typed a URL instead of a
-// hostname should learn it at the step that asks, not three steps later.
+// hostname should learn it from the call that asks, not from a later one.
 func TestConsolePreflight_RefusesAMalformedDomain(t *testing.T) {
 	f := startConsoleFixture(t)
 	actor := newActor("editor@publisher.example")

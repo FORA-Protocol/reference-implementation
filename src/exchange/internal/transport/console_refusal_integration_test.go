@@ -26,7 +26,8 @@ import (
 //
 // Legs: the refused write goes signed HTTP -> service; the absence of a site is
 // read back through the signed resume route, and the absence of an audit row
-// through the audit repository, for the reason auditActions gives.
+// through the audit repository, for the reason exchangetest's AuditActions
+// gives.
 func TestConsoleRegistration_RegisterDomainRefusesAGrantlessPublisherID(t *testing.T) {
 	f := startConsoleFixture(t)
 	owner := newActor("editor@publisher.example")
@@ -54,7 +55,7 @@ func TestConsoleRegistration_RegisterDomainRefusesAGrantlessPublisherID(t *testi
 	if _, sites := listRegistrations(t, f, other); len(sites) != 0 {
 		t.Fatalf("the refused registration left the caller with sites: %v", sites)
 	}
-	if n := countActions(t, f, "RegisterDomain"); n != 0 {
+	if n := f.exchange.CountAuditActions(t, "RegisterDomain"); n != 0 {
 		t.Fatalf("the refused registration wrote %d RegisterDomain audit rows", n)
 	}
 }
@@ -170,7 +171,7 @@ type siteSnapshot struct {
 // snapshotSite records the owner's site before a call that must not touch it.
 func snapshotSite(t *testing.T, f *consoleFixture, owner consoleActorBody, domain string) siteSnapshot {
 	t.Helper()
-	return siteSnapshot{site: listedSite(t, f, owner, domain), checks: countActions(t, f, "CheckDomain")}
+	return siteSnapshot{site: listedSite(t, f, owner, domain), checks: f.exchange.CountAuditActions(t, "CheckDomain")}
 }
 
 // assertSiteUntouched proves a refused call on a registered site wrote nothing:
@@ -189,7 +190,7 @@ func assertSiteUntouched(
 			t.Fatalf("the refused call moved %s from %v to %v", field, before.site[field], after[field])
 		}
 	}
-	if n := countActions(t, f, "CheckDomain"); n != before.checks {
+	if n := f.exchange.CountAuditActions(t, "CheckDomain"); n != before.checks {
 		t.Fatalf("the refused call wrote %d CheckDomain audit rows", n-before.checks)
 	}
 }

@@ -18,10 +18,20 @@
 // tests/node/fastly-entry.test.ts and tests/node/aws-handler.test.ts.
 import { SELF } from 'cloudflare:test';
 
-import { describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { WBA_PATH, WELL_KNOWN_PATH } from '../../src/types.js';
-import { PUB_ORIGIN } from '../helpers/test-setup.js';
+import { fetchMock } from '../helpers/fetch-mock.js';
+import { expectOriginAnswer, mockOrigin, originDocument } from '../helpers/publisher-documents.js';
+import { PUB_ORIGIN, setupE2ETest } from '../helpers/test-setup.js';
+
+beforeAll(async () => {
+  await setupE2ETest();
+});
+
+beforeEach(() => {
+  fetchMock.reset();
+});
 
 describe('key directory on a publisher that issues no keys', () => {
   it('answers 404', async () => {
@@ -33,10 +43,9 @@ describe('key directory on a publisher that issues no keys', () => {
     // A keyless publisher is not a broken one. Its fora.json still has to answer,
     // because that is the address a denied bot is sent to, so the 404 above must
     // be the absence of one optional document and not a Worker that stopped
-    // serving discovery.
-    const res = await SELF.fetch(`${PUB_ORIGIN}${WELL_KNOWN_PATH}`);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { role: string };
-    expect(body.role).toBe('ROLE_PUBLISHER');
+    // passing discovery through to the publisher's origin.
+    const answer = originDocument(WELL_KNOWN_PATH);
+    mockOrigin(WELL_KNOWN_PATH, answer);
+    await expectOriginAnswer(await SELF.fetch(`${PUB_ORIGIN}${WELL_KNOWN_PATH}`), answer);
   });
 });

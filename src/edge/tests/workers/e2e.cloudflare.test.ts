@@ -53,30 +53,10 @@ describe('GET /healthz', () => {
   });
 });
 
+// The publisher's own documents (fora.json, rsl.txt) are not the Worker's to
+// answer: publisher-documents.test.ts covers how it passes them through. The key
+// directory is the one discovery document it serves itself.
 describe('well-known routes', () => {
-  it('serves the unified fora.json manifest', async () => {
-    const res = await SELF.fetch(`${PUB_ORIGIN}/.well-known/fora.json`);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      ver: string;
-      role: string;
-      domain: string;
-      exchanges: Array<{ domain: string; endpoint: string; relationship: string }>;
-    };
-    expect(body.ver).toBe('1.0');
-    expect(body.role).toBe('ROLE_PUBLISHER');
-    expect(body.domain).toBe('pub.test');
-    expect(body.exchanges[0]?.relationship).toBe('PROVIDER_RELATIONSHIP_DIRECT');
-  });
-
-  it('omits identity keys from the overlay manifest (WBA split)', async () => {
-    const res = await SELF.fetch(`${PUB_ORIGIN}/.well-known/fora.json`);
-    const body = (await res.json()) as Record<string, unknown>;
-    // Keys live in the WBA directory now — never republished in the overlay.
-    expect(body.public_keys).toBeUndefined();
-    expect(body.invalidation_url).toBeUndefined();
-  });
-
   it('serves the WBA directory under the Web Bot Auth media type (no kid)', async () => {
     const res = await SELF.fetch(`${PUB_ORIGIN}/.well-known/http-message-signatures-directory`);
     expect(res.status).toBe(200);
@@ -91,23 +71,6 @@ describe('well-known routes', () => {
     expect(body.keys[0]?.crv).toBe('Ed25519');
     // A WBA key is named by its RFC 7638 thumbprint — it carries no kid.
     expect(body.keys[0]?.kid).toBeUndefined();
-  });
-
-  it('serves rsl.txt', async () => {
-    const res = await SELF.fetch(`${PUB_ORIGIN}/rsl.txt`);
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe('# test rsl');
-  });
-
-  it('serves ACME challenge for known token', async () => {
-    const res = await SELF.fetch(`${PUB_ORIGIN}/.well-known/fora-verify/demo`);
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe('response-body');
-  });
-
-  it('404 for unknown ACME token', async () => {
-    const res = await SELF.fetch(`${PUB_ORIGIN}/.well-known/fora-verify/unknown`);
-    expect(res.status).toBe(404);
   });
 });
 

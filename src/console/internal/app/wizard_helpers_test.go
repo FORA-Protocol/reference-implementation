@@ -9,31 +9,84 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/oidcup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/exchangeclient"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/web"
 )
 
 // The steps most tests take before the one they are about, and the read-back
 // every test asserts with.
 
-// registerBusiness opens the wizard and answers its first step, which registers
-// the payee on the Exchange. It records the payee id the console was given.
+// registerBusiness takes the wizard's business step the way its Next does,
+// which registers the payee on the Exchange, and records the payee id the step
+// answered with, which must be the one the Exchange now lists for this person.
 func (f *consoleFixture) registerBusiness(t *testing.T) {
 	t.Helper()
-	f.openWizard(t)
-	out := f.ok(t, "/api/publisher", map[string]any{"display_name": "Stoa Press"})
-	id, _ := out["publisher_id"].(string)
-	if id == "" {
-		t.Fatalf("registering the business answered no payee id: %v", out)
+	out := f.ok(t, web.APIPublisherPath, map[string]any{"display_name": "Stoa Press"})
+	f.publisherID, _ = out["publisher_id"].(string)
+	if listed := f.mine(t).PublisherID; f.publisherID == "" || f.publisherID != listed {
+		t.Fatalf("the business step answered payee %q, and the Exchange lists %q for this person",
+			f.publisherID, listed)
 	}
-	f.publisherID = id
 }
 
-// walkToDocument registers the business, looks the domain up and leaves the
-// wizard where the discovery document is handed over. Most tests start here.
-// Nothing is published on the site yet.
-func (f *consoleFixture) walkToDocument(t *testing.T, domain string) map[string]any {
+// lookUp registers the business and asks the domain step's lookup about
+// domain, the way Enter on the step does. It saves nothing.
+func (f *consoleFixture) lookUp(t *testing.T, domain string) map[string]any {
 	t.Helper()
 	f.registerBusiness(t)
-	return f.ok(t, "/api/domain/lookup", map[string]any{"domain": domain})
+	return f.ok(t, web.APILookupPath, map[string]any{"domain": domain})
+}
+
+// saveDomain is the domain step as the page takes it: the lookup, then Next,
+// which saves the domain behind the network the lookup found, with /articles/
+// licensed. It returns what the save answered.
+func (f *consoleFixture) saveDomain(t *testing.T, domain string) map[string]any {
+	t.Helper()
+	found := f.ok(t, web.APILookupPath, map[string]any{"domain": domain})
+	return f.ok(t, web.APIRegisterPath, map[string]any{
+		"domain": domain, "cdn": found["provider"], "content_paths": "/articles/",
+	})
+}
+
+// walkToTerms registers the business and takes the domain step, which leaves
+// the domain saved with no terms. Most tests start here.
+func (f *consoleFixture) walkToTerms(t *testing.T, domain string) map[string]any {
+	t.Helper()
+	f.registerBusiness(t)
+	return f.saveDomain(t, domain)
+}
+
+// setTerms is the licensing step's Next: it saves answers on domain, after the
+// read of its site the step opens with, and returns what the save answered.
+// answers carries the terms and whatever else the step asks that the test is
+// about; the sitemap the read found is sent unless answers names one.
+func (f *consoleFixture) setTerms(t *testing.T, domain string, answers map[string]any) map[string]any {
+	t.Helper()
+	page := f.ok(t, web.APIPagePath, map[string]any{"domain": domain})
+	body := map[string]any{"domain": domain, "sitemap_url": page["sitemap_url"]}
+	maps.Copy(body, answers)
+	return f.ok(t, web.APITermsPath, body)
+}
+
+// walkToConnect takes the first two steps for stoa.example, the domain publish
+// serves, with the terms addDomain sets, and leaves the wizard on the last step.
+func (f *consoleFixture) walkToConnect(t *testing.T) {
+	t.Helper()
+	const domain = "stoa.example"
+	f.walkToTerms(t, domain)
+	f.setTerms(t, domain, map[string]any{"terms": addDomainTerms()})
+}
+
+// files asks for a saved domain's files, the way the last step does.
+func (f *consoleFixture) files(t *testing.T, domain string) map[string]any {
+	t.Helper()
+	return f.ok(t, web.APIFilesPath, map[string]any{"domain": domain})
+}
+
+// check is the last step's check of domain, the one the page makes when the
+// step opens, every few seconds after, and on Check now.
+func (f *consoleFixture) check(t *testing.T, domain string) map[string]any {
+	t.Helper()
+	return f.ok(t, web.APICheckPath, map[string]any{"domain": domain})
 }
 
 // publish makes stoa.example, the domain addDomain adds, serve a correct
@@ -49,7 +102,7 @@ func (f *consoleFixture) publish(t *testing.T) {
 }
 
 // publishHandedOver makes the domain serve the discovery document the wizard
-// handed over, byte for byte as the console generated it. Registering on the
+// handed over, byte for byte as the console generated it. Verifying on the
 // strength of it is what proves the console's document satisfies the
 // Exchange's check, rather than a document the test wrote.
 func (f *consoleFixture) publishHandedOver(t *testing.T, domain string, files map[string]any) {
@@ -71,10 +124,10 @@ func (f *consoleFixture) publishHandedOver(t *testing.T, domain string, files ma
 	t.Fatalf("the wizard handed over no fora.json: %v", files)
 }
 
-// addDomain walks the whole wizard and leaves stoa.example saved, returning
-// what the last button answered. It is a helper because for the tests that call
-// it the wizard is a precondition, not the subject; the tests that are about a
-// step drive that step themselves.
+// addDomain walks the whole wizard for stoa.example and returns what the last
+// step's check answered. It is a helper because for the tests that call it the
+// wizard is a precondition, not the subject; the tests that are about a step
+// drive that step themselves.
 //
 // Whether the domain comes out verified depends on the console the test
 // started: verifying it takes a site reader that sees the package answer, which
@@ -88,8 +141,8 @@ func addDomain(t *testing.T, f *consoleFixture) map[string]any {
 // stoaSitemap is a sitemap on stoa.example, which the Exchange keeps as given.
 const stoaSitemap = "https://stoa.example/sitemap.xml"
 
-// addDomainTerms is the licensing addDomain registers: charged at 0.02 per
-// access, for search and AI input.
+// addDomainTerms is the licensing addDomain sets: charged at 0.02 per fetch,
+// for search and AI input.
 func addDomainTerms() map[string]any {
 	return map[string]any{
 		"pricing_model": "per_unit", "rate": "0.02",
@@ -103,73 +156,29 @@ func addDomainWith(t *testing.T, f *consoleFixture, domain string, terms map[str
 	return addDomainAnswering(t, f, domain, map[string]any{"terms": terms})
 }
 
-// addDomainAnswering walks the whole wizard for domain and presses the last
-// button with lastStep's answers -- the licensing, and whatever else the last
-// step asks that the test is about -- and returns what the button answered.
-func addDomainAnswering(t *testing.T, f *consoleFixture, domain string, lastStep map[string]any) map[string]any {
+// addDomainAnswering walks the whole wizard for domain with termsStep as the
+// licensing step's answers -- the terms, and whatever else that step asks that
+// the test is about -- publishes the discovery document the last step hands
+// over, and returns what the last step's check then answered.
+func addDomainAnswering(t *testing.T, f *consoleFixture, domain string, termsStep map[string]any) map[string]any {
 	t.Helper()
-	return f.pressLastStep(t, f.walkToLastStep(t, domain), lastStep)
-}
-
-// walkToLastStep walks the wizard for domain up to the licensing step, the way
-// the page does: the file is published as handed over, and both checks are
-// asked. It returns the last step's save, filled in with the answers given on
-// the way.
-func (f *consoleFixture) walkToLastStep(t *testing.T, domain string) map[string]any {
-	t.Helper()
-	f.walkToDocument(t, domain)
-	files := f.ok(t, "/api/domain/files", map[string]any{
-		"domain": domain, "cdn": "cloudflare", "content_paths": "/articles/",
-	})
-	f.publishHandedOver(t, domain, files)
-	if out := f.ok(t, "/api/domain/check-manifest", map[string]any{"domain": domain}); out["passed"] != true {
-		t.Fatalf("the document check did not pass: %v", out)
-	}
-	f.ok(t, "/api/domain/check-edge", map[string]any{
-		"domain": domain, "content_paths": "/articles/",
-	})
-	page := f.ok(t, "/api/domain/page", map[string]any{"domain": domain})
-	return map[string]any{
-		"domain": domain, "cdn": "cloudflare", "content_paths": "/articles/",
-		"sitemap_url": page["sitemap_url"],
-	}
-}
-
-// pressLastStep sends the last step's save with lastStep's answers over the
-// walk's, and returns what it answered.
-func (f *consoleFixture) pressLastStep(t *testing.T, walked, lastStep map[string]any) map[string]any {
-	t.Helper()
-	register := maps.Clone(walked)
-	maps.Copy(register, lastStep)
-	out := f.ok(t, "/api/domain", register)
-	if out["domain"] != walked["domain"] {
-		t.Fatalf("the last step did not save %s: %v", walked["domain"], out)
+	f.walkToTerms(t, domain)
+	f.setTerms(t, domain, termsStep)
+	f.publishHandedOver(t, domain, f.files(t, domain))
+	out := f.check(t, domain)
+	if out["domain"] != domain {
+		t.Fatalf("the last step checked %v, want %s", out["domain"], domain)
 	}
 	return out
 }
 
-// requireVerified fails the test unless the last button's answer says the
-// domain is verified: saved, and sold from.
-func requireVerified(t *testing.T, finished map[string]any) {
+// requireVerified fails the test unless the last step's check says the domain
+// is verified: saved, and sold from.
+func requireVerified(t *testing.T, checked map[string]any) {
 	t.Helper()
-	if finished["verified"] != true {
-		t.Fatalf("the domain was saved but not verified: %v", finished)
+	if checked["verified"] != true {
+		t.Fatalf("the domain was saved but not verified: %v", checked)
 	}
-}
-
-// reasonsOf reads a check's reasons out of an answer.
-func reasonsOf(t *testing.T, out map[string]any) []string {
-	t.Helper()
-	raw, ok := out["reasons"].([]any)
-	if !ok {
-		t.Fatalf("no reasons in %v", out)
-	}
-	list := make([]string, 0, len(raw))
-	for _, r := range raw {
-		s, _ := r.(string)
-		list = append(list, s)
-	}
-	return list
 }
 
 // registrationsOf reads what the Exchange holds for one person.
@@ -218,8 +227,8 @@ func (f *consoleFixture) mine(t *testing.T) exchangeclient.Registrations {
 }
 
 // assertNoDomains fails the test if the Exchange holds any domain for the
-// fixture's person. It is what most wizard tests end on: nothing about a
-// domain may be written before the last step.
+// fixture's person. A refused save ends on it: nothing about the domain may be
+// written.
 func (f *consoleFixture) assertNoDomains(t *testing.T, after string) {
 	t.Helper()
 	if got := f.mine(t).Sites; len(got) != 0 {

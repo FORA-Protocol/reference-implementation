@@ -87,9 +87,9 @@ files, written by `gen-keys.sh demo-aws`.
 | Variable | Default | Notes |
 |---|---|---|
 | `route53_zone_id` | — (required) | Id of the EXISTING Route 53 hosted zone of `domain`; replaces the three `cloudflare_*` variables. The zone may be shared with other projects — the stack only adds its own records and refuses to overwrite records it did not create |
-| `lambda_zip_path` | in-repo `src/edge/dist/lambda-edge.zip` | Replaces `worker_bundle_path`. Build the zip with `scripts/build-lambda-edge.sh` from the config the stack renders (see the `lambda_edge_config` output) |
+| `lambda_zip_path` | in-repo `src/edge/dist/lambda-edge.zip` | Replaces `worker_bundle_path`. Build the zip with `scripts/build-lambda-edge.sh` from the config the stack renders and its publisher hostname (see the `lambda_edge_config` and `lambda_edge_domain` outputs) |
 | `name_prefix` | `fora-demo` | AWS resource naming |
-| `resource_owner_id` | `demo-resource-owner` | Settlement payee in the publisher manifest |
+| `resource_owner_id` | `demo-resource-owner` | Settlement payee in the publisher's discovery document, which the origin serves |
 
 ### Added — the onboarding preview service
 
@@ -124,8 +124,7 @@ The stack also outputs `onboarding_url`, and the rendered `compose_yaml`
 | `cloudflare_api_token` | yes | Same scopes as above |
 | `cloudflare_account_id` / `cloudflare_zone_id` | | Account + zone the worker runs on |
 | `exchange_url` | | Exchange base URL |
-| `provider_domain` | | Publisher domain in fora.json |
-| `exchanges_json` | | Exchange entries advertised in fora.json |
+| `provider_domain` | | The publisher hostname the worker fronts; the default route |
 
 ### Optional
 
@@ -136,7 +135,7 @@ The stack also outputs `onboarding_url`, and the rendered `compose_yaml`
 | `script_name` | `fora-edge` | Worker name |
 | `worker_bundle_path` | in-repo `src/edge/dist/worker.mjs` | Override for out-of-repo bundles |
 | `worker_hostname` | null | Creates the proxied placeholder DNS record |
-| `origin_url`, `same_zone_origin`, `rsl_body`, `acme_tokens_json`, `catalog_contributors_json`, `fora_verify_keys`, `fora_enforce_binding`, `wba_keys_json`, `wba_revocation_url`, `bot_ua_allow_json`, `bot_ua_deny_json`, `licensed_paths_json` | null | Optional worker bindings — unset means the binding is not created. One of `origin_url` / `same_zone_origin = "true"` is required: the worker refuses to run without an origin mode |
+| `origin_url`, `same_zone_origin`, `fora_verify_keys`, `fora_enforce_binding`, `wba_keys_json`, `wba_revocation_url`, `bot_ua_allow_json`, `bot_ua_deny_json`, `licensed_paths_json` | null | Optional worker bindings — unset means the binding is not created. One of `origin_url` / `same_zone_origin = "true"` is required: the worker refuses to run without an origin mode |
 | `create_waf_skip_rule` / `waf_skip_expression` | `false` / null | Zone protections exemption |
 
 ## Modules

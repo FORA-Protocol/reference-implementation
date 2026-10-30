@@ -17,6 +17,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fora_sdk.client import CallError
 from fora_sdk.core import DiscoveryResult, VerifiedOffer
@@ -24,9 +25,10 @@ from fora_sdk.signing_transport import SigningTransport
 from fora_sdk.sync import BrokerClient, Client
 from fora_sdk.wba import MAX_SIGNATURE_LIFETIME
 from fora_sdk.window import clock_window
-from wire.models import BrokerTransactionResponse
+from wire.models import BrokerTransactionResponse, ResourceQuery
 
 from ._multi_exchange_common import _MUSIC_URI, _PHILOSOPHY_URI, _SFX_URI
+from .after_signing import after_signing, resend
 from .broker_purchase import (
     one_group_per_uri,
     only_verified_offer,
@@ -63,13 +65,13 @@ SIGNATURE_INVALID = "REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID"
 SIGNATURE_STALE = "REQUEST_AUTH_FAILURE_REASON_SIGNATURE_STALE"
 
 
-def probe_query(exchange: str = EXCHANGE_A_DOMAIN, uri: str = PROBE_URI) -> dict[str, Any]:
+def probe_query(exchange: str = EXCHANGE_A_DOMAIN, uri: str = PROBE_URI) -> ResourceQuery:
     """The discovery of ``uri`` addressed to ``exchange``; the SDK fills the requester."""
     return resource_query(exchange, [uri])
 
 
 def discovery_by(
-    agent: FreshAgent, *, exchange: str = EXCHANGE_A_DOMAIN, query: dict[str, Any] | None = None
+    agent: FreshAgent, *, exchange: str = EXCHANGE_A_DOMAIN, query: ResourceQuery | None = None
 ) -> Request[Client, DiscoveryResult]:
     """``agent``'s discovery at ``exchange``: the control a discovery negative alters."""
 
@@ -116,15 +118,40 @@ def discover_outcome(
 
 
 def signer_for(
-    agent: FreshAgent, key: Ed25519PrivateKey, *, created_offset_s: float = 0.0
+    agent: FreshAgent,
+    key: Ed25519PrivateKey,
+    *,
+    created_offset_s: float = 0.0,
+    at: float | None = None,
 ) -> SigningTransport:
     """The SDK's signer naming ``agent``'s directory, signing with ``key``.
 
     ``created_offset_s`` shifts the signature's ``created`` from now; the window
-    lasts the SDK's default validity from there.
+    lasts the SDK's default validity from there. ``at`` pins the clock instead, so
+    every signature the signer makes carries the same ``created`` and ``expires``.
     """
-    window = clock_window(lambda: time.time() + created_offset_s, SDK_SIGNING_TTL_S)
+    if at is not None and created_offset_s:
+        raise ValueError("pin the signing clock with at, or shift it, not both")
+    window = clock_window(
+        (lambda: at) if at is not None else (lambda: time.time() + created_offset_s),
+        SDK_SIGNING_TTL_S,
+    )
     return signing_transport(agent.host, key, window=window)
+
+
+def resent_discovery(agent: FreshAgent, sent: httpx.Request) -> CallError | None:
+    """``sent``'s signed bytes sent to exchange-a again: the refusal, or None when answered.
+
+    One of ``agent``'s clients signs a discovery of its own, and the after-signing
+    transport sends ``sent``'s bytes in its place, so the SDK decodes the answer to
+    exactly those bytes.
+    """
+    client = agent.exchange_client(EXCHANGE_A_DOMAIN, http=after_signing(resend(sent)))
+    try:
+        client.discover(probe_query())
+    except CallError as refusal:
+        return refusal
+    return None
 
 
 def auth_reason(refusal: CallError) -> str | None:

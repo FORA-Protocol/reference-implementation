@@ -9,12 +9,13 @@ it, and reads the JSON that comes back.
 That returned JSON has two shapes, and telling them apart is the whole point of
 the Lambda@Edge entry:
 
-* a **generated response** — a denial, or a well-known document — carries
-  ``status``, ``headers`` and ``body``, and CloudFront returns it to the viewer
-  without ever contacting the origin;
-* a **pass-through** — the answer for an authorized read — is the incoming
-  REQUEST object (``uri``, ``querystring``, ``headers``), which tells CloudFront
-  to go and fetch the origin.
+* a **generated response** — a denial, the health check or the key directory —
+  carries ``status``, ``headers`` and ``body``, and CloudFront returns it to the
+  viewer without ever contacting the origin;
+* a **pass-through** — the answer for an authorized read, and for a read of the
+  publisher's own discovery document or RSL file — is the incoming REQUEST
+  object (``uri``, ``querystring``, ``headers``), which tells CloudFront to go
+  and fetch the origin.
 
 The translation between a URL and a CloudFront event stays here, in the test
 harness, rather than in an HTTP front-end inside the container. A front-end
@@ -40,7 +41,6 @@ helper over the agent's signing transport (:func:`proof_of_possession`).
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from collections.abc import Mapping
@@ -59,6 +59,7 @@ from fora_sdk.signedurl import sign_ed25519_signed_url
 from fora_sdk.thumbprint import thumbprint as ed25519_thumbprint
 from fora_sdk.window import clock_window
 
+from .edge_fetch import media_type_of, refusal_reason
 from .poll import poll_until
 from .protocol_documents import wba_directory_at
 from .sdk_client import agent_signer
@@ -172,27 +173,20 @@ class ViewerResult:
         value = entries[0].get("value")
         return str(value) if value is not None else None
 
-    def json_body(self) -> dict[str, Any]:
-        """The generated response's JSON body, saying clearly when there isn't one.
+    @property
+    def media_type(self) -> str:
+        """The generated response's media type, without parameters; empty when it has none."""
+        return media_type_of(self.header("content-type") or "")
 
-        Every answer this worker generates (the well-known documents and each
-        denial) is JSON. A 403 that arrives as HTML or empty is exactly the
-        failure worth naming, and a bare ``json.loads`` would raise before an
-        assertion could say what it saw.
+    @property
+    def reason(self) -> str:
+        """The function's refusal token, or a marker saying why there is none.
 
-        The media type is checked by its "+json" family rather than by an exact
-        string: denials and the manifest are application/json, while the Web Bot
-        Auth directory is application/http-message-signatures-directory+json, as the
-        profile requires. The route that cares about the exact value asserts it.
+        Every refusal this worker generates is JSON. A 403 that arrives as HTML or
+        empty is exactly the failure worth naming; the shared parser says what
+        arrived instead of raising.
         """
-        content_type = self.header("content-type") or ""
-        assert content_type.split(";")[0].strip().endswith("json"), (
-            f"expected a JSON body; content-type was {content_type!r}, "
-            f"body {str(self.body)[:160]!r}"
-        )
-        body = json.loads(self.body or "")
-        assert isinstance(body, dict), f"body is not a JSON object: {body!r}"
-        return body
+        return refusal_reason(self.media_type, self.body or "")
 
 
 def _viewer_result(result: Mapping[str, Any]) -> ViewerResult:

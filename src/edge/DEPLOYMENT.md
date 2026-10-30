@@ -50,7 +50,7 @@ except to fetch its **public** keys.
 | An API token with the scopes below | `CLOUDFLARE_API_TOKEN` in your shell | `wrangler whoami` succeeds with the token exported |
 | Node.js 20 or newer, and npm | — | `node --version` |
 | The address of the Exchange, and its key directory | `EXCHANGE_URL`, `EXCHANGE_WBA_URL` | `curl -s https://exchange.example.com/.well-known/http-message-signatures-directory` returns JSON with a `keys` array |
-| The publisher's payee id | `EXCHANGES_JSON` → `ext.resource_owner_id` | Ask the Exchange operator — [`CONFIGURATION.md`](CONFIGURATION.md) §3.5 |
+| The publisher's discovery document | The publisher's own origin, at `/.well-known/fora.json` — not a Worker setting | `curl -s https://<origin>/.well-known/fora.json` returns the `fora.json` the Exchange operator handed over, payee id included — [`CONFIGURATION.md`](CONFIGURATION.md) §3.5 |
 | The origin arrangement | `SAME_ZONE_ORIGIN` or `ORIGIN_URL` | [`CONFIGURATION.md`](CONFIGURATION.md) §3.1 |
 
 **The API token needs exactly three permissions:**
@@ -108,10 +108,12 @@ Fill in the environment block in `wrangler.toml` — `[env.staging]` for staging
 and a matching `[env.production]` block for production. The two items that most
 often go wrong, both covered in that document:
 
-1. `EXCHANGES_JSON` must carry `ext.resource_owner_id`, or every catalog push for
-   this publisher is rejected (§3.5 there).
-2. Exactly one origin mode must be set, or the Worker fails with an error on every request
+1. Exactly one origin mode must be set, or the Worker fails with an error on every request
    (§3.1 there).
+2. The publisher's discovery document is a file on its origin, not a variable
+   here: the Worker passes `/.well-known/fora.json` and `/rsl.txt` through to the
+   origin (§3.4 there). A deployment upgrading from a release that answered them
+   itself puts both files on the origin first (§2 there).
 
 Keep `wrangler.toml` as the single authoritative configuration. Variables edited
 in the Cloudflare dashboard are overwritten by the next `wrangler deploy`.
@@ -150,23 +152,27 @@ live on the zone and must be right independently.
 A "route" tells Cloudflare which addresses this Worker handles.
 
 - The routes must cover **all** article paths on the publisher's site.
-- The routes must **also** cover `/.well-known/*` — the discovery documents bots
-  read to learn how to buy access. A route that misses them breaks bot
-  negotiation silently: the bot gets a `403` telling it where to go, follows the
-  pointer, and finds nothing there.
+- The routes must **also** cover `/.well-known/http-message-signatures-directory`
+  when the publisher publishes its own signing keys (`WBA_KEYS_JSON`): the Worker
+  serves that directory itself.
+- The discovery document and the RSL file need no route of their own. They are
+  the publisher's files on its origin; on a covered path the Worker passes them
+  through to it, and on an uncovered one the origin answers them directly. Either
+  way a bot sent to read `/.well-known/fora.json` gets the publisher's file.
 
-A single wildcard such as `staging.publisher.example/*` satisfies both. The attached
-routes are printed by the deploy command (§5); confirm the discovery path is
-actually covered by asking for it:
+A single wildcard such as `staging.publisher.example/*` satisfies all of this,
+and it is what the console's package uses. The attached routes are printed by the
+deploy command (§5); confirm the discovery document is reachable through them,
+for an AI agent too:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' https://staging.publisher.example/.well-known/fora.json
-# Expect: 200. A 404 means the route does not reach the Worker on that path —
-#         the origin answered instead.
+curl -s -o /dev/null -w '%{http_code}\n' -A "GPTBot/1.0" \
+  https://staging.publisher.example/.well-known/fora.json
+# Expect: 200, the publisher's own file. A 404 means the origin has no file at
+#         that address.
 ```
 
-For what those documents should contain once the route reaches them, see the
-filled-in copies in
+For what that document should contain, see the filled-in copies in
 [`../../deploy/publisher-wellknown/`](../../deploy/publisher-wellknown/).
 
 ### 6.2 DNS records must be proxied
@@ -263,11 +269,12 @@ curl -s -D - -o /dev/null -A "GPTBot/1.0" https://<host>/some-article-path
 **Check C — discovery works.**
 
 ```bash
-curl -s https://<host>/.well-known/fora.json
+curl -s -A "GPTBot/1.0" https://<host>/.well-known/fora.json
 ```
 
-What a correct answer contains, and what a missing or wrong
-`ext.resource_owner_id` costs, is in
+The answer is the publisher's own file, passed through from the origin for every
+client, an AI agent included. What a correct answer contains, and what a missing
+or wrong `ext.resource_owner_id` costs, is in
 [`../../deploy/publisher-wellknown/`](../../deploy/publisher-wellknown/) beside a
 reference copy of the document. See also [`CONFIGURATION.md`](CONFIGURATION.md)
 §3.5.
@@ -320,7 +327,7 @@ building its own configuration instead creates the same resources:
 |---|---|
 | Worker script | The pre-built `dist/worker.mjs` from §3 |
 | Worker vars | The variables from [`CONFIGURATION.md`](CONFIGURATION.md) §2, as plain vars — there are no secrets |
-| Worker routes | Article paths **and** `/.well-known/*` (§6.1) |
+| Worker routes | Article paths, and the key directory when the publisher publishes keys — the whole hostname covers both (§6.1) |
 | DNS records | `proxied = true` for every served hostname (§6.2) |
 | `workers_dev` | `false` (§6.3) |
 | Compatibility | `compatibility_date = "2026-07-01"`, `compatibility_flags = ["nodejs_compat"]` |

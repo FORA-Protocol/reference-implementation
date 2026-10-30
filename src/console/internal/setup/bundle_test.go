@@ -214,11 +214,14 @@ func TestBundleRefusesLicensingItCannotBuild(t *testing.T) {
 	}
 }
 
-// TestEdgeConfigNamesThisSiteAndThisExchange checks the settings a publisher
-// builds their package with actually describe their own site. A config that
-// named the wrong payee would deploy cleanly and send another publisher's
-// content through this one's edge.
-func TestEdgeConfigNamesThisSiteAndThisExchange(t *testing.T) {
+// TestEdgeConfigNamesThisExchangeAndNotThePayee checks the settings a publisher
+// builds their package with point the edge at this deployment's Exchange, and
+// leave the payee to the discovery document: the fora.json beside them, which
+// the publisher serves from its own origin and the package passes through. A
+// payee in the settings would be a second copy of the publisher's file, ignored
+// by the edge and free to disagree with it. The download test in internal/app
+// holds the same file to carrying none of the document's settings.
+func TestEdgeConfigNamesThisExchangeAndNotThePayee(t *testing.T) {
 	b := setup.NewBuilder(testDeployment(), nil, termspreset.Defaults{Currency: "EUR"})
 	bundle, err := b.Build(context.Background(), testSite())
 	if err != nil {
@@ -230,21 +233,17 @@ func TestEdgeConfigNamesThisSiteAndThisExchange(t *testing.T) {
 			raw = f.Body
 		}
 	}
-	var cfg struct {
-		Provider      string `json:"PROVIDER"`
-		ExchangesJSON string `json:"EXCHANGES_JSON"`
-		WBAURL        string `json:"EXCHANGE_WBA_URL"`
-	}
+	var cfg map[string]any
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("the edge settings do not parse: %v", err)
 	}
-	if cfg.Provider != testSiteDomain {
-		t.Fatalf("edge settings name provider %q, want %q", cfg.Provider, testSiteDomain)
+	if cfg["EXCHANGE_URL"] != testDeployment().ExchangeEndpoint {
+		t.Fatalf("edge settings name exchange %v, want %q", cfg["EXCHANGE_URL"], testDeployment().ExchangeEndpoint)
 	}
-	if !strings.Contains(cfg.ExchangesJSON, testPublisherID) {
-		t.Fatalf("edge settings do not name the payee: %s", cfg.ExchangesJSON)
-	}
-	if cfg.WBAURL == "" {
+	if cfg["EXCHANGE_WBA_URL"] == "" || cfg["EXCHANGE_WBA_URL"] == nil {
 		t.Fatal("edge settings name no address for the verification keys")
+	}
+	if strings.Contains(string(raw), testPublisherID) {
+		t.Fatalf("edge settings name the payee, which only the discovery document attests: %s", raw)
 	}
 }

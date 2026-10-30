@@ -239,7 +239,7 @@ func TestDashboard_TransactionDetailShowsTheSignedOffer(t *testing.T) {
 
 	body := f.get2(t, dashboard.PathTransactions+"/"+sale.TransactionID)
 	mustContain(t, "the detail", body, sale.TransactionID, buyer.ID(), sale.URI,
-		"0.05 USD per accesses", "The agent owes a usage report by", `data-status="pending"`, "Verify")
+		"0.05 USD per access<", "The agent owes a usage report by", `data-status="pending"`, "Verify")
 	mustNotContain(t, "the detail", body, "0.07")
 
 	detail, err := f.reads().TransactionDetail(t.Context(), exchangeclient.TransactionDetailRequest{

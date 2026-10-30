@@ -6,14 +6,19 @@ import { createKeyCache } from './keys-cache.js';
 import { type Jwk, JwkSchema, MAX_WBA_KEYS } from './keys.js';
 import {
   type AppDeps,
-  type CatalogContributor,
   type SignedWbaDirectory,
   type WbaKey,
-  buildPublisherManifest,
   buildPublisherWba,
   signedDirectoryFrom,
 } from './types.js';
 
+// The settings the Worker reads. A setting the schema does not name is
+// dropped, not refused (zod's default for an object): a Worker deployed from a
+// package built for an earlier release keeps starting with the settings that
+// release read and this one does not — PROVIDER, EXCHANGES_JSON,
+// CATALOG_CONTRIBUTORS_JSON and RSL_BODY, which fed the discovery document and
+// the RSL file the edge used to answer itself before it passed both addresses
+// through to the publisher's origin.
 const EnvSchema = z.object({
   EXCHANGE_URL: z.string().url(),
   // Absolute URL of the exchange's Web Bot Auth directory
@@ -22,8 +27,6 @@ const EnvSchema = z.object({
   // RFC 7638 thumbprint), so this is the fetch source for resolving the
   // delivery-URL verify key.
   EXCHANGE_WBA_URL: z.string().url(),
-  RSL_BODY: z.string().optional(),
-  ACME_TOKENS_JSON: z.string().optional(),
   /**
    * Origin backend the worker proxies verified requests to. Optional — when
    * unset the worker returns 200 empty (for CloudFront-native signed URL
@@ -38,23 +41,6 @@ const EnvSchema = z.object({
    * with the original Host header.
    */
   SAME_ZONE_ORIGIN: z.enum(['true', 'false']).optional(),
-  /**
-   * Publisher identifier advertised in fora.json (the `domain` field). Required.
-   */
-  PROVIDER: z.string().min(1),
-  /**
-   * JSON array of exchange entries advertised in fora.json. Broker reads this
-   * to decide which exchanges represent the publisher.
-   */
-  EXCHANGES_JSON: z.string(),
-  /**
-   * Optional JSON array of CatalogContributor entries. Authorizes third-party
-   * callers to push resources on behalf of this publisher via the signed
-   * fora.v1.CatalogService/PushResources RPC. Consumed by the Exchange
-   * contributor-authz check (forawellknown.AuthorizesContributor). Leave unset
-   * to only let `PROVIDER` itself push.
-   */
-  CATALOG_CONTRIBUTORS_JSON: z.string().optional(),
   /**
    * Optional JSON array of inline Ed25519 JWKs (D5 pre-provisioning). When set,
    * the edge verifies delivery URLs against these keys directly and only falls
@@ -100,7 +86,8 @@ const EnvSchema = z.object({
    * Optional JSON array of the path prefixes the publisher licenses, each
    * starting with '/'. An unsigned read from an AI bot is sent to negotiate
    * only inside them; the rest of the site passes to the origin. Unset or
-   * empty = the whole site. The discovery routes are unaffected either way.
+   * empty = the whole site. The discovery addresses are routed ahead of the
+   * gate, so a scope never reaches them either way.
    */
   LICENSED_PATHS_JSON: z.string().optional(),
   /**
@@ -137,9 +124,6 @@ export function parseEnv(env: unknown): EdgeEnv {
 // Compute): the key directory read, the signed-URL check and the delivery-proof
 // check all run through it. Omitted, each uses WebCrypto.
 export function buildDeps(env: EdgeEnv, verifyEd25519?: Ed25519Verify): AppDeps {
-  const contributors = parseCatalogContributors(env.CATALOG_CONTRIBUTORS_JSON);
-  const parsedExchanges = parseExchanges(env.EXCHANGES_JSON);
-  const manifest = buildPublisherManifest(env.PROVIDER, parsedExchanges, contributors);
   const wbaKeys = parseWbaKeys(env.WBA_KEYS_JSON);
   const wba =
     wbaKeys !== undefined ? buildPublisherWba(wbaKeys, env.WBA_REVOCATION_URL) : undefined;
@@ -150,12 +134,10 @@ export function buildDeps(env: EdgeEnv, verifyEd25519?: Ed25519Verify): AppDeps 
     ...(staticKeys !== undefined ? { staticKeys } : {}),
     ...(verifyEd25519 !== undefined ? { verifyEd25519 } : {}),
   });
-  const acmeTokens = parseAcmeTokens(env.ACME_TOKENS_JSON);
   const botAllow = parseBotPatterns(env.BOT_UA_ALLOW_JSON);
   const botDeny = parseBotPatterns(env.BOT_UA_DENY_JSON);
   const licensedPaths = parseLicensedPaths(env.LICENSED_PATHS_JSON);
   return {
-    manifest,
     exchangeUrl: env.EXCHANGE_URL,
     resolveKey: (keyid) => cache.resolve(keyid),
     ...(verifyEd25519 !== undefined ? { verifyEd25519 } : {}),
@@ -167,8 +149,6 @@ export function buildDeps(env: EdgeEnv, verifyEd25519?: Ed25519Verify): AppDeps 
     enforceBinding: env.FORA_ENFORCE_BINDING !== 'false',
     ...(wba !== undefined ? { wba } : {}),
     ...(wbaSigned !== undefined ? { wbaSigned } : {}),
-    ...(env.RSL_BODY !== undefined ? { rslBody: env.RSL_BODY } : {}),
-    ...(acmeTokens !== undefined ? { acmeTokens } : {}),
     ...(env.ORIGIN_URL !== undefined ? { originUrl: env.ORIGIN_URL } : {}),
     ...(env.SAME_ZONE_ORIGIN === 'true' ? { sameZoneOrigin: true } : {}),
     ...(botAllow !== undefined ? { botAllowPatterns: botAllow } : {}),
@@ -220,45 +200,6 @@ export function originModeConfigured(
   env: Pick<EdgeEnv, 'ORIGIN_URL' | 'SAME_ZONE_ORIGIN'>,
 ): boolean {
   return Boolean(env.ORIGIN_URL) || env.SAME_ZONE_ORIGIN === 'true';
-}
-
-function parseAcmeTokens(raw: string | undefined): Record<string, string> | undefined {
-  if (!raw) return undefined;
-  const parsed: unknown = JSON.parse(raw);
-  const schema = z.record(z.string(), z.string());
-  return schema.parse(parsed);
-}
-
-// EXCHANGES_JSON keeps its historical per-entry shape (domain/endpoint plus an
-// optional supported_profiles list). The unified AuthorizedExchange has no
-// per-entry profiles slot, so they are hoisted into the manifest's top-level
-// supported_profiles; relationship defaults to DIRECT.
-const ExchangeEntrySchema = z.object({
-  domain: z.string().min(1),
-  endpoint: z.string().url(),
-  supported_profiles: z.array(z.string()).default([]),
-  // Optional extension map (mirrors the proto AuthorizedExchange.ext Struct). The
-  // publisher attests its resource_owner_id payee here for the Exchange settlement
-  // gate; carried through to the served manifest verbatim.
-  ext: z.record(z.string(), z.unknown()).optional(),
-});
-
-type ExchangeEntry = z.infer<typeof ExchangeEntrySchema>;
-
-function parseExchanges(raw: string): ExchangeEntry[] {
-  const parsed: unknown = JSON.parse(raw);
-  return z.array(ExchangeEntrySchema).parse(parsed);
-}
-
-const CatalogContributorSchema = z.object({
-  domain: z.string().min(1),
-  relationship: z.string().min(1),
-});
-
-function parseCatalogContributors(raw: string | undefined): CatalogContributor[] | undefined {
-  if (!raw) return undefined;
-  const parsed: unknown = JSON.parse(raw);
-  return z.array(CatalogContributorSchema).parse(parsed);
 }
 
 // RFC3339 timestamp, mirroring the canonical WBA schema's not_before/not_after

@@ -11,13 +11,16 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/setup"
 )
 
-// Sites reads back what a person has registered: the list, one site and the
-// files it was set up with, and its licensing in a line.
+// Sites reads back what a person has registered, and builds what the pages show
+// from it: one site and the files it was set up with, and its licensing in a
+// line.
 //
-// Everything is read from the Exchange on every call. Nothing about where a
-// person is in the setup is kept in the session: a publisher who signed out
-// halfway through, or who is on a second device, sees the same state, because
-// the state is the Exchange's and is read back rather than remembered.
+// What a person has registered is read from the Exchange on every request: the
+// read in front of every publisher page fetches it, and the page is built from
+// it. Nothing about where a person is in the setup is kept in
+// the session: a publisher who signed out halfway through, or who is on a
+// second device, sees the same state, because the state is the Exchange's and
+// is read back rather than remembered.
 type Sites struct {
 	reader  Reader
 	bundles Bundler
@@ -31,7 +34,8 @@ func NewSites(reader Reader, bundles Bundler, exchangeDomain string) *Sites {
 	return &Sites{reader: reader, bundles: bundles, exchangeDomain: exchangeDomain}
 }
 
-// Registrations lists what this person has registered.
+// Registrations lists what this person has registered. It is the read made in
+// front of every publisher page.
 func (s *Sites) Registrations(
 	ctx context.Context, actor exchangeclient.Actor,
 ) (exchangeclient.Registrations, error) {
@@ -46,38 +50,55 @@ type Registered struct {
 	Bundle       setup.Bundle
 }
 
-// Registered finds one of this person's sites by name and builds its files
-// from the registration the Exchange holds, never from the request. A publisher
-// who signs back in a month later downloads the files their site was
-// registered with, because the registration is what they are built from.
+// Registered finds one of this person's sites by name in regs and builds its
+// files from the registration the Exchange holds, never from anything the
+// browser sent. A publisher who signs back in a month later downloads the files
+// their site was registered with, because the registration is what they are
+// built from.
 //
-// The lookup runs over what the Exchange returned for this actor, so a site
-// somebody else registered is simply not in the list: there is no way to ask
-// about one, and a guessed hostname is answered the same way an unregistered
-// one is.
-func (s *Sites) Registered(ctx context.Context, actor exchangeclient.Actor, domain string) (Registered, error) {
-	regs, err := s.reader.ListRegistrations(ctx, actor)
+// regs must be what the Exchange listed for the signed-in person on this
+// request: the payee it names is the one the discovery document attests, and a
+// value the browser could set is a value the browser could change. The lookup
+// runs over it, so a site somebody else registered is simply not in the list:
+// there is no way to ask about one, and a guessed hostname is answered the same
+// way an unregistered one is.
+func (s *Sites) Registered(
+	ctx context.Context, regs exchangeclient.Registrations, domain string,
+) (Registered, error) {
+	reg, err := siteIn(regs, domain)
 	if err != nil {
 		return Registered{}, err
 	}
-	reg, ok := siteNamed(regs, domain)
-	if !ok {
-		return Registered{}, notYours()
+	bundle, err := build(ctx, s.bundles, siteOf(regs.PublisherID, reg))
+	if err != nil {
+		return Registered{}, err
 	}
-	site := setup.Site{
+	return Registered{PublisherID: regs.PublisherID, Registration: reg, Bundle: bundle}, nil
+}
+
+// siteOf is what a saved domain's files are built from: the registration the
+// Exchange holds and the payee it is registered under, never anything the
+// browser sent. The domain's page and the wizard's last step build from it
+// alike, so they hand over the same files.
+func siteOf(publisherID string, reg exchangeclient.Registration) setup.Site {
+	return setup.Site{
 		Domain:           reg.Domain,
-		PublisherID:      regs.PublisherID,
+		PublisherID:      publisherID,
 		CDN:              reg.CDN,
 		ContentPathScope: reg.ContentPathScope,
 		Terms:            controlsOrDefault(reg.Terms),
 		SitemapURL:       reg.SitemapURL,
 	}
-	bundle, err := build(ctx, s.bundles, site,
-		"Something went wrong on our side. Your registration is unaffected.")
-	if err != nil {
-		return Registered{}, err
+}
+
+// siteIn is siteNamed for a domain that has to be the person's: any other is
+// refused as not theirs.
+func siteIn(regs exchangeclient.Registrations, domain string) (exchangeclient.Registration, error) {
+	reg, ok := siteNamed(regs, domain)
+	if !ok {
+		return exchangeclient.Registration{}, notYours()
 	}
-	return Registered{PublisherID: regs.PublisherID, Registration: reg, Bundle: bundle}, nil
+	return reg, nil
 }
 
 // siteNamed finds one of the person's sites by name, whatever its case.
@@ -107,8 +128,8 @@ type SiteTerms struct {
 	Summary  string
 	Charging bool
 	Rate     string
-	// Currency and Unit are the Exchange's denomination, the one the rate is
-	// in.
+	// Currency is the Exchange's denomination, the one the rate is in, and
+	// Unit is what one charge is for, said the way a price reads it.
 	Currency    string
 	Unit        string
 	Uses        []SiteUse
@@ -159,7 +180,7 @@ func (s *Sites) Terms(ctx context.Context, site Registered) (SiteTerms, error) {
 		Charging:     strings.EqualFold(c.PricingModel, termspreset.ModelPerUnit),
 		Rate:         strings.TrimSpace(c.Rate),
 		Currency:     d.Vocab().Currency,
-		Unit:         d.Vocab().Unit,
+		Unit:         termspreset.SingularUnit(d.Vocab().Unit),
 		Uses:         uses,
 		Attribution:  c.AttributionRequired,
 		Offer:        offer,

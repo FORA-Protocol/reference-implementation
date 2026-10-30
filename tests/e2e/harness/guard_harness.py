@@ -1,13 +1,13 @@
 """Scaffolding every structural guard suite needs.
 
-Six suites in this directory assert that something shipped in this repository
-refuses what it says it refuses. Five of them do it by driving a shipped script
-against a synthetic tree; the sixth reads the real workflow files and drives
-nothing. What they need overlaps rather than coincides — all six declare the same
-marks, four build a scratch git repository, three run a gate script, two plant a
-private key — and every piece of it was written once per suite until this module
-existed, in copies that had already started to differ. One gate runner grew an
-``env`` parameter and a longer timeout; the other two did not.
+The structural guard suites in this directory assert that something shipped in
+this repository does what it says: most of them by driving a shipped script
+against a synthetic tree or a stub command, a few by reading the real files and
+driving nothing. What they need overlaps rather than coincides — the same marks, a
+scratch git repository, a script runner, a planted private key, a stub on PATH —
+and each piece was written once per suite until this module existed, in copies
+that had already started to differ. One gate runner grew an ``env`` parameter and
+a longer timeout; the other two did not.
 
 None of it is publish-specific. ``publish_harness`` sits on top of this module and
 keeps only what belongs to driving the publish tool: the miniature published tree,
@@ -37,8 +37,9 @@ from __future__ import annotations
 import functools
 import os
 import shutil
+import stat
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -242,11 +243,16 @@ def run_gate(
     reads_root: bool = True,
     env: dict[str, str] | None = None,
     timeout: int = GATE_TIMEOUT,
+    args: Sequence[str] = (),
 ) -> subprocess.CompletedProcess[str]:
     """Run the copy of ``gate`` that ``root`` carries.
 
     The root is passed as an argument, never through the environment: an ambient
     variable that selects the tree a gate reads can redirect it in production too.
+
+    ``args`` are the script's own arguments, for a script with subcommands, such
+    as host-load.sh's ``record FILE`` and ``summary FILE``. They come before
+    ``--root``.
 
     ``reads_root`` says whether the gate SCANS a tree. Most do, and take --root
     to say which. One does not: check-buildx.sh asks the local docker whether the
@@ -269,13 +275,14 @@ def run_gate(
     already, when one gate runner grew an ``env`` parameter and a longer timeout
     and the other two did not.
 
-    ``env`` exists only so one suite can put a deliberately broken scanner, or a
-    stub docker, on PATH — it selects which binary runs, never which tree is
-    read. Leaving it at ``None`` starts from the caller's environment. Either
-    way it goes through ``fixture_env``, because the gates run git against the
-    tree they are handed and an inherited GIT_DIR would point them elsewhere.
+    ``env`` exists only so a suite can put a deliberately broken scanner, or a
+    stub command from ``stub_commands_env``, on PATH — it selects which binary
+    runs, never which tree is read. Leaving it at ``None`` starts from the
+    caller's environment. Either way it goes through ``fixture_env``, because the
+    gates run git against the tree they are handed and an inherited GIT_DIR would
+    point them elsewhere.
     """
-    cmd = ["bash", str(root / "scripts" / gate)]
+    cmd = ["bash", str(root / "scripts" / gate), *args]
     if reads_root:
         cmd += ["--root", str(root)]
     return subprocess.run(
@@ -288,12 +295,36 @@ def run_gate(
     )
 
 
+def stub_commands_env(tmp_path: Path, stubs: Mapping[str, str]) -> dict[str, str]:
+    """The caller's environment with a directory of stub commands first on PATH.
+
+    ``stubs`` maps a command name to the shell body that stands in for it, so a
+    suite can drive a shipped script against whatever ``docker`` or ``vmstat``
+    answer its case needs. Each suite should stub only the calls its script
+    makes: a stub that answered everything would let the script drift to another
+    call without the suite noticing.
+
+    The suites that stub docker each wrote this directory, file, mode and PATH
+    themselves until it lived here.
+    """
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    for name, body in stubs.items():
+        stub = stub_dir / name
+        stub.write_text("#!/usr/bin/env bash\n" + body)
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC | stat.S_IRWXU)
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_dir}{os.pathsep}{env['PATH']}"
+    return env
+
+
 def guard_marks(*, skip_when: bool, reason: str = GATE_ABSENT_REASON) -> list[pytest.MarkDecorator]:
     """The two marks a structural guard suite declares.
 
-    ``stack_isolation("isolated")`` makes the autouse cleanup dispatch a no-op,
-    which would otherwise resolve a live Postgres DSN these suites have no use
-    for.
+    ``stack_isolation("isolated")`` declares the isolation contract every harness
+    test must declare: these suites read files and run local commands, use no
+    stack, and so own their environment. The autouse dispatch runs nothing for
+    them.
 
     The skip takes the caller's own condition rather than a path this function
     tests for itself. One suite asks whether a file is present and another asks

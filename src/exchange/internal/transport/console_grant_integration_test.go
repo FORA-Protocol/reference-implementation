@@ -28,7 +28,7 @@ import (
 // Legs: both writes go signed HTTP -> service -> repositories -> database, and
 // the publisher read-back comes through the signed resume route the console
 // uses. The audit count is one tier lower, through the audit repository, for
-// the reason auditActions gives.
+// the reason exchangetest's AuditActions gives.
 //
 // Not covered: that the losing transaction's publisher row is really gone. A
 // publisher is reachable only through its grant, and the loser's minted id is
@@ -82,7 +82,7 @@ func TestConsoleRegistration_ConcurrentSubmitsMintOnePublisher(t *testing.T) {
 	// The losing submit rolled its transaction back, so only one registration
 	// was recorded. This counts audit rows, not publisher rows: see the note on
 	// the orphaned row above.
-	if registered := countActions(t, f, "RegisterPublisher"); registered != 1 {
+	if registered := f.exchange.CountAuditActions(t, "RegisterPublisher"); registered != 1 {
 		t.Fatalf("two concurrent submits wrote %d RegisterPublisher audit rows, want 1", registered)
 	}
 }
@@ -150,24 +150,13 @@ func listedSite(t *testing.T, f *consoleFixture, actor consoleActorBody, domain 
 }
 
 // auditDetailsOf reads the detail of every audit row on the seat recording
-// action. Same tier as auditActions, for the same reason: the Exchange
-// publishes no read surface for its audit log.
+// action, through auditRecordsOf.
 func auditDetailsOf(t *testing.T, f *consoleFixture, action string) []map[string]any {
 	t.Helper()
-	records, err := f.audit.ByTenant(f.ctx, f.seatID)
-	if err != nil {
-		t.Fatalf("read audit log: %v", err)
-	}
-	var out []map[string]any
+	records := auditRecordsOf(t, f.ctx, f.audit, f.seatID, action)
+	out := make([]map[string]any, 0, len(records))
 	for _, r := range records {
-		if r.Action != action {
-			continue
-		}
-		var detail map[string]any
-		if err := json.Unmarshal(r.Detail, &detail); err != nil {
-			t.Fatalf("decode %s audit detail: %v", action, err)
-		}
-		out = append(out, detail)
+		out = append(out, auditDetail(t, r))
 	}
 	return out
 }

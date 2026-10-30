@@ -39,7 +39,6 @@ from wire.models import TransactionResultItem
 
 from ..admin_plane import reporting_window, require_admin_plane
 from ..broker_purchase import discover_group
-from ..constants import requester
 from ..exchanges import EXCHANGE_A_DOMAIN, EXCHANGE_D_DOMAIN
 from ..fresh_agent import FreshAgent
 from ..money_path import LECTURE_NOTES, discover_offer, only_item
@@ -76,7 +75,6 @@ def test_browse_moves_no_money_while_a_purchase_does(fresh_agent: FreshAgent) ->
         EXCHANGE_A_DOMAIN,
         _RESOURCE_URI,
         "browse",
-        requester=requester(fresh_agent.agent_id, user_type="individual", geography="US"),
     )
     # (b) browse returned an offer the agent could have accepted
     assert group.result.verified, f"browse must surface at least one offer; got {group}"

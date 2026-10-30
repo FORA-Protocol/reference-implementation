@@ -1,7 +1,9 @@
 // CloudFront canned-policy signed-URL verifier used as a local stand-in for
 // a real CloudFront distribution in the FORA demo E2E. Runs the exact
 // cryptographic check CloudFront performs (RSA-SHA1 over the canned policy
-// JSON) against the Exchange-minted URL; if valid, proxies to the origin.
+// JSON) against the Exchange-minted URL; if valid, proxies to the origin. The
+// publisher's own discovery document and RSL file are forwarded to the origin
+// with no signed URL asked for, as a distribution's behaviour for them would.
 //
 // The canned-policy format is:
 //
@@ -12,9 +14,7 @@
 //
 // Env:
 //   EXCHANGE_URL       e.g. http://exchange:8081          (fetch public key)
-//   ORIGIN_URL         e.g. http://publisher:80           (proxy on success)
-//   PROVIDER           publisher identifier for fora.json
-//   EXCHANGES_JSON     JSON array advertised in fora.json/exchanges
+//   ORIGIN_URL         e.g. http://publisher:8003         (proxy on success)
 //   PORT               listen port (default 8788)
 
 import { createHash, createPublicKey, createVerify } from 'node:crypto';
@@ -23,12 +23,11 @@ import { createServer } from 'node:http';
 
 // Shared with the Hono edge worker (src/edge/src/well-known.mjs, copied
 // into the image at build time) so this shim cannot drift from the canonical
-// discovery-document shapes. Guarded by tests/e2e/harness/test_manifest_parity.py.
+// discovery addresses and key-directory shapes.
 import {
+  PUBLISHER_DOCUMENT_PATHS,
   WBA_DIRECTORY_CONTENT_TYPE,
   WBA_PATH,
-  WELL_KNOWN_PATH,
-  buildPublisherManifest,
   buildPublisherWba,
   signedDirectoryFrom,
   signedDirectoryHeaders,
@@ -36,13 +35,6 @@ import {
 
 const PORT = Number.parseInt(process.env.PORT ?? '8788', 10);
 const ORIGIN_URL = required('ORIGIN_URL');
-const PROVIDER = required('PROVIDER');
-const EXCHANGES = JSON.parse(required('EXCHANGES_JSON'));
-// Authorized third-party catalog pushers (optional). Consumed by the Exchange
-// contributor-authz check (forawellknown.AuthorizesContributor).
-const CATALOG_CONTRIBUTORS = process.env.CATALOG_CONTRIBUTORS_JSON
-  ? JSON.parse(process.env.CATALOG_CONTRIBUTORS_JSON)
-  : [];
 // This publisher's signing key(s), served in the WBA directory's keys[] (no kid)
 // so the Exchange learns them via the well-known fetch (no DB pre-seed). Optional.
 const WBA_KEYS = process.env.WBA_KEYS_JSON ? JSON.parse(process.env.WBA_KEYS_JSON) : undefined;
@@ -168,13 +160,10 @@ async function handle(req, res) {
     res.end('ok');
     return;
   }
-  if (url.pathname === WELL_KNOWN_PATH) {
-    // Built from the shared canonical builder so this shim cannot drift. Pass
-    // undefined (not an empty array) for no contributors so the field is omitted,
-    // matching buildPublisherManifest's contract. Identity keys are NOT in the
-    // overlay after the WBA split — they are served at WBA_PATH below.
-    const contributors = CATALOG_CONTRIBUTORS.length > 0 ? CATALOG_CONTRIBUTORS : undefined;
-    reply(res, 200, buildPublisherManifest(PROVIDER, EXCHANGES, contributors));
+  if (PUBLISHER_DOCUMENT_PATHS.includes(url.pathname) && ['GET', 'HEAD'].includes(req.method)) {
+    // The publisher's own documents live on its origin: forwarded whatever the
+    // client, and the origin's status, headers and body come back unchanged.
+    await forwardToOrigin(req, res);
     return;
   }
   if (url.pathname === WBA_PATH) {
@@ -203,6 +192,10 @@ async function handle(req, res) {
     reply(res, 403, { error: 'Invalid signature', reason: result.reason });
     return;
   }
+  await forwardToOrigin(req, res);
+}
+
+async function forwardToOrigin(req, res) {
   try {
     await proxyToOrigin(req, res);
   } catch (err) {

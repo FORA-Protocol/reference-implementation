@@ -44,6 +44,7 @@ var denialReasonByKind = map[exchange.Kind]forav1.DenialReason{
 	exchange.KindEntitlementNotGranted: forav1.DenialReason_DENIAL_REASON_ENTITLEMENT_NOT_GRANTED,
 	exchange.KindReportingOverdue:      forav1.DenialReason_DENIAL_REASON_REPORTING_OVERDUE,
 	exchange.KindRelayNotAccepted:      forav1.DenialReason_DENIAL_REASON_RELAY_NOT_ACCEPTED,
+	exchange.KindDelegationInvalid:     forav1.DenialReason_DENIAL_REASON_DELEGATION_INVALID,
 }
 
 // DenialReasonForKind returns the canonical DenialReason for a transaction-denial

@@ -4,10 +4,10 @@
 // stylesheet beside it.
 //
 // The pages are ordinary server-rendered documents. The one exception is adding
-// a domain, which is a single page holding the publisher's answers in the
-// browser: it cannot be a chain of form posts, because the domain must not be
-// stored until the publisher's own site has proved they control it, and proving
-// that means handing them a file to publish first.
+// a domain, which is a single page of steps. Each step saves what it
+// asked through a JSON call, and the last one asks the publisher's own site
+// again every few seconds while it is shown, which a chain of form posts
+// could not do.
 package web
 
 import (
@@ -119,14 +119,20 @@ type Download struct {
 	URL         string
 }
 
-// Render draws one page.
+// Render draws one page, answered 200.
+func (r *Renderer) Render(w http.ResponseWriter, req *http.Request, name string, page Page) {
+	r.RenderStatus(w, req, http.StatusOK, name, page)
+}
+
+// RenderStatus draws one page answered with status: a page that says why
+// nothing was done.
 //
-// A template that fails mid-write has already sent a 200 and part of a page, so
-// there is nothing useful left to say to the browser; it is logged and the
-// truncated page is what the person sees. Every value a template reads is
+// A template that fails mid-write has already sent the status and part of a
+// page, so there is nothing useful left to say to the browser; it is logged and
+// the truncated page is what the person sees. Every value a template reads is
 // escaped by html/template, which is why the publisher-supplied domain and the
 // Exchange's own refusal messages can be written straight into a page.
-func (r *Renderer) Render(w http.ResponseWriter, req *http.Request, name string, page Page) {
+func (r *Renderer) RenderStatus(w http.ResponseWriter, req *http.Request, status int, name string, page Page) {
 	t, ok := r.sets[name]
 	if !ok {
 		reqctx.FromContext(req.Context()).ErrorContext(req.Context(), "console.unknown_template",
@@ -136,6 +142,7 @@ func (r *Renderer) Render(w http.ResponseWriter, req *http.Request, name string,
 	}
 	page.Session = auth.FromContext(req.Context())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
 	if err := t.ExecuteTemplate(w, "layout", page); err != nil {
 		reqctx.FromContext(req.Context()).ErrorContext(req.Context(), "console.render_failed",
 			"template", name, "err", err)
@@ -147,8 +154,7 @@ func (r *Renderer) Render(w http.ResponseWriter, req *http.Request, name string,
 func (r *Renderer) RenderMessage(
 	w http.ResponseWriter, req *http.Request, status int, title, message, link, linkLabel string,
 ) {
-	w.WriteHeader(status)
-	r.Render(w, req, "message", Page{
+	r.RenderStatus(w, req, status, "message", Page{
 		Title: title, Message: message, Link: link, LinkLabel: linkLabel,
 	})
 }

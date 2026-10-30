@@ -1,88 +1,82 @@
 package service
 
 import (
-	"strings"
-
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
+	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/exchange"
 )
 
-// selectTerms projects a publisher's terms down to those the requester is
-// entitled to. It is the SINGLE source of term-eligibility in the Exchange: the
+// selectedTerm is one term the requester may be offered, with the delegation
+// evidence that admitted it when the term is subscription-gated (nil otherwise).
+// The evidence is exposed so a later slice can bound the offer's expiry by the
+// chain's and store it with the transaction; nothing here bounds it yet.
+type selectedTerm struct {
+	term       *forav1.LicenseTerm
+	delegation *verifiedSubscription
+}
+
+// selectTerms projects a publisher's terms down to those the requester may be
+// offered. It is the SINGLE source of term-eligibility in the Exchange: the
 // discovery path calls selectTerms before projecting terms onto Offer.terms and
 // never reimplements this filtering itself. Token canonicalization and the
-// ingest-tier term checks are the SDK's (sdk/go/helpers); this scope projection
-// is the one piece of term logic the Exchange keeps, because it is Exchange
-// behaviour rather than a protocol rule.
+// ingest-tier term checks are the SDK's (sdk/go/helpers); this projection is the
+// one piece of term logic the Exchange keeps.
 //
-// A term is kept only when the scopes the requester states (Requester.scopes)
-// cover ALL of the term's scopes (AND-coverage). An empty term scopes[] is
-// public. Coverage is segment-wise: a requester scope "a:*" covers "a:US" and a
-// bare "*" covers everything. Scope coverage is the ONLY eligibility filter.
+// Two kinds of term, decided by the term's own scopes:
+//
+//   - A GATED term carries one concrete 'subscription:' scope. It is kept only
+//     when the delegation chain in Requester.delegation verifies against the
+//     subscription record that owns that scope (gate.verified: trusted root key,
+//     intact chain, audience, expiry, holder bound to the key that signed this
+//     request) and the chain's verified scopes cover ALL of the term's scopes.
+//     Requester.scopes is ignored for a gated term: stating the scope proves
+//     nothing. A term with more than one subscription scope, or one that breaks
+//     the concrete-scope rule, is hidden for every requester and journaled;
+//     ingest refuses such a term, this is the backstop.
+//
+//   - Every other term is kept when the scopes the requester states cover ALL
+//     of its scopes under the protocol's segment-wise rule (helpers.ScopesCover:
+//     a granted segment equals the required one or is '*', a terminal '*' covers
+//     the remaining segments, a grant with more segments never covers a shorter
+//     requirement, and no implicit prefix match). An empty term scopes[] is
+//     public. A stated scope is the requester's own statement, signed and
+//     attributable and not verified: it decides which terms are presented, and a
+//     false statement is settled through reconciliation and the account
+//     relationship.
 //
 // Restriction axes (USER_TYPE, GEOGRAPHY, FUNCTION) are NOT used to exclude
-// terms here. A requester's attributes are self-declared and unvalidated, so
-// filtering by them would be advisory at best and is the agent's concern, not
-// the Exchange's (ADR-014: the Exchange filters by resource_id and scopes only;
-// restrictions ride on the returned offer for the agent to self-honour, and are
-// enforced at accept→report→reconcile). A REFERENCE_ONLY term's machine fields,
-// when present, are an advisory summary of the referenced License document,
-// which governs; they are not evaluated here either.
+// terms here: they ride on the returned offer for the agent to self-honour and
+// are enforced at accept→report→reconcile. A REFERENCE_ONLY term's machine
+// fields are an advisory summary of the referenced License document and are not
+// evaluated either.
 //
-// A nil requester selects nothing (no requester, no entitlement). selectTerms
-// never mutates its inputs, and the terms it returns are the same pointers it
-// was given, in stored order — storedIndex recovers the publisher's term
-// index by pointer identity.
-//
-// Requester.scopes is the requester's own statement, as the pinned protocol
-// defines it: signed and attributable, and not verified by the Exchange. Scope
-// coverage decides which terms the Exchange presents; it is not access control,
-// and a false statement is settled through reconciliation and the account
-// relationship. An Exchange MAY require a verified delegation before it presents
-// a scoped term (see LicenseTerm.scopes); this one reads no delegation, so it
-// presents every term the stated scopes cover.
-func selectTerms(terms []*forav1.LicenseTerm, requester *forav1.Requester) []*forav1.LicenseTerm {
+// A nil requester selects nothing. selectTerms never mutates its inputs, and the
+// terms it returns are the same pointers it was given, in stored order —
+// storedIndex recovers the publisher's term index by pointer identity.
+func selectTerms(
+	terms []*forav1.LicenseTerm, requester *forav1.Requester, tenantID string, gate *discoveryGate,
+) []selectedTerm {
 	if requester == nil {
 		return nil
 	}
-	scopes := requester.GetScopes() // the requester's own statement; see above
-	out := make([]*forav1.LicenseTerm, 0, len(terms))
+	stated := requester.GetScopes()
+	out := make([]selectedTerm, 0, len(terms))
 	for _, term := range terms {
 		if term == nil {
 			continue
 		}
-		if !scopesCovered(term.GetScopes(), scopes) {
-			continue
+		scope, gated, err := exchange.SubscriptionScopeOf(term.GetScopes())
+		switch {
+		case err != nil:
+			gate.hideMalformedTerm(tenantID, err)
+		case gated:
+			if vs := gate.verified(tenantID, scope); vs != nil && helpers.ScopesCover(vs.Scopes, term.GetScopes()) {
+				out = append(out, selectedTerm{term: term, delegation: vs})
+			}
+		case helpers.ScopesCover(stated, term.GetScopes()):
+			out = append(out, selectedTerm{term: term})
 		}
-		out = append(out, term)
 	}
 	return out
-}
-
-// scopesCovered reports whether every term scope is covered by some requester
-// scope. Empty termScopes is public (always covered).
-func scopesCovered(termScopes, requesterScopes []string) bool {
-	for _, ts := range termScopes {
-		if !scopeCovered(ts, requesterScopes) {
-			return false
-		}
-	}
-	return true
-}
-
-// scopeCovered reports whether termScope is covered by any requester scope. A
-// requester scope covers a term scope when it is exactly equal, is the global
-// "*", or is a hierarchical wildcard "prefix:*" whose prefix matches the term
-// scope's prefix (so "dist:*" covers "dist:US" and "dist").
-func scopeCovered(termScope string, requesterScopes []string) bool {
-	for _, rs := range requesterScopes {
-		if rs == "*" || rs == termScope {
-			return true
-		}
-		if prefix, ok := strings.CutSuffix(rs, ":*"); ok {
-			if termScope == prefix || strings.HasPrefix(termScope, prefix+":") {
-				return true
-			}
-		}
-	}
-	return false
 }

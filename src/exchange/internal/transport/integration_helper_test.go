@@ -19,7 +19,6 @@ import (
 	"github.com/FORA-Protocol/protocol/gen/go/fora/admin/v1/foraadminv1connect"
 	foraconnect "github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
@@ -180,15 +179,14 @@ func setupExchangeTestDBDeferredRSA(t *testing.T, agentID string, deferredRSA bo
 
 	// The seat answers on this Exchange's own domain, which is what the push
 	// path resolves it by. The site below is a different host entirely.
-	insert := sqlc.InsertTenantParams{
-		TenantID:        tenantID,
-		Domain:          harnessExchangeDomain,
-		Ed25519KeyRef:   ed25519Ref,
-		ReportingPolicy: []byte(`{}`),
+	seat := repotest.Seat{
+		ID:            tenantID,
+		Domain:        harnessExchangeDomain,
+		Ed25519KeyRef: ed25519Ref,
 		// The seat holds one private-key reference per scheme, whatever its
 		// sites sign with, so the RSA ref is always present and a site
 		// registered on AWS_CLOUDFRONT_RSA resolves its signer through it.
-		RsaKeyRef: pgtype.Text{String: cloudFrontTestKeyRef, Valid: true},
+		RSAKeyRef: cloudFrontTestKeyRef,
 	}
 	// The payee row itself is seeded once per test by acquireTestDB, so this
 	// only attaches the site to it.
@@ -200,7 +198,7 @@ func setupExchangeTestDBDeferredRSA(t *testing.T, agentID string, deferredRSA bo
 	if deferredRSA {
 		// The private key is the seat's and the scheme is the site's, so the
 		// deferred-RSA shape is written across both rows.
-		insert.RsaKeyRef = pgtype.Text{String: deferredRSAKeyRef, Valid: true}
+		seat.RSAKeyRef = deferredRSAKeyRef
 		site.SigningScheme = string(sqlc.ForaSigningSchemeAWSCLOUDFRONTRSA)
 		site.CloudFrontKeyPairID = "cf-deferred-test"
 		keystore.PutRSAFunc(deferredRSAKeyRef, func() (*rsa.PrivateKey, error) {
@@ -210,9 +208,7 @@ func setupExchangeTestDBDeferredRSA(t *testing.T, agentID string, deferredRSA bo
 			)
 		})
 	}
-	if _, err := queries.InsertTenant(ctx, insert); err != nil {
-		t.Fatalf("insert seat: %v", err)
-	}
+	repotest.SeedSeat(t, ctx, pool, seat)
 	repotest.SeedSite(t, ctx, pool, site)
 	agentPub, agentPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

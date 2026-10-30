@@ -21,53 +21,34 @@ there.
 
 from __future__ import annotations
 
-import os
-import stat
 import subprocess
 from pathlib import Path
 
 from .conftest import REPO_ROOT
-from .guard_harness import GATE_TIMEOUT, guard_marks
+from .guard_harness import guard_marks, run_gate, stub_commands_env
 
-GATE = REPO_ROOT / "scripts" / "check-buildx.sh"
+GATE = "check-buildx.sh"
 
-pytestmark = guard_marks(skip_when=not GATE.is_file())
+pytestmark = guard_marks(skip_when=not (REPO_ROOT / "scripts" / GATE).is_file())
 
 
-def _docker_stub(tmp_path: Path, *, buildx_exit: int) -> Path:
-    """A directory holding a ``docker`` that exits ``buildx_exit`` for buildx.
+def _run_with(tmp_path: Path, *, buildx_exit: int) -> subprocess.CompletedProcess[str]:
+    """Run the gate with a ``docker`` that exits ``buildx_exit`` for buildx.
 
     Only the buildx subcommand is answered, because that is the only call the
     gate makes. A stub that answered everything would be a stub the gate could
     drift away from without this suite noticing.
     """
-    stub_dir = tmp_path / "bin"
-    stub_dir.mkdir()
-    stub = stub_dir / "docker"
-    stub.write_text(
-        '#!/usr/bin/env bash\nif [ "$1" = "buildx" ]; then exit %d; fi\nexit 0\n' % buildx_exit
+    env = stub_commands_env(
+        tmp_path, {"docker": 'if [ "$1" = "buildx" ]; then exit %d; fi\nexit 0\n' % buildx_exit}
     )
-    stub.chmod(stub.stat().st_mode | stat.S_IEXEC | stat.S_IRWXU)
-    return stub_dir
-
-
-def _run_gate(stub_dir: Path) -> subprocess.CompletedProcess[str]:
-    env = dict(os.environ)
-    env["PATH"] = f"{stub_dir}{os.pathsep}{env['PATH']}"
-    return subprocess.run(
-        ["bash", str(GATE)],
-        capture_output=True,
-        text=True,
-        timeout=GATE_TIMEOUT,
-        env=env,
-        check=False,
-    )
+    return run_gate(REPO_ROOT, GATE, reads_root=False, env=env)
 
 
 def test_gate_passes_when_buildx_answers(tmp_path: Path) -> None:
     """Without this the negative below proves nothing: a gate that failed for an
     unrelated reason — a missing file, a syntax error — would satisfy it."""
-    proc = _run_gate(_docker_stub(tmp_path, buildx_exit=0))
+    proc = _run_with(tmp_path, buildx_exit=0)
 
     assert proc.returncode == 0, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
 
@@ -79,7 +60,7 @@ def test_gate_refuses_when_buildx_is_missing(tmp_path: Path) -> None:
     this gate is that the failure explains itself, since the condition it
     catches produces no error of its own.
     """
-    proc = _run_gate(_docker_stub(tmp_path, buildx_exit=1))
+    proc = _run_with(tmp_path, buildx_exit=1)
 
     assert proc.returncode == 1, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
     assert "buildx" in proc.stderr

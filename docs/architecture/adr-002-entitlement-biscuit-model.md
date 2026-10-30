@@ -1,6 +1,6 @@
 # ADR-002 — Entitlement-Biscuit Model (single biscuit; mandatory per-request attenuation)
 
-**Status:** Accepted (2026-04-21)
+**Status:** Superseded (2026-10-28). The entitlement biscuit was never shipped; subscription-gated terms are gated by the holder-bound JWT delegation chain the pinned protocol module `github.com/FORA-Protocol/protocol` (v1.1.1-0.20261028171027-060933f00123, `helpers.VerifyDelegation`) defines: trusted root keys live on the subscription record, the chain is bound to the key the request proved, and every failure is one per-item `DENIAL_REASON_DELEGATION_INVALID`. The design-level trade-offs below are kept as history. Originally accepted 2026-04-21.
 **Supersedes:** `docs/architecture/adr-002-two-biscuit-model.md` (previous draft — retracted; the identity-biscuit concept duplicated the JWT's job)
 **Tracks:** the entitlement-biscuit model.
 **Companion documents:**

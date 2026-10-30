@@ -18,8 +18,9 @@ const (
 	// KindInvalid means something the person gave cannot be used: an answer
 	// in the wizard, or a date, a period or a status in a page's address.
 	KindInvalid Kind = iota + 1
-	// KindNotRegistered means a step that needs the publisher's payee was
-	// reached before the business name was registered.
+	// KindNotRegistered means a wizard call that needs the publisher's payee
+	// was made before the account registered its business, which the
+	// wizard's business step does.
 	KindNotRegistered
 	// KindNotFound means what was asked about is not this person's, or does
 	// not exist. The two are answered alike, so the answer says nothing about

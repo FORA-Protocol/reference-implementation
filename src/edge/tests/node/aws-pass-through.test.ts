@@ -3,14 +3,17 @@
 // demo-on-AWS deployment shape, where CloudFront owns the origin fetch. An
 // authorized request must come back as the CloudFront REQUEST object (so
 // CloudFront continues to its configured origin) with the reserved signature
-// params stripped; every denial and every well-known route must come back as
-// a generated response. Driven with hand-crafted viewer-request events
-// through Hono's production adapter, same harness shape as aws-handler.test.ts.
+// params stripped, and so must a read of the publisher's own documents, whose
+// origin is the one place they live; every denial, the health check and the
+// key directory must come back as a generated response. Driven with
+// hand-crafted viewer-request events through Hono's production adapter, same
+// harness shape as aws-handler.test.ts.
 import type { CloudFrontRequest } from 'hono/lambda-edge';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { CDN_AUTHORIZED_HEADER } from '../../src/app.js';
 import type { handler as awsHandler } from '../../src/entries/aws-lambda.js';
+import { PUBLISHER_DOCUMENT_PATHS, WBA_PATH } from '../../src/types.js';
 import { makeViewerRequestEvent as makeEvent } from '../helpers/cloudfront.js';
 import {
   type TestKeypair,
@@ -43,8 +46,6 @@ beforeAll(async () => {
     'EXCHANGE_WBA_URL',
     'https://exchange.test/.well-known/http-message-signatures-directory',
   );
-  vi.stubEnv('PROVIDER', 'pub.example.com');
-  vi.stubEnv('EXCHANGES_JSON', '[{"domain":"exchange.test","endpoint":"https://exchange.test"}]');
   vi.stubEnv(
     'FORA_VERIFY_KEYS',
     JSON.stringify([{ kty: 'OKP', crv: 'Ed25519', x: keypair.publicJwk.x }]),
@@ -105,30 +106,37 @@ describe('AWS entry pass-through (no origin mode)', () => {
     );
   });
 
-  it('serves fora.json as a generated response, never a pass-through', async () => {
-    const result = await handler(makeEvent(`${PUB_ORIGIN}/.well-known/fora.json`));
-    expect(isRequest(result)).toBe(false);
-    if (isRequest(result)) return;
-    expect(result.status).toBe('200');
-    const body = JSON.parse(result.body ?? '') as { domain: string };
-    expect(body.domain).toBe('pub.example.com');
-  });
-
-  it('serves an unconfigured rsl.txt as a generated 404, never a pass-through', async () => {
-    const result = await handler(makeEvent(`${PUB_ORIGIN}/rsl.txt`));
-    expect(isRequest(result)).toBe(false);
-    if (isRequest(result)) return;
-    expect(result.status).toBe('404');
+  it.each(
+    PUBLISHER_DOCUMENT_PATHS.flatMap((path) => [
+      [path, 'a browser', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) Safari/605.1.15'],
+      [path, 'an AI bot', 'ClaudeBot/1.0'],
+    ]),
+  )('hands %s back to CloudFront for %s, so the origin answers', async (path, _who, ua) => {
+    const result = await handler(
+      makeEvent(`${PUB_ORIGIN}${path}?sig=forged&kid=k1&lang=en`, { 'user-agent': ua as string }),
+    );
+    expect(isRequest(result)).toBe(true);
+    if (!isRequest(result)) return;
+    expect(result.uri).toBe(path);
+    // The reserved params go, as on every hand-back; the rest of the query stays.
+    expect(result.querystring).toBe('lang=en');
   });
 
   it('never leaks the authorization marker on generated responses', async () => {
+    // The answers this entry still makes itself: the health check, the key
+    // directory's 404 on a publisher that publishes no key, and a refusal. A
+    // generated 404 must stay a generated 404, never a hand-back to the origin.
     const generated = await Promise.all([
-      handler(makeEvent(`${PUB_ORIGIN}/.well-known/fora.json`)),
-      handler(makeEvent(`${PUB_ORIGIN}/rsl.txt`)),
+      handler(makeEvent(`${PUB_ORIGIN}/healthz`)),
+      handler(makeEvent(`${PUB_ORIGIN}${WBA_PATH}`)),
       handler(makeEvent(`${PUB_ORIGIN}/article/42`, { 'user-agent': 'ClaudeBot/1.0' })),
     ]);
+    expect(generated.map((result) => (isRequest(result) ? 'request' : result.status))).toEqual([
+      '200',
+      '404',
+      '403',
+    ]);
     for (const result of generated) {
-      expect(isRequest(result)).toBe(false);
       if (isRequest(result)) continue;
       // Keyed off the PRODUCTION constant so a renamed marker cannot leave
       // this test green while the header leaks under its new name.

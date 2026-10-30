@@ -1,0 +1,14 @@
+{
+  "ver": "1.0",
+  "role": "ROLE_PUBLISHER",
+  "domain": "lambda.demo.fora-protocol.org",
+  "exchanges": [
+    {
+      "domain": "exchange:8081",
+      "endpoint": "http://exchange:8081",
+      "relationship": "PROVIDER_RELATIONSHIP_DIRECT",
+      "ext": { "resource_owner_id": "demo-resource-owner" }
+    }
+  ],
+  "supported_profiles": ["fora-news-v1", "fora-comp-v1", "fora-music-v1"]
+}

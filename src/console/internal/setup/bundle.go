@@ -7,7 +7,6 @@ import (
 	"fmt"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/catalogfeed"
-	wkserver "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/server"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/pagefetch"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/publicerr"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/termspreset"
@@ -166,15 +165,16 @@ func (b *Builder) edgePackage(s Site) (*File, error) {
 // values; how they arrive differs -- Cloudflare binds them as variables, Fastly
 // as a configuration store, and Lambda@Edge, which takes no environment, gets
 // them from the index.mjs the package places beside the unchanged bundle.
+//
+// None of them describes the site's discovery document: that is the fora.json
+// the publisher serves from its own origin, and the package passes the address
+// through to it.
 type edgeConfigBody struct {
-	ExchangeURL     string          `json:"EXCHANGE_URL"`
-	ExchangeWBAURL  string          `json:"EXCHANGE_WBA_URL"`
-	Provider        string          `json:"PROVIDER"`
-	ExchangesJSON   string          `json:"EXCHANGES_JSON"`
-	ContributorJSON string          `json:"CATALOG_CONTRIBUTORS_JSON"`
-	EnforceBinding  string          `json:"FORA_ENFORCE_BINDING"`
-	LicensedPaths   []string        `json:"licensed_paths"`
-	Notes           edgeConfigNotes `json:"notes"`
+	ExchangeURL    string          `json:"EXCHANGE_URL"`
+	ExchangeWBAURL string          `json:"EXCHANGE_WBA_URL"`
+	EnforceBinding string          `json:"FORA_ENFORCE_BINDING"`
+	LicensedPaths  []string        `json:"licensed_paths"`
+	Notes          edgeConfigNotes `json:"notes"`
 }
 
 // edgeConfigNotes carry what a person needs to know to use the file and cannot
@@ -191,30 +191,11 @@ type edgeConfigNotes struct {
 // which it fetches from the address named here. Nothing secret ever reaches a
 // publisher, and a key rotation needs no redeploy on their side.
 func (b *Builder) edgeConfig(s Site) ([]byte, error) {
-	exchanges, err := json.Marshal([]map[string]any{{
-		"domain":             b.deployment.ExchangeDomain,
-		"endpoint":           b.deployment.ExchangeEndpoint,
-		"relationship":       "PROVIDER_RELATIONSHIP_DIRECT",
-		"ext":                map[string]string{"resource_owner_id": s.PublisherID},
-		"supported_profiles": b.deployment.SupportedProfiles,
-	}})
-	if err != nil {
-		return nil, fmt.Errorf("setup: render the exchange settings: %w", err)
-	}
-	contributors, err := json.Marshal([]map[string]string{{
-		"domain": b.deployment.ContributorHost, "relationship": wkserver.OperatorRelationship,
-	}})
-	if err != nil {
-		return nil, fmt.Errorf("setup: render the contributor settings: %w", err)
-	}
 	body := edgeConfigBody{
-		ExchangeURL:     b.deployment.ExchangeEndpoint,
-		ExchangeWBAURL:  b.deployment.ExchangeWBAURL,
-		Provider:        s.Domain,
-		ExchangesJSON:   string(exchanges),
-		ContributorJSON: string(contributors),
-		EnforceBinding:  "true",
-		LicensedPaths:   s.ContentPathScope,
+		ExchangeURL:    b.deployment.ExchangeEndpoint,
+		ExchangeWBAURL: b.deployment.ExchangeWBAURL,
+		EnforceBinding: "true",
+		LicensedPaths:  s.ContentPathScope,
 		Notes: edgeConfigNotes{
 			Release: b.deployment.EdgeReleaseRef,
 			Keys: "The package holds no secret. It fetches the Exchange's public " +
@@ -244,18 +225,15 @@ func (b *Builder) edgeSettings(s Site) (map[string]string, error) {
 		return nil, fmt.Errorf("setup: read back the edge settings: %w", err)
 	}
 	settings := map[string]string{
-		"EXCHANGE_URL":              body.ExchangeURL,
-		"EXCHANGE_WBA_URL":          body.ExchangeWBAURL,
-		"PROVIDER":                  body.Provider,
-		"EXCHANGES_JSON":            body.ExchangesJSON,
-		"CATALOG_CONTRIBUTORS_JSON": body.ContributorJSON,
-		"FORA_ENFORCE_BINDING":      body.EnforceBinding,
+		"EXCHANGE_URL":         body.ExchangeURL,
+		"EXCHANGE_WBA_URL":     body.ExchangeWBAURL,
+		"FORA_ENFORCE_BINDING": body.EnforceBinding,
 	}
 	// The paths the publisher licenses are the only ones the edge sends AI bots
 	// to negotiate for; the rest of the site passes as it did before. The route
-	// still covers the whole hostname, because the discovery documents are
-	// served there. No scope is the whole site, which is the edge's own default,
-	// so the key is written only when there is a scope to carry.
+	// still covers the whole hostname, so the gate sees every path a scope can
+	// name. No scope is the whole site, which is the edge's own default, so the
+	// key is written only when there is a scope to carry.
 	if len(body.LicensedPaths) > 0 {
 		scope, err := json.Marshal(body.LicensedPaths)
 		if err != nil {

@@ -2,45 +2,30 @@ import { describe, expect, it } from 'vitest';
 
 import { buildDeps, parseEnv } from '../../src/config.js';
 // Minimum env the schema accepts. Tests extend this object.
+import { EARLIER_RELEASE_SETTINGS } from '../helpers/earlier-release-settings.js';
 import { BASE_SCHEMA_ENV as baseEnv } from '../helpers/test-setup.js';
 
-describe('unified manifest', () => {
-  it('builds a role=ROLE_PUBLISHER manifest with domain from PROVIDER', () => {
-    const deps = buildDeps(parseEnv(baseEnv));
-    expect(deps.manifest.ver).toBe('1.0');
-    expect(deps.manifest.role).toBe('ROLE_PUBLISHER');
-    expect(deps.manifest.domain).toBe('edge.e2e.local');
-  });
-
-  it('maps EXCHANGES_JSON entries to AuthorizedExchange with DIRECT relationship', () => {
-    const deps = buildDeps(parseEnv(baseEnv));
-    expect(deps.manifest.exchanges).toEqual([
-      {
-        domain: 'exchange.e2e.local',
-        endpoint: 'http://exchange:8081',
-        relationship: 'PROVIDER_RELATIONSHIP_DIRECT',
-      },
-    ]);
-  });
-
-  it('hoists per-exchange supported_profiles into a deduped top-level union', () => {
-    const raw = JSON.stringify([
-      { domain: 'a.test', endpoint: 'http://a:1', supported_profiles: ['p1', 'p2'] },
-      { domain: 'b.test', endpoint: 'http://b:1', supported_profiles: ['p2', 'p3'] },
-    ]);
-    const deps = buildDeps(parseEnv({ ...baseEnv, EXCHANGES_JSON: raw }));
-    expect(deps.manifest.supported_profiles).toEqual(['p1', 'p2', 'p3']);
-  });
-
-  it('omits supported_profiles when no exchange declares any', () => {
-    const raw = JSON.stringify([{ domain: 'a.test', endpoint: 'http://a:1' }]);
-    const deps = buildDeps(parseEnv({ ...baseEnv, EXCHANGES_JSON: raw }));
-    expect(deps.manifest.supported_profiles).toBeUndefined();
-  });
-
+describe('the Exchange hint', () => {
   it('sources exchangeUrl (X-FORA-Exchange hint) from EXCHANGE_URL', () => {
     const deps = buildDeps(parseEnv(baseEnv));
     expect(deps.exchangeUrl).toBe('http://exchange:8081');
+  });
+});
+
+// A Worker deployed from a package an earlier release built still carries the
+// settings that release made the discovery document and the RSL file from.
+// This release reads none of them: they parse, are dropped, and break nothing,
+// even a value the earlier release would have refused on the first request.
+describe('settings an earlier release read', () => {
+  it('parse, and the parsed settings carry none of them', () => {
+    const env = parseEnv({ ...baseEnv, ...EARLIER_RELEASE_SETTINGS });
+    for (const name of Object.keys(EARLIER_RELEASE_SETTINGS)) {
+      expect(env, name).not.toHaveProperty(name);
+    }
+  });
+
+  it('assemble a Worker as if they were absent', () => {
+    expect(() => buildDeps(parseEnv({ ...baseEnv, ...EARLIER_RELEASE_SETTINGS }))).not.toThrow();
   });
 });
 
@@ -119,36 +104,6 @@ describe('FORA_VERIFY_KEYS', () => {
   it('rejects a non-Ed25519 JWK', () => {
     const raw = JSON.stringify([{ kty: 'RSA', crv: 'Ed25519', kid: 'k', x: 'AA' }]);
     expect(() => buildDeps(parseEnv({ ...baseEnv, FORA_VERIFY_KEYS: raw }))).toThrow();
-  });
-});
-
-describe('CATALOG_CONTRIBUTORS_JSON', () => {
-  it('omits the manifest field when env is unset', () => {
-    const deps = buildDeps(parseEnv(baseEnv));
-    expect(deps.manifest.catalog_contributors).toBeUndefined();
-  });
-
-  it('parses a list of contributors', () => {
-    const raw = JSON.stringify([
-      { domain: 'catalog-contributor-e2e', relationship: 'harness' },
-      { domain: 'wordpress-plugin', relationship: 'cms' },
-    ]);
-    const deps = buildDeps(parseEnv({ ...baseEnv, CATALOG_CONTRIBUTORS_JSON: raw }));
-    expect(deps.manifest.catalog_contributors).toEqual([
-      { domain: 'catalog-contributor-e2e', relationship: 'harness' },
-      { domain: 'wordpress-plugin', relationship: 'cms' },
-    ]);
-  });
-
-  it('rejects malformed JSON', () => {
-    expect(() =>
-      buildDeps(parseEnv({ ...baseEnv, CATALOG_CONTRIBUTORS_JSON: 'not-json' })),
-    ).toThrow();
-  });
-
-  it('rejects entries missing required fields', () => {
-    const raw = JSON.stringify([{ domain: 'x' }]); // missing relationship
-    expect(() => buildDeps(parseEnv({ ...baseEnv, CATALOG_CONTRIBUTORS_JSON: raw }))).toThrow();
   });
 });
 

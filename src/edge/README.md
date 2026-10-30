@@ -16,9 +16,11 @@ no separate "licensed" path or hostname. On every request the Worker decides:
 | No signature, browser-like client | Pass through to origin untouched. Normal website traffic never sees a 403. |
 | No signature, AI-bot User-Agent | 403 with an `X-Content-Rules` header and a JSON body pointing at `/.well-known/fora.json`, where the bot learns how to buy access. |
 
-The discovery files `/.well-known/fora.json` and
-`/.well-known/http-message-signatures-directory` are always served without any
-signature.
+The discovery addresses are never gated and need no signature. The publisher's
+own `/.well-known/fora.json` and `/rsl.txt` are files on its origin: the Worker
+passes both through to it for every client, an AI bot included, and returns the
+origin's answer unchanged. The key directory,
+`/.well-known/http-message-signatures-directory`, the Worker serves itself.
 
 The end-to-end proof of all four outcomes on one article path runs on the real
 Cloudflare runtime: `npm run test:e2e:article`.
@@ -138,8 +140,9 @@ Cloudflare routing behavior).
 **AWS Lambda@Edge is deliberately exempt from this check.** On AWS the roles
 are reversed: CloudFront verifies its RSA signed URLs natively (trusted key
 group) and CloudFront fetches the origin itself; the Lambda function sits in
-front only for the bot gate (the check that blocks unpaid AI bots) and the
-discovery routes. Running it without `ORIGIN_URL` is the intended production
+front only for the bot gate (the check that blocks unpaid AI bots) and the key
+directory, and hands every other read back to CloudFront, the publisher's own
+discovery document and RSL file included. Running it without `ORIGIN_URL` is the intended production
 shape there, so the guard must not apply — this difference is intentional;
 do not add the check to the AWS adapter.
 (Setting `ORIGIN_URL` on Lambda still works if a deployment wants the Worker
@@ -154,7 +157,8 @@ Rules the origin should follow:
   forwarding; the site should not use these names for its own purposes.
 - POST/PUT and other non-read methods on *unsigned* requests are forwarded
   as-is (body included) and are never bot-gated; GET/HEAD without a signature
-  go through the bot check.
+  go through the bot check, apart from the publisher's own
+  `/.well-known/fora.json` and `/rsl.txt`, which are forwarded for every client.
 - A *signed* URL authorizes reading only. The signature covers the URL, not
   the method or body, so a signed request with a write method is always
   refused (405).
@@ -242,7 +246,8 @@ The third script **is** part of a deployment path:
   builds it, and an `index.mjs` beside it that assigns a per-deployment
   config file's values to `process.env` and re-exports the handler.
   Lambda@Edge has no environment variables, so the settings travel in the
-  package. This is the same layout the console hands a publisher. The script
+  package. It takes the publisher hostname as `--domain`, which `index.mjs`
+  names in its header. This is the same layout the console hands a publisher. The script
   smoke-invokes the result so a broken config fails the build, not the
   deploy. The AWS deployment tooling
   (`deploy/terraform/scripts/build-lambda-edge.sh`) and the E2E stack's

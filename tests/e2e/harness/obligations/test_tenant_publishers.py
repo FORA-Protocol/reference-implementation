@@ -135,7 +135,7 @@ def _register(stack: StackURLs, factory: PublisherFactory, name: str, rate: Deci
     publisher = factory()
     site = mint_site()
     onboarding = onboard(stack, publisher, site)
-    assert onboarding.registered.verified, f"{name}: {site.domain} was not registered: {onboarding}"
+    assert onboarding.connected.verified, f"{name}: {site.domain} was not verified: {onboarding}"
     key = mint_site_key(site)
     publish(stack, site, manifest=onboarding.files[MANIFEST_FILE].body, key=key)
     return Tenant(name, publisher, site, onboarding, Catalog(stack.exchange, key.signer), rate)

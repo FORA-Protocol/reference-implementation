@@ -45,7 +45,7 @@ class AfterSigning(httpx.BaseTransport):
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         request.read()
         if self._alter is not None:
-            request = self._alter(request)
+            request = _with_extensions_of(request, self._alter(request))
         response = self._send(request)
         for _ in range(self._sends - 1):
             response.read()
@@ -97,6 +97,17 @@ class Capture:
         return [(str(request.url), request.headers.get(name, "")) for request in self._sent]
 
 
+def _with_extensions_of(original: httpx.Request, altered: httpx.Request) -> httpx.Request:
+    """``altered``, carrying ``original``'s extensions wherever it set none of its own.
+
+    httpx keeps a client's timeouts in ``request.extensions``. A request an alteration
+    builds anew has no extensions, and the transport would then wait on a silent peer
+    for ever instead of timing out as the SDK's client asked.
+    """
+    altered.extensions = {**original.extensions, **altered.extensions}
+    return altered
+
+
 def _copy(request: httpx.Request, *, content: bytes | None = None, drop: str = "") -> httpx.Request:
     headers = [
         (k, v)
@@ -104,7 +115,9 @@ def _copy(request: httpx.Request, *, content: bytes | None = None, drop: str = "
         if k.lower() not in {drop.lower(), "content-length"}
     ]
     body = request.content if content is None else content
-    return httpx.Request(request.method, request.url, headers=headers, content=body)
+    return httpx.Request(
+        request.method, request.url, headers=headers, content=body, extensions=request.extensions
+    )
 
 
 def drop_header(name: str) -> Alteration:

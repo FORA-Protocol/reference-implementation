@@ -1,3 +1,9 @@
+variable "publisher_domain" {
+  description = "The publisher's own hostname, the domain its discovery document names, e.g. demo.publisher.example."
+  type        = string
+  nullable    = false
+}
+
 variable "exchange_fqdn" {
   description = "Full hostname of the Exchange that represents this publisher, e.g. exchange.demo.publisher.example. The endpoint URL is derived as https://<exchange_fqdn>."
   type        = string

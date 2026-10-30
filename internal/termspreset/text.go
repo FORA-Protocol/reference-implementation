@@ -8,9 +8,9 @@ import (
 )
 
 // PriceText says what a price asks, in the words a publisher reads it in
-// wherever the console shows one: "free", "0.05 EUR per fetches", or
+// wherever the console shows one: "free", "0.05 EUR per fetch", or
 // "12 EUR once" for a flat fee. It reports the price as stated and never
-// computes from it.
+// computes from it. The unit is said the way SingularUnit says it.
 //
 // A pricing model this package does not name is said in the protocol's own
 // token, so a term priced some newer way is shown as what it is rather than
@@ -21,13 +21,50 @@ func PriceText(p *forav1.Pricing) string {
 	case forav1.PricingModel_PRICING_MODEL_FREE:
 		return "free"
 	case forav1.PricingModel_PRICING_MODEL_PER_UNIT:
-		return amount + " per " + p.GetUnit()
+		return amount + " per " + SingularUnit(p.GetUnit())
 	case forav1.PricingModel_PRICING_MODEL_FLAT:
 		return amount + " once"
 	default:
 		model := strings.ToLower(strings.TrimPrefix(p.GetModel().String(), "PRICING_MODEL_"))
 		return strings.TrimSpace(amount + " " + model)
 	}
+}
+
+// SingularUnit is a metering unit as a price reads it: "per fetch", not
+// "per fetches".
+//
+// The protocol's registered units are plural -- fetches, accesses, pages --
+// because they count what was metered: an estimate is five fetches. A unit
+// price is about one of them. Only the words change: the token stays plural
+// everywhere it is data, in an offer, a catalog feed and the Exchange's
+// denomination. The rule is the one the offer preview on the protocol's own
+// website uses (singularUnit, in the github.com/FORA-Protocol/protocol
+// module), so a publisher reads the same words there and here. A hyphen reads
+// as a space: "sq-km" is "sq km".
+func SingularUnit(token string) string {
+	text := strings.ReplaceAll(strings.TrimSpace(token), "-", " ")
+	n := len(text)
+	switch {
+	case n == 0:
+		return ""
+	case pluralAddsES(text):
+		return text[:n-2]
+	case n >= 2 && text[n-1] == 's' && text[n-2] != 's':
+		return text[:n-1]
+	default:
+		return text
+	}
+}
+
+// pluralAddsES reports whether text ends in a plural that adds "es" to a
+// sibilant, as fetches, accesses and boxes do.
+func pluralAddsES(text string) bool {
+	for _, ending := range []string{"ches", "shes", "ses", "xes", "zes"} {
+		if strings.HasSuffix(text, ending) {
+			return true
+		}
+	}
+	return false
 }
 
 // FunctionLabel names a use the way the console shows it to a publisher, who is

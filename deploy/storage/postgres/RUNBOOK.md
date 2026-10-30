@@ -295,7 +295,7 @@ new agent by hand before it can buy.
 | `reporting_policy` | Same. |
 | `allow_broker_relay` | **SQL only** — no API writes this column. |
 | `activate_new_agents_by_default` | **SQL only** — no API writes this column yet. |
-| Creating a tenant | **SQL only** — no API creates a tenant row (§4.2). |
+| Creating a tenant | **SQL, or the Exchange's boot fixture** — no API creates a tenant row. With `EXCHANGE_BOOT_FIXTURE_FILE` set, the Exchange creates each seat the file declares at start-up when it is absent (`src/exchange/CONFIGURATION.md` §2.1). |
 | `fora.tenant_resource_owner_fee` overrides | **SQL only.** |
 
 **Adding an agent by SQL — only half of what is needed.** Agents normally register
@@ -366,10 +366,13 @@ overwrite each other's state nor block each other at boot.
 ### 4.2 Onboarding and configuration by SQL
 
 Bringing a deployment live has an Exchange half (keys, catalog ingest, edge
-configuration) and a database half. **The database half is the seat row.**
-Publishers and their sites are registered by the publishers themselves, through
-the publisher console; you write those rows only when there is no console yet,
-or when recovering one registration that went wrong. The full procedure,
+configuration) and a database half. **The database half is the seat row**,
+which the Exchange's boot fixture can create instead of SQL
+(`src/exchange/CONFIGURATION.md` §2.1). Publishers and their sites are registered
+by the publishers themselves, through the publisher console; you write those rows
+only when there is no console yet, or when recovering one registration that went
+wrong, and a deployment with no console can declare them in the boot fixture
+instead. The full procedure,
 and the value each column must carry, is in the Exchange's runbook,
 `src/exchange/RUNBOOK.md`, and is not repeated here. What this document adds is
 the constraints that will reject the write:
@@ -562,7 +565,7 @@ survive; escalate.
 | `fora.catalog` | **Reconstructible** — re-ingest the publisher's feed through the Exchange. |
 | `fora.agents` | **Reconstructible** — agents re-register on their next call, or re-insert by SQL (§4.1). |
 | `broker.exchanges` | **Reconstructible** — re-created from the Broker's registry file at its next start. |
-| `fora.tenants`, `fora.publishers`, `fora.publisher_domains`, `fora.publisher_domain_listings`, `fora.publisher_grants`, `fora.tenant_resource_owner_fee` | Reconstructible **only from your own records** — no API creates these rows (§4.2). |
+| `fora.tenants`, `fora.publishers`, `fora.publisher_domains`, `fora.publisher_domain_listings`, `fora.publisher_grants`, `fora.tenant_resource_owner_fee` | Reconstructible **only from your own records** — no API creates these rows (§4.2). A boot fixture is such a record: the seats, publishers, sites and listings it declares are created again at the next start. Grants and fee overrides are not in it. |
 | `fora.transaction_log` | **Not reconstructible.** One row per delivered resource; the billing record. Loss is unbillable revenue. |
 | `fora.transaction_evidence` | **Not reconstructible, and the costliest.** The signed offer plus both parties' signatures — the only proof of what was agreed, and it can be checked without any service running. Losing it removes your ability to answer a billing dispute. |
 | `fora.transaction_events` | Not reconstructible. The record of refused purchases that the publisher console's revenue totals count; losing it empties those counts for the period lost. No financial impact. |

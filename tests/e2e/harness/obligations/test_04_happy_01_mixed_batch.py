@@ -10,8 +10,8 @@ not recognise gets no offer and a reason (BROWSE-003).
 V1 reading: the structural failure mode the catalog produces for an unknown
 URI is ``OFFER_ABSENCE_REASON_NOT_IN_CATALOG``. Driven against two known demo
 philosophy resources (socrates + heraclitus, both FREE EUR) and one
-never-seeded demo URI, as the test's own agent (``fresh_agent``, academic, EU),
-registered at exchange-a. Every call is the SDK's own, signed with the agent's own
+never-seeded demo URI, as the test's own agent (``fresh_agent``), registered at
+exchange-a. Every call is the SDK's own, signed with the agent's own
 key and read through the SDK's typed results. The free purchase owes a usage report this test
 never files, which is why the agent is the test's own: the unreported
 obligation stays with an agent no other test buys as.
@@ -22,12 +22,9 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from fora_sdk import ProtocolVersion
-from wire.models import ResourceQuery
 
-from ..broker_purchase import one_group_per_uri, only_verified_offer
+from ..broker_purchase import one_group_per_uri, only_verified_offer, resource_query
 from ..conftest import StackURLs
-from ..constants import requester
 from ..edge_fetch import fetch_signed
 from ..exchanges import EXCHANGE_A_DOMAIN
 from ..fresh_agent import FreshAgent
@@ -56,14 +53,7 @@ def test_mixed_batch_groups_known_offers_and_not_in_catalog_reason(
     client = fresh_agent.exchange(EXCHANGE_A_DOMAIN)
     unseeded_uri = f"http://{DEMO_PHILOSOPHY_DOMAIN}/articles/never-seeded-{uuid.uuid4().hex}.txt"
     uris = [_KNOWN_URI_A, _KNOWN_URI_B, unseeded_uri]
-    result = client.discover(
-        ResourceQuery(
-            ver=ProtocolVersion,
-            exchange=EXCHANGE_A_DOMAIN,
-            uris=uris,
-            requester=requester(fresh_agent.agent_id, user_type="academic", geography="EU"),
-        )
-    )
+    result = client.discover(resource_query(EXCHANGE_A_DOMAIN, uris))
     groups = one_group_per_uri(result, uris, "batch discovery")
 
     # Every group says how its URI was found, the two hits and the miss alike.

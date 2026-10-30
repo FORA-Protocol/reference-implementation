@@ -20,3 +20,10 @@ SELECT * FROM sor.agent_accounts WHERE subdomain = $1;
 
 -- name: GetAgentAccountActive :one
 SELECT active FROM sor.agent_accounts WHERE billing_ref = $1;
+
+-- name: SetAgentAccountActive :execrows
+-- Sets the SoR-owned active flag of one account: the operator's out-of-band
+-- approval, or switching an account off. No production path of the Exchange
+-- runs it; the operator's switch lives in the SoR itself. The row count lets the
+-- caller tell an unknown billing_ref (0) from an update (1).
+UPDATE sor.agent_accounts SET active = $2 WHERE billing_ref = $1;

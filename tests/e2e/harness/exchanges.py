@@ -10,9 +10,11 @@ inside the compose network is the same string and from the host is an ephemeral
 Every addressed request carries the identity, so a suite that has a URL and needs
 to say who it is talking to comes here. This module holds the four identities,
 the in-network URL built from each, and the mapping between a URL and an identity
-in both directions. Other views of the same exchanges exist elsewhere — the
-seed maps an identity to the database that exchange owns — and each of them
-derives its keys from the constants here rather than respelling them.
+in both directions. Other views of the same exchanges exist elsewhere. The seed
+maps each identity to the URL a run reaches it at, and derives its keys from the
+constants here rather than respelling them. Each exchange's boot fixture declares
+its seat under the identity as a literal, and
+``test_guards_exchange_boot_fixtures.py`` holds it to the constants here.
 
 The SEAT each exchange runs is here too. A ``fora.tenants`` row is the Exchange
 seat rather than a publisher, so the seat's domain IS the exchange identity
@@ -31,14 +33,16 @@ from .stack_urls import StackURLs
 # docker-compose.e2e.yml: an exchange refuses a request that names anything else.
 EXCHANGE_A_DOMAIN = "exchange:8081"
 EXCHANGE_B_DOMAIN = "exchange-b:8081"
-# exchange-c is the account suite's RESERVED never-registered target: no test
-# may open an account there. Three of that suite's assertions are claims about a
-# total — this agent has no account here — and a refusal cannot be observed
-# anywhere the agent already holds one, because Register is idempotent. See the
-# docstring of test_multi_exchange_mcp and exchange-c's own compose block.
+# exchange-c is the MCP account suite's RESERVED never-registered target: that
+# suite's shared agent never opens an account there. Three of its assertions are
+# claims about a total — this agent has no account here — and a refusal cannot be
+# observed anywhere the agent already holds one, because Register is idempotent.
+# Accounts are per agent, so a test's own agent (fresh_agent) opening one here
+# leaves the reservation intact. See the docstring of test_multi_exchange_mcp and
+# exchange-c's own compose block.
 EXCHANGE_C_DOMAIN = "exchange-c:8081"
-# exchange-d is the seat that REFUSES purchases the Broker relays: the seed
-# writes it with allow_broker_relay = FALSE. It sells the archive site only.
+# exchange-d is the seat that REFUSES purchases the Broker relays: its boot
+# fixture declares it with allow_broker_relay false. It sells the archive site only.
 EXCHANGE_D_DOMAIN = "exchange-d:8081"
 
 # The URL each exchange answers on INSIDE the compose network, where the host and
@@ -84,8 +88,9 @@ SERVICE_IDENTITIES = {
     "exchange-d": EXCHANGE_D_DOMAIN,
 }
 
-# The exchanges whose seat refuses purchases the Broker relays. The seed writes
-# allow_broker_relay = FALSE on exactly these seats and TRUE on every other one.
+# The exchanges whose seat refuses purchases the Broker relays. The boot fixtures
+# declare allow_broker_relay false on exactly these seats and true on every other
+# one (test_guards_exchange_boot_fixtures.py).
 RELAY_REFUSING_EXCHANGES = frozenset({EXCHANGE_D_DOMAIN})
 
 # The seat each exchange runs, as a tenant id.

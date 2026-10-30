@@ -81,9 +81,9 @@ func (a *InMemoryAdapter) IsActive(_ context.Context, billingRef string) (bool, 
 // Adapter port: the SoR owns the flag and the operator changes it inside the SoR,
 // out of band — never through the Exchange. This method is that out-of-band
 // switch for the in-memory backend; harnesses and tests use it to model the
-// operator's action. (The Postgres backend's equivalent is a direct row update
-// in the SoR's own database.)
-func (a *InMemoryAdapter) SetActive(billingRef string, active bool) error {
+// operator's action. PostgresAdapter.SetActive is the same switch on the
+// Postgres backend.
+func (a *InMemoryAdapter) SetActive(_ context.Context, billingRef string, active bool) error {
 	if err := validateBillingRef(billingRef); err != nil {
 		return err
 	}

@@ -2,12 +2,12 @@
 // do, in what order, and the commands for the network they already run.
 //
 // The text lives in a data file next to this code rather than on the public
-// website, so the website has nothing to keep in step and two callers read one
-// copy of it: the public preview page, which shows a visitor what onboarding
-// would involve, and the publisher console, which shows the same steps to
-// someone who has registered and gives them the real values. The wording is
-// provisional: the onboarding guide being written against a real publisher
-// integration will own it, and this file is where that guide lands.
+// website, so the website has nothing to keep in step, and two callers read one
+// copy of it. The public preview answers a visitor with the whole path, in the
+// publisher console's own order: the business, the domain, the terms, and the
+// two tasks that connect the site, the discovery file and the edge package. The
+// console reads only the network's edge step, for the deploy commands on the
+// wizard's last step, with the publisher's real values in them.
 package setupsteps
 
 import (
@@ -93,8 +93,8 @@ func mustParse() data {
 // with the edge step replaced by the variant for the network they run and the
 // manifest attached to the step that asks them to serve it.
 //
-// A publisher on no supported network gets the same path with a different third
-// step, rather than a truncated one. The other three steps are the same work
+// A publisher on no supported network gets the same path with a different edge
+// step, rather than a truncated one. The other steps are the same work
 // whichever network they use, and showing them is what makes the conversation
 // they are invited into a short one.
 func For(provider cdn.Provider, host string, manifest json.RawMessage) []Step {

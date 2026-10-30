@@ -92,8 +92,8 @@ func controlsOf(t exchangeclient.Terms) termspreset.Controls {
 
 // controlsOrDefault is controlsOf for a site whose terms may not be chosen yet.
 // Such a site's files are built with the terms the licensing step opens on,
-// the way a domain's files are built mid-wizard, rather than with an empty set
-// of controls, which would build a term that permits everything.
+// rather than with an empty set of controls, which would build a term that
+// permits everything.
 func controlsOrDefault(t *exchangeclient.Terms) termspreset.Controls {
 	if t == nil {
 		return defaultTerms()

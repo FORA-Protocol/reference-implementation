@@ -18,7 +18,7 @@ publisher's article pages. It needs:
 | Dependency | Required? | Why |
 |---|---|---|
 | A Cloudflare zone with proxied DNS | **Yes** | A "zone" is a domain in Cloudflare. The Worker only runs on proxied traffic. |
-| A reachable origin | **Yes** | The real backend holding the article pages. Reached either through the zone (`SAME_ZONE_ORIGIN`) or at an explicit address (`ORIGIN_URL`) — §3.1. |
+| A reachable origin | **Yes** | The real backend holding the article pages, and the publisher's own `/.well-known/fora.json` (and `/rsl.txt` if it has one), which the Worker passes through to it — §3.4. Reached either through the zone (`SAME_ZONE_ORIGIN`) or at an explicit address (`ORIGIN_URL`) — §3.1. |
 | The Exchange's key directory | Yes, at runtime | Fetched over the public internet to get the public keys that signed URLs are checked against (`EXCHANGE_WBA_URL`). |
 
 Before you start, note six things that operators often look for; most of them
@@ -84,20 +84,15 @@ on **every** request, article traffic included. It is not a partial failure.
 |---|---|---|---|
 | `EXCHANGE_URL` | **Required** | Base address of the Exchange. Its **only** runtime effect is the `X-FORA-Exchange` header on a bot denial — a hint telling the bot where to negotiate. The Worker never calls this address. | `https://exchange.example` |
 | `EXCHANGE_WBA_URL` | **Required** | The Exchange's public-key directory. This is the address the Worker actually fetches, to get the keys that verify signed URLs. | `https://exchange.example/.well-known/http-message-signatures-directory` |
-| `PROVIDER` | **Required** | The publisher's identifier, usually its domain. Published as the `domain` field of the discovery document. | `www.publisher.example` |
-| `EXCHANGES_JSON` | **Required** | JSON list of the Exchanges that represent this publisher, published in the discovery document. **Read §3.5 before writing this** — it carries the payee id. | see §3.5 |
 | `SAME_ZONE_ORIGIN` | One of the two, see §3.1 | `"true"` forwards to the zone's own configured origin. Cloudflare-only. | `true` |
 | `ORIGIN_URL` | One of the two, see §3.1 | Explicit address of a dedicated backend. | `https://origin.publisher.example` |
 | `FORA_VERIFY_KEYS` | Optional | JSON list of public keys to pin, skipping the network fetch — §3.2. | `[{"kty":"OKP","crv":"Ed25519","x":"<43-char base64url>"}]` |
 | `WBA_KEYS_JSON` | Optional | JSON list of the **publisher's own** public signing keys, served in its key directory. Unset is a legitimate configuration — §3.4. | see §3.4 |
 | `WBA_REVOCATION_URL` | Optional | Address where verifiers check whether the publisher's own keys were withdrawn. Ignored unless `WBA_KEYS_JSON` is also set. | `https://www.publisher.example/key-revocations` |
 | `WBA_SIGNED_DIRECTORY_JSON` | Optional | The key directory pre-signed for this host, `{body, content_digest, signature_input, signature}`, made offline with `scripts/sign-wba-directory.mjs` by whoever holds the key. Served verbatim in place of the unsigned directory. When `WBA_KEYS_JSON` is also set, the body must list exactly those keys. | the output of the signing tool |
-| `RSL_BODY` | Optional | Text served at `/rsl.txt` as a licensing hint. Unset, empty, or whitespace-only returns 404 — §3.4. | `# RSL hint` |
-| `ACME_TOKENS_JSON` | Optional | JSON map of domain-verification tokens to their answers. Unset means every token address returns 404 — §3.4. | `{"token123":"challenge-response"}` |
-| `CATALOG_CONTRIBUTORS_JSON` | Optional | JSON list of other parties allowed to add content on the publisher's behalf. Unset means only `PROVIDER` itself may. | `[{"domain":"partner.example.com","relationship":"licensee"}]` |
 | `BOT_UA_ALLOW_JSON` | Optional | Replaces the built-in search-crawler list — §3.3. | `["Googlebot","bingbot"]` |
 | `BOT_UA_DENY_JSON` | Optional | Replaces the built-in AI-bot list — §3.3. | `["GPTBot","ClaudeBot"]` |
-| `LICENSED_PATHS_JSON` | Optional | JSON list of the path prefixes the publisher licenses, each starting with `/`. An unsigned read from an AI bot is refused only under these; the rest of the site passes to the origin. The discovery documents answer everywhere. Unset or `[]` means the whole site. Matching fails closed: percent-escapes are decoded, repeated slashes merged and case ignored before comparing, and a path that cannot be decoded or holds a dot segment counts as licensed. | `["/articles/","/archive/"]` |
+| `LICENSED_PATHS_JSON` | Optional | JSON list of the path prefixes the publisher licenses, each starting with `/`. An unsigned read from an AI bot is refused only under these; the rest of the site passes to the origin. The discovery addresses answer everywhere: §3.4. Unset or `[]` means the whole site. Matching fails closed: percent-escapes are decoded, repeated slashes merged and case ignored before comparing, and a path that cannot be decoded or holds a dot segment counts as licensed. | `["/articles/","/archive/"]` |
 | `FORA_ENFORCE_BINDING` | Optional | `"false"` switches this Worker to the weaker mode, where a delivery address works for whoever holds it. Unset means the proof check runs — §3.6. | `true` |
 
 All values are strings, including the ones that look like lists or booleans:
@@ -111,6 +106,17 @@ on `wrangler deploy`. The deploy reports success and the Worker then answers
 values, not on names: a variable outside the table above is simply ignored, so a
 misspelled name behaves exactly like an unset one. Nothing at deploy time will
 tell you. Manually compare the names you set against the table.
+
+**Settings an earlier release read.** `PROVIDER`, `EXCHANGES_JSON`,
+`CATALOG_CONTRIBUTORS_JSON` and `RSL_BODY` once made the discovery document and
+the RSL file the Worker answered itself. This release reads none of them: it
+passes both addresses through to the origin (§3.4). A deployment that still sets
+them keeps running, and they are ignored like any other unknown name, a value
+that would once have failed every request included. **Before you deploy this
+release over one that used them, put both files on the origin**: the
+`fora.json` your Exchange operator handed you at `/.well-known/fora.json`, and
+your RSL document at `/rsl.txt` if you published one. Otherwise agents find
+nothing at those addresses.
 
 ---
 
@@ -219,18 +225,30 @@ name fragments like the built-ins — the size caps limit how much text is scann
 but they cannot save you from a badly written pattern such as `(a+)+`, which can
 take a very long time to run.
 
-### 3.4 The optional documents — what "unset" actually serves
+### 3.4 The discovery addresses — which the Worker answers, and which it passes on
 
-Five addresses the Worker answers itself. Three of them behave differently when
-their variable is unset, and the differences are easy to mistake for errors.
+Two addresses the Worker answers itself, and two it passes through to the origin.
+None of the four is gated, and none is subject to `LICENSED_PATHS_JSON`, whoever
+asks.
 
-| Address | Variable | Set | Unset |
-|---|---|---|---|
-| `/healthz` | none | — | Always `200` with the body `ok` |
-| `/.well-known/fora.json` | `PROVIDER`, `EXCHANGES_JSON` | The discovery document | Cannot happen — both are required |
-| `/.well-known/http-message-signatures-directory` | `WBA_KEYS_JSON` | The publisher's public keys, as a Web Bot Auth key directory | **404** |
-| `/rsl.txt` | `RSL_BODY` | The text you supplied, unchanged | **404** when unset, empty, or whitespace-only |
-| `/.well-known/fora-verify/<token>` | `ACME_TOKENS_JSON` | The answer for a known token; 404 for any other | **404 for every token** |
+| Address | Who answers | What comes back |
+|---|---|---|
+| `/healthz` | the Worker | Always `200` with the body `ok` |
+| `/.well-known/http-message-signatures-directory` | the Worker, from `WBA_KEYS_JSON` | The publisher's public keys, as a Web Bot Auth key directory; **404** when `WBA_KEYS_JSON` is unset |
+| `/.well-known/fora.json` | the origin | The publisher's own discovery document — the `fora.json` the Exchange operator hands the publisher, served from the publisher's site |
+| `/rsl.txt` | the origin | The publisher's own RSL document, if its site has one; the origin's **404** if not |
+
+**The discovery document and the RSL file are the publisher's files, not the
+Worker's.** The Worker forwards both addresses to the origin and returns the
+origin's answer unchanged — status, headers and body — to every client, an AI
+bot included, with no signed address asked for. The reserved signed-address
+parameters are stripped from the forward, as on every pass-through. The
+publisher changes who may sell or import its pages by editing its own file;
+nothing in the Worker's settings describes it, so nothing here can disagree with
+it. If the origin cannot be reached, the Worker answers `502` with the reason
+`origin_fetch_failed` — it never makes a document of its own. On a deployment
+whose CDN fetches the origin itself (CloudFront with no origin mode), the
+function hands the request back to the CDN, as for content.
 
 **`WBA_KEYS_JSON` has a strict shape.** It is a JSON array of 1 to 64 key
 objects, and every field below is required. A missing or different value makes
@@ -265,53 +283,43 @@ check signed URLs — those come from the *Exchange's* directory at
 `EXCHANGE_WBA_URL` and are never served here.
 
 Note that `/rsl.txt` and `/healthz` sit at the top level, not under
-`/.well-known/`, and that all five addresses are answered by the Worker rather
-than passed to the origin. If the site already publishes its own document at one
-of these addresses, the Worker answers instead of the site.
+`/.well-known/`. The Worker matches each address exactly: `/.well-known/fora.json/`
+or any other spelling is an ordinary path, gated like the rest of the site.
 
-This table says what each address serves; §8 traces every field of the two
-discovery documents back to the setting that produces it, and names where a
-filled-in copy of each document lives.
+This table says who answers each address; §3.5 covers the one field of the
+discovery document that decides who gets paid, and §8 names where a filled-in
+copy of each document lives.
 
-### 3.5 `EXCHANGES_JSON` — and the payee id inside it
+### 3.5 The payee id in the publisher's `fora.json`
 
-Each entry in the list takes this shape:
+The publisher's discovery document lists the Exchanges that sell its pages, in
+`exchanges[]`. Each entry takes this shape:
 
-| Field | Required? | What it is |
-|---|---|---|
-| `domain` | **Yes** | The Exchange's own canonical domain. Must match **exactly** what the Exchange calls itself, or the payee lookup below finds nothing. |
-| `endpoint` | **Yes** | Full address of the Exchange. |
-| `supported_profiles` | Optional | Profile names for this entry; omitting it means none. That is the input side — the served document publishes the combined list at the top level instead, and leaves the field out when no entry names one (§8.1). |
-| `ext` | **Effectively required** | Extension map. Carries `resource_owner_id`. |
+| Field | What it is |
+|---|---|
+| `domain` | The Exchange's own canonical domain. Must match **exactly** what the Exchange calls itself, or the payee lookup below finds nothing. |
+| `endpoint` | Full address of the Exchange. |
+| `relationship` | `PROVIDER_RELATIONSHIP_DIRECT`. |
+| `ext` | Extension map. Carries `resource_owner_id`. |
 
 **`ext.resource_owner_id` is the publisher's payee id — the account that
 receives the payments for the content.** The Exchange reads it out of the
-discovery document this Worker serves, matching on the entry whose `domain`
-equals the Exchange's own. The Worker never computes this value itself, and
+document the publisher's origin serves, matching on the entry whose `domain`
+equals the Exchange's own. Nothing computes this value for the publisher, and
 there is no default:
 
 > **Without it, every catalog push for this publisher is rejected**, with the
 > reason `missing_resource_owner_id`. The publisher's content never enters the
 > catalog, so nothing about it can ever be sold — while the Worker itself looks
-> perfectly healthy and serves the discovery document without complaint.
+> perfectly healthy and passes the discovery document through without complaint.
 
-A complete entry:
-
-```json
-[{"domain":"exchange.example",
-  "endpoint":"https://exchange.example",
-  "supported_profiles":["fora-news-v1"],
-  "ext":{"resource_owner_id":"publisher-01"}}]
-```
-
-Two things to confirm with the Exchange operator before you deploy: the exact
-`domain` string the Exchange identifies itself by, and the `resource_owner_id`
-value to declare. They fail differently. A wrong `domain` matches no entry, so
-every catalog push is rejected with `missing_resource_owner_id` and you see it.
-A wrong `resource_owner_id` is accepted — the Exchange checks only that it is
-non-empty and never validates it — so the content sells and the revenue is
-attributed to an account the Exchange operator does not recognise, with nothing
-rejected and nothing logged.
+The publisher console writes the whole file for a publisher, payee id included,
+and the Exchange checks it: a domain registered on this Exchange whose document
+attests another payee is refused with `resource_owner_id_mismatch`. A publisher
+writing the file by hand confirms two things with the Exchange operator: the
+exact `domain` string the Exchange identifies itself by, and the
+`resource_owner_id` it registered the site under. A filled-in copy is in
+[`../../deploy/publisher-wellknown/fora.json.example`](../../deploy/publisher-wellknown/fora.json.example).
 
 ---
 
@@ -358,7 +366,6 @@ value needs a code change and a redeploy.
 | Keys per directory | at most 64 | A larger key set is rejected. |
 | Caller identity string scanned | first **512** characters | The bot patterns are applied only to these characters. A marker after that point is never matched. |
 | Reserved query parameters | `exp`, `sig`, `kid`, `agent_id` | Stripped before every forward to the origin. The site must not use these names for its own purposes. |
-| Manifest document version (`ver` in `/.well-known/fora.json`) | `1.0` | Stamped from the SDK's `WellKnownManifestVersion`; there is no variable for it. It is the version of the manifest document, a namespace separate from the RPC envelope `ver`. A consumer accepts any minor of major 1 and refuses another major or an absent value, so the value here decides whether a Broker or an Exchange will read this Worker's manifest at all. |
 | `compatibility_date` | `2026-07-01` | The Cloudflare runtime version the code is developed against. Keep it aligned — see [`RUNBOOK.md`](RUNBOOK.md) §4.3. |
 | `compatibility_flags` | `["nodejs_compat"]` | Required; the code relies on it. |
 | Configuration read | once per isolate, then cached | An "isolate" is the small sandbox Cloudflare runs one copy of the Worker in. A variable change reaches traffic through a new deployment version, not through a live reload. |
@@ -391,8 +398,8 @@ network. Several of their values are deliberately unsuitable for production:
 |---|---|---|
 | `EXCHANGE_URL: "http://exchange:8081"` | Container-to-container names on a private bridge. | Unencrypted, and the hostname resolves nowhere on the internet. |
 | `EXCHANGE_WBA_URL: "http://…"` | Same. | Public keys fetched over unencrypted HTTP could be modified in transit. |
-| `ORIGIN_URL: "http://publisher:80"` | Same. | Same. |
-| `EXCHANGES_JSON` with `"domain":"exchange:8081"` | Matches the test Exchange's own identity, which is a container name and port. | A real deployment's `domain` is a real hostname — §3.5. |
+| `ORIGIN_URL: "http://publisher:8001"` | Same; one port per demo publisher, each answering with that publisher's own discovery documents. | Same. |
+| `"domain":"exchange:8081"` in the test publishers' `fora.json` | Matches the test Exchange's own identity, which is a container name and port. | A real deployment's `domain` is a real hostname — §3.5. |
 | `WBA_KEYS_JSON` from `deploy/edge-keys/edge.env` | Generated test keys for the local stack. The file is created by `scripts/gen-e2e-keys.sh`, is not tracked in git, and holds public keys only. | The matching private halves are throwaway test material on a developer machine, not the publisher's real keys. Generate the publisher's own keys, or leave the variable unset. |
 
 The commented-out `[vars]` block at the top of `wrangler.toml` is likewise an
@@ -409,8 +416,6 @@ marked *fill in* are specific to your deployment.
 |---|---|
 | `EXCHANGE_URL` | `https://exchange.example` |
 | `EXCHANGE_WBA_URL` | `https://exchange.example/.well-known/http-message-signatures-directory` |
-| `PROVIDER` | `www.publisher.example` |
-| `EXCHANGES_JSON` | `[{"domain":"exchange.example","endpoint":"https://exchange.example","supported_profiles":[]}]` — replace `exchange.example` with the Exchange's own domain, and add the `ext.resource_owner_id` field before content can be sold (§3.5) |
 | `FORA_ENFORCE_BINDING` | `true` — set explicitly in the block; the same as the unset default (§3.6) |
 | `SAME_ZONE_ORIGIN` | `true` |
 
@@ -427,43 +432,33 @@ Worker settings, the same for every environment:
 | Bindings | none |
 
 Everything not listed stays unset. In particular `FORA_VERIFY_KEYS`,
-`WBA_KEYS_JSON`, `ACME_TOKENS_JSON`, `BOT_UA_ALLOW_JSON` and
-`BOT_UA_DENY_JSON` are absent, which is the intended default in every case. A
-name that is not in the §2 table is not read at all, set or unset.
+`WBA_KEYS_JSON`, `BOT_UA_ALLOW_JSON` and `BOT_UA_DENY_JSON` are absent, which
+is the intended default in every case. A name that is not in the §2 table is
+not read at all, set or unset.
 
-The `ext.resource_owner_id` field is **not** in the checked-in staging block and
-must be added before the publisher's content can be sold — §3.5.
+The staging site's discovery document is not in this block either: it is the
+publisher's `fora.json`, served from its origin, with the payee id in it (§3.5).
 
 ---
 
-## 8. The two documents these variables produce
+## 8. The two discovery documents
 
-§2 lists the settings. This section traces each field of the two served documents
-back to the setting that produces it. Both documents are built in memory when the
-first request arrives and reused for every later one — there is no file to upload
-and none to keep in sync.
+§2 lists the settings. This section says where each discovery document comes
+from: the publisher's own file, or the Worker's settings.
 
 **A filled-in copy of each document is in
 [`../../deploy/publisher-wellknown/`](../../deploy/publisher-wellknown/)**, along
 with the operator's procedure for the signing key, the two publisher setups, and
-the `curl` checks. That folder is the worked example for the tables below; the
-test suite requests both addresses through the Worker's routes and compares the
-responses against those files, so they cannot drift away from what the code
-serves.
+the `curl` checks. The test suite checks both copies: the discovery document
+through the Exchange's own parser, and the key directory against the Worker's
+routes, so neither can drift away from what is served.
 
 ### 8.1 `/.well-known/fora.json`
 
-| Field | Comes from | Notes |
-|---|---|---|
-| `ver` | nothing — fixed in the code | The manifest document version (major 1), a namespace separate from the RPC envelope `ver`. §4. |
-| `role` | nothing — fixed in the code | Always `ROLE_PUBLISHER` here. |
-| `domain` | `PROVIDER` | Copied through unchanged. |
-| `exchanges[].domain` | `EXCHANGES_JSON` | Must match the Exchange's own name exactly — §3.5. |
-| `exchanges[].endpoint` | `EXCHANGES_JSON` | |
-| `exchanges[].relationship` | nothing — fixed in the code | Always `PROVIDER_RELATIONSHIP_DIRECT`; no variable changes it. |
-| `exchanges[].ext.resource_owner_id` | `EXCHANGES_JSON` | Present only when you supply it. The payee id — §3.5. |
-| `supported_profiles` | `EXCHANGES_JSON` | **Moves.** Written inside each entry, served once at the top level. The reference folder shows the result and what an empty list produces. |
-| `catalog_contributors` | `CATALOG_CONTRIBUTORS_JSON` | Names other parties, never the publisher itself. The reference folder explains when an entry is needed and what leaving the variable unset produces. |
+The publisher's own file on its origin; no setting here produces any field of it.
+The Worker passes the address through (§3.4). The console hands the publisher
+the file to serve, and the reference copy above shows every field; the one that
+decides who gets paid is `exchanges[].ext.resource_owner_id` (§3.5).
 
 ### 8.2 `/.well-known/http-message-signatures-directory`
 

@@ -21,7 +21,9 @@ import uuid
 from decimal import Decimal
 
 import pytest
+from fora_sdk import to_wire
 from fora_sdk.client import CallError
+from wire.models import LicenseTerm, PushResourcesRequest
 
 from ..after_signing import strip_signature
 from ..catalog_calls import (
@@ -74,10 +76,11 @@ from ..exchanges import EXCHANGE_B_DOMAIN
 from ..fresh_agent import FreshAgent
 from ..httpsig_signer import unpublished_signer
 from ..malformed import Alteration, Mutation, Request, malformed
+from ..model_edits import with_members
 from ..money_path import typed_reasons
 from ..obligation_registry import Obligation, obligation
 from ..publisher_sites import SITE_ZONE
-from ..seed import SELFPUB_PHILOSOPHY_KEY_PATH, SELFPUB_SFX_KEY_PATH, SeededFixture
+from ..seed import SELFPUB_PHILOSOPHY_KEY_PATH, SELFPUB_SFX_KEY_PATH
 from ..stack_urls import StackURLs
 
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
@@ -96,7 +99,7 @@ _SIGNATURE_REFUSALS = {
 }
 
 
-def _unknown_unit_term() -> dict[str, object]:
+def _unknown_unit_term() -> LicenseTerm:
     return license_term(
         model=PRICING_MODEL_PER_UNIT, rate=0.1, unit=_UNREGISTERED_UNIT, estimated_quantity=1
     )
@@ -105,7 +108,6 @@ def _unknown_unit_term() -> dict[str, object]:
 @obligation(Obligation.CATALOG_001, negative=True)
 def test_a_push_with_a_wire_tier_failure_stores_nothing(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """A SHARE_ALIKE term without scope_license, beside a fresh valid entry: neither is stored.
@@ -144,7 +146,6 @@ def test_a_push_with_a_wire_tier_failure_stores_nothing(
 @obligation(Obligation.CATALOG_001, negative=True)
 def test_a_push_with_an_ingest_tier_failure_stores_nothing(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """An unregistered bare unit refuses the push, and its valid sibling is not stored.
@@ -168,7 +169,6 @@ def test_a_push_with_an_ingest_tier_failure_stores_nothing(
 @CATALOG_REFUSAL_UNTYPED.mark
 def test_a_refused_push_names_its_reason_and_exactly_the_failing_entry(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """catalog_rejection UNKNOWN_VOCAB_TOKEN, rejected_paths the failing entry's path alone."""
@@ -185,7 +185,6 @@ def test_a_refused_push_names_its_reason_and_exactly_the_failing_entry(
 @CATALOG_SIGNATURE_REFUSAL_UNTYPED.mark
 def test_an_unsigned_push_is_refused_unauthenticated(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """The contributor's push with its signature removed: refused, typed, nothing stored.
@@ -203,7 +202,6 @@ def test_an_unsigned_push_is_refused_unauthenticated(
 @CATALOG_SIGNATURE_REFUSAL_UNTYPED.mark
 def test_a_push_signed_by_a_key_the_caller_does_not_publish_is_refused(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """The push names the listed contributor's directory; the signing key is one it does not serve.
@@ -248,7 +246,6 @@ def _assert_signature_refusal(error: CallError, agent: FreshAgent, uri: str) -> 
 @obligation(Obligation.CATALOG_004)
 def test_a_listed_contributor_pushes_for_the_publisher(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """The music publisher's manifest lists the operator's contributor: its push is stored."""
@@ -267,7 +264,6 @@ def test_a_listed_contributor_pushes_for_the_publisher(
 @CATALOG_REFUSAL_UNTYPED.mark
 def test_a_caller_the_manifest_does_not_list_cannot_push(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """The sfx publisher signs a push for the music publisher, which does not list it.
@@ -287,7 +283,6 @@ def test_a_caller_the_manifest_does_not_list_cannot_push(
 @CATALOG_TENANT_MISMATCH_UNTYPED.mark
 def test_a_push_naming_another_tenant_is_refused_permission_denied(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """tenant_id names exchange-c's seat in a push to exchange-a: refused, nothing stored.
@@ -301,7 +296,6 @@ def test_a_push_naming_another_tenant_is_refused_permission_denied(
 @CATALOG_REFUSAL_UNTYPED.mark
 def test_a_push_for_an_unregistered_domain_is_refused_domain_not_verified(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """A domain no publisher ever registered at exchange-a: DOMAIN_NOT_VERIFIED, nothing stored."""
@@ -316,7 +310,6 @@ def test_a_push_for_an_unregistered_domain_is_refused_domain_not_verified(
 @CATALOG_REFUSAL_UNTYPED.mark
 def test_a_push_claiming_a_held_uri_is_refused_and_the_holder_is_unchanged(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """Another content_id at a held URI: URI_UNAVAILABLE, and the holder's offer keeps its price."""
@@ -339,7 +332,6 @@ def test_a_push_claiming_a_held_uri_is_refused_and_the_holder_is_unchanged(
 @obligation(Obligation.CATALOG_014, negative=True)
 def test_a_push_addressed_to_another_exchange_is_refused_untyped(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """exchange names exchange-b in a push sent to exchange-a: invalid_argument, no typed reason.
@@ -356,7 +348,9 @@ def test_a_push_addressed_to_another_exchange_is_refused_untyped(
     entry = fresh_entry()
     push = catalog.push(HOME_SEAT, [entry])
     readdressed = Request(
-        client=push.client, verb=push.verb, message={**push.message, "exchange": EXCHANGE_B_DOMAIN}
+        client=push.client,
+        verb=push.verb,
+        message=with_members(push.message, exchange=EXCHANGE_B_DOMAIN),
     )
     error = refusal(readdressed, "the push names another Exchange as its recipient")
     assert error.code == "invalid_argument", f"refused as {error.code!r}: {error}"
@@ -368,7 +362,6 @@ def test_a_push_addressed_to_another_exchange_is_refused_untyped(
 @CATALOG_ATTESTATIONS_UNVERIFIED.mark
 def test_an_attestation_by_an_unauthorized_verifier_refuses_the_push(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """The attestation's verifier is listed nowhere and its signature verifies under no key.
@@ -407,7 +400,6 @@ def test_an_attestation_by_an_unauthorized_verifier_refuses_the_push(
 @obligation(Obligation.CATALOG_017)
 def test_a_successful_push_reports_its_size_and_warnings_refuse_nothing(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """Three entries, one with an unregistered restriction token: accepted 3, warned, all offered."""
@@ -432,7 +424,6 @@ def test_a_successful_push_reports_its_size_and_warnings_refuse_nothing(
 @obligation(Obligation.CATALOG_018)
 def test_a_re_push_replaces_the_resource_and_its_offers(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """FREE, then FLAT 2.25 at the same URI: one offer, at the FLAT price."""
@@ -455,7 +446,6 @@ def test_a_re_push_replaces_the_resource_and_its_offers(
 @obligation(Obligation.CATALOG_018, negative=True)
 def test_a_re_push_cannot_move_a_resource_to_another_uri(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """The same content_id at another path: refused; the first URI still offered, the second not."""
@@ -476,7 +466,6 @@ def test_a_re_push_cannot_move_a_resource_to_another_uri(
 @obligation(Obligation.CATALOG_020)
 def test_a_publisher_pushes_its_own_catalog(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the publisher's domain
     fresh_agent: FreshAgent,
 ) -> None:
     """The philosophy publisher signs as its own domain and pushes its own page: stored."""
@@ -491,7 +480,6 @@ def test_a_publisher_pushes_its_own_catalog(
 @CATALOG_CALLER_ID_REQUIRED.mark
 def test_a_push_without_caller_id_is_stored(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """The listed contributor's push with no caller_id in the body: stored.
@@ -502,7 +490,9 @@ def test_a_push_without_caller_id_is_stored(
     """
     entry = fresh_entry()
     push = contributor(compose_stack).push(HOME_SEAT, [entry])
-    message = {name: value for name, value in push.message.items() if name != "caller_id"}
+    message = PushResourcesRequest.model_validate(
+        {name: value for name, value in to_wire(push.message).items() if name != "caller_id"}
+    )
     outcome = answer(Request(client=push.client, verb=push.verb, message=message))
     CATALOG_CALLER_ID_REQUIRED.check(
         not isinstance(outcome, CallError), f"the push without caller_id was refused: {outcome}"

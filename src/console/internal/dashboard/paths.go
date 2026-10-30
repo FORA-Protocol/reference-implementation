@@ -34,9 +34,9 @@ type Nav struct {
 	PublisherID string
 	Section     string
 	// Domains are the publisher's sites, for the filter each list offers.
-	// They come from the registrations every dashboard page already reads to
-	// learn which publisher the person holds, so the filter costs no second
-	// call.
+	// They come from the same registrations that say which publisher the
+	// person holds, the ones read in front of the page, so the
+	// filter costs no second call.
 	Domains []string
 }
 

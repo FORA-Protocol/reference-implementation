@@ -16,9 +16,14 @@ from __future__ import annotations
 import re
 from http import HTTPStatus
 
+import pytest
+
 from .conftest import StackURLs
 from .constants import AI_BOT_UA, BROWSER_UA
 from .edge_fetch import browse
+
+# ADR-008 D5 — declare stack-isolation contract.
+pytestmark = pytest.mark.stack_isolation("shared-without-cleanup")
 
 
 def test_browser_at_site_root_gets_the_catalog_index(compose_stack: StackURLs) -> None:

@@ -3,24 +3,29 @@
 package app_test
 
 import (
+	"archive/zip"
+	"bytes"
+	"encoding/json"
+	"maps"
 	"net/http"
-	"net/url"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/cdn"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/pagefetch"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/setup"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/web"
 )
 
-// Downloading a domain's setup files, both after it is registered and while the
-// wizard is still running.
+// Downloading a domain's setup files, from its own page and from the wizard's
+// last step.
 //
-// A registered domain's files are built from the registration the Exchange
-// holds: each download reads it back through the Exchange's registrations/list
-// route under the signed-in person's own actor, and the console builds the
-// files from what comes back. Nothing in the request chooses what they say.
+// A saved domain's files are built from the registration the Exchange holds:
+// each download reads it back through the Exchange's registrations/list route
+// under the signed-in person's own actor, and the console builds the files from
+// what comes back. Nothing in the request chooses what they say.
 
 // rePageLink finds the download links a domain page renders.
 var rePageLink = regexp.MustCompile(`href="(/domains/[^"]+/files/[^"]+)"`)
@@ -45,9 +50,7 @@ func TestConsole_AReturningPublisherDownloadsTheFilesTheDomainWasRegisteredWith(
 	f := startConsole(t, verifiedClaims(), withPages(sitePages()))
 	f.signIn(t)
 	addDomain(t, f)
-	handedOver := fileBodies(t, f.ok(t, "/api/domain/files", map[string]any{
-		"domain": "stoa.example", "cdn": "cloudflare", "content_paths": "/articles/",
-	}))
+	handedOver := fileBodies(t, f.files(t, "stoa.example"))
 
 	f.client = newBrowser(t)
 	f.signIn(t)
@@ -69,12 +72,24 @@ func TestConsole_AReturningPublisherDownloadsTheFilesTheDomainWasRegisteredWith(
 	if err != nil || owner != f.publisherID {
 		t.Fatalf("the downloaded document attests %q (%v), want this publisher's payee id", owner, err)
 	}
+	// The edge settings describe the package only. The discovery document is the
+	// file the publisher serves from its own site, which the package passes
+	// through, so no setting restates it.
+	var edge map[string]any
+	if err := json.Unmarshal([]byte(downloaded[setup.FileEdgeConfig]), &edge); err != nil {
+		t.Fatalf("the downloaded edge settings do not parse: %v", err)
+	}
+	for _, retired := range []string{"PROVIDER", "EXCHANGES_JSON", "CATALOG_CONTRIBUTORS_JSON", "RSL_BODY"} {
+		if _, ok := edge[retired]; ok {
+			t.Fatalf("the downloaded edge settings still carry %s:\n%s", retired, downloaded[setup.FileEdgeConfig])
+		}
+	}
 	// The terms are shown as the domain was registered, in the form the
 	// licensing step set them with, and none of it can be changed here. Beside
 	// them is the offer they produce, for the page of the site the sample was
 	// built from, sold by this Exchange.
 	for _, want := range []string{
-		`<fieldset class="sample terms-readonly" disabled>`, `value="0.02"`, "per fetches",
+		`<fieldset class="sample terms-readonly" disabled>`, `value="0.02"`, "per fetch<",
 		`<span class="val"> On rivers</span>`, `<span class="val"> ` + testExchangeDomain + `</span>`,
 		`<span class="val"> https://stoa.example/articles/on-rivers</span>`,
 	} {
@@ -94,6 +109,7 @@ func TestConsole_RefusesAnotherPublishersFiles(t *testing.T) {
 	f := startConsole(t, verifiedClaims())
 	addDomain(t, f.otherPerson(t, otherClaims()))
 	f.signIn(t)
+	f.registerBusiness(t)
 
 	status, body := f.get(t, "/domains/stoa.example/files/"+setup.FileManifest)
 	if status != http.StatusNotFound {
@@ -116,29 +132,28 @@ func TestConsole_RefusesAFileTheDomainDoesNotHave(t *testing.T) {
 	}
 }
 
-// TestConsole_TheWizardDownloadRefusesWhatItCannotBuild drives the mid-wizard
-// download link with each answer it carries set to something it must refuse.
-// The answers travel in the address, so they are the caller's to choose.
-func TestConsole_TheWizardDownloadRefusesWhatItCannotBuild(t *testing.T) {
+// TestConsole_TheLastStepsFilesAreOnlyForASavedDomain: the last step's files
+// are built from a saved domain, so an address that is not a hostname is
+// refused as one, and a domain nobody saved is answered the way another
+// publisher's is. Neither answer carries a file.
+func TestConsole_TheLastStepsFilesAreOnlyForASavedDomain(t *testing.T) {
 	f := startConsole(t, verifiedClaims())
 	f.signIn(t)
-	f.walkToDocument(t, "stoa.example")
+	f.walkToTerms(t, "stoa.example")
 
 	for _, tc := range []struct {
-		name, domain, cdn, file string
-		want                    int
+		name, domain string
+		want         int
 	}{
-		{"a network we ship no package for", "stoa.example", "fastly", setup.FileManifest, http.StatusBadRequest},
-		{"an address that is not a hostname", "https://stoa.example/x", "cloudflare", setup.FileManifest, http.StatusBadRequest},
-		{"a file the builder never produces", "stoa.example", "cloudflare", "secrets.json", http.StatusNotFound},
+		{"an address that is not a hostname", "https://stoa.example/x", http.StatusBadRequest},
+		{"a domain nobody saved", "harmonia.example", http.StatusNotFound},
 	} {
-		q := url.Values{"name": {tc.file}, "domain": {tc.domain}, "cdn": {tc.cdn}, "content_paths": {""}}
-		status, body := f.get(t, "/api/domain/file?"+q.Encode())
+		status, out := f.api(t, web.APIFilesPath, map[string]any{"domain": tc.domain})
 		if status != tc.want {
-			t.Fatalf("%s = %d, want %d: %s", tc.name, status, tc.want, head(body))
+			t.Fatalf("%s = %d, want %d: %v", tc.name, status, tc.want, out)
 		}
-		if strings.Contains(body, "resource_owner_id") {
-			t.Fatalf("%s: the refusal carries a file: %s", tc.name, head(body))
+		if strings.Contains(stringOf(out), "resource_owner_id") {
+			t.Fatalf("%s: the refusal carries a file: %v", tc.name, out)
 		}
 	}
 }
@@ -164,14 +179,14 @@ func TestConsole_AProhibitionInTheSitesLicenceIsWhatTheExchangeStores(t *testing
 </rsl>`
 	f := startConsole(t, verifiedClaims(), withPages(pages))
 	f.signIn(t)
-	f.walkToDocument(t, "stoa.example")
-	prefill := f.ok(t, "/api/domain/page", map[string]any{"domain": "stoa.example"})
+	f.walkToTerms(t, "stoa.example")
+	prefill := f.ok(t, web.APIPagePath, map[string]any{"domain": "stoa.example"})
 	terms, _ := prefill["terms"].(map[string]any)
 	if terms == nil {
 		t.Fatalf("the licence was not read: %v", prefill)
 	}
 
-	addDomainWith(t, f, "stoa.example", terms)
+	f.setTerms(t, "stoa.example", map[string]any{"terms": terms})
 	sites := f.mine(t).Sites
 	if len(sites) != 1 || !slices.Contains(sites[0].Terms.ProhibitedFunctions, "ai-train") {
 		t.Fatalf("the Exchange stored %+v, want ai-train prohibited", sites)
@@ -194,6 +209,51 @@ func TestConsole_ATickedUseIsNoLongerProhibited(t *testing.T) {
 	got := f.mine(t).Sites[0].Terms
 	if !slices.Contains(got.PermittedFunctions, "ai-train") || slices.Contains(got.ProhibitedFunctions, "ai-train") {
 		t.Fatalf("the Exchange stored %+v, want ai-train permitted and not prohibited", got)
+	}
+}
+
+// TestConsole_TheLastStepOnCloudFrontHandsOverTheLambdaPackage: a domain saved
+// behind AWS CloudFront gets the same last step with its own package: the
+// Lambda@Edge zip beside the discovery file, the commands that create the
+// function from that zip, and the sentence that says where the package runs
+// once it answers. The zip downloads from the domain's own page, and holds the
+// function's entry module with the release bundle beside it.
+func TestConsole_TheLastStepOnCloudFrontHandsOverTheLambdaPackage(t *testing.T) {
+	f := startConsole(t, verifiedClaims(),
+		withDetector(newStubDetector(cdn.ProviderCloudFront)), withEdgePackages(t))
+	f.signIn(t)
+	f.walkToConnect(t)
+
+	out := f.files(t, "stoa.example")
+	names := slices.Sorted(maps.Keys(fileBodies(t, out)))
+	if want := []string{setup.FileLambdaPackage, "fora.json"}; !slices.Equal(names, want) {
+		t.Fatalf("the last step on CloudFront hands over %v, want %v", names, want)
+	}
+	if out["deployed"] != "Deployed on AWS CloudFront, on the cache behaviours you associated it with." {
+		t.Fatalf("the step says the package runs %q", out["deployed"])
+	}
+	steps := stringOf(out["edge_steps"])
+	if !strings.Contains(steps, "aws lambda create-function") ||
+		!strings.Contains(steps, "fileb://"+setup.FileLambdaPackage) || strings.Contains(steps, "wrangler") {
+		t.Fatalf("the deploy commands are not CloudFront's: %s", steps)
+	}
+
+	status, body := f.get(t, "/domains/stoa.example/files/"+setup.FileLambdaPackage)
+	if status != http.StatusOK {
+		t.Fatalf("downloading %s = %d", setup.FileLambdaPackage, status)
+	}
+	archive, err := zip.NewReader(bytes.NewReader([]byte(body)), int64(len(body)))
+	if err != nil {
+		t.Fatalf("%s does not read as a zip: %v", setup.FileLambdaPackage, err)
+	}
+	entries := make([]string, 0, len(archive.File))
+	for _, entry := range archive.File {
+		entries = append(entries, entry.Name)
+	}
+	for _, want := range []string{"index.mjs", "lambda-edge.mjs"} {
+		if !slices.Contains(entries, want) {
+			t.Fatalf("%s holds %v, without %s", setup.FileLambdaPackage, entries, want)
+		}
 	}
 }
 

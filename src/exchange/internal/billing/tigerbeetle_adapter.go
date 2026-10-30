@@ -51,8 +51,10 @@ type TigerBeetleAdapter struct {
 	ledgers     map[string]uint32
 	holdTimeout time.Duration
 	// idNS namespaces every derived account/transfer id. It is empty in production
-	// (hashing stays unsalted); tests set a unique value per instance so cases on
-	// the shared cluster never collide.
+	// (hashing stays unsalted). The integration tests set a unique value per
+	// instance, and an e2e build sets the one its Exchange is configured with
+	// (EXCHANGE_BILLING_TB_ID_NAMESPACE), so instances sharing a cluster never
+	// collide.
 	idNS string
 }
 

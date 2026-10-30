@@ -11,6 +11,55 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const createTenantIfAbsent = `-- name: CreateTenantIfAbsent :one
+INSERT INTO fora.tenants (
+    tenant_id, domain, ed25519_key_ref, rsa_key_ref,
+    allow_broker_relay, activate_new_agents_by_default
+) VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT DO NOTHING
+RETURNING tenant_id, domain, ed25519_key_ref, reporting_policy, created_at, rsa_key_ref, allow_broker_relay, fee_rate_bps, fee_rate_notes, activate_new_agents_by_default
+`
+
+type CreateTenantIfAbsentParams struct {
+	TenantID                   string      `json:"tenant_id"`
+	Domain                     string      `json:"domain"`
+	Ed25519KeyRef              string      `json:"ed25519_key_ref"`
+	RsaKeyRef                  pgtype.Text `json:"rsa_key_ref"`
+	AllowBrokerRelay           bool        `json:"allow_broker_relay"`
+	ActivateNewAgentsByDefault bool        `json:"activate_new_agents_by_default"`
+}
+
+// Creates a seat an operator's boot fixture declares (ADR-029), with both of its
+// policies, unless a seat already holds this tenant id or this domain. A stored
+// seat is left exactly as it is, whatever the fixture says now, so a boot after
+// the first changes nothing that a product surface or an operator set since. A
+// conflict on either key returns no row; the caller reads the seat back by its
+// id to tell a seat that is already stored from a domain another seat holds.
+func (q *Queries) CreateTenantIfAbsent(ctx context.Context, arg CreateTenantIfAbsentParams) (ForaTenant, error) {
+	row := q.db.QueryRow(ctx, createTenantIfAbsent,
+		arg.TenantID,
+		arg.Domain,
+		arg.Ed25519KeyRef,
+		arg.RsaKeyRef,
+		arg.AllowBrokerRelay,
+		arg.ActivateNewAgentsByDefault,
+	)
+	var i ForaTenant
+	err := row.Scan(
+		&i.TenantID,
+		&i.Domain,
+		&i.Ed25519KeyRef,
+		&i.ReportingPolicy,
+		&i.CreatedAt,
+		&i.RsaKeyRef,
+		&i.AllowBrokerRelay,
+		&i.FeeRateBps,
+		&i.FeeRateNotes,
+		&i.ActivateNewAgentsByDefault,
+	)
+	return i, err
+}
+
 const getTenantByDomain = `-- name: GetTenantByDomain :one
 SELECT tenant_id, domain, ed25519_key_ref, reporting_policy, created_at, rsa_key_ref, allow_broker_relay, fee_rate_bps, fee_rate_notes, activate_new_agents_by_default FROM fora.tenants WHERE domain = $1
 `

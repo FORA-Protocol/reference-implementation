@@ -77,6 +77,7 @@ case "\$1 \${3:-}" in
         case "\$(cat)" in
             *lambda_edge_config*) echo "\"\$(printf '{"FORA_ENFORCE_BINDING":"false"}' | base64)\"" ;;
             *lambda_zip_path*) echo "\"\$(printf '%s' "\${ZIP_PATH:-./../../../../src/edge/dist/lambda-edge.zip}" | base64)\"" ;;
+            *publisher_fqdn*) echo "\"\$(printf '%s' demo.publisher.example | base64)\"" ;;
             local.onboarding_enabled) [ "\${ONBOARDING:-0}" = 1 ] && echo true || echo false ;;
             *) exit 1 ;;
         esac ;;
@@ -134,8 +135,8 @@ run_script -auto-approve || fail "clean run exited $?: ${out}"
     || fail "clean run steps: $(steps)"
 grep -qx "build-push-images.sh export STACK_DIR=${stack} --tag=${tag} exchange broker identity publisher" "${calls}" \
     || fail "images not built from the export with the commit tag: $(grep build-push "${calls}")"
-grep -qx "build-lambda-edge.sh export STACK_DIR=${stack} ${stack}/lambda-edge-config.json" "${calls}" \
-    || fail "the edge bundle was not built from the export and the rendered config"
+grep -qx "build-lambda-edge.sh export STACK_DIR=${stack} ${stack}/lambda-edge-config.json demo.publisher.example" "${calls}" \
+    || fail "the edge bundle was not built from the export, the rendered config and the configured publisher domain"
 [ "$(cat "${stack}/lambda-edge-config.json")" = '{"FORA_ENFORCE_BINDING":"false"}' ] \
     || fail "the Lambda config was not rendered from the current configuration: $(cat "${stack}/lambda-edge-config.json")"
 [ "$(cat "${work}/src/edge/dist/lambda-edge.zip" 2>/dev/null)" = "bundle from export" ] \

@@ -221,4 +221,4 @@ def test_a_url_presented_at_lambda_edge_after_its_exp_is_refused_expired(
 
     assert not refused.pass_through, f"an expired URL was handed to the origin: {refused}"
     assert refused.status == str(HTTPStatus.FORBIDDEN.value), refused
-    assert refused.json_body().get("reason") == _EDGE_EXPIRED, refused
+    assert refused.reason == _EDGE_EXPIRED, refused

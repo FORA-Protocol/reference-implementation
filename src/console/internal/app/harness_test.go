@@ -28,6 +28,7 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/exchangeclient"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/repo"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/setup"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/setup/setuptest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/wizard"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 )
@@ -95,8 +96,8 @@ type consoleFixture struct {
 	upstream *fakeUpstream
 	// claims is the person this fixture's browser signs in as.
 	claims oidcup.Claims
-	// publisherID is the payee the wizard's first step answered with, once it
-	// has run.
+	// publisherID is the payee the Exchange lists for this person once the
+	// wizard's business step has registered it.
 	publisherID string
 	// config is what the console was built from, for a test that starts a
 	// second console beside it.
@@ -114,6 +115,14 @@ func withDetector(d wizard.Detector) option {
 // withPages installs the reader the lookup takes response headers from.
 func withPages(p app.SiteReader) option {
 	return func(c *app.Config, _ *exchangetest.Exchange) { c.Pages = p }
+}
+
+// withEdgePackages makes the console a deployment that ships edge packages, so
+// a domain's files include the package its network installs rather than the
+// settings file a deployment without packages hands over.
+func withEdgePackages(t *testing.T) option {
+	dir := setuptest.ReleaseDir(t)
+	return func(c *app.Config, _ *exchangetest.Exchange) { c.Deployment.EdgePackageDir = dir }
 }
 
 // startConsole brings the console up over a real database, in front of a real
@@ -326,9 +335,9 @@ var reBoot = regexp.MustCompile(`data-boot="([^"]*)"`)
 
 // wizardBoot is the part of that block these tests read back.
 type wizardBoot struct {
+	// Registered is the business step's: whether the account has named its
+	// business.
 	Registered   bool   `json:"registered"`
-	HasDomains   bool   `json:"has_domains"`
-	DisplayName  string `json:"display_name"`
 	SupportEmail string `json:"support_email"`
 	Currency     string `json:"currency"`
 	Unit         string `json:"unit"`
@@ -336,8 +345,8 @@ type wizardBoot struct {
 		Key   string `json:"key"`
 		Title string `json:"title"`
 	} `json:"steps"`
-	// Terms is what the licensing step opens on, in the shape the last step
-	// sends back.
+	// Terms is what the licensing step opens on, in the shape its Next sends
+	// back.
 	Terms map[string]any `json:"terms"`
 	// Resume is the saved domain the page reopens, on the setup page only.
 	Resume *struct {
@@ -347,7 +356,12 @@ type wizardBoot struct {
 		Paths                     string `json:"content_paths"`
 		TermsSet                  bool   `json:"terms_set"`
 		ImportReplacesManualTerms bool   `json:"import_replaces_manual_terms"`
+		Step                      string `json:"step"`
 	} `json:"resume"`
+	// Paths.Home is where the page's Finish later leads.
+	Paths struct {
+		Home string `json:"home"`
+	} `json:"paths"`
 }
 
 // openWizard loads the add-a-domain page and reads what it starts with.
@@ -359,12 +373,31 @@ func (f *consoleFixture) openWizard(t *testing.T) wizardBoot {
 // bootOn loads a page that draws the wizard and reads what it starts with.
 func (f *consoleFixture) bootOn(t *testing.T, path string) wizardBoot {
 	t.Helper()
-	page := f.get2(t, path)
+	return bootIn(t, f.get2(t, path))
+}
+
+// bootIn reads what the wizard starts with out of a page that draws it.
+func bootIn(t *testing.T, page string) wizardBoot {
+	t.Helper()
+	return bootAs[wizardBoot](t, page)
+}
+
+// bootFields reads the same block field by field, under the names the page
+// carries them by: for a test about a field the block must not carry, which a
+// struct would read back as empty either way.
+func bootFields(t *testing.T, page string) map[string]any {
+	t.Helper()
+	return bootAs[map[string]any](t, page)
+}
+
+// bootAs decodes the wizard's starting state out of a page that draws it.
+func bootAs[T any](t *testing.T, page string) T {
+	t.Helper()
 	m := reBoot.FindStringSubmatch(page)
 	if m == nil {
 		t.Fatalf("no wizard state in the page: %s", head(page))
 	}
-	var boot wizardBoot
+	var boot T
 	if err := json.Unmarshal([]byte(html.UnescapeString(m[1])), &boot); err != nil {
 		t.Fatalf("wizard state is not JSON: %v", err)
 	}

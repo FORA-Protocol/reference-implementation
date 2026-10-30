@@ -10,45 +10,40 @@ import (
 )
 
 // Finishing the setup of a domain saved and not verified: the domain list and
-// page link to it, the setup page reopens the wizard with the domain's saved
-// answers, the progress route says which step to reopen on by asking the site
-// what it answers now, and the last button then saves the terms chosen and
-// verifies the domain. Every leg goes through the console's routes, the real
-// Exchange behind them and the Exchange's signed reads.
+// page link to it, and the setup page reopens the wizard with the domain's
+// saved answers, on the step its setup stands on -- the licensing step while it
+// has no terms, the last step after that. Every leg goes through the console's
+// routes, the real Exchange behind them and the Exchange's signed reads.
 
-// TestConsole_ProgressFollowsTheSiteAsItIsFixed: the step the wizard reopens on
-// is the first one the site does not pass yet -- the file, then the package,
-// then, once both answer, the licensing step.
-func TestConsole_ProgressFollowsTheSiteAsItIsFixed(t *testing.T) {
-	var up atomic.Bool
-	f := startConsole(t, verifiedClaims(), withPages(switchablePackage(&up)))
+// TestConsole_TheSetupReopensWhereTheDomainStands: a domain saved on the first
+// step reopens on the licensing step, and once its terms are saved, on the last
+// one. Nothing is asked of the site to decide it: what the Exchange holds says.
+func TestConsole_TheSetupReopensWhereTheDomainStands(t *testing.T) {
+	var probes atomic.Int32
+	f := startConsole(t, verifiedClaims(), withPages(countedProbes(deployedPackage(), &probes)))
 	f.signIn(t)
-	addDomain(t, f)
-	f.exchange.Manifests.Withdraw("stoa.example")
+	f.walkToTerms(t, "stoa.example")
+	asked := probes.Load()
 
-	for _, tc := range []struct {
-		fix  func()
-		want string
-	}{
-		{func() {}, "document"},
-		{func() { f.publish(t) }, "package"},
-		{func() { up.Store(true) }, "terms"},
-	} {
-		tc.fix()
-		if at := f.ok(t, "/api/domain/progress", map[string]any{"domain": "stoa.example"}); at["step"] != tc.want {
-			t.Fatalf("progress = %v; want the %s step", at, tc.want)
-		}
+	if boot := f.bootOn(t, "/domains/stoa.example/setup"); boot.Resume == nil || boot.Resume.Step != "terms" {
+		t.Fatalf("a domain with no terms reopens with %+v; want the licensing step", boot.Resume)
+	}
+	f.setTerms(t, "stoa.example", map[string]any{"terms": addDomainTerms()})
+	if boot := f.bootOn(t, "/domains/stoa.example/setup"); boot.Resume == nil || boot.Resume.Step != "connect" {
+		t.Fatalf("a domain with terms reopens with %+v; want the last step", boot.Resume)
+	}
+	if n := probes.Load() - asked; n != 0 {
+		t.Fatalf("reopening the setup asked the site %d times", n)
 	}
 }
 
-// TestConsole_FinishingLaterVerifiesWithoutTypingTheDomainAgain is the ticket's
-// third acceptance: a domain saved while its package was not installed is
-// finished later from the setup page and becomes verified without the domain
-// being typed again.
+// TestConsole_FinishingLaterVerifiesWithoutTypingTheDomainAgain: a domain whose
+// package was not installed when the publisher left is finished later from the
+// setup page, and becomes verified without the domain being typed again.
 //
 // The round trip runs from the saved listing, through the setup page's own
 // data -- the domain, its network and paths, the price it was saved at and the
-// import's answer -- through the last step's save, back to the listing, which
+// import's answer -- through the last step's check, back to the listing, which
 // then holds what it was saved with. The list shows it verified, with no setup
 // left to finish.
 func TestConsole_FinishingLaterVerifiesWithoutTypingTheDomainAgain(t *testing.T) {
@@ -58,28 +53,16 @@ func TestConsole_FinishingLaterVerifiesWithoutTypingTheDomainAgain(t *testing.T)
 	if out := addDomainAnswering(t, f, "stoa.example", map[string]any{
 		"terms": addDomainTerms(), "import_replaces_manual_terms": true,
 	}); out["verified"] != false {
-		t.Fatalf("the last button with no package answered %v; want saved, not verified", out)
+		t.Fatalf("the last step with no package answered %v; want saved, not verified", out)
 	}
 	mustContain(t, "the domains list", f.get2(t, "/domains"), `href="/domains/stoa.example/setup"`)
 	mustContain(t, "the domain page", f.get2(t, "/domains/stoa.example"), `href="/domains/stoa.example/setup"`)
 
 	boot := f.bootOn(t, "/domains/stoa.example/setup")
-	if boot.Resume == nil || boot.Resume.Domain != "stoa.example" || boot.Resume.CDN != "cloudflare" ||
-		boot.Resume.Paths != "/articles/" || !boot.Resume.TermsSet || !boot.Resume.ImportReplacesManualTerms {
-		t.Fatalf("the setup page opens with %+v; want stoa.example's saved answers", boot.Resume)
-	}
-	// The licensing step opens on the price the domain was saved at, not on the
-	// free terms a new domain opens on.
-	if boot.Terms["pricing_model"] != "per_unit" || boot.Terms["rate"] != "0.02" {
-		t.Fatalf("the setup page opens on terms %v; want the per-access price stoa.example was saved at", boot.Terms)
-	}
+	requireReopenedAsSaved(t, boot)
 
 	up.Store(true)
-	requireVerified(t, f.ok(t, "/api/domain", map[string]any{
-		"domain": boot.Resume.Domain, "cdn": boot.Resume.CDN, "content_paths": boot.Resume.Paths,
-		"sitemap_url": "", "terms": boot.Terms,
-		"import_replaces_manual_terms": boot.Resume.ImportReplacesManualTerms,
-	}))
+	requireVerified(t, f.check(t, boot.Resume.Domain))
 	sites := f.mine(t).Sites
 	if len(sites) != 1 || sites[0].Terms == nil || sites[0].Terms.PricingModel != "per_unit" ||
 		sites[0].Terms.Rate != "0.02" || !sites[0].ImportReplacesManualTerms {
@@ -91,33 +74,26 @@ func TestConsole_FinishingLaterVerifiesWithoutTypingTheDomainAgain(t *testing.T)
 	mustNotContain(t, "the domain page", f.get2(t, "/domains/stoa.example"), "/setup")
 }
 
-// TestConsole_FinishingASavedDomainSetsTheTermsChosenNow: the last button on a
-// domain already saved and not verified saves the terms chosen this time over
-// the ones it was saved with, keeping the domain otherwise as it was saved. A
-// sitemap the licensing step did not find this time leaves the saved one.
-func TestConsole_FinishingASavedDomainSetsTheTermsChosenNow(t *testing.T) {
-	f := startConsole(t, verifiedClaims())
-	f.signIn(t)
-	addDomainAnswering(t, f, "stoa.example", map[string]any{"terms": addDomainTerms(), "sitemap_url": stoaSitemap})
-	f.ok(t, "/api/domain", map[string]any{
-		"domain": "stoa.example", "cdn": "cloudflare", "content_paths": "/articles/",
-		"sitemap_url": "", "terms": map[string]any{"pricing_model": "free", "permitted_functions": []string{"search"}},
-	})
-	sites := f.mine(t).Sites
-	if len(sites) != 1 || sites[0].Terms == nil || sites[0].Terms.PricingModel != "free" {
-		t.Fatalf("the Exchange holds %+v; want stoa.example with the free terms chosen last", sites)
+// requireReopenedAsSaved fails the test unless the setup page opens on the last
+// step with everything stoa.example was saved with: its network and paths, the
+// import's answer, and the price.
+func requireReopenedAsSaved(t *testing.T, boot wizardBoot) {
+	t.Helper()
+	if boot.Resume == nil || boot.Resume.Domain != "stoa.example" || boot.Resume.CDN != "cloudflare" ||
+		boot.Resume.Paths != "/articles/" || !boot.Resume.TermsSet || !boot.Resume.ImportReplacesManualTerms ||
+		boot.Resume.Step != "connect" {
+		t.Fatalf("the setup page opens with %+v; want stoa.example's saved answers, on the last step", boot.Resume)
 	}
-	if got := sites[0].ContentPathScope; len(got) != 1 || got[0] != "/articles/" {
-		t.Fatalf("the saved paths became %v; want /articles/ as saved", got)
-	}
-	if sites[0].SitemapURL != stoaSitemap {
-		t.Fatalf("the saved sitemap became %q; want %s, kept when none is found", sites[0].SitemapURL, stoaSitemap)
+	// The licensing step, if the publisher goes back to it, opens on the price
+	// the domain was saved at, not on the free terms a new domain opens on.
+	if boot.Terms["pricing_model"] != "per_unit" || boot.Terms["rate"] != "0.02" {
+		t.Fatalf("the setup page opens on terms %v; want the per-fetch price stoa.example was saved at", boot.Terms)
 	}
 }
 
-// TestConsole_TheSetupOfAnotherPublishersDomainIsNotFound: the setup page and
-// the progress route answer not-found for a domain somebody else saved, the
-// answer a domain nobody holds gets, and the site is not asked anything.
+// TestConsole_TheSetupOfAnotherPublishersDomainIsNotFound: the setup page
+// answers not-found for a domain somebody else saved, the answer a domain
+// nobody holds gets, and the site is not asked anything.
 func TestConsole_TheSetupOfAnotherPublishersDomainIsNotFound(t *testing.T) {
 	f := startConsole(t, verifiedClaims())
 	f.signIn(t)
@@ -127,9 +103,6 @@ func TestConsole_TheSetupOfAnotherPublishersDomainIsNotFound(t *testing.T) {
 
 	if status, _ := f.get(t, "/domains/stoa.example/setup"); status != http.StatusNotFound {
 		t.Fatalf("the setup page of another publisher's domain = %d, want 404", status)
-	}
-	if status, out := f.api(t, "/api/domain/progress", map[string]any{"domain": "stoa.example"}); status != http.StatusNotFound {
-		t.Fatalf("the progress of another publisher's domain = %d %v, want 404", status, out)
 	}
 	if n := f.exchange.Manifests.Calls() - fetched; n != 0 {
 		t.Fatalf("asking about another publisher's domain read its document %d times", n)

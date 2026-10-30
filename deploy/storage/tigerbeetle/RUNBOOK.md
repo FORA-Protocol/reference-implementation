@@ -724,10 +724,12 @@ place the money actually moved.
 - **Reversing a charge is not available.** The proportional refund exists in the
   ledger but no part of the platform ever calls it — no dispute RPC, no operator
   procedure.
-- **The end-to-end stack runs one single-replica ledger per Exchange**, in
-  development mode on a throwaway volume. It proves purchases move balances, read
-  back through `GetAccountStatus`; it says nothing about durability, backups or
-  failover, which only an operator procedure covers.
+- **The end-to-end stack runs one single-replica ledger for all its Exchanges**,
+  in development mode on a throwaway volume. Each Exchange salts its ids with its
+  own namespace, a setting only the Exchange's e2e build reads, so the Exchanges
+  never share an account; production ids stay unsalted. It proves purchases move
+  balances, read back through `GetAccountStatus`; it says nothing about
+  durability, backups or failover, which only an operator procedure covers.
 - **A single replica has no failover** — one process, one file. Recovery means
   restoring a backup (§5.3), which costs downtime plus every transaction since that
   backup was taken.

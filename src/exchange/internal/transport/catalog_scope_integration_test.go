@@ -24,7 +24,7 @@ func scopedTerm(label string, scopes ...string) *forav1.LicenseTerm {
 	}
 }
 
-// requesterWithScopes builds a Requester carrying the Biscuit-authority scopes
+// requesterWithScopes builds a Requester carrying the stated scopes
 // selectTerms reads from the native Requester.scopes field (distinct from the
 // ext facets requesterWithExt populates). No user_type/geography facets are set, so
 // a scope-only term — which carries no restrictions — is gated purely on scope
@@ -33,17 +33,20 @@ func requesterWithScopes(id string, scopes ...string) requesterSpec {
 	return requesterSpec{requester: newRequester(id, "agent.example", scopes...)}
 }
 
-// TestDiscover_SelectByScope pins scope/subscription gating
-// (service/termselect.go: selectTerms -> scopesCovered/scopeCovered) through
-// the public DiscoverResources RPC, the single observation surface. Each row
-// pushes ONE scope-gated term and discovers it as a requester with a given
-// Biscuit-authority scope set; a kept term projects on a single offer with the
-// exact part_label, an uncovered term yields NO offer (all-terms-filtered =>
-// no eligible priced term => no offer — never an empty-terms stub).
+// TestDiscover_SelectByScope pins stated-scope selection of non-gated terms
+// (service/termselect.go: selectTerms -> helpers.ScopesCover) through the public
+// DiscoverResources RPC, the single observation surface. Each row pushes ONE
+// scope-gated term and discovers it as a requester stating a given scope set; a
+// kept term projects on a single offer with the exact part_label, an uncovered
+// term yields NO offer (all-terms-filtered => no eligible priced term => no
+// offer — never an empty-terms stub).
 //
-// The matrix exercises every branch of scopeCovered: exact equality, the global
-// "*", the hierarchical "prefix:*", exclusion of an uncovered scope, and the
-// AND-coverage requirement of scopesCovered (every term scope must be covered).
+// The matrix is a representative subset of the protocol's shared
+// scope-match-vectors.json, driven through the whole discovery path: exact
+// equality, the global "*", a terminal "prefix:*", an inner-segment "*", the
+// literal "*" in a requirement, a grant with more segments than the requirement,
+// no implicit prefix match, and the AND-coverage of every term scope.
+// Subscription-gated terms are a different rule, pinned by the delegation suite.
 func TestDiscover_SelectByScope(t *testing.T) {
 	h := newPushHarness(t)
 	callerID := "caller.example"
@@ -57,49 +60,91 @@ func TestDiscover_SelectByScope(t *testing.T) {
 		keep       bool
 	}{
 		{
-			name:       "exact: requester dist:US covers term dist:US (scopeCovered exact)",
+			name:       "exact: requester dist:US covers term dist:US ",
 			path:       "/scope/exact",
 			termScopes: []string{"dist:US"},
 			reqScopes:  []string{"dist:US"},
 			keep:       true,
 		},
 		{
-			name:       "absent: requester with no scope cannot cover term dist:US (scopeCovered)",
+			name:       "absent: requester with no scope cannot cover term dist:US",
 			path:       "/scope/absent",
 			termScopes: []string{"dist:US"},
 			reqScopes:  nil,
 			keep:       false,
 		},
 		{
-			name:       "hierarchical: requester dist:* covers term dist:US (scopeCovered prefix)",
+			name:       "hierarchical: requester dist:* covers term dist:US",
 			path:       "/scope/hierarchical",
 			termScopes: []string{"dist:US"},
 			reqScopes:  []string{"dist:*"},
 			keep:       true,
 		},
 		{
-			name:       "global: requester * covers term dist:US (scopeCovered global)",
+			name:       "global: requester * covers term dist:US",
 			path:       "/scope/global",
 			termScopes: []string{"dist:US"},
 			reqScopes:  []string{"*"},
 			keep:       true,
 		},
 		{
-			name:       "AND-coverage partial: dist:* alone cannot cover [dist:US, sub:premium] (scopesCovered)",
+			name:       "inner wildcard: requester publisher:*:read covers term publisher:news:read",
+			path:       "/scope/inner-wildcard",
+			termScopes: []string{"publisher:news:read"},
+			reqScopes:  []string{"publisher:*:read"},
+			keep:       true,
+		},
+		{
+			name:       "terminal wildcard: requester publisher:news:* covers term publisher:news:read",
+			path:       "/scope/terminal-wildcard",
+			termScopes: []string{"publisher:news:read"},
+			reqScopes:  []string{"publisher:news:*"},
+			keep:       true,
+		},
+		{
+			name:       "literal wildcard requirement: requester publisher:news:read does not cover term publisher:news:*",
+			path:       "/scope/literal-star",
+			termScopes: []string{"publisher:news:*"},
+			reqScopes:  []string{"publisher:news:read"},
+			keep:       false,
+		},
+		{
+			name:       "narrower grant: requester dist:US:CA does not cover term dist:US",
+			path:       "/scope/narrower-grant",
+			termScopes: []string{"dist:US"},
+			reqScopes:  []string{"dist:US:CA"},
+			keep:       false,
+		},
+		{
+			name:       "no implicit prefix: requester dist does not cover term dist:US",
+			path:       "/scope/no-prefix",
+			termScopes: []string{"dist:US"},
+			reqScopes:  []string{"dist"},
+			keep:       false,
+		},
+		{
+			name:       "terminal wildcard needs a segment: requester dist:* does not cover term dist",
+			path:       "/scope/star-needs-segment",
+			termScopes: []string{"dist"},
+			reqScopes:  []string{"dist:*"},
+			keep:       false,
+		},
+		{
+			name:       "AND-coverage partial: dist:* alone cannot cover [dist:US, sub:premium]",
 			path:       "/scope/and-partial",
 			termScopes: []string{"dist:US", "sub:premium"},
 			reqScopes:  []string{"dist:*"},
 			keep:       false,
 		},
 		{
-			name:       "AND-coverage full: dist:* + sub:premium cover [dist:US, sub:premium] (scopesCovered)",
+			name:       "AND-coverage full: dist:* + sub:premium cover [dist:US, sub:premium]",
 			path:       "/scope/and-full",
 			termScopes: []string{"dist:US", "sub:premium"},
 			reqScopes:  []string{"dist:*", "sub:premium"},
 			keep:       true,
 		},
 		{
-			name:       "public: empty term scopes are covered for a scopeless requester (scopesCovered public)",
+			name:       "public: empty term scopes are covered for a scopeless requester",
 			path:       "/scope/public",
 			termScopes: nil,
 			reqScopes:  nil,
@@ -150,7 +195,9 @@ func TestDiscover_ScopeShortStatesNoReason(t *testing.T) {
 	callerID := "caller.example"
 	client := setupTermContributor(t, h, callerID)
 
-	const scope = "subscription:premium"
+	// A stated (non-subscription) scope: a 'subscription:' scope is gated and
+	// never satisfied by stating it, see the delegation suite.
+	const scope = "region:EU"
 	pushTerms(t, h, client, callerID, "/scope/reason/gated", scopedTerm("gated", scope))
 	pushTerms(t, h, client, callerID, "/scope/reason/mixed", scopedTerm("gated", scope), scopedTerm("public"))
 	gated := "https://" + h.publisherDom + "/scope/reason/gated"

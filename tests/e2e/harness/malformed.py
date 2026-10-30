@@ -9,8 +9,9 @@ declared way, and reads the refusal. This module is the one way to do that:
 2. The test declares **one alteration**, built on the SDK's own seams:
 
    * ``before_sign``: the SDK's pre-signing hook. The SDK builds, stamps and
-     validates the request, the hook patches it, and the SDK signs the patched
-     bytes, so the signature is valid over what is sent;
+     validates the request and checks it against the strict schema
+     (``strict_requests``); the hook then patches it, and the SDK signs the
+     patched bytes, so the signature is valid over what is sent;
    * ``after_signing`` and ``sends``: the transport in :mod:`harness.after_signing`
      receives the signed bytes, applies the alteration, and sends the result
      ``sends`` times; ``sends=2`` with no alteration is a replay;
@@ -26,14 +27,15 @@ declared way, and reads the refusal. This module is the one way to do that:
    per-item denial), :func:`malformed_answer` returns the SDK's typed answer
    instead, for the test to read the denial from.
 
-Before returning, the bytes that reached the wire are checked as the request
-message by the SDK's strict check (``fora_sdk.check_strict``: the published strict
-JSON Schema and the cross-field rules), and the verdict must agree with the declared
-``kind``. The control must pass the check. A ``MESSAGE`` mutation must fail it: it
-claims the message is malformed. Every other kind must pass it: a signature or
-identity negative that also broke the message's shape would pass whether or not the
-check it targets works. The capture is the transport's, so what is checked is what
-was sent, after every alteration.
+Before each request leaves, its bytes are checked as the request message by the
+SDK's strict check (``fora_sdk.check_strict``: the published strict JSON Schema and
+the cross-field rules), and the verdict must agree with the declared ``kind``. The
+control must pass the check. A ``MESSAGE`` mutation must fail it: it claims the
+message is malformed. Every other kind must pass it: a signature or identity
+negative that also broke the message's shape would pass whether or not the check it
+targets works. The check runs in the transport, after every alteration and before
+the bytes go out, so what is checked is exactly what would be sent, and a request
+whose verdict contradicts its declaration never reaches the peer.
 
 Every client is built through ``harness.sdk_client``, so both sends run the
 universal strict shape check on the answer.
@@ -244,29 +246,30 @@ def _declared(
 
     sent: list[httpx.Request] = []
     try:
-        answer = _send(control, Alteration(), sent)
+        answer = _send(control, Alteration(), _verdict(f"{why}: control", sent, must_pass=True))
     except CallError as exc:
         raise AssertionError(f"{why}: control: the unaltered request was refused: {exc}") from exc
+    assert sent, f"{why}: control: nothing reached the wire"
     if accepted is not None:
         accepted(answer)
-    _check_verdict(f"{why}: control", sent, must_pass=True)
 
     sent.clear()
     outcome: T | CallError
+    verdict = _verdict(why, sent, must_pass=kind is not Mutation.MESSAGE)
     try:
-        outcome = _send(control, alter, sent)
+        outcome = _send(control, alter, verdict)
     except CallError as exc:
         assert exc.kind is not CallErrorKind.NOT_SENT and sent, (
             f"{why}: the altered request never left the SDK: {exc}"
         )
         outcome = exc
-    _check_verdict(why, sent, must_pass=kind is not Mutation.MESSAGE)
+    assert sent, f"{why}: nothing reached the wire"
     return outcome
 
 
-def _send(request: Request[C, T], alter: Alteration, sent: list[httpx.Request]) -> T:
-    """Send ``request`` once with ``alter`` applied, recording every request put on the wire."""
-    with after.after_signing(alter.after_signing, sends=alter.sends, observe=sent.append) as http:
+def _send(request: Request[C, T], alter: Alteration, observe: after.Observer) -> T:
+    """Send ``request`` once with ``alter`` applied; ``observe`` sees each request before it leaves."""
+    with after.after_signing(alter.after_signing, sends=alter.sends, observe=observe) as http:
         client = request.client(signer=alter.signer, before_sign=alter.before_sign, http=http)
         with closing(client):
             argument = request.message
@@ -274,26 +277,62 @@ def _send(request: Request[C, T], alter: Alteration, sent: list[httpx.Request]) 
                 assert isinstance(argument, BaseModel), (
                     "raw mode alters a generated request model's wire form"
                 )
-                argument = RawBody(alter.raw(to_wire(argument)))
+                argument = RawBody(alter.raw(_complete_wire(argument)))
             return request.verb(client)(argument)
 
 
-def _check_verdict(why: str, sent: list[httpx.Request], *, must_pass: bool) -> None:
-    """Require the strict check's verdict on every sent body to be ``must_pass``."""
-    assert sent, f"{why}: nothing reached the wire"
-    for request in sent:
-        name = _REQUEST_MESSAGES.get(request.url.path)
-        assert name is not None, f"{why}: no request message is known for {request.url.path}"
-        complaint = _strict_complaint(name, request.content)
-        if must_pass:
-            assert complaint is None, (
-                f"{why}: the sent {name} fails the strict check, so the negative would "
-                f"pass whatever the check under test does: {complaint}"
-            )
-        else:
-            assert complaint is not None, (
-                f"{why}: declared a malformed message, and the sent {name} passes the strict check"
-            )
+def _complete_wire(message: BaseModel) -> dict[str, Any]:
+    """``message``'s wire form, refused unless the strict check accepts it unaltered.
+
+    Raw mode sends what the alteration returns exactly as given: the SDK stamps
+    nothing into it, the requester included. A message built without one (see
+    ``harness.broker_purchase.unstamped``) would then fail a ``MESSAGE`` verdict for
+    its missing requester, whatever the alteration did, so the base must be whole.
+    """
+    names = [
+        name for name in _REQUEST_MESSAGES.values() if name.endswith(f".{type(message).__name__}")
+    ]
+    assert len(names) == 1, f"no request message is known for {type(message).__name__}"
+    wire = to_wire(message)
+    complaint = _strict_complaint(names[0], json.dumps(wire).encode())
+    assert complaint is None, (
+        f"raw mode alters a complete message, and the unaltered {names[0]} fails the "
+        f"strict check: {complaint}"
+    )
+    return wire
+
+
+def _verdict(why: str, sent: list[httpx.Request], *, must_pass: bool) -> after.Observer:
+    """The transport's observer: check each request's verdict, then record it.
+
+    The transport calls it after every alteration and just before the request
+    leaves, so a request whose verdict contradicts the declaration is never sent.
+    The ``AssertionError`` it raises is not an ``httpx`` error, so the SDK does not
+    turn it into a ``CallError``: it reaches the test as it was raised.
+    """
+
+    def observe(request: httpx.Request) -> None:
+        _check_verdict(why, request, must_pass=must_pass)
+        sent.append(request)
+
+    return observe
+
+
+def _check_verdict(why: str, request: httpx.Request, *, must_pass: bool) -> None:
+    """Require the strict check's verdict on ``request``'s body to be ``must_pass``."""
+    name = _REQUEST_MESSAGES.get(request.url.path)
+    assert name is not None, f"{why}: no request message is known for {request.url.path}"
+    complaint = _strict_complaint(name, request.content)
+    if must_pass:
+        assert complaint is None, (
+            f"{why}: the {name} about to be sent fails the strict check, so the negative "
+            f"would pass whatever the check under test does: {complaint}"
+        )
+    else:
+        assert complaint is not None, (
+            f"{why}: declared a malformed message, and the {name} about to be sent passes "
+            "the strict check"
+        )
 
 
 def _strict_complaint(name: str, body: bytes) -> str | None:

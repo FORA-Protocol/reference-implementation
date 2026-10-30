@@ -63,11 +63,14 @@ variables {
   }
   importer_key_json = "{\"kid\": \"catalog-contributor.staging.example\", \"private_key\": \"fixture-private\", \"public_key\": \"fixture-public\"}\n"
 
-  origin_hostname   = "origin.staging.example"
-  publisher_image   = "registry.example.com/group/proj/publisher:test"
-  registry_server   = "registry.example.com"
-  registry_username = "gitlab+deploy-token-123456"
-  registry_password = "glpat-XXXXXXXXXXXXXXXXXXXX"
+  origin_hostname = "origin.staging.example"
+  publisher_image = "registry.example.com/group/proj/publisher:test"
+  # The demo publisher's discovery document at its real size, as the
+  # publisher-manifest module renders it for the staging stack.
+  origin_discovery_document = "{\"catalog_contributors\":[{\"domain\":\"catalog-contributor.staging.example\",\"relationship\":\"operator\"}],\"domain\":\"demo.staging.example\",\"exchanges\":[{\"domain\":\"exchange.staging.example\",\"endpoint\":\"https://exchange.staging.example\",\"ext\":{\"resource_owner_id\":\"pub_0f8b6c3e-4c1d-4b7e-9a51-2f6d8e9a1c33\"},\"relationship\":\"PROVIDER_RELATIONSHIP_DIRECT\"}],\"role\":\"ROLE_PUBLISHER\",\"supported_profiles\":[\"fora-news-v1\",\"fora-comp-v1\",\"fora-music-v1\"],\"ver\":\"1.0\"}"
+  registry_server           = "registry.example.com"
+  registry_username         = "gitlab+deploy-token-123456"
+  registry_password         = "glpat-XXXXXXXXXXXXXXXXXXXX"
 }
 
 run "fully_loaded_user_data_fits_the_ec2_limit" {

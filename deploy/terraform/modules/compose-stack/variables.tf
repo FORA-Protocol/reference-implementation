@@ -45,9 +45,20 @@ variable "zitadel_hostname" {
 }
 
 variable "origin_hostname" {
-  description = "Optional public full domain name for the demo publisher origin (the edge worker's ORIGIN_URL target). Requires publisher_image. Null disables the publisher service. Staging-only: the origin is publicly reachable, which a production publisher would restrict."
+  description = "Optional public full domain name for the demo publisher origin (the edge worker's ORIGIN_URL target). Requires publisher_image and origin_discovery_document. Null disables the publisher service. Staging-only: the origin is publicly reachable, which a production publisher would restrict."
   type        = string
   default     = null
+}
+
+variable "origin_discovery_document" {
+  description = "The demo publisher's discovery document, the JSON its origin serves at /.well-known/fora.json (render it with the publisher-manifest module). Required when origin_hostname is set. The publisher image's own tree carries the e2e stack's mock document, so Caddy answers that address on origin_hostname from a file cloud-init writes and never forwards it to the image."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.origin_discovery_document == null || try(jsondecode(var.origin_discovery_document).role == "ROLE_PUBLISHER", false)
+    error_message = "origin_discovery_document must be a publisher's fora.json: a JSON object whose role is ROLE_PUBLISHER."
+  }
 }
 
 variable "static_wba_directories" {

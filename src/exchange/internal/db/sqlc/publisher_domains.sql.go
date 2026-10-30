@@ -51,6 +51,50 @@ func (q *Queries) CreatePublisherDomain(ctx context.Context, arg CreatePublisher
 	return i, err
 }
 
+const createPublisherDomainIfAbsent = `-- name: CreatePublisherDomainIfAbsent :one
+INSERT INTO fora.publisher_domains (domain, publisher_id, signing_scheme, cdn, cloudfront_key_pair_id)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (domain) DO NOTHING
+RETURNING domain, publisher_id, signing_scheme, cloudfront_key_pair_id, created_at, updated_at, cdn
+`
+
+type CreatePublisherDomainIfAbsentParams struct {
+	Domain              string            `json:"domain"`
+	PublisherID         string            `json:"publisher_id"`
+	SigningScheme       ForaSigningScheme `json:"signing_scheme"`
+	Cdn                 string            `json:"cdn"`
+	CloudfrontKeyPairID pgtype.Text       `json:"cloudfront_key_pair_id"`
+}
+
+// Creates a site an operator's boot fixture declares (ADR-029), with its signing
+// scheme and, for an AWS_CLOUDFRONT_RSA site, its CloudFront key-pair id, unless
+// the domain is already stored. A stored site is left as it is, whichever payee
+// owns it; the caller reads it back and refuses a fixture that declares it under
+// another payee. Registration takes no key-pair id and refuses an existing
+// domain; an operator provisions the RSA sites registration cannot, and declares
+// them again on every boot. Deployment-wide for the reason GetPublisherDomain
+// gives.
+func (q *Queries) CreatePublisherDomainIfAbsent(ctx context.Context, arg CreatePublisherDomainIfAbsentParams) (ForaPublisherDomain, error) {
+	row := q.db.QueryRow(ctx, createPublisherDomainIfAbsent,
+		arg.Domain,
+		arg.PublisherID,
+		arg.SigningScheme,
+		arg.Cdn,
+		arg.CloudfrontKeyPairID,
+	)
+	var i ForaPublisherDomain
+	err := row.Scan(
+		&i.Domain,
+		&i.PublisherID,
+		&i.SigningScheme,
+		&i.CloudfrontKeyPairID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Cdn,
+	)
+	return i, err
+}
+
 const getPublisherDomain = `-- name: GetPublisherDomain :one
 SELECT domain, publisher_id, signing_scheme, cloudfront_key_pair_id, created_at, updated_at, cdn FROM fora.publisher_domains WHERE domain = $1
 `

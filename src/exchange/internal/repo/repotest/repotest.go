@@ -25,7 +25,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	sharedb "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/db"
@@ -60,10 +59,15 @@ func SeedPublisher(
 
 // Seat describes the one Exchange seat a suite sells as.
 type Seat struct {
+	// ID is the seat's tenant id. Empty mints "t_" and a fresh UUID.
+	ID string
 	// Domain is the hostname the seat answers on, the value EXCHANGE_DOMAIN
 	// carries. Registration and the catalog push path both resolve the seat by
 	// it.
 	Domain string
+	// Ed25519KeyRef is the seat's ed25519_key_ref. Empty is SeatEd25519KeyRef of
+	// the seat's id.
+	Ed25519KeyRef string
 	// RSAKeyRef is the seat's rsa_key_ref. Empty leaves the column NULL, which
 	// is a seat that signs only with Ed25519.
 	RSAKeyRef string
@@ -74,29 +78,40 @@ type Seat struct {
 // under it.
 func SeatEd25519KeyRef(seatID string) string { return "secret://ed25519/" + seatID }
 
-// SeedSeat creates one seat and returns its tenant id. Its Ed25519 key
-// reference is SeatEd25519KeyRef of that id.
+// SeedSeat creates one seat through repo.SeatProvisionRepo, the port a
+// deployment's boot fixture provisions its seats through, and returns its
+// tenant id. Nothing that serves a request creates a seat, so that port is the
+// production surface to arrange one through. The seat must not exist yet.
 //
-// It writes through the sqlc InsertTenant query rather than a repository port,
-// because none exists: seats are provisioned by the operator's bootstrap, not by
-// any request path, so there is no production write surface to arrange through.
-// The seat gets the schema's default fee rate. The operator changes it through
-// the admin plane's SetTenantFeeRate, and a suite that needs another rate
-// calls that route once the seat exists.
+// The seat gets the schema's default fee rate and reporting policy. The operator
+// changes them through the admin plane's setters, and a suite that needs other
+// values calls those setters once the seat exists: the admin RPCs, or
+// AdminService from inside the service package. Both of its policies are the
+// schema's defaults too: relayed purchases are refused and new agents are
+// activated at Register. A suite that needs either changed sets it through the
+// relay-policy or the tenant write port once the seat exists.
 func SeedSeat(tb testing.TB, ctx context.Context, pool *pgxpool.Pool, in Seat) string {
 	tb.Helper()
-	seatID := "t_" + uuid.NewString()
-	params := sqlc.InsertTenantParams{
-		TenantID:        seatID,
-		Domain:          in.Domain,
-		Ed25519KeyRef:   SeatEd25519KeyRef(seatID),
-		ReportingPolicy: []byte(`{}`),
+	seatID := cmp.Or(in.ID, "t_"+uuid.NewString())
+	seat := repo.NewSeat{
+		TenantID:                   seatID,
+		Domain:                     in.Domain,
+		Ed25519KeyRef:              cmp.Or(in.Ed25519KeyRef, SeatEd25519KeyRef(seatID)),
+		RSAKeyRef:                  in.RSAKeyRef,
+		AllowBrokerRelay:           false,
+		ActivateNewAgentsByDefault: true,
 	}
-	if in.RSAKeyRef != "" {
-		params.RsaKeyRef = pgtype.Text{String: in.RSAKeyRef, Valid: true}
-	}
-	if _, err := sqlc.New(pool).InsertTenant(ctx, params); err != nil {
+	var created bool
+	err := sharedb.WithTx(ctx, pool, func(tx pgx.Tx) error {
+		var terr error
+		_, created, terr = repo.NewSeatProvisionRepo(sqlc.New(pool)).CreateSeatIfAbsent(ctx, tx, seat)
+		return terr
+	})
+	if err != nil {
 		tb.Fatalf("seed seat %q: %v", in.Domain, err)
+	}
+	if !created {
+		tb.Fatalf("seed seat %q: a seat with id %q already exists", in.Domain, seatID)
 	}
 	return seatID
 }

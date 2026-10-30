@@ -26,9 +26,9 @@ price.
 
 from __future__ import annotations
 
-from contextlib import closing
 from decimal import Decimal
 
+import pytest
 from fora_sdk.core import DiscoveryResult
 
 from .broker_purchase import (
@@ -41,13 +41,15 @@ from .broker_purchase import (
 from .conftest import StackURLs
 from .e2e_catalog import DemoResource
 from .edge_fetch import fetch_signed
-from .sdk_client import sdk_broker_client
 from .defects import RESOLVE_BUDGET_REPORTED_AS_NOT_AUTHORIZED
 from .fresh_agent import FreshAgent
 from .exchanges import EXCHANGE_C_DOMAIN
 from .money_path import SCI_FI_DOOR
 from .obligation_registry import Obligation, obligation
 from .seed import SeededFixture
+
+# ADR-008 D5 — declare stack-isolation contract.
+pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
 # 0.01 USD: below any positive per-unit cost → over budget.
 _BUDGET_OVER = "0.01"
@@ -56,10 +58,8 @@ _BUDGET_AMPLE = "10000.00"
 _BUDGET_EXCEEDED = "OFFER_ABSENCE_REASON_BUDGET_EXCEEDED"
 
 
-def _resolve_priced(
-    compose_stack: StackURLs, res: DemoResource, *, budget: str | None
-) -> DiscoveryResult:
-    """Discover the priced demo resource as its buyer, with an optional USD budget.
+def _resolve_priced(agent: FreshAgent, res: DemoResource, *, budget: str | None) -> DiscoveryResult:
+    """Discover the priced demo resource as ``agent``, with an optional USD budget.
 
     Broker Resolve is discovery-only AND it is where the budget PRE-FLIGHT gate
     lives — the Broker checks "can the agent afford the cheapest offer?" and
@@ -70,21 +70,17 @@ def _resolve_priced(
     ``budget`` is the only axis that varies across these legs (absent ⇒ the gate
     is skipped).
     """
-    buyer = sdk_broker_client(
-        compose_stack, agent_id=res.buyer_agent_id, key_path=res.buyer_key_path
-    )
-    with closing(buyer) as client:
-        return client.resolve(
-            resolve_request(
-                [res.uri],
-                intended_use=AI_INPUT,
-                period_budget=(budget, "USD") if budget is not None else None,
-            )
+    return agent.broker.resolve(
+        resolve_request(
+            [res.uri],
+            intended_use=AI_INPUT,
+            period_budget=(budget, "USD") if budget is not None else None,
         )
+    )
 
 
-def _buy_priced(compose_stack: StackURLs, res: DemoResource, result: DiscoveryResult):
-    """Buy the discovered priced offer through the Broker as its currency-matched buyer.
+def _buy_priced(agent: FreshAgent, res: DemoResource, result: DiscoveryResult):
+    """Buy the discovered priced offer through the Broker as ``agent``.
 
     The signed URL is minted on the purchase. The Broker routes from the signed
     offer.exchange, so no Exchange URL is supplied.
@@ -92,27 +88,23 @@ def _buy_priced(compose_stack: StackURLs, res: DemoResource, result: DiscoveryRe
     offer = only_verified_offer(
         one_group_per_uri(result, [res.uri], "broker resolve")[res.uri], "broker resolve"
     )
-    buyer = sdk_broker_client(
-        compose_stack,
-        agent_id=res.buyer_agent_id,
-        key_path=res.buyer_key_path,
-    )
-    with closing(buyer) as client:
-        return only_item(client.execute([offer]), f"broker purchase of {res.uri}")
+    return only_item(agent.broker.execute([offer]), f"broker purchase of {res.uri}")
 
 
 def test_within_budget_resolves_and_delivers_content(
     compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """An ample budget → discovery passes the gate, and the purchase delivers."""
-    res = seeded.priced_per_unit  # wooden-door-creak, PER_UNIT 0.25 USD
+    res = seeded.priced_per_unit  # wooden-door-creak, PER_UNIT 0.25 USD, sold by exchange-c
+    fresh_agent.fund(EXCHANGE_C_DOMAIN)
     # Phase 1 — discovery passes the budget pre-flight gate (ample budget).
-    discovery = _resolve_priced(compose_stack, res, budget=_BUDGET_AMPLE)
+    discovery = _resolve_priced(fresh_agent, res, budget=_BUDGET_AMPLE)
 
     # Phase 2 — buy the discovered offer; the signed URL and the delivered price
     # ride on the purchase's result item.
-    item = _buy_priced(compose_stack, res, discovery)
+    item = _buy_priced(fresh_agent, res, discovery)
 
     # ADR-019: the PAID-term price is the canonical typed per-item cost.
     # unit_cost is the per-unit rate (amount = unit_cost × est_quantity), so it
@@ -123,7 +115,7 @@ def test_within_budget_resolves_and_delivers_content(
 
     signed_url = item.retrieval_endpoint
     assert signed_url, item
-    content = fetch_signed(signed_url, compose_stack, key_path=res.buyer_key_path)
+    content = fetch_signed(signed_url, compose_stack, key_path=fresh_agent.key_path)
     assert content.body.strip(), content.body[:256]
 
 
@@ -174,23 +166,22 @@ def test_a_resolve_charges_nothing(fresh_agent: FreshAgent) -> None:
 
 
 def test_no_budget_skips_the_gate(
-    compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """SAME priced resolve but NO budget declared → licensed (gate skipped).
 
     The budget pre-flight engages ONLY when the agent declares a positive
     period_budget (checkBudget short-circuits on a non-positive limit). With no
     budget to meter against, the priced resolve surfaces an offer and delivery
-    succeeds. The only difference from
-    :func:`test_over_budget_is_refused_before_licensing` is the absence of a
-    declared budget; the outcome flipping from refused to licensed pins the
-    declared budget as the sole cause of enforcement.
+    succeeds. It is :func:`test_within_budget_resolves_and_delivers_content`
+    with the budget left out.
     """
     res = seeded.priced_per_unit
+    fresh_agent.fund(EXCHANGE_C_DOMAIN)
     # Phase 1 — no budget → the Broker skips the gate, so the resolve surfaces an
     # offer even for the priced resource.
-    discovery = _resolve_priced(compose_stack, res, budget=None)
+    discovery = _resolve_priced(fresh_agent, res, budget=None)
     # Phase 2 — and delivery succeeds (nothing metered the priced request).
-    item = _buy_priced(compose_stack, res, discovery)
+    item = _buy_priced(fresh_agent, res, discovery)
     assert item.retrieval_endpoint, item

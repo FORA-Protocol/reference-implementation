@@ -16,13 +16,13 @@ request as it was sent:
   to the Broker, signed as the agent, and the DiscoverResources query the Broker
   originates to the Exchange. Both are scoped by the agent's own host, which the
   first names in its Signature-Agent and the second as its requester;
-- one purchase through the Broker: agent-e2e resolves an offer and buys it with
-  BrokerService.ExecuteTransaction through the FORA Python SDK, and the Broker
-  re-packages the purchase into an ExecuteTransaction to the Exchange, which it
-  signs alone. Both hops are scoped by an X-Request-ID the test sends, which the
-  Broker copies onto every request it sends for the call;
-- one Broker call made by the FORA Python SDK client, signed as agent-e2e with
-  the https origin ``https://agent-e2e``.
+- one purchase through the Broker: the test's own agent resolves an offer and
+  buys it with BrokerService.ExecuteTransaction through the FORA Python SDK, and
+  the Broker re-packages the purchase into an ExecuteTransaction to the Exchange,
+  which it signs alone. Both hops are scoped by an X-Request-ID the test sends,
+  which the Broker copies onto every request it sends for the call;
+- one Broker call made by the FORA Python SDK client, signed as the test's own
+  agent with the https origin of its own host.
 
 The Broker never forwards an agent's request unchanged. It originates the
 discovery call and re-packages the purchase, so the agent's transport signature
@@ -61,7 +61,6 @@ import asyncio
 import dataclasses
 import os
 import secrets
-from contextlib import closing
 
 import pytest
 from wire.models import DiscoveryRequest, ResourceQuery, TransactionRequest
@@ -69,26 +68,21 @@ from wire.models import DiscoveryRequest, ResourceQuery, TransactionRequest
 from .broker_purchase import resolve_request
 from .capture_proxy import BROKER_DOMAIN, CaptureProxy, CapturedRequest
 from .e2e_catalog import SeededFixture
+from .fresh_agent import FreshAgent
 from .mcp_agents import McpAgentFactory
 from .mcp_client import mcp_session
-from .sdk_client import sdk_broker_client
 from .stack_urls import StackURLs
 from .wba_checks import b64_any
 from .wba_conformance import (
-    AGENT_ORIGIN,
-    FORA_COMPONENTS,
-    RESOLVE_PATH,
+    agent_origin,
     assert_passes,
     assert_signed_alone_by_the_broker,
-    agent_sdk_signer,
-    bodied_request,
     buy_as_agent,
     cloudflare_verdict,
     https_jwks,
     labels,
-    python_sign,
+    probe_broker,
     python_verdict,
-    send,
     signature_params,
     with_header,
 )
@@ -150,12 +144,12 @@ def hops(
 
 @pytest.fixture
 def purchase_hops(
-    compose_stack: StackURLs, seeded: SeededFixture, capture_proxy: CaptureProxy
+    seeded: SeededFixture, capture_proxy: CaptureProxy, fresh_agent: FreshAgent
 ) -> Hops:
-    """Buy the free philosophy article through the Broker as agent-e2e; read both signed hops."""
+    """Buy the free philosophy article through the Broker as the test's own agent; read both hops."""
     request_id = f"wba-purchase-{secrets.token_hex(8)}"
     traffic = capture_proxy.watch(request_id)
-    item = buy_as_agent(compose_stack, seeded.free.uri, request_id=request_id)
+    item = buy_as_agent(fresh_agent, seeded.free.uri, request_id=request_id)
     assert item.retrieval_endpoint, f"the purchase delivered nothing: {item}"
     to_broker = traffic.carrying(TransactionRequest, target=BROKER_DOMAIN)
     to_exchange = traffic.carrying(TransactionRequest, caller="broker")
@@ -286,19 +280,16 @@ def test_every_fora_signature_carries_the_wba_parameter(broker_path: Hops, prop:
 
 
 def test_an_sdk_client_request_passes_both_verifiers(
-    compose_stack: StackURLs,
     seeded: SeededFixture,
     capture_proxy: CaptureProxy,
     ts_oracle: TSOracle,
+    fresh_agent: FreshAgent,
 ) -> None:
-    """The SDK's Broker client, signing as agent-e2e under https://agent-e2e."""
+    """The SDK's Broker client, signing as the test's own agent under its https origin."""
     request_id = f"wba-sdk-{secrets.token_hex(8)}"
     traffic = capture_proxy.watch(request_id)
-    client = sdk_broker_client(
-        compose_stack, signer=agent_sdk_signer(), request_id=lambda: request_id
-    )
-    with closing(client):
-        client.resolve(resolve_request([seeded.free.uri]))
+    client = fresh_agent.broker_client(request_id=lambda: request_id)
+    client.resolve(resolve_request([seeded.free.uri]))
     found = traffic.carrying(DiscoveryRequest, target=BROKER_DOMAIN)
     assert len(found) == 1, f"want the SDK's one Resolve in the capture: {found}"
     entry = found[0]
@@ -306,25 +297,24 @@ def test_an_sdk_client_request_passes_both_verifiers(
 
 
 def test_the_verification_path_tells_a_conformant_signature_from_a_corrupted_one(
-    compose_stack: StackURLs, capture_proxy: CaptureProxy, ts_oracle: TSOracle
+    capture_proxy: CaptureProxy, ts_oracle: TSOracle, fresh_agent: FreshAgent
 ) -> None:
     """The path the tests above use accepts a conformant signature and rejects copies of it.
 
     A WG-00 signature from the Python oracle, plus the FORA components, goes to
     the Broker and is read back from the capture, exactly as the FORA hops are.
     Whether the Broker accepts it does not matter here. It passes both verifiers
-    with the key fetched from https://agent-e2e. Then one character of the
+    with the key fetched from the agent's own origin. Then one character of the
     signature is changed, and separately the request is moved to another
     authority, and both verifiers reject each copy.
     """
     request_id = f"wba-path-{secrets.token_hex(8)}"
     traffic = capture_proxy.watch(request_id)
-    request = bodied_request(f"{compose_stack.broker}{RESOLVE_PATH}", {"probe": request_id})
-    send(request, python_sign(request, extra_components=FORA_COMPONENTS), request_id=request_id)
+    probe_broker(fresh_agent, request_id)
     (entry,) = traffic.requests()
     assert_passes(entry, "sig1", "the conformant probe", ts_oracle)
 
-    jwks = https_jwks(AGENT_ORIGIN)
+    jwks = https_jwks(agent_origin(fresh_agent))
     value = entry.header("signature")
     flipped = value[:10] + ("A" if value[10] != "A" else "B") + value[11:]
     for corrupted in (

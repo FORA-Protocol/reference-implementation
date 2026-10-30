@@ -32,9 +32,11 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from fora_sdk import to_wire
 from fora_sdk.b64 import b64url_decode
 from fora_sdk.resolvers import read_revocation_list
 from fora_sdk.thumbprint import thumbprint
+from wire.models import KeyRevocationList
 
 from .constants import REVOCATION_PATH
 from .poll import poll_until
@@ -44,12 +46,6 @@ _REVOCATION_FILE = Path(__file__).parent / "revocations" / "revocations.json"
 
 #: How long the Broker may take to serve a list after the file changes.
 _SERVE_DEADLINE_S = 15.0
-
-
-def _rfc3339(epoch_seconds: int) -> str:
-    """``epoch_seconds`` as an RFC 3339 'Z' timestamp the revocation schema accepts."""
-    stamp = datetime.fromtimestamp(epoch_seconds, tz=UTC)
-    return stamp.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def served_as_of(broker_url: str) -> int:
@@ -90,7 +86,10 @@ def _publish(broker_url: str, thumbprints: Sequence[str]) -> int:
     scripts/lib is out of reach here: the runner image does not copy scripts/lib.
     """
     as_of = max(int(time.time()), served_as_of(broker_url) + 1)
-    body = json.dumps({"as_of": _rfc3339(as_of), "revoked": list(thumbprints)})
+    document = KeyRevocationList(
+        as_of=datetime.fromtimestamp(as_of, tz=UTC), revoked=list(thumbprints)
+    )
+    body = json.dumps(to_wire(document))
     fd, tmp = tempfile.mkstemp(
         dir=_REVOCATION_FILE.parent, prefix=f".{_REVOCATION_FILE.name}.", suffix=".tmp"
     )

@@ -16,13 +16,17 @@
 # not at the edge.
 #
 # Usage:
-#   deploy/terraform/scripts/build-lambda-edge.sh <deploy-config.json>
+#   deploy/terraform/scripts/build-lambda-edge.sh <deploy-config.json> <publisher-domain>
+#
+# The publisher domain is the hostname the function fronts; index.mjs names it
+# in its header. It is not a setting, so it is not in the config file.
 
 set -euo pipefail
 
 . "$(dirname "${BASH_SOURCE[0]}")/lib/edge-build.sh"
 
-CONFIG_ARG="${1:?usage: build-lambda-edge.sh <deploy-config.json>}"
+CONFIG_ARG="${1:?usage: build-lambda-edge.sh <deploy-config.json> <publisher-domain>}"
+DOMAIN="${2:?usage: build-lambda-edge.sh <deploy-config.json> <publisher-domain>}"
 # Absolute before any cd, so a path relative to the caller's cwd keeps working.
 CONFIG="$(cd "$(dirname "${CONFIG_ARG}")" && pwd)/$(basename "${CONFIG_ARG}")"
 [ -f "${CONFIG}" ] || { echo "missing config file: ${CONFIG_ARG}" >&2; exit 2; }
@@ -36,7 +40,7 @@ rm -f "${EDGE_DIR}/dist/lambda-edge.zip"
 edge_npm_ci
 
 echo "==> bundling Lambda@Edge worker"
-node scripts/build-lambda-edge.mjs --config "${CONFIG}"
+node scripts/build-lambda-edge.mjs --config "${CONFIG}" --domain "${DOMAIN}"
 
 # -X drops platform extra fields, -j stores both files at the archive root —
 # the flat layout the "index.handler" handler string expects, with the bundle

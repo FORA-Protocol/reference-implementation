@@ -145,7 +145,7 @@ func TestConsoleRegistration_RefusesAnIncompleteActor(t *testing.T) {
 			}
 		})
 	}
-	if n := countActions(t, f, "RegisterPublisher"); n != 0 {
+	if n := f.exchange.CountAuditActions(t, "RegisterPublisher"); n != 0 {
 		t.Fatalf("refused registrations wrote %d RegisterPublisher audit rows", n)
 	}
 }
@@ -289,7 +289,7 @@ func TestConsoleRegistration_RefusesTermsItCannotOffer(t *testing.T) {
 			if _, sites := listRegistrations(t, f, actor); len(sites) != 0 {
 				t.Fatalf("the refused registration left a site: %v", sites)
 			}
-			if n := countActions(t, f, "RegisterDomain"); n != 0 {
+			if n := f.exchange.CountAuditActions(t, "RegisterDomain"); n != 0 {
 				t.Fatalf("the refused registration wrote %d RegisterDomain audit rows", n)
 			}
 		})

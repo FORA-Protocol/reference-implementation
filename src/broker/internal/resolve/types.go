@@ -55,6 +55,12 @@ type Request struct {
 	// forwards it unchanged on every per-Exchange query and does not read it:
 	// the Exchange selects terms by it and is the party that judges it.
 	Scopes []string `json:"scopes,omitempty"`
+	// Delegation is requester.delegation exactly as the agent sent it: the
+	// holder-bound chain an Exchange verifies before it presents a
+	// subscription-gated term. The Broker forwards it unchanged on every
+	// per-Exchange query and never reads it. It is kept out of the audit JSON:
+	// the token is a credential, not a selection input.
+	Delegation *forav1.Delegation `json:"-"`
 	// IntendedUse rides on the native Requester.intended_use proto field. The
 	// Exchange filters by resource_id and scopes only (ADR-014), so there are no
 	// user_type / geography fields — self-declared requester attributes are not a

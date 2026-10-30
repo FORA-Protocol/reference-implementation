@@ -70,17 +70,30 @@ locals {
   # region as a prefix (/aws/lambda/us-east-1.<function> in every serving
   # region). A single-region grant silently loses every request served
   # elsewhere. The log-group name stays scoped.
+  #
+  # Log Group actions (CreateLogGroup) require a Log Group ARN format (no trailing :*),
+  # while Log Stream actions (CreateLogStream, PutLogEvents) require a Log Stream ARN
+  # format (ending in :*). Keeping both statements complies with CloudWatch Logs IAM
+  # requirements (April 2027 lifecycle update).
   logs_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream",
-        "logs:PutLogEvents",
-      ]
-      Resource = "arn:aws:logs:*:*:log-group:/aws/lambda/*.${var.name_prefix}-edge:*"
-    }]
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+        ]
+        Resource = "arn:aws:logs:*:*:log-group:/aws/lambda/*.${var.name_prefix}-edge"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+        ]
+        Resource = "arn:aws:logs:*:*:log-group:/aws/lambda/*.${var.name_prefix}-edge:*"
+      },
+    ]
   })
 }
 
@@ -169,9 +182,10 @@ resource "aws_cloudfront_distribution" "this" {
     }
   }
 
-  # ONE behavior on purpose: the shared app serves the well-known routes
-  # before its bot gate, so nothing needs a function-bypass behavior, and a
-  # single behavior keeps a single code path. Caching is disabled for the
+  # ONE behavior on purpose: the shared app answers its well-known routes,
+  # and hands the publisher's own discovery document and RSL file back to
+  # CloudFront, before its bot gate, so nothing needs a function-bypass
+  # behavior, and a single behavior keeps a single code path. Caching is disabled for the
   # demo — correctness first — and the viewer-request placement keeps any
   # later caching decision safe, because the function runs on cache hits too.
   default_cache_behavior {

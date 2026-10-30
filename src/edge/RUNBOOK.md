@@ -69,8 +69,8 @@ curl -s -o /dev/null -w '%{http_code}\n' -A "Mozilla/5.0" https://<host>/some-ar
 curl -s -o /dev/null -w '%{http_code}\n' -A "GPTBot/1.0" https://<host>/some-article-path
 # Expect: 403
 
-curl -s -o /dev/null -w '%{http_code}\n' https://<host>/.well-known/fora.json
-# Expect: 200
+curl -s -o /dev/null -w '%{http_code}\n' -A "GPTBot/1.0" https://<host>/.well-known/fora.json
+# Expect: 200 — the publisher's own file, passed through from the origin
 
 curl -s -o /dev/null -w '%{http_code}\n' "https://<host>/some-article-path?exp=…&sig=…&kid=…"
 # Expect: 200 (needs a fresh signed address from the Exchange)
@@ -157,7 +157,7 @@ Only a sudden change in the `edge.deny.signature` rate is worth attention.
 | Search crawlers are blocked | Cloudflare's WAF managed rules and bot products run **before** the Worker; a blocked crawler never reaches it. | Check Security Events for the crawler, add a skip rule. [`DEPLOYMENT.md`](DEPLOYMENT.md) §7. |
 | AI bots never reach the Worker | Zone-level AI-bot blocking runs **before** the Worker, so the bot is refused without ever learning how to pay. | Turn off "Block AI bots" / Bot Fight Mode for the article paths. This loses money and does not add security. |
 | The Worker is reachable on `*.workers.dev` | `workers_dev` was left on, so the zone — and therefore the gate — can be bypassed. | Set `workers_dev = false` and redeploy. [`DEPLOYMENT.md`](DEPLOYMENT.md) §6.3. |
-| The publisher's content is not for sale | The discovery document carries no payee declaration, so every catalog push is rejected. | Check `ext.resource_owner_id` — [`CONFIGURATION.md`](CONFIGURATION.md) §3.5. |
+| The publisher's content is not for sale | The discovery document on the publisher's origin carries no payee declaration, or another one, so every catalog push is rejected. | Check `ext.resource_owner_id` in the origin's file — [`CONFIGURATION.md`](CONFIGURATION.md) §3.5. |
 
 **How to tell the two apart.** Read the event name in Workers Logs:
 
@@ -248,12 +248,16 @@ curl -s -o /dev/null -w 'paying agent     %{http_code}\n' \
 # Expect: paying agent     200
 ```
 
-**Read the discovery documents the Worker is currently serving:**
+**Read the discovery documents a reader currently gets:**
 
 ```bash
 curl -s https://<host>/.well-known/fora.json
 curl -s https://<host>/.well-known/http-message-signatures-directory
 ```
+
+The first is the publisher's own file, passed through from the origin, so a
+wrong answer there is fixed on the origin, not in the Worker's settings. The
+second is the Worker's own.
 
 What each answer should look like — including why a `404` on the second is
 legitimate, and why the served key value has to be compared against
@@ -274,9 +278,13 @@ there is a sign that the Worker has not picked up a rotation yet — §4.2.
 
 ### 3.3 Gotchas
 
-- **Routes must cover `/.well-known/*`.** Missing them breaks bot negotiation
-  silently: the bot gets a `403` pointing at the discovery document, follows the
-  pointer, and finds the origin's `404`.
+- **The discovery document lives on the origin.** The Worker passes
+  `/.well-known/fora.json` and `/rsl.txt` through to it; it never answers them.
+  An origin without the file breaks bot negotiation silently: the bot gets a
+  `403` pointing at the discovery document, follows the pointer, and finds the
+  origin's `404`. Upgrading from a release that answered both addresses itself
+  means putting both files on the origin first
+  ([`CONFIGURATION.md`](CONFIGURATION.md) §2).
 - **A grey-cloud DNS record means the Worker never runs.** No error is logged
   anywhere — the gate is simply bypassed and everything is served free.
 - **Zone security runs before the Worker.** WAF rules, Bot Fight Mode and AI-bot
@@ -344,14 +352,15 @@ curl -sI https://<host>/ | grep -i '^server:'
    Exchange with `signing_scheme = 'ED25519'` on its `fora.publisher_domains`
    row, or the delivery address will not carry the signature this Worker checks.
    See [`../exchange/RUNBOOK.md`](../exchange/RUNBOOK.md).
-2. **Routes** covering all article paths **and** `/.well-known/*`
-   ([`DEPLOYMENT.md`](DEPLOYMENT.md) §6.1), on proxied DNS records (§6.2).
-3. **The two discovery documents.** `/.well-known/fora.json` is always served by
-   the Worker; `/.well-known/http-message-signatures-directory` is served only
-   when `WBA_KEYS_JSON` is set and returns `404` otherwise, which is legitimate.
-   **All discovery documents are generated at request time from the environment
-   variables — there are no static files to upload or keep in sync.** A filled-in
-   copy of each, with the procedure for the publisher's signing key, is in
+2. **Routes** covering all article paths, and the key directory when the
+   publisher publishes keys ([`DEPLOYMENT.md`](DEPLOYMENT.md) §6.1), on proxied
+   DNS records (§6.2).
+3. **The two discovery documents.** `/.well-known/fora.json` is the publisher's
+   own file on its origin, and the Worker passes it through — the origin must
+   have it. `/.well-known/http-message-signatures-directory` is served by the
+   Worker only when `WBA_KEYS_JSON` is set and returns `404` otherwise, which is
+   legitimate. A filled-in copy of each, with the procedure for the publisher's
+   signing key, is in
    [`../../deploy/publisher-wellknown/`](../../deploy/publisher-wellknown/).
 4. **Zone protections that must not conflict with the Worker**
    ([`DEPLOYMENT.md`](DEPLOYMENT.md) §7).

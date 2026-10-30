@@ -13,6 +13,18 @@ INSERT INTO fora.publishers (publisher_id, display_name)
 VALUES ($1, $2)
 RETURNING *;
 
+-- name: CreatePublisherIfAbsent :one
+-- Creates a payee an operator's boot fixture declares (ADR-029), unless one is
+-- already stored under this id, which is left as it is. Unlike CreatePublisher,
+-- whose caller mints a fresh id, the fixture names the id itself and every boot
+-- after the first declares it again, so an existing row is the expected case and
+-- returns no row rather than an error. Deployment-wide for the reason
+-- GetPublisher gives.
+INSERT INTO fora.publishers (publisher_id, display_name)
+VALUES ($1, $2)
+ON CONFLICT (publisher_id) DO NOTHING
+RETURNING *;
+
 -- name: LockPublisher :one
 -- Takes the payee's row lock for the rest of the transaction, so registrations
 -- for one payee that count what it already holds run one after another rather

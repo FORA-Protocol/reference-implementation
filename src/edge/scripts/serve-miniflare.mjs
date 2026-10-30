@@ -34,13 +34,6 @@ const mf = new Miniflare({
     // signed-URL verify keys from its keys[] by RFC 7638 thumbprint.
     EXCHANGE_WBA_URL: requireEnv('EXCHANGE_WBA_URL'),
     ORIGIN_URL: requireEnv('ORIGIN_URL'),
-    PROVIDER: requireEnv('PROVIDER'),
-    EXCHANGES_JSON: requireEnv('EXCHANGES_JSON'),
-    RSL_BODY: process.env.RSL_BODY ?? '',
-    ACME_TOKENS_JSON: process.env.ACME_TOKENS_JSON ?? '{}',
-    // Optional; enables Gate 2 (CatalogService contributor authorization)
-    // when the deploy lists authorized third-party catalog pushers.
-    CATALOG_CONTRIBUTORS_JSON: process.env.CATALOG_CONTRIBUTORS_JSON ?? '',
     // Optional D5 pre-provisioned verify keys (inline JWK array). Passed only
     // when set so the worker falls back to fetching the WBA directory otherwise.
     ...(process.env.FORA_VERIFY_KEYS ? { FORA_VERIFY_KEYS: process.env.FORA_VERIFY_KEYS } : {}),

@@ -32,8 +32,8 @@ import (
 //
 // Legs: each write goes signed HTTP -> service -> repositories -> database, and
 // the site read-back comes through the signed resume route. The audit count is
-// one tier lower, through the audit repository, for the reason auditActions
-// gives.
+// one tier lower, through the audit repository, for the reason
+// exchangetest's AuditActions gives.
 func TestConsoleRegistration_ConcurrentDomainSubmitsRegisterOneSite(t *testing.T) {
 	f := startConsoleFixture(t)
 	actor := newActor("editor@publisher.example")
@@ -87,7 +87,7 @@ func TestConsoleRegistration_ConcurrentDomainSubmitsRegisterOneSite(t *testing.T
 	}
 
 	listedSite(t, f, actor, "stoa.example")
-	if n := countActions(t, f, "RegisterDomain"); n != 1 {
+	if n := f.exchange.CountAuditActions(t, "RegisterDomain"); n != 1 {
 		t.Fatalf("%d concurrent submits wrote %d RegisterDomain audit rows, want 1", submits, n)
 	}
 }
@@ -131,7 +131,7 @@ func TestConsoleRegistration_ListsAnOwnSiteThatHasNoListing(t *testing.T) {
 	if terms, _ := site["terms"].(map[string]any); terms["pricing_model"] != "per_unit" {
 		t.Fatalf("listing terms = %v, want the terms this registration submitted", terms)
 	}
-	if n := countActions(t, f, "RegisterDomain"); n != 1 {
+	if n := f.exchange.CountAuditActions(t, "RegisterDomain"); n != 1 {
 		t.Fatalf("the registration wrote %d RegisterDomain audit rows, want 1", n)
 	}
 }
@@ -200,16 +200,4 @@ func TestConsoleRegistration_ListsEverySiteWithItsOwnSiteRow(t *testing.T) {
 			t.Fatalf("site %s lists cdn %v, want %s", domain, s["cdn"], want[domain])
 		}
 	}
-}
-
-// countActions counts the audit rows with one action on the fixture's seat.
-func countActions(t *testing.T, f *consoleFixture, action string) int {
-	t.Helper()
-	var n int
-	for _, a := range auditActions(t, f) {
-		if a == action {
-			n++
-		}
-	}
-	return n
 }

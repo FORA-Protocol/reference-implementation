@@ -56,7 +56,12 @@ func (s *ExchangeService) validateBatchRequest(req *forav1.TransactionRequest) e
 		if item.GetOffer().GetSignature() == "" {
 			return exchange.Newf(exchange.KindInvalidRequest, "item %d: offer signature required", i)
 		}
-		if item.GetAgentAcceptance().GetSignature() == "" {
+		// A subscription-gated item (its offer's term carries a 'subscription:'
+		// scope) without an acceptance is NOT a malformed envelope: the protocol
+		// answers it with a per-item DENIAL_REASON_DELEGATION_INVALID, so it must
+		// reach the per-item path and be denied there while its siblings execute.
+		// Every other item still needs its acceptance here.
+		if item.GetAgentAcceptance().GetSignature() == "" && !gatedItem(item) {
 			return exchange.Newf(exchange.KindInvalidRequest, "item %d: agent_acceptance signature required", i)
 		}
 		// The signed canonical URL is REQUIRED: it is the only binding between an
@@ -83,4 +88,17 @@ func (s *ExchangeService) validateBatchRequest(req *forav1.TransactionRequest) e
 		seen[id] = i
 	}
 	return nil
+}
+
+// gatedItem reports whether the item's offer sells a subscription-gated term:
+// its one term carries a scope with the subscription prefix. Read off the
+// presented offer before any signature check, so it only decides which refusal
+// vocabulary a missing acceptance gets, never whether the item is trusted.
+func gatedItem(item *forav1.TransactionItem) bool {
+	for _, term := range item.GetOffer().GetTerms() {
+		if _, gated, _ := exchange.SubscriptionScopeOf(term.GetScopes()); gated {
+			return true
+		}
+	}
+	return false
 }

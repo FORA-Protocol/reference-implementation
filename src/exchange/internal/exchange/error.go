@@ -23,49 +23,44 @@ const (
 	KindBillingDenied
 	KindIdempotent // already-processed idempotency replay
 	KindInternal
-	// KindUnauthenticated is for delegation verification failures that are
-	// caller-attributable (bad/expired Biscuit, unknown principal domain).
+	// KindUnauthenticated is for caller-attributable authentication failures
+	// (no verified transport signature, an unknown caller).
 	KindUnauthenticated
 	// KindFailedPrecondition signals state-level invariants (e.g. a
 	// post-verification identity-mismatch check on ReportUsage).
 	KindFailedPrecondition
-	// KindPermissionDenied signals that a biscuit chain-verified but the
-	// Exchange policy layer refused it — for example because the
-	// authority or attenuation kid is on the issuer's revocation list
-	// (ADR-003 §5). Maps to connect.CodePermissionDenied.
+	// KindPermissionDenied signals that a caller authenticated but the
+	// Exchange policy layer refused the operation. Maps to
+	// connect.CodePermissionDenied.
 	KindPermissionDenied
 	// KindUnimplemented signals an operation the adapter or handler does not
 	// implement — e.g. a billing adapter with no reverse-transfer primitive
 	// returning ErrRefundUnsupported. Maps to connect.CodeUnimplemented.
 	KindUnimplemented
-	// Refusal-reason taxonomy (obligation 05). Each kind
-	// names a distinct biscuit-failure mode at the wire boundary so
-	// operator tooling can triage. All map to CodeUnauthenticated at
-	// the Connect layer — the discriminator is the Kind tag plus the
-	// canonical message prefix carried in Error.Message.
+	// Entitlement refusal taxonomy. The six kinds below keep their wire
+	// mappings (the protocol still defines the six DenialReason values) but the
+	// Exchange no longer emits any of them: every failure of the holder-bound
+	// JWT delegation chain a subscription-gated term is bought under is
+	// KindDelegationInvalid, and the specific failure is journaled, not
+	// returned. They map to CodeUnauthenticated at the Connect layer.
 	//
-	// KindEntitlementMissing — caller presented no entitlement biscuit
-	// for a subscription-only offer.
+	// KindEntitlementMissing — no delegation token was presented for a
+	// subscription-gated term.
 	KindEntitlementMissing
-	// KindEntitlementMalformed — biscuit bytes failed the Biscuit v2
-	// protobuf decode (ErrMalformed at the verifier layer).
+	// KindEntitlementMalformed — the delegation token did not parse as the
+	// profile's compact JWS.
 	KindEntitlementMalformed
-	// KindEntitlementExpired — biscuit's authority validity window has
-	// passed (ErrExpired at the verifier layer).
+	// KindEntitlementExpired — the chain's earliest exp has passed.
 	KindEntitlementExpired
-	// KindEntitlementWrongBuyer — biscuit's subscriber_org fact does
-	// not match the caller's asserted buyer organization. Crypto +
-	// TTL pass; only the buyer binding is wrong.
+	// KindEntitlementWrongBuyer — the chain's holder binding (cnf.jkt) is not the
+	// key the request proved.
 	KindEntitlementWrongBuyer
-	// KindSubscriptionLapsed — the subscription itself has lapsed on
-	// the resource owner's side (distinct from the biscuit's TTL — the
-	// covering contract is no longer valid). Today this surfaces via
-	// the same ErrExpired path; reserved for the future grant-map
-	// branch where the subscription contract is queried independently.
+	// KindSubscriptionLapsed — the subscription record itself has ended on the
+	// resource owner's side, independent of the token's exp. Reserved; ending a
+	// record today leaves its keys trusted.
 	KindSubscriptionLapsed
-	// KindEntitlementNotGranted — the subscription exists for some
-	// buyer org but no buyer-side grant ties this caller to it. The
-	// biscuit is sound but does not name this caller's org.
+	// KindEntitlementNotGranted — the chain verifies but its scopes do not cover
+	// the term.
 	KindEntitlementNotGranted
 	// KindOfferExpired signals that a presented offer's signature verified but
 	// its signed expires_at is in the past (or absent — fail-closed). Distinct
@@ -138,6 +133,16 @@ const (
 	// transaction_denial; inside the batch loop it denies its item and the rest
 	// proceed.
 	KindRelayNotAccepted
+	// KindDelegationInvalid signals that a subscription-gated item was bought
+	// without a delegation chain that verifies for it: no token, a malformed or
+	// oversized token, an untrusted root key, a broken chain, an expired or not
+	// yet valid token, a holder binding that is not the key the acceptance
+	// proved, verified scopes that do not cover the term, or a restriction this
+	// Exchange does not meter. Every one of those is the same per-item denial on
+	// the wire, DENIAL_REASON_DELEGATION_INVALID; the failure name is journaled,
+	// never returned, so the response does not say which check refused. Other
+	// items in the batch proceed.
+	KindDelegationInvalid
 )
 
 // Error is the canonical domain error. Handlers receive it from the service
@@ -189,6 +194,7 @@ var kindStrings = map[Kind]string{
 	KindAccountInactive:       "account_inactive",
 	KindReportingOverdue:      "reporting_overdue",
 	KindRelayNotAccepted:      "relay_not_accepted",
+	KindDelegationInvalid:     "delegation_invalid",
 
 	KindRegistrationDataInvalid: "registration_data_invalid",
 	KindTermsDigestStale:        "terms_digest_stale",
@@ -213,7 +219,7 @@ func (k Kind) ConnectCode() connect.Code {
 	case KindSignatureInvalid:
 		return connect.CodeUnauthenticated
 	case KindBillingDenied, KindAccountNotRegistered, KindAccountInactive, KindReportingOverdue,
-		KindRelayNotAccepted:
+		KindRelayNotAccepted, KindDelegationInvalid:
 		return connect.CodePermissionDenied
 	case KindIdempotent:
 		return connect.CodeAlreadyExists

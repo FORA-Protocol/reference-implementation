@@ -22,8 +22,64 @@ const billingURLTTL = 5 * time.Minute
 
 // newTigerBeetleBillingAdapter builds the persisted TigerBeetle billing adapter
 // from the environment. Config is fully validated before the client connection
-// opens, so a misconfiguration fails fast without leaking a socket. The returned
-// func() closes the client on shutdown.
+// opens (readTigerBeetleSettings), so a misconfiguration fails fast without
+// leaking a socket. The returned func() closes the client on shutdown.
+func newTigerBeetleBillingAdapter(
+	ctx context.Context, logger *slog.Logger,
+) (billing.Adapter, []string, func(), error) {
+	settings, err := readTigerBeetleSettings()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	client, err := tigerbeetle.NewClient(settings.cluster, []string{settings.address}, logger,
+		settings.clientOpts...)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("billing: connect TigerBeetle at %s: %w", settings.address, err)
+	}
+	if err := client.Health(ctx); err != nil {
+		client.Close()
+		return nil, nil, nil, fmt.Errorf("billing: TigerBeetle health check: %w", err)
+	}
+
+	opts := settings.adapterOptions(client)
+	adapter, err := billing.NewTigerBeetleAdapter(opts)
+	if err != nil {
+		client.Close()
+		return nil, nil, nil, err
+	}
+	// Boot-path logs use free-text messages by convention (see keys.go /
+	// keyresolver.go); dotted event names (exchange.*) are the request/lifecycle path.
+	//
+	// base_currency is logged separately from the list because it is a decision
+	// the list's ORDER makes silently: an operator who reorders the variable
+	// changes what this Exchange advertises, and this line is where that shows up.
+	logger.Info("billing adapter: tigerbeetle",
+		"currencies", strings.Join(opts.Currencies, ","), "base_currency", opts.Currencies[0],
+		"address", settings.address, "hold_timeout", opts.HoldTimeout)
+	if opts.IDNamespace != "" {
+		// Only an e2e build gets here: a production build refuses the setting.
+		// The value is read from the options the adapter was built with, so the
+		// line shows what the adapter salts its ids with, not what was configured.
+		logger.Warn("billing adapter: ledger ids salted with an e2e namespace",
+			"id_namespace", opts.IDNamespace)
+	}
+	return adapter, opts.Currencies, client.Close, nil
+}
+
+// tigerBeetleSettings is everything the TigerBeetle adapter reads from the
+// environment, already validated.
+type tigerBeetleSettings struct {
+	currencies  []string
+	address     string
+	cluster     uint64
+	holdTimeout time.Duration
+	clientOpts  []tigerbeetle.Option
+	idNamespace string
+}
+
+// readTigerBeetleSettings reads and validates the adapter's settings. It opens
+// no connection, so every misconfiguration fails here, before a socket exists.
 //
 // Environment variables (all under the EXCHANGE_BILLING_ prefix — one adapter,
 // one convention):
@@ -38,64 +94,58 @@ const billingURLTTL = 5 * time.Minute
 //   - EXCHANGE_BILLING_TB_OP_TIMEOUT: per-call cluster deadline (default 5s); a
 //     call exceeding it fails fast with a retryable unavailable error instead of
 //     blocking on an unreachable cluster.
-func newTigerBeetleBillingAdapter(
-	ctx context.Context, logger *slog.Logger,
-) (billing.Adapter, []string, func(), error) {
+//   - EXCHANGE_BILLING_TB_ID_NAMESPACE: e2e builds only, where it is required; a
+//     production build refuses it. See billingIDNamespaceEnv.
+func readTigerBeetleSettings() (tigerBeetleSettings, error) {
 	currencies, err := billingLedgerCurrencies()
 	if err != nil {
-		return nil, nil, nil, err
+		return tigerBeetleSettings{}, err
 	}
 	addr := runhttp.EnvOr("EXCHANGE_BILLING_TB_ADDRESS", "")
 	if addr == "" {
-		return nil, nil, nil, fmt.Errorf(
+		return tigerBeetleSettings{}, fmt.Errorf(
 			"billing: EXCHANGE_BILLING_TB_ADDRESS is required for FORA_BILLING_ADAPTER=tigerbeetle")
 	}
 	cluster, err := strconv.ParseUint(runhttp.EnvOr("EXCHANGE_BILLING_TB_CLUSTER_ID", "0"), 10, 64)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("billing: invalid EXCHANGE_BILLING_TB_CLUSTER_ID: %w", err)
+		return tigerBeetleSettings{}, fmt.Errorf("billing: invalid EXCHANGE_BILLING_TB_CLUSTER_ID: %w", err)
 	}
 	grace, err := time.ParseDuration(runhttp.EnvOr("EXCHANGE_BILLING_HOLD_GRACE", "1m"))
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("billing: invalid EXCHANGE_BILLING_HOLD_GRACE: %w", err)
+		return tigerBeetleSettings{}, fmt.Errorf("billing: invalid EXCHANGE_BILLING_HOLD_GRACE: %w", err)
 	}
 	var clientOpts []tigerbeetle.Option
 	if raw := runhttp.EnvOr("EXCHANGE_BILLING_TB_OP_TIMEOUT", ""); raw != "" {
 		opTimeout, pErr := time.ParseDuration(raw)
 		if pErr != nil {
-			return nil, nil, nil, fmt.Errorf("billing: invalid EXCHANGE_BILLING_TB_OP_TIMEOUT: %w", pErr)
+			return tigerBeetleSettings{}, fmt.Errorf("billing: invalid EXCHANGE_BILLING_TB_OP_TIMEOUT: %w", pErr)
 		}
 		clientOpts = append(clientOpts, tigerbeetle.WithOpTimeout(opTimeout))
 	}
-
-	client, err := tigerbeetle.NewClient(cluster, []string{addr}, logger, clientOpts...)
+	namespace, err := billingIDNamespace()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("billing: connect TigerBeetle at %s: %w", addr, err)
+		return tigerBeetleSettings{}, err
 	}
-	if err := client.Health(ctx); err != nil {
-		client.Close()
-		return nil, nil, nil, fmt.Errorf("billing: TigerBeetle health check: %w", err)
-	}
+	return tigerBeetleSettings{
+		currencies:  currencies,
+		address:     addr,
+		cluster:     cluster,
+		holdTimeout: billingURLTTL + grace,
+		clientOpts:  clientOpts,
+		idNamespace: namespace,
+	}, nil
+}
 
-	adapter, err := billing.NewTigerBeetleAdapter(billing.TigerBeetleOptions{
+// adapterOptions are the options the adapter is built with over client. It is
+// the only way the settings reach the adapter, so a test of it covers the
+// wiring of every setting the adapter reads.
+func (s tigerBeetleSettings) adapterOptions(client *tigerbeetle.Client) billing.TigerBeetleOptions {
+	return billing.TigerBeetleOptions{
 		Client:      client,
-		Currencies:  currencies,
-		HoldTimeout: billingURLTTL + grace,
-		// IDNamespace deliberately empty: production hashing stays unsalted.
-	})
-	if err != nil {
-		client.Close()
-		return nil, nil, nil, err
+		Currencies:  s.currencies,
+		HoldTimeout: s.holdTimeout,
+		IDNamespace: s.idNamespace,
 	}
-	// Boot-path logs use free-text messages by convention (see keys.go /
-	// keyresolver.go); dotted event names (exchange.*) are the request/lifecycle path.
-	//
-	// base_currency is logged separately from the list because it is a decision
-	// the list's ORDER makes silently: an operator who reorders the variable
-	// changes what this Exchange advertises, and this line is where that shows up.
-	logger.Info("billing adapter: tigerbeetle",
-		"currencies", strings.Join(currencies, ","), "base_currency", currencies[0],
-		"address", addr, "hold_timeout", billingURLTTL+grace)
-	return adapter, currencies, client.Close, nil
 }
 
 // billingLedgerCurrencies reads EXCHANGE_BILLING_LEDGER — one ISO 4217 numeric

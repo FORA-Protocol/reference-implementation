@@ -96,16 +96,12 @@ func (s *ExchangeService) resolveAgent(
 		// transaction to an unverified string.
 		return resolvedAgent{}, exchange.Newf(exchange.KindInternal, "service has no agents repo wired")
 	}
-	relay := classifyTransportChain(helpers.AllSignaturesFromContext(ctx))
+	relay := s.classifyRequestTransport(ctx, v)
 	if s.callerIsConfiguredBroker(v) {
-		// A single-signature Broker re-package carries no second signature for
-		// classifyTransportChain to count, so the relay is recorded here instead.
-		// The Broker's own verified keyid is what the audit line names, unless a
-		// chain was present and already named its outermost hop.
-		relay.hasBroker = true
-		if relay.brokerKey == "" {
-			relay.brokerKey = v.KeyID
-		}
+		// The Broker's single-signature re-package: the header names the relay,
+		// so the agent is taken from Requester.domain. A FORWARDED chain is a
+		// relay too (relay.hasBroker), but its first signature is the agent's own
+		// Signature-Agent, so the direct derivation below still names the agent.
 		return s.resolveRelayedAgent(ctx, req, relay)
 	}
 	callerHost, agent, err := s.callerAgentRecord(ctx, v)
@@ -122,6 +118,27 @@ func (s *ExchangeService) resolveAgent(
 		key:        snapshotKey(agent),
 		relay:      relay,
 	}, nil
+}
+
+// classifyRequestTransport decides, once per request, how the request reached
+// the Exchange: v is the first verified transport signature (helpers.FromContext)
+// and the result says whether a Broker delivered the request. Both relay shapes
+// are recognised here — a forwarded multi-signature chain by position
+// (classifyTransportChain) and a single-signature Broker re-package by the
+// configured Broker directory host — so the execute path and the discovery gate
+// cannot reach different verdicts about the same request. A single-signature
+// Broker re-package carries no second signature for classifyTransportChain to
+// count, so the relay is recorded here instead; the Broker's own verified keyid
+// is what the audit line names, unless a chain already named its outermost hop.
+func (s *ExchangeService) classifyRequestTransport(ctx context.Context, v *helpers.VerifiedRequest) transportChain {
+	relay := classifyTransportChain(helpers.AllSignaturesFromContext(ctx))
+	if v != nil && s.callerIsConfiguredBroker(v) {
+		relay.hasBroker = true
+		if relay.brokerKey == "" {
+			relay.brokerKey = v.KeyID
+		}
+	}
+	return relay
 }
 
 // callerIsConfiguredBroker reports whether the verified caller signed as the

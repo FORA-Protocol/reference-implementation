@@ -121,6 +121,16 @@ write_files:
     encoding: b64
     content: ${base64encode(wba_body)}
 %{ endfor }
+%{ for origin_path, origin_body in origin_document_files ~}
+  # The demo publisher's discovery document, which Caddy serves as a file on
+  # the origin hostname. Base64-delivered for the same reason as the key
+  # directories above: no byte of it passes through YAML, shell or proxy-config
+  # quoting.
+  - path: /opt/fora/${origin_path}
+    permissions: "0644"
+    encoding: b64
+    content: ${base64encode(origin_body)}
+%{ endfor ~}
 %{ for terms_filename, terms_document in terms_documents ~}
   # Terms revisions served by Caddy under /terms/. Base64-delivered for the
   # same reason as the documents above, and for one more that is specific to

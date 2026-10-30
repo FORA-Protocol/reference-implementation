@@ -21,17 +21,17 @@
 # Build context is the repo root (see docker-compose.e2e.yml) so both src/edge/
 # and this directory are reachable.
 
-# @fora-protocol/sdk is installed from the npm registry at an exact release
-# version, and npm verifies its recorded sha512 integrity against the downloaded
-# tarball. Written out once, with the reasoning, in
+# @fora-protocol/sdk is a git dependency pinned to one commit of the protocol
+# repository. Written out once, with the reasoning, in
 # src/edge/Dockerfile.miniflare — three copies of it is how the correction
-# reached three sites of eight last time.
+# reached three sites of eight last time. The full node image rather than -slim
+# so git is present for npm's clone fallback without an apt layer.
 FROM node:22 AS builder
 WORKDIR /app
 COPY src/edge/package.json src/edge/package-lock.json ./
 # Persist npm's download cache across builds — the slowest two stages of a cold
-# stack build. It holds every registry tarball this step downloads, the SDK's
-# among them. The mount lives with the builder, so nothing here reaches a
+# stack build. It holds every tarball this step downloads, the SDK's codeload
+# tarball among them. The mount lives with the builder, so nothing here reaches a
 # layer.
 #
 # id, because BuildKit otherwise names a cache mount after its target and all
@@ -42,13 +42,15 @@ RUN --mount=type=cache,id=npm-lambda-edge,target=/root/.npm,sharing=locked \
 COPY src/edge/ ./
 COPY tests/e2e/lambda-edge/write-configs.mjs /build/write-configs.mjs
 RUN node /build/write-configs.mjs --out-dir /build/config --edge-dir /app
-# The build script smoke-invokes each package it produces (manifest route plus
-# an unsigned human read), which needs no network — so a broken config fails
-# the image build here rather than the first test.
+# The build script smoke-invokes each package it produces (the health route,
+# and the discovery document and an unsigned human read handed back to
+# CloudFront), which needs no network — so a broken config fails the image
+# build here rather than the first test. The publisher domain comes from
+# write-configs.mjs, the one place it is named.
 RUN node scripts/build-lambda-edge.mjs --config /build/config/with-wba.json \
-      --out-dir dist/lambda-edge-with-wba \
+      --domain "$(cat /build/config/domain)" --out-dir dist/lambda-edge-with-wba \
     && node scripts/build-lambda-edge.mjs --config /build/config/no-wba.json \
-      --out-dir dist/lambda-edge-no-wba
+      --domain "$(cat /build/config/domain)" --out-dir dist/lambda-edge-no-wba
 
 FROM public.ecr.aws/lambda/nodejs:22
 COPY --from=builder /app/dist/lambda-edge-with-wba/index.mjs /app/dist/lambda-edge-with-wba/lambda-edge.mjs ${LAMBDA_TASK_ROOT}/

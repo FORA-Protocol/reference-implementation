@@ -27,6 +27,9 @@ type AccountRepo interface {
 	// ActiveByBillingRef returns the SoR-owned active flag for an account, or
 	// ErrAccountNotFound when no account has that billing_ref.
 	ActiveByBillingRef(ctx context.Context, billingRef string) (bool, error)
+	// SetActive sets the SoR-owned active flag of the account with this
+	// billing_ref, or returns ErrAccountNotFound when no account has it.
+	SetActive(ctx context.Context, billingRef string, active bool) error
 }
 
 // NewAccountRepo composes an AccountRepo over a generated sqlc.Querier.
@@ -92,6 +95,20 @@ func (r *accountRepo) ActiveByBillingRef(ctx context.Context, billingRef string)
 		return false, fmt.Errorf("get agent account active: %w", err)
 	}
 	return active, nil
+}
+
+func (r *accountRepo) SetActive(ctx context.Context, billingRef string, active bool) error {
+	n, err := r.q.SetAgentAccountActive(ctx, sqlc.SetAgentAccountActiveParams{
+		BillingRef: billingRef,
+		Active:     active,
+	})
+	if err != nil {
+		return fmt.Errorf("set agent account active: %w", err)
+	}
+	if n == 0 {
+		return ErrAccountNotFound
+	}
+	return nil
 }
 
 func accountFromRow(row sqlc.SorAgentAccount) (Account, error) {

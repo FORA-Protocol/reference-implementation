@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "@fastly/js-compute": "^3.33.0",
-    "@fora-protocol/sdk": "1.1.0",
+    "@fora-protocol/sdk": "1.2.0",
     "@fora/edge": "file:../../../src/edge",
     "@noble/ed25519": "^2.3.0",
     "hono": "^4.7.0",

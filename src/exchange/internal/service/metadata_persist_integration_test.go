@@ -28,15 +28,10 @@ func TestCatalogMetadataPersists(t *testing.T) {
 	ctx := context.Background()
 	pool := servicetest.AcquireTestDB(t, ctx)
 
-	// pt9 documented corner: no public tenant-provisioning RPC exists yet, so the
-	// tenant prerequisite is seeded via the sqlc InsertTenant query (the same
-	// surface sibling Exchange tests use), not a raw SQL string.
-	if _, err := sqlc.New(pool).InsertTenant(ctx, sqlc.InsertTenantParams{
-		TenantID: "t1", Domain: "publisher.example", Ed25519KeyRef: "k",
-		ReportingPolicy: []byte(`{}`),
-	}); err != nil {
-		t.Fatalf("seed tenant: %v", err)
-	}
+	// No public RPC creates a seat, so the tenant prerequisite is arranged through
+	// repo.SeatProvisionRepo, the port a deployment's boot fixture provisions its
+	// seats through.
+	repotest.SeedSeat(t, ctx, pool, repotest.Seat{ID: "t1", Domain: "publisher.example", Ed25519KeyRef: "k"})
 
 	// entryFromProto is the write projection only; the push path fills the payee
 	// in afterwards from the site's manifest, and the domain from the registered

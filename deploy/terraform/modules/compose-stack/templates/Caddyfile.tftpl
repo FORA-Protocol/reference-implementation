@@ -154,8 +154,28 @@ FORA_CSS
 # Demo publisher origin (staging only): the edge worker fetches verified
 # content from here. Publicly reachable by design in staging; a production
 # publisher restricts its origin.
+#
+# The publisher's discovery document is this deployment's own, written by
+# cloud-init and served as a file: the publisher image's tree carries the e2e
+# stack's mock document, which names an Exchange this deployment does not run,
+# so the address never reaches the image. The document is a file, never
+# interpolated here, so no byte of it can parse as proxy configuration.
 ${origin_hostname} {
+%{ if origin_documents ~}
+	handle /.well-known/fora.json {
+		root * /srv/origin
+		rewrite * /fora.json
+		header Content-Type application/json
+		file_server
+	}
+	# Wrapped, like the terms routes on the Exchange's site: handle blocks
+	# are mutually exclusive, so exactly one of the two answers a request.
+	handle {
+		reverse_proxy publisher:80
+	}
+%{ else ~}
 	reverse_proxy publisher:80
+%{ endif ~}
 }
 %{ endif ~}
 %{ if onboarding_hostname != null }

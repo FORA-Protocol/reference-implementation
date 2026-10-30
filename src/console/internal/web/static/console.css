@@ -322,7 +322,8 @@ code { font-family: var(--fora-mono); background: rgba(126, 200, 160, 0.1); padd
   color: var(--fora-light-gray);
   overflow-x: auto;
 }
-/* A file offered inside the step it belongs to. */
+/* A file offered inside the step it belongs to: its name and where it goes on
+   the left, its download on the right. */
 .filerow {
   display: flex;
   justify-content: space-between;
@@ -332,6 +333,17 @@ code { font-family: var(--fora-mono); background: rgba(126, 200, 160, 0.1); padd
   border: 1px solid var(--fora-mid);
   border-radius: 4px;
   padding: 0.75rem 1rem;
+}
+/* The text side may be narrower than its longest word. The discovery file's
+   address -- the domain and /.well-known/fora.json -- is one unbroken string,
+   and a flex item is never narrower than its longest word unless told so: the
+   row grew past its border and pushed the button out of the box. Allowed to
+   shrink, the address wraps inside it, as Bootstrap's code element lets it. */
+.filerow > div { min-width: 0; }
+/* A phone has no room for both side by side: the button goes under the text,
+   the row's full width. */
+@media (max-width: 36rem) {
+  .filerow { flex-direction: column; align-items: stretch; gap: 0.75rem; }
 }
 
 /* The deployment steps, shown in place rather than downloaded as a file. */
@@ -405,6 +417,123 @@ code { font-family: var(--fora-mono); background: rgba(126, 200, 160, 0.1); padd
 .probe-failed .probe-mark { color: #e5736f; }
 .probe-unclear .probe-mark { color: var(--fora-key); }
 
+/* The connect step's two tasks: one container with a rule between them, a
+   hollow circle while a task is pending and a green tick once it passes, and a
+   badge that says the same in words. No numbers: the two are done in either
+   order. The tick and the badge carry the state beside the colour, for a
+   reader who cannot tell the colours apart. */
+.tasks {
+  border: 1px solid var(--fora-mid);
+  border-radius: 4px;
+  background: #0f0f16;
+}
+.task {
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+  padding: 1.125rem 1.25rem;
+}
+.task + .task { border-top: 1px solid var(--fora-mid); }
+.task-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.task-title {
+  flex: 1;
+  margin: 0;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  color: var(--fora-white);
+}
+.task-mark {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 1.75rem;
+  height: 1.75rem;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 1px solid #3f3f52;
+}
+.task-mark.task-done {
+  border-color: rgba(126, 200, 160, 0.5);
+  background: rgba(126, 200, 160, 0.15);
+  color: var(--fora-str);
+}
+.task-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.25rem 0.625rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.task-badge.pending {
+  background: rgba(224, 164, 88, 0.12);
+  border: 1px solid rgba(224, 164, 88, 0.35);
+  color: var(--fora-warn);
+}
+.task-badge.done {
+  background: rgba(126, 200, 160, 0.12);
+  border: 1px solid rgba(126, 200, 160, 0.35);
+  color: var(--fora-str);
+}
+/* What the last check found, under the task it is about. */
+.task-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--fora-warn);
+}
+.task-status::before {
+  content: "";
+  flex-shrink: 0;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-top: 0.375rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+.task-status.done { color: var(--fora-str); }
+.task-reasons {
+  margin: 0;
+  padding-left: 2rem;
+  font-size: 0.8125rem;
+  color: var(--fora-light-gray);
+}
+.task-checks {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0 0 0 1rem;
+  font-size: 0.8125rem;
+  color: var(--fora-light-gray);
+}
+.task-checks li { display: flex; align-items: center; gap: 0.5rem; }
+.task-checks .probe-mark { color: var(--fora-str); }
+.task details > summary {
+  cursor: pointer;
+  color: var(--fora-accent-text);
+  font-size: 0.875rem;
+}
+/* Finish later is a way out, not an action: a link beside the step's one
+   button, with the sentence that says what it keeps under the bar. */
+.wiz-later {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0 0.375rem;
+  color: var(--fora-gray);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.wiz-note { margin: 0.5rem 0 0; }
+
 /* The finished-setup dialog. Styled for both states it can be in: open in the
    page when the script did not run, and modal when it did. */
 .donedialog {
@@ -420,13 +549,12 @@ code { font-family: var(--fora-mono); background: rgba(126, 200, 160, 0.1); padd
 /* The add-a-domain progress header: one numbered circle per step, the step's
    title under it, joined by a rule.
  *
- * Four states, in the colours the dashboard already uses for its badges:
- * green for a step whose check passed, amber for the step being worked on,
- * grey for one not reached yet, and grey in a dashed ring for one passed over
- * with Skip for now. The number is not the only signal -- a passed step shows a
- * tick, a skipped one a dash, and the current one is the only bold title --
- * because a reader who cannot distinguish the colours would otherwise see five
- * identical circles.
+ * Three states, in the colours the dashboard already uses for its badges:
+ * green for a step that is done, amber for the step being worked on, and grey
+ * for one not reached yet. The number is not the only signal -- a done step
+ * shows a tick and the current one is the only bold title -- because a reader
+ * who cannot distinguish the colours would otherwise see a row of identical
+ * circles.
  *
  * The numbers are positions in the list the server sent, not constants. A
  * publisher who already has a business name is not shown that step at all, and
@@ -458,8 +586,9 @@ code { font-family: var(--fora-mono); background: rgba(126, 200, 160, 0.1); padd
   width: 100%;
   text-align: center;
 }
-/* A step already passed is a way back. The ones ahead are not controls at all,
-   so there is nothing to disable. */
+/* A step already passed is a way back, except the business step, which is not
+   shown again. That one and the ones ahead are not controls at all, so there is
+   nothing to disable. */
 button.wiz-stack {
   border: 0;
   background: none;
@@ -493,8 +622,6 @@ button.wiz-stack:hover .wiz-label { color: var(--fora-white); }
   color: var(--fora-str);
 }
 .wiz-done .wiz-label { color: var(--fora-light-gray); }
-.wiz-skipped .wiz-num { border-style: dashed; }
-.wiz-skipped .wiz-label { color: var(--fora-light-gray); }
 .wiz-now .wiz-num {
   border-color: rgba(224, 164, 88, 0.5);
   background: rgba(224, 164, 88, 0.15);
@@ -503,7 +630,7 @@ button.wiz-stack:hover .wiz-label { color: var(--fora-white); }
 .wiz-now .wiz-label { color: var(--fora-white); font-weight: 600; }
 
 @media (max-width: 560px) {
-  /* Under a phone width five titles side by side wrap to three lines each.
+  /* Under a phone width the titles side by side wrap to three lines each.
      The circles carry the position on their own there. */
   .wiz-label { display: none; }
 }
@@ -541,7 +668,7 @@ button.wiz-stack:hover .wiz-label { color: var(--fora-white); }
 
 /* The dashboard.
  *
- * Its pages sit beside a full-height sidebar: the console's mark, the four
+ * Its pages sit beside a full-height sidebar: the console's mark, the five
  * sections with their icons, and sign-out at the foot. The collapse button
  * shrinks it to the icons alone, and sidebar.js remembers that between pages.
  * Below the md breakpoint the sidebar is hidden and the same list opens from a

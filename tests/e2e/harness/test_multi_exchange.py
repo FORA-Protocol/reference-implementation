@@ -48,7 +48,6 @@ observed through ``ExchangeService/ReportUsage`` (see
 from __future__ import annotations
 
 import uuid
-from contextlib import closing
 
 import pytest
 from fora_sdk.client import CallError
@@ -77,7 +76,6 @@ from .fresh_agent import FreshAgent
 from .money_path import discover_offer
 from .protocol_documents import wba_directory_at
 from .reporting import assert_report_recorded_only_at, file_report, report_body
-from .sdk_client import sdk_broker_client
 from .seed import DEMO_PHILOSOPHY_DOMAIN, SeededFixture
 
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
@@ -201,10 +199,7 @@ def _resolve_one_offer_each(agent: FreshAgent, uris: list[str]) -> list[Verified
     return [only_verified_offer(by_uri[uri], f"broker resolve of {uri}") for uri in uris]
 
 
-def test_broker_fans_out_batch_across_exchanges(
-    compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: seed ingests each catalog into its DB
-) -> None:
+def test_broker_fans_out_batch_across_exchanges(fresh_agent: FreshAgent) -> None:
     """ONE broker Resolve over a 3-publisher batch returns a per-URI offer group from
     the right exchange, plus a typed-absence group for an uncatalogued URI.
 
@@ -225,8 +220,7 @@ def test_broker_fans_out_batch_across_exchanges(
         f"http://{DEMO_PHILOSOPHY_DOMAIN}/articles/philosophers/nonexistent-{uuid.uuid4().hex}.txt"
     )
     uris = [*_URI_OWNERS, miss_uri]
-    with closing(sdk_broker_client(compose_stack)) as client:
-        result = client.resolve(resolve_request(uris))
+    result = fresh_agent.broker.resolve(resolve_request(uris))
     by_uri = one_group_per_uri(result, uris, "broker resolve")
 
     for uri, owner in _URI_OWNERS.items():

@@ -5,7 +5,8 @@
 // whatever a real deployment pipeline would render.
 //
 // Two configs, because the WBA directory route has two postures and one
-// container can serve only one handler:
+// container can serve only one handler, and the publisher's domain beside them
+// (domain), which the build writes into each package's index.mjs:
 //
 //   with-wba.json — the publisher publishes a signing key, so the directory is
 //                   served, pre-signed for the publisher's host
@@ -39,9 +40,9 @@ const { signWbaDirectory } = await import(
 // The publisher this deployment fronts. It is NOT a compose network alias:
 // the Lambda runtime emulator speaks only the Lambda invoke protocol, so no
 // plain HTTP traffic is ever routed to this service by hostname. The name
-// still has to be a real publisher identity because it is what fora.json
-// advertises as `domain` and what the delivery URLs are signed over.
-const PROVIDER = 'lambda.demo.fora-protocol.org';
+// still has to be a real publisher identity because it is the domain the
+// publisher's own fora.json names and what the delivery URLs are signed over.
+const PUBLISHER = 'lambda.demo.fora-protocol.org';
 
 // exchange-a. The delivery-URL verify key is resolved by fetching this
 // directory over the compose network — the production key-resolution path,
@@ -57,21 +58,11 @@ const EXCHANGE_WBA_URL = `${EXCHANGE_URL}/.well-known/http-message-signatures-di
 const shared = {
   EXCHANGE_URL,
   EXCHANGE_WBA_URL,
-  PROVIDER,
-  EXCHANGES_JSON: JSON.stringify([
-    {
-      domain: 'exchange:8081',
-      endpoint: EXCHANGE_URL,
-      supported_profiles: ['fora-news-v1', 'fora-comp-v1', 'fora-music-v1'],
-      ext: { resource_owner_id: 'demo-resource-owner' },
-    },
-  ]),
   // Stated explicitly rather than left to the default, like the other edges in
   // the stack: proof-of-possession enforcement is what two of the E2E cases
   // are about, and a test whose subject is implied by a default proves less
   // than one whose subject is written down.
   FORA_ENFORCE_BINDING: 'true',
-  RSL_BODY: '# e2e rsl lambda',
 };
 
 // A fresh publisher signing key per image build. The public half is published
@@ -99,7 +90,7 @@ async function wbaSettings() {
   ];
   const privKey = await crypto.subtle.importKey('jwk', jwk, { name: 'Ed25519' }, false, ['sign']);
   const signed = await signWbaDirectory({
-    authority: PROVIDER,
+    authority: PUBLISHER,
     keys,
     signers: [{ x: jwk.x, privKey }],
     validDays: 365,
@@ -115,4 +106,5 @@ writeFileSync(
   `${JSON.stringify({ ...shared, ...(await wbaSettings()) }, null, 2)}\n`,
 );
 writeFileSync(join(outDir, 'no-wba.json'), `${JSON.stringify(shared, null, 2)}\n`);
-console.log(`wrote with-wba.json and no-wba.json to ${outDir}`);
+writeFileSync(join(outDir, 'domain'), PUBLISHER);
+console.log(`wrote with-wba.json, no-wba.json and domain to ${outDir}`);

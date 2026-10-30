@@ -1,6 +1,8 @@
 # ADR-028 — E2E Obligation Harness: Registry, SDK-Driven Requests, Universal Shape Check
 
-**Status:** Proposed (2026-10-02)
+**Status:** Accepted (2026-10-15)
+
+**Amended 2026-10-22.** D6's control service gains two controls, both for the e2e seed's credit-less buyer: a seat's agent-activation policy, and an account's active flag in the Exchange's reference System of Record, which is how the operator approves a held account. Neither has an admin RPC, and the protocol leaves account activation to the operator, out of band, so both follow D6's own rule for state no admin RPC reaches. See D6. With them, and with each Exchange creating its seats, publishers, sites and listings at start-up from its boot fixture (ADR-029), the harness writes no database: H10 now holds by structure, and its ban on the harness's own database-writing module went with the module.
 
 **Relates to:** ADR-008 (D1, time is a port; D3, strict xfail markers; D5, declared test isolation, which this ADR extends to every e2e test).
 
@@ -68,6 +70,7 @@ Each fact about an obligation is written in exactly one place. Everything else i
   - **MCP calls:** the tool result's `structuredContent`, against the tool's declared `outputSchema`.
 - **The check is not optional.** A test cannot reach a response without it.
 - **Request bodies built outside a verb** come from one factory per protocol message over the generated models, serialized by the SDK's wire serializer. Hand-written protocol dictionaries are not allowed.
+- **The SDK checks the request too.** Every client the harness builds sets the SDK's `strict_requests`: a verb takes only its own generated request model, or a `RawBody` for raw mode, and refuses anything else before it signs. The message the SDK then stamps (`ver`, the configured requester, a purchase's reflected offers) must pass the same strict schema before it is signed.
 
 ### D4 — Responses and refusals are read through the SDK's types
 
@@ -83,20 +86,25 @@ Each fact about an obligation is written in exactly one place. Everything else i
 ### D6 — E2E-only control surfaces exist only under the `e2e` build tag
 
 - **Existing admin RPCs are used where they exist.** For example, the reporting window is set per tenant through `fora.admin.v1.SetReportingPolicy` (`window_seconds`).
-- **State with no admin RPC is set and observed through an e2e-only control service** in each Go service, compiled only under the `e2e` build tag:
-  - the tenant's transaction log;
+- **State with no admin RPC is set and observed through an e2e-only control service**, in the Go service that holds that state and compiled only under the `e2e` build tag. Only the Exchange has one. It controls:
   - the tenant relay policy;
-  - per-tenant offer and delivery-URL lifetimes.
+  - per-tenant offer and delivery-URL lifetimes;
+  - the tenant agent-activation policy: whether an agent's first Register opens an active account or one held for the operator's review;
+  - an account's active flag in the Exchange's reference System of Record: the operator's out-of-band approval of a held account. The Exchange never changes the flag itself, so this control stands in for the operator.
+- **A transaction is observed through surfaces the product already has**, such as the publisher's transaction list in the console (D2) and the operator evidence read on the Exchange's admin listener.
 - **The surface cannot reach a production binary.**
-  - Every file of the control package carries `//go:build e2e`, and only `e2e`-tagged wiring imports it.
-  - Production images are built without the tag. A production build that imports the package fails to compile, because the build constraints exclude all of its files.
-  - The `make quality` build runs without the tag, so a misplaced import breaks the gate. No custom guard is needed.
+  - Every file of the control package carries `//go:build e2e`, and only `e2e`-tagged wiring imports it. A production build that imports the package fails to compile, because the build constraints exclude all of its files.
+  - The untagged `go build` in `make quality` is the production build, so a misplaced import breaks the gate.
+  - Production images are built without the tag.
+  - Two guards in `make quality` check these facts:
+    - `internal/guards/e2e_control_build_tag_guard_test.go` reads the build constraints with `go/build`. Without the tag, the control package has no files and nothing under `src/` or `internal/` imports it. With the tag, the Exchange's composition root does.
+    - `tests/e2e/harness/test_guards_e2e_images.py` reads the Dockerfiles and the scripts and workflow that build images. The Exchange's production stage reads no stage that builds e2e content, however the tag is spelled, and nothing that builds production images mentions `e2e` outside a comment.
 - **There is no per-service test clock** (ADR-008 D1 keeps time a port for integration tests). Shifting one service's clock in a multi-service stack breaks the signature windows between services. Time-dependent behaviour is tested by shortening the window and polling until it passes.
 
 ### D7 — Every test owns its identities
 
 - **Fresh identities.** A `fresh_agent()` fixture mints a key, a WBA directory entry and, optionally, an Exchange account per test, through the SDK's identity helpers.
-- **Fixed identities** are allowed only in fixtures that need a pre-registered party.
+- **Fixed identities** are allowed only in fixtures that need a pre-registered party. Two kinds remain: the seed's credit-less buyer (`credit_less_buyer`), whose account only the seed can open, and the MCP session agents signed up from the bootstrap's logins (`mcp_agent`, `unregistered_agent`, `spending_agent`). A test that needs an MCP agent nobody else has touched takes one from `fresh_mcp_agent_factory()`.
 - **Every e2e test declares its isolation contract**, extending ADR-008 D5 beyond the obligation tests.
 - **The suite must pass twice in a row against one stack.**
 
@@ -111,7 +119,7 @@ Each linter ban carries a companion test that runs the real linter on a sample v
 
 | # | Standard | Enforcement |
 |---|---|---|
-| H1 | Requests go through SDK verbs or MCP tool calls; other bodies come from the message factories | **Structural:** the seam accepts only generated-model instances or factory output and serializes them itself, so a dictionary cannot reach the wire |
+| H1 | Requests go through SDK verbs or MCP tool calls; other bodies come from the message factories | **Structural:** every client is built with the SDK's `strict_requests`, so a verb accepts only its own generated request model or a `RawBody`, refuses a dictionary before signing, and strict-checks the message it stamps; a dictionary cannot reach the wire |
 | H2 | Every response passes the universal shape check (D3) | **Structural:** the check runs inside the seam, and the seam is the only way to send |
 | H3 | Responses and refusals are read through the SDK's types (D4) | **Structural:** the seam returns only the typed result or raises the SDK's typed error, and never exposes the raw response. **Linter:** ruff `banned-api` refuses `httpx` in test modules |
 | H4 | Negatives are declared mutations with a control request (D5) | **Structural:** `malformed()` is the only way to alter a request, and it takes the control request as an argument and sends it first. The schema-verdict check runs inside it |
@@ -120,8 +128,8 @@ Each linter ban carries a companion test that runs the real linter on a sample v
 | H7 | RPC paths, enum values and the protocol version come from the SDK and the generated models | **Structural:** the seam takes an SDK verb or a generated service descriptor, never a path string |
 | H8 | No dead harness code | **Linter:** vulture in `make quality`. Harness modules declare no `__all__`: vulture counts every name listed there as used, so a listed definition could never be reported dead. No linter rule can state that, so review enforces it |
 | H9 | One factory per message; one identity helper, one poller, one address resolver | **Linter:** jscpd at threshold 0 over `src/`, `internal/` and the harness. It reports copies of at least 20 lines and 100 tokens, so a smaller second helper is caught in review |
-| H10 | Tests never touch the database (D6) | **Linter:** ruff `banned-api` refuses, in test modules, the database and cache drivers `psycopg`, `psycopg2`, `asyncpg`, `pg8000`, `sqlalchemy`, `sqlite3` and `redis`, and `harness.operator_writes`: the one harness module that writes a database, for the seed's writes of seats, publishers and account approvals that no product surface can make yet |
-| H11 | Every test owns its identities; the suite passes twice per stack (D7) | **Structural:** `fresh_agent()` is the only identity source in tests. **CI:** the suite runs twice against one stack. **Config:** `xfail_strict = true` |
+| H10 | Tests never touch the database (D6) | **Structural:** the harness has no database or cache driver among its dependencies, and no harness module opens a database connection. Each Exchange creates its seats, publishers, sites and listings from its boot fixture (ADR-029), and the seed holds the seats and approves the credit-less buyer's accounts through D6's controls. **Linter:** ruff `banned-api` refuses, in test modules, the database and cache drivers `psycopg`, `psycopg2`, `asyncpg`, `pg8000`, `sqlalchemy`, `sqlite3` and `redis` |
+| H11 | Every test owns its identities; the suite passes twice per stack (D7) | **Structural:** a test's agents come from `fresh_agent()` / `fresh_agent_factory()` and its MCP agents from `fresh_mcp_agent_factory()`; an agent set up before the run reaches a test only through its fixture (`credit_less_buyer`; the MCP session agents `mcp_agent`, `unregistered_agent`, `spending_agent`); no client builder or purchase helper falls back to an identity, and a client built with neither a keyfile nor a signer is refused. **Linter:** ruff `banned-api` refuses, in test modules, `harness.seed_agents`, the module that holds the seed's agents. **Custom check:** the harness conftest refuses to collect a test that declares no `stack_isolation` mode, a rule no linter can state. **CI:** the suite runs twice against one stack. **Config:** `xfail_strict = true` |
 | H12 | Every sent request is captured with its bytes | **Structural:** the stack's capture proxy records every request sent to the parties it fronts: the Broker, the Exchanges, the console, the publisher edges, the static key-directory hosts and the wildcard zones. It is the stack's one TLS endpoint: the services serve plain http, and every port the proxy listens on answers both http and https, under a certificate from the local CA the stack mints at every start. The services and the runner resolve those parties' names to it, and it forwards each request over plain http with its Host, end-to-end headers and body bytes unchanged. The runner's own requests are also captured at its transport |
 
 One rule has no linter equivalent: each registry quote still appears at its citation. A host-side test checks it. The link between tests and obligations needs no check at all, because it is written in one place and type-checked (D1).
@@ -154,7 +162,7 @@ An obligation is `tested` when:
 
 - The harness depends on SDK capabilities and schema artifacts that must be released first: the pre-signing hook, strict decoding, typed error decoding, identity helpers and the strict JSON Schemas.
 - Migrating the existing harness onto the seam is a large one-time change.
-- Each Go service carries an e2e-only control surface. The `e2e` build tag keeps it out of production structurally: an untagged build cannot compile an import of it.
+- The Exchange carries an e2e-only control surface. The `e2e` build tag keeps it out of production structurally: an untagged build cannot compile an import of it.
 
 ## Rejected alternatives
 

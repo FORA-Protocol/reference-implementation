@@ -245,8 +245,25 @@ func (s *ExchangeService) executeResolvedItem(
 	if err != nil {
 		return nil, "", exchange.Wrap(exchange.KindInternal, err, "load tenant")
 	}
+	// A gated item without an acceptance is denied in the delegation vocabulary
+	// the protocol mandates, before the acceptance check would call it a
+	// signature failure. Nothing was proven about this item, so nothing is
+	// journaled about it beyond the denial.
+	if gatedItem(item) && item.GetAgentAcceptance().GetSignature() == "" {
+		derr := exchange.Newf(exchange.KindDelegationInvalid, "subscription-gated item carries no agent_acceptance")
+		s.logOutcome(ctx, "execute_transaction", "DELEGATION_REFUSED",
+			Caller{KeyID: agent.id, Kind: CallerAgent, AgentID: agent.id}, &tenant, agent.id, "", derr)
+		return nil, "", derr
+	}
 	caller, binding, err := s.authorizeExecute(ctx, itemReq, agent, tenant)
 	if err != nil {
+		return nil, "", err
+	}
+	// Subscription-gated item: the delegation chain must verify against the
+	// record that owns the term's subscription scope, bound to the key the
+	// acceptance just proved, and cover the term. Direct and relayed purchases
+	// alike bind to the ACCEPTANCE key, never the Broker's transport key.
+	if err := s.authorizeDelegation(ctx, itemReq, item, tenant.ID, caller, binding); err != nil {
 		return nil, "", err
 	}
 	// Deny an agent far enough behind on usage reports before any funds are

@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 # This is a flat-layout tree with several non-package sibling dirs (fixtures/,
 # aws-edge/, fastly-edge/, mock-publisher/). Restrict package discovery to the
-# importable `harness` package (+ its subpackages) so the editable build that
-# `make test-e2e-aws` performs (uv run --with-editable .) does not fail with
-# setuptools' "Multiple top-level packages discovered in a flat-layout" error.
+# importable `harness` package (+ its subpackages) so the editable install of
+# this project that every `uv sync` performs does not fail with setuptools'
+# "Multiple top-level packages discovered in a flat-layout" error.
 [tool.setuptools.packages.find]
 include = ["harness*"]
 
@@ -17,14 +17,13 @@ description = "Full-stack E2E harness for the FORA demo (docker-compose)."
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28",
-    "psycopg[binary]>=3.2",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     # Parallel test execution - reduces wall time by 2-4x on multi-core machines
     "pytest-xdist>=3.6",
-    # RFC 9421 signer in tests/e2e/harness/catalog_push.py (PushResources RPC).
+    # The Ed25519 keys the harness mints and loads: fresh agents, keyfiles and the
+    # third-party oracles' signers.
     "cryptography>=44.0.0",
-    "rfc8785>=0.1.4",
     # Docker SDK for Python — used by obligation tests that drive container
     # lifecycle (restart, inspect, exec) directly against the docker socket
     # instead of shelling out to the docker CLI. Required because the runner
@@ -51,12 +50,12 @@ dependencies = [
     # signs the requests the Go services verify and the delivery proof the
     # TypeScript edge worker verifies, so a version split here surfaces as a
     # signature that does not check out.
-    "fora-protocol-sdk==1.1.0",
+    "fora-protocol-sdk==1.2.0",
     # Generated wire types (the `wire` package). fora_sdk.acceptance imports
     # `wire.models`, so the SDK is unusable without it. The harness used to get
     # this transitively through the in-tree Python shim; the shim is gone (the MCP
     # surface is the Go adapter), so it is named directly here.
-    "fora-protocol==1.1.0",
+    "fora-protocol==1.2.0",
     # Web Bot Auth conformance oracle (harness/wba_oracle.py). A third-party RFC
     # 9421 implementation, so the WBA conformance tests check FORA against code
     # FORA did not write. Pinned exactly: the oracle extends its component
@@ -125,8 +124,9 @@ select = [
     "TID251",          # banned-api: the bans below, and nothing else from TID
 ]
 
-# ADR-028 D3 and D8 H2: every SDK client the harness builds is strict, so every
-# answer passes the published strict JSON Schema before a test reads it. That
+# ADR-028 D3 and D8 H1/H2: every SDK client the harness builds is strict, so every
+# answer passes the published strict JSON Schema before a test reads it, and sets
+# strict_requests, so a verb sends only its own generated request model. That
 # holds only while one function builds the SDK's ClientConfig, so importing it
 # anywhere else is refused. The SDK re-exports the class from three modules.
 #
@@ -135,9 +135,9 @@ select = [
 # harness module: a second ClientConfig builder is as likely in a helper as in a
 # test.
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
-"fora_sdk.ClientConfig".msg = "build SDK clients through harness/sdk_client.py, which sets strict=True"
-"fora_sdk.client.ClientConfig".msg = "build SDK clients through harness/sdk_client.py, which sets strict=True"
-"fora_sdk.sync.ClientConfig".msg = "build SDK clients through harness/sdk_client.py, which sets strict=True"
+"fora_sdk.ClientConfig".msg = "build SDK clients through harness/sdk_client.py, which sets strict and strict_requests"
+"fora_sdk.client.ClientConfig".msg = "build SDK clients through harness/sdk_client.py, which sets strict and strict_requests"
+"fora_sdk.sync.ClientConfig".msg = "build SDK clients through harness/sdk_client.py, which sets strict and strict_requests"
 
 # The one module the ban above exempts: it is the single place a ClientConfig is
 # built, which is the property the ban protects.
@@ -146,9 +146,9 @@ select = [
 
 # ADR-028 D8 H8: no dead harness code. `make deadcode` runs vulture with this table.
 #
-# The paths match the typecheck scope in the Makefile: the harness, the standalone
-# drivers that import it, and ../e2e-aws/. A driver left out would make every harness
-# helper only it calls look unused. vulture_whitelist.py is in the list because it is
+# The paths match the typecheck scope in the Makefile: the harness and the standalone
+# drivers that import it. A driver left out would make every harness helper only it
+# calls look unused. vulture_whitelist.py is in the list because it is
 # how vulture learns of the symbols it cannot see being used; its header says what
 # may go there.
 #
@@ -168,10 +168,8 @@ select = [
 [tool.vulture]
 paths = [
     "harness/",
-    "demo_proof.py",
     "register_staging_agent.py",
     "smoke_staging.py",
-    "../e2e-aws/",
     "vulture_whitelist.py",
 ]
 min_confidence = 60

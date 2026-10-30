@@ -42,9 +42,10 @@ const noopCallback: Callback = () => undefined;
 // generated response) and CloudFront fetches the distribution's configured
 // origin. The reserved signature params are stripped first, so the origin
 // never sees the spoofable attribution namespace and the cache key stays
-// clean. Every other response — denials, well-known routes — returns to the
-// viewer as the generated response it is. At viewer-request a generated
-// response is capped at ~40 KB, which is exactly why content bodies take the
+// clean. Every other response — denials, the health check, the key directory —
+// returns to the viewer as the generated response it is. At viewer-request a
+// generated response is capped at ~40 KB, which is exactly why content bodies,
+// and the publisher's own discovery document and RSL file, take the
 // pass-through path and never transit this function.
 function passThroughOrRespond(
   event: CloudFrontEdgeEvent,

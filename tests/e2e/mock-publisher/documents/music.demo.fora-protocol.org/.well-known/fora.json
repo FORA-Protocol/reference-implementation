@@ -1,0 +1,17 @@
+{
+  "ver": "1.0",
+  "role": "ROLE_PUBLISHER",
+  "domain": "music.demo.fora-protocol.org",
+  "exchanges": [
+    {
+      "domain": "exchange-b:8081",
+      "endpoint": "http://exchange-b:8081",
+      "relationship": "PROVIDER_RELATIONSHIP_DIRECT",
+      "ext": { "resource_owner_id": "demo-resource-owner" }
+    }
+  ],
+  "supported_profiles": ["fora-news-v1", "fora-comp-v1", "fora-music-v1"],
+  "catalog_contributors": [
+    { "domain": "catalog-contributor-e2e", "relationship": "harness" }
+  ]
+}

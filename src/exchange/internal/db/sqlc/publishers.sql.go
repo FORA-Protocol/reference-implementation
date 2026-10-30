@@ -31,6 +31,31 @@ func (q *Queries) CreatePublisher(ctx context.Context, arg CreatePublisherParams
 	return i, err
 }
 
+const createPublisherIfAbsent = `-- name: CreatePublisherIfAbsent :one
+INSERT INTO fora.publishers (publisher_id, display_name)
+VALUES ($1, $2)
+ON CONFLICT (publisher_id) DO NOTHING
+RETURNING publisher_id, display_name, created_at
+`
+
+type CreatePublisherIfAbsentParams struct {
+	PublisherID string `json:"publisher_id"`
+	DisplayName string `json:"display_name"`
+}
+
+// Creates a payee an operator's boot fixture declares (ADR-029), unless one is
+// already stored under this id, which is left as it is. Unlike CreatePublisher,
+// whose caller mints a fresh id, the fixture names the id itself and every boot
+// after the first declares it again, so an existing row is the expected case and
+// returns no row rather than an error. Deployment-wide for the reason
+// GetPublisher gives.
+func (q *Queries) CreatePublisherIfAbsent(ctx context.Context, arg CreatePublisherIfAbsentParams) (ForaPublisher, error) {
+	row := q.db.QueryRow(ctx, createPublisherIfAbsent, arg.PublisherID, arg.DisplayName)
+	var i ForaPublisher
+	err := row.Scan(&i.PublisherID, &i.DisplayName, &i.CreatedAt)
+	return i, err
+}
+
 const getPublisher = `-- name: GetPublisher :one
 SELECT publisher_id, display_name, created_at FROM fora.publishers WHERE publisher_id = $1
 `

@@ -30,16 +30,14 @@ import re
 import pytest
 import yaml
 
+from ._compose import stack_files
 from .conftest import REPO_ROOT
+from .constants import KEY_DIRECTORIES_SERVICE
 from .guard_harness import guard_marks
 from .publisher_sites import SITE_ZONE
 from .test_guards_identity_lists import proxy_zone_routes
 
 _COMPOSE = REPO_ROOT / "docker-compose.e2e.yml"
-#: The script every e2e compose call goes through, and the line in it that names
-#: the optional overlay it adds when the tree carries one.
-_E2E_STACK = REPO_ROOT / "scripts" / "e2e-stack.sh"
-_OVERLAY_LINE = re.compile(r'^OPTIONAL_OVERLAY="\$ROOT/([^"]+)"$', re.MULTILINE)
 _TEMPLATE = REPO_ROOT / "deploy/terraform/modules/compose-stack/templates/docker-compose.yml.tftpl"
 
 pytestmark = guard_marks(skip_when=not _COMPOSE.is_file())
@@ -54,11 +52,11 @@ _SITE_READERS = ("console", _SEAT, _IMPORTER, "runner")
 #: files define it: the runner image mounts only the base file, and a tree that
 #: carries no overlay runs no such service.
 _OPTIONAL_SITE_READERS = ("onboarding",)
-#: The fixture holding the operator's contributor key, and the one host besides the
-#: importer allowed to mount it: the contributor's key directory, which publishes
-#: the public half.
+#: The fixture holding the operator's contributor key, and the one service besides
+#: the importer allowed to mount it: the key-directories service, which publishes
+#: the public half under the contributor's host name.
 _CONTRIBUTOR_KEY = "catalog_contributor_key.json"
-_CONTRIBUTOR_DIRECTORY = "catalog-contributor-e2e-jwks"
+_CONTRIBUTOR_DIRECTORY = KEY_DIRECTORIES_SERVICE
 _DENOMINATION = ("EXCHANGE_TERMS_CURRENCY", "EXCHANGE_TERMS_UNIT")
 #: Settings the stack's importer adds for this network only: the address guard and
 #: the plaintext refusal relaxed, and the log level the job's lines are read at.
@@ -67,25 +65,6 @@ _E2E_ONLY = frozenset({"SKIP_SSRF", "ALLOW_INSECURE", "EXCHANGE_LOG_LEVEL"})
 
 def _services() -> dict:
     return yaml.safe_load(_COMPOSE.read_text())["services"]
-
-
-def _stack_files() -> list:
-    """The compose files the stack is composed from by default, in compose order.
-
-    The base file, and the optional overlay ``scripts/e2e-stack.sh`` adds when
-    the tree carries it; the overlay is read from that script, so the two cannot
-    disagree about which file it is. Overlays a caller adds itself, such as CI's
-    build cache, define no service of their own and are not read. Without the
-    script (the e2e runner image) the base file is all there is.
-    """
-    files = [_COMPOSE]
-    if _E2E_STACK.is_file():
-        match = _OVERLAY_LINE.search(_E2E_STACK.read_text())
-        assert match, f"{_E2E_STACK.name} names no OPTIONAL_OVERLAY to read the stack by"
-        overlay = REPO_ROOT / match.group(1)
-        if overlay.is_file():
-            files.append(overlay)
-    return files
 
 
 def _stack_services() -> dict:
@@ -98,7 +77,7 @@ def _stack_services() -> dict:
     one file sets on that service, and a caller must read no other key.
     """
     merged: dict = {}
-    for path in _stack_files():
+    for path in stack_files():
         for name, service in (yaml.safe_load(path.read_text()).get("services") or {}).items():
             merged[name] = {**merged.get(name, {}), **(service or {})}
     return merged

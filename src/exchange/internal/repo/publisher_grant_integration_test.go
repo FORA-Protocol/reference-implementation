@@ -30,8 +30,8 @@ func TestGrantAllowsOnePublisherPerPersonPerSeat(t *testing.T) {
 		issuer  = "https://login.example"
 		subject = "sub-1"
 	)
-	seedTenantRow(t, ctx, q, seatA, "exchange.example")
-	seedTenantRow(t, ctx, q, seatB, "other-exchange.example")
+	seedTenantRow(t, ctx, pool, seatA, "exchange.example")
+	seedTenantRow(t, ctx, pool, seatB, "other-exchange.example")
 	for _, id := range []string{"pub-first", "pub-second"} {
 		if _, err := createPublisher(t, ctx, pool, id, id); err != nil {
 			t.Fatalf("Create publisher %q: %v", id, err)

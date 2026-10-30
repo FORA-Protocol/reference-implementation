@@ -21,6 +21,35 @@ the hostname. See the
 [Amendment (2026-10-08)](#amendment-2026-10-08--a-site-is-saved-before-it-is-proven)
 section.
 
+**Amended 2026-10-22.** A listing an operator declares in the Exchange's boot fixture
+is created `active`, without a manifest check. That is the one exception to D1's rule
+that a listing stays `pending_manifest` until the site's manifest proves it, and it is
+the exception the operator's own SQL already made. Catalog push still checks the
+manifest on every push. See [ADR-029](adr-029-exchange-boot-fixture.md) D6.
+
+**Amended 2026-10-27.** The manifest D3 reads is the publisher's own file on its
+origin. The edge package serves no discovery document of its own: it passes
+`/.well-known/fora.json` and `/rsl.txt` through to the origin for every client. D3 also
+no longer says the manifest fetch follows no redirects, because it follows up to five.
+See [D3](#d3--proof-of-domain-control-is-the-served-manifest-the-protocols-http-01-pair-stays-unimplemented).
+
+**Amended 2026-10-28.** The add-a-domain wizard saves on every step: the domain on
+the first, its terms on the second, and its last step verifies the domain once the
+discovery file and the package are both in place, in either order. **Finish later**
+replaces "Skip for now" and "Cancel", the browser keeps nothing, and **Finish setup**
+reopens on the terms or on the last step. See the
+[Amendment (2026-10-28)](#amendment-2026-10-28--the-wizard-saves-on-every-step)
+section.
+
+**Amended 2026-10-29.** The console asks for the business name on the first step of
+the add-a-domain wizard, shown only while the account holds no publisher, and the
+step is left only through its Next: every page that draws the console sends an
+account without a publisher to the wizard. An account with a publisher and no
+domain yet sees the console with its sections empty, and My domains offers the first
+domain. See the
+[Amendment (2026-10-29)](#amendment-2026-10-29--the-business-is-named-on-the-wizards-first-step)
+section.
+
 **Relates to:** ADR-010 (publisher payout — the resource-owner payee and the commission
 registry; amended by this ADR), ADR-017 (the agent-side identity service, which the
 console deliberately does not extend; its account key and its "a link is a hint, the
@@ -189,20 +218,33 @@ console, and — because Gate 2 and the owner-id read already fetch it — at ev
 push. The proof is continuous, not a one-time ceremony: a manifest that stops naming the
 seat stops the domain from pushing.
 
-The fetch is the guarded fetch of ADR-023 D6: resolve first, refuse private and
-link-local addresses, follow no redirects, cap body and time, send no credentials. The
-domain is publisher-supplied and the console is reachable by anyone with a login, so
-this is an SSRF surface and the posture is mandatory.
+The manifest is the publisher's own file, served from its origin. The edge package the
+console hands the publisher serves no copy of it: the package passes
+`/.well-known/fora.json`, and `/rsl.txt` with it, through to the origin for every
+client, an AI bot included, and returns the origin's answer unchanged. So the document
+the Exchange checks here, the one an agent refused at an article is sent to, and the one
+the publisher edits are one file. A publisher adds a seat or changes its contributors by
+editing that file, without redeploying the package.
+
+The fetch is guarded and bounded like the content fetch of ADR-023 D6: resolve first,
+refuse private and link-local addresses, cap body and time, send no credentials. Unlike
+that fetch, it follows redirects, up to five, re-pinning the address and re-checking the
+scheme at each one; that is what the protocol (`fora.proto` in
+`github.com/FORA-Protocol/protocol`) permits for this document, and a longer chain is
+refused. The domain is publisher-supplied and the console is reachable by anyone with a
+login, so this is an SSRF surface and the posture is mandatory.
 
 **Why not `RequestDomainVerification` / `ConfirmDomainVerification`.** The protocol
-module defines them (ACME HTTP-01 style: serve a token at
-`/.well-known/fora-verify/<token>`, then confirm and register a signing key). They prove
+module defines them (ACME HTTP-01 style: serve a token at the challenge's
+`verification_url`, then confirm and register a signing key). They prove
 control once and bind one key. The manifest proves control *and* carries the
 authorization the Exchange needs at every push — which seat may sell, which contributor
 may push, which payee is owed — and the publisher must serve it regardless. Implementing
 the pair would add a second proof of a subset of what the first already proves, and a
 second place for the two to disagree. The RPCs stay unimplemented on this Exchange; the
-Exchange answers them `unimplemented`, as it does today.
+Exchange answers them `unimplemented`, as it does today. The edge function does not
+serve the token's address either: a publisher that must answer such a challenge serves
+the token from its own origin, and the edge forwards the request there like any other.
 
 ### D4 — The console is its own service, operator-side; it owns login and sessions; it calls each Exchange as a signed first-party caller acting for the logged-in person
 
@@ -766,3 +808,133 @@ many accounts can.
 - **A failed check at the last button saves nothing.** It keeps a stranger from holding
   a name by pressing the button, but anyone can hold a name by saving it anyway, and it
   throws away the terms the publisher just set.
+
+## Amendment (2026-10-28) — the wizard saves on every step
+
+### What changed before this
+
+The 2026-10-08 amendment separated saving a site from verifying it, but the console
+still saved a site only when the publisher pressed the wizard's last button. The
+wizard had four steps: the domain, the discovery file, the package and the terms. A
+publisher who closed the tab before the last button lost what they had entered.
+"Skip for now" meant a different thing on each step: go on without the file or the
+package, save the site with no terms, or leave with nothing saved. **Finish setup**
+reopened the wizard on the first check that did not pass, so the file came before the
+terms.
+
+### Decision
+
+**The domain step saves.** Its **Next** calls `RegisterDomain` with no terms as soon as
+the domain's network is one the console can set up and the domain is free, so the site
+is held and its listing is `PENDING_MANIFEST` from the first step. The call reads
+nothing from the site, as D6 says. A domain the same publisher saved before is answered
+with what it was saved with, and nothing is written. A network the console cannot set
+up still ends the wizard with nothing saved.
+
+**The terms step saves.** Its **Next** calls `domains/terms` with the terms, the sitemap
+and the import's take-over answer. A request without terms is refused before anything
+is sent. The terms of a verified site are shown and are not sent again.
+
+**The last step checks the file and the package together, in either order.** Each
+check asks the Exchange to read the site's discovery document (`PreflightDomain`, which
+writes nothing). It also asks the site what an AI agent and an ordinary visitor get at
+the licensed path, and, once the package answers, what an agent gets at the discovery
+address. When the file and the package both pass, the same request asks the Exchange to
+verify the site. The package is still checked in one place, right before
+`CheckDomain`, on the answers that request has just read, and the structural guard
+holds that place. A site with no terms is not checked: its setup stands on the terms
+step.
+
+The page checks when the step opens, again every 15 seconds while the step is shown,
+and at once on **Check now**. It stops checking while the tab is hidden and checks at
+once when the tab is shown again. It stops when the site is verified, when the publisher
+leaves the step, and after an answer of 401, 403 or 404, which a later check would only
+repeat.
+
+**Finish later replaces "Skip for now" and "Cancel".** It is a link back to My domains
+on every step until the site is verified, and what the publisher entered is already on
+the Exchange. The browser keeps nothing. After the domain step, the page's address becomes the domain's setup page, so
+a reload opens the saved domain where it stands.
+
+**Finish setup reopens on the terms, then on the last step.** It opens the terms step
+for a site with no terms, and the last step otherwise. The step is read off the
+registration, so the page opens on it without asking the site first. The setup page of
+a verified site opens the site's own page.
+
+**One click now holds a hostname.** The 2026-10-08 amendment accepted that saving holds
+a hostname, and the wizard now saves on its first step. The cap of ten sites saved and
+not verified per payee (`consoleapi.MaxUnverifiedDomains`) is the only limit on one
+account. Releasing a held site stays an operator action, with the recovery procedure in
+`src/exchange/RUNBOOK.md`. A publisher still cannot remove a site from the console.
+
+This replaces three things in the 2026-10-08 amendment: saving at the last button, the
+"Skip for now" that saved a site without terms, and the order **Finish setup** reopened
+in. The rest of that amendment stands.
+
+### Rejected alternatives
+
+- **Saving at the last button, as before.** A publisher who cannot deploy to their CDN
+  that day loses what they entered, which is the cost the 2026-10-08 amendment set out
+  to remove.
+- **A draft table.** The 2026-10-08 amendment rejected it: it is a second record of a
+  site beside the one registration writes.
+- **A record in the browser.** The wizard kept one in `sessionStorage`. It is lost with
+  the tab, another device never sees it, and it is a second copy of what the Exchange
+  holds.
+
+## Amendment (2026-10-29) — the business is named on the wizard's first step
+
+### What changed before this
+
+D4 has the console create an account at sign-up and nothing else, and run
+`RegisterPublisher` when the person connects to an Exchange. The name the publisher's
+payments are made out to is one answer per account (amendment D: one publisher per
+account per seat). The 2026-10-28 amendment describes the wizard's steps for a domain.
+None of them says where the console asks for the name, or what an account sees before
+its first domain is saved.
+
+### Decision
+
+**The name is the wizard's first step, shown only while the account has no
+publisher.** Its **Next** runs `RegisterPublisher` on the Exchange. A second call --
+from a second tab, say -- is answered with the publisher the account already holds,
+under its first name, because `RegisterPublisher` is idempotent by actor (amendment D).
+Once the step has saved the name the wizard does not go back to it: the domain step has
+no **Back**, and the progress header marks the business step done without a link to
+it. The wizard therefore has four steps on the first visit and three once the business
+is named, and the progress header numbers whichever list the console sends. In the 2026-10-28 amendment, a first visit has
+the business step before the three steps it describes, so the domain step is the second
+there.
+
+**The business step is left only through its Next.** It has no **Finish later**, and
+every page that draws the console -- the home page, My domains and the dashboard's
+sections -- sends an account the Exchange lists no publisher for to the add-a-domain
+wizard. A sign-in, a bookmark or a reload before the business is named therefore opens
+the business step. This is navigation, not authorization: the Exchange still decides
+every call from the grants it holds (D4), and the wizard's own calls still refuse an
+account without a publisher.
+
+**Before the first domain the console opens empty.** An account with a publisher and no
+domain sees the console as any publisher does: its sections, each read from the Exchange
+and saying there is nothing in it yet, and My domains with the button that opens the
+wizard on its domain step. **Finish later** on the domain step -- the link back to My
+domains the 2026-10-28 amendment describes -- leads there.
+
+Each publisher page reads the account's registrations once per request, in front of the
+page, and is drawn from that read.
+
+**The name cannot be changed in the console.** D6's write table has no rename, and none
+is added here.
+
+### Rejected alternatives
+
+- **Asking on the login provider's sign-up form.** The publishers' Zitadel instance
+  draws its own sign-up forms with fixed sets of fields, and the forms a person signs
+  up through -- the one for an address and password, and the one after an external
+  identity provider -- have no field for a business name.
+- **Sending every page to the wizard until a domain is saved.** **Finish later** on the
+  domain step has to lead out of the wizard, and the console with nothing in it is where
+  it leads.
+- **Opening the wizard on the first sign-in only.** It needs a record of whether the
+  person has signed in before. The console decides where a sign-in lands from what the
+  Exchange holds, and an account that left on the business step has not started yet.

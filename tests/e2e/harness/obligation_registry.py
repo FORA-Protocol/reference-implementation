@@ -27,7 +27,7 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 import yaml
@@ -243,12 +243,38 @@ def _skip_reason(report: pytest.TestReport) -> str:
     return message.removeprefix("Skipped: ")
 
 
+#: The ``workeroutput`` key under which a pytest-xdist worker hands its claims over.
+_CLAIMS_OUTPUT = "obligation_claims"
+
+
+class _Worker(Protocol):
+    """The part of pytest-xdist's handle on a finished worker that the report reads."""
+
+    workeroutput: dict[str, object]
+
+
+def _claims_from(output: object) -> list[tuple[str, str, bool, bool]] | None:
+    """The claims a worker handed over, as tuples again; None when it handed none."""
+    if not isinstance(output, list):
+        return None
+    return [(str(n), str(oid), bool(strict), bool(neg)) for n, oid, strict, neg in output]
+
+
 class ObligationReport:
     """Writes each obligation's derived state to the terminal summary and a JSON file.
 
     The claims are read when the session finishes collecting; whether a claiming
     case skipped is known only once it runs, so the state is derived when the
     session finishes.
+
+    Under pytest-xdist the controller process collects nothing. Each worker
+    collects the whole suite and runs its share, and every test report reaches
+    the controller, so the controller sees every worker's skips. A worker hands
+    its claims to the controller in its ``workeroutput``, and the controller
+    takes them when that worker shuts down. Every worker collects the same
+    tests, so the first claims to arrive are the claims. A worker also derives
+    and writes the report from its own share of the skips, but the controller
+    finishes after every worker, so the report left on disk is the controller's.
     """
 
     def __init__(self, entries: Mapping[str, Entry], json_path: Path) -> None:
@@ -277,6 +303,14 @@ class ObligationReport:
                         strict = xfail is not None and xfail.strict
                     claimed.append((item.nodeid, member.value, strict, negative))
         self._claimed = claimed
+        workeroutput = getattr(session.config, "workeroutput", None)
+        if isinstance(workeroutput, dict):
+            workeroutput[_CLAIMS_OUTPUT] = claimed
+
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_testnodedown(self, node: _Worker, error: object) -> None:
+        if self._claimed is None:
+            self._claimed = _claims_from(getattr(node, "workeroutput", {}).get(_CLAIMS_OUTPUT))
 
     def _negative_flag(self, item: pytest.Item, mark: pytest.Mark) -> bool:
         unknown = set(mark.kwargs) - {"negative"}

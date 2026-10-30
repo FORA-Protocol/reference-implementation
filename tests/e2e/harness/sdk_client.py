@@ -1,11 +1,8 @@
 """The FORA SDK's own client, wired for this stack.
 
-Two callers still send a body dict built by hand to a path constant
-(:func:`post_signed_json`, signed by the SDK's own signer): the console's
-transactions-list read, a console route the SDK has no client for, and the staging
-registration script's Register. A hand-built protocol body is the re-derivation the
-SDK exists to remove; every test sends through an SDK verb instead, over the SDK's
-Connect-unary JSON client.
+This module builds every SDK client the harness and its scripts send through, over
+the SDK's Connect-unary JSON client, and offers no way to put a body built by hand
+on the wire: a request goes out through an SDK verb.
 
 This module is the wiring such a client needs and does not supply itself. Three
 pieces are load-bearing, and each is a thing the client refuses to guess:
@@ -35,27 +32,22 @@ service sets for the same reason the five Go FORA services that dial out do.
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
 
 import httpx
 from fora_sdk.client import DEFAULT_CALL_TIMEOUT_SEC, ClientConfig
 from fora_sdk.core import Mode, StaticOfferKeyResolver, Verifier
 from fora_sdk.hosts import host_of
-from pydantic import ValidationError
 from fora_sdk.resolvers import (
     CachedOfferKeyResolver,
-    SsrfError,
+    create_wba_offer_directory_fetch,
     WellKnownEndpointResolver,
     WellKnownRequirementsReader,
-    guarded_async_client,
     guarded_client,
-    wba_directory_url,
 )
 from fora_sdk.sync import AdminClient, BrokerClient, CatalogClient, Client
 from fora_sdk.signing_transport import SigningTransport
@@ -63,7 +55,6 @@ from fora_sdk.window import Window
 from wire.models import WBAFile
 
 from .constants import requester
-from .e2e_catalog import USD_AGENT_ID, USD_AGENT_KEY_PATH
 from .exchanges import SERVICE_IDENTITIES, exchange_url
 from .httpsig_signer import load_keypair, signing_transport
 from .stack_urls import StackURLs
@@ -134,66 +125,6 @@ def _resolvers(scheme: str) -> _Resolvers:
     )
 
 
-async def _fetch_wba_directory(url: str) -> WBAFile | None:
-    """Read one exchange's Web Bot Auth directory.
-
-    The offer-signing key lives ONLY here — not in ``fora.json`` — so this is
-    what makes an offer verifiable at all.
-
-    **Returns None for every failure, and raises for none of them.** That is the
-    seam's contract, not a preference: ``CachedOfferKeyResolver.prefetch`` gathers
-    these calls without ``return_exceptions``, so one raised error abandons the
-    whole prefetch instead of leaving a single exchange unresolved. Its own
-    docstring states the intent — an unresolvable exchange is simply absent from
-    the map, and the Verifier then rejects that exchange's offers fail-closed.
-    A dropped connection would otherwise take down the verifier setup for every
-    exchange, which surfaces as a crash in module setup rather than as the one
-    exchange whose offers could not be checked.
-
-    Dials through the SDK's guarded client rather than a bare httpx one. That is
-    what reads ``SKIP_SSRF`` and ``ALLOW_INSECURE`` — the two flags the runner
-    sets — and what keeps this leg off the ambient proxy environment.
-
-    Three outbound legs run under a client built here, and they are not guarded
-    alike:
-
-    1. This fetch. Its host comes from the domain list the caller hands
-       :func:`offer_verifier`, and every call site fills that from the stack's
-       own exchange constants or its own configuration — so it is addressed by
-       configuration, not by anything read off the wire. Guarded, as above.
-    2. The SDK's ``WellKnownEndpointResolver``, reading an Exchange's manifest
-       before a usage report or a dispute. Its host is the report's ``exchange``
-       field — data, and the leg a signed offer actually steers. The shared
-       endpoint resolver (``_resolvers``) is handed ``guarded_client``, so this
-       leg dials through the same factory as leg 1 rather than the unguarded
-       default.
-
-       ``vet_exchange_endpoint`` runs in front of it, and it is worth being exact
-       about what that does and does not do. It calls ``is_bare_host``, which
-       answers whether the value is EXACTLY a host — it refuses a scheme,
-       userinfo, a path, a query or a fragment, so a URL smuggled into the
-       ``exchange`` field cannot choose what gets fetched. That is a real check
-       and it is a check about SHAPE. It is not an address check: ``localhost``,
-       ``127.0.0.1``, ``169.254.169.254`` and ``10.0.0.5:8080`` are all bare
-       hosts and all pass it. The address class an SSRF guard exists for is the
-       dial-time guard's job, which is why this leg dials guarded rather than
-       relying on the vet alone.
-    3. The RPC send that follows the resolve. The SDK marks that one guarded,
-       and keeps the plain transport for discover and execute, whose address is
-       the operator's own configuration rather than an offer's.
-    """
-    try:
-        async with guarded_async_client(timeout=_FETCH_TIMEOUT_SEC) as http:
-            resp = await http.get(url)
-        if resp.status_code != httpx.codes.OK:
-            return None
-        return WBAFile.model_validate(resp.json())
-    except (httpx.HTTPError, SsrfError, ValidationError, ValueError):
-        # ValueError covers a body that is not JSON; ValidationError, a body that
-        # is JSON and not a directory.
-        return None
-
-
 def offer_verifier(
     exchange_domains: Sequence[str],
     *,
@@ -207,18 +138,30 @@ def offer_verifier(
     keys are read once. An exchange left out of that list is not an error here —
     its offers simply arrive rejected, which is what the caller asserts on.
 
+    Each directory is read by the SDK's own ``create_wba_offer_directory_fetch``:
+    no redirect, the directory media type, and the response signatures checked,
+    keeping only the keys that signed it, so the verifier holds no key the
+    directory did not sign for. Every failure is contained as None, so an
+    exchange whose directory cannot be read is absent from the map and its offers
+    arrive rejected, fail-closed. The read dials through the SDK's guarded client,
+    which is what reads the ``SKIP_SSRF`` and ``ALLOW_INSECURE`` flags the runner
+    sets and keeps the leg off the ambient proxy environment.
+
     Each directory is read at ``scheme://<domain>`` unless ``dial`` maps the
-    domain to another host to read it from. Inside the compose network the
-    domain IS the address; a script on the host passes the mapped port, because
-    from there an exchange's domain resolves to nothing. The key is still filed
-    under the domain, which is what an offer's ``exchange`` field names.
+    domain to another host to read it from; the key is still filed under the
+    domain, which is what an offer's ``exchange`` field names. The response
+    signatures are checked against the host actually read, so a dial to another
+    exchange reads that exchange's own signed directory, and a dial to an address
+    the directory was not signed for keeps no key at all.
     """
     routes = dict(dial or {})
+    with guarded_client(timeout=_FETCH_TIMEOUT_SEC) as http:
+        read = create_wba_offer_directory_fetch(http=http, scheme=scheme)
 
-    async def fetch(domain: str) -> WBAFile | None:
-        return await _fetch_wba_directory(wba_directory_url(scheme, routes.get(domain, domain)))
+        async def fetch(domain: str) -> WBAFile | None:
+            return await read(routes.get(domain, domain))
 
-    keys = asyncio.run(CachedOfferKeyResolver(fetch=fetch).prefetch(exchange_domains))
+        keys = asyncio.run(CachedOfferKeyResolver(fetch=fetch).prefetch(exchange_domains))
     return Verifier(
         mode=Mode.STRICT,
         resolver=StaticOfferKeyResolver(keys),
@@ -270,9 +213,17 @@ def _config(
       test sees it. An unknown field, a field-level rule broken or a cross-field
       rule broken fails the call as a ``MALFORMED`` ``CallError`` (ADR-028 D3,
       the universal shape check). There is no parameter for it.
+    * ``strict_requests=True``: a verb takes only its own generated request model,
+      or a ``RawBody``; a plain dict, or a model of another message, is refused as a
+      ``MALFORMED`` ``CallError`` before anything is read, signed or sent. The
+      message the SDK stamps (``ver``, the configured requester, a purchase's
+      reflected offers) must then pass the same strict schema before it is signed,
+      so a dictionary cannot reach the wire and a member the protocol does not
+      define is refused by name (ADR-028 H1). There is no parameter for it either.
 
     A deliberately altered request goes through :func:`harness.malformed.malformed`,
-    which builds its clients here too.
+    which builds its clients here too: its pre-signing hook runs after that check,
+    and its raw mode sends a ``RawBody``, which the SDK never checks.
     """
     resolvers = _resolvers(scheme)
     return ClientConfig(
@@ -285,6 +236,7 @@ def _config(
         before_sign=before_sign,
         request_id=request_id,
         strict=True,
+        strict_requests=True,
         call_timeout_sec=call_timeout_sec,
     )
 
@@ -318,19 +270,36 @@ def _agent_config(
     )
 
 
+def _signer(key_path: Path | None, signer: SigningTransport | None) -> SigningTransport:
+    """What an agent client signs with: ``signer`` when given, else the key at ``key_path``.
+
+    A client signs only as an agent its caller names. One built with neither is
+    refused, so no client falls back to an identity the caller did not choose.
+    """
+    if signer is not None:
+        return signer
+    if key_path is None:
+        raise TypeError("an SDK client signs as an agent: pass its key_path or a signer")
+    return agent_signer(key_path)
+
+
 def sdk_exchange_client(
     stack: StackURLs,
     exchange_domain: str,
     verifier: Verifier,
     *,
-    agent_id: str = USD_AGENT_ID,
-    key_path: Path = USD_AGENT_KEY_PATH,
+    agent_id: str,
+    key_path: Path | None = None,
     signer: SigningTransport | None = None,
     before_sign: BeforeSign | None = None,
     http: httpx.Client | None = None,
     base_url: str | None = None,
 ) -> Client:
     """The SDK client for one Exchange, addressed at the URL this stack reaches it on.
+
+    The client signs as the agent the caller names: ``agent_id`` is the free label
+    in ``requester.id``, and the agent signs with the key at ``key_path``. There is
+    no default agent.
 
     ``signer`` replaces the agent's own signer, ``before_sign`` alters each request
     before the SDK signs it, and ``http`` replaces the client the SDK sends
@@ -341,7 +310,7 @@ def sdk_exchange_client(
     config = _agent_config(
         base_url if base_url is not None else exchange_url(stack, exchange_domain),
         agent_id,
-        signer if signer is not None else agent_signer(key_path),
+        _signer(key_path, signer),
         verifier,
         before_sign=before_sign,
     )
@@ -357,24 +326,6 @@ def sdk_content_client(stack: StackURLs, key_path: Path) -> Client:
     set because every client is addressed somewhere.
     """
     return Client(_config(stack.exchange, signer=agent_signer(key_path)))
-
-
-def post_signed_json(
-    url: str, body: dict[str, Any], *, signer: SigningTransport, timeout: float = 30.0
-) -> httpx.Response:
-    """POST ``body`` as JSON to ``url``, signed by the SDK's ``signer``.
-
-    For the two callers that still send a hand-built body rather than an SDK verb:
-    the console's transactions-list read (``console_client``), a console route the
-    SDK has no client for, and the staging registration script's Register. The
-    SDK's signer signs the exact bytes sent (RFC 9421 over the Content-Digest of
-    this serialization), so nothing changes the body after it is built here.
-    Prefer an SDK verb wherever one exists.
-    """
-    payload = json.dumps(body, separators=(",", ":")).encode()
-    signed = signer.sign_outbound(method="POST", url=url, body=payload, authorization="")
-    headers = {**signed.headers, "Content-Type": "application/json"}
-    return httpx.post(url, content=payload, headers=headers, timeout=timeout)
 
 
 def no_offer_verifier() -> Verifier:
@@ -409,12 +360,32 @@ def sdk_account_client(base_url: str, *, agent_id: str, key_path: Path) -> Clien
     return Client(_agent_config(base_url, agent_id, agent_signer(key_path), no_offer_verifier()))
 
 
+def deployed_account_client(exchange_url: str, *, agent_id: str, key_path: Path) -> Client:
+    """The SDK client for one agent's account calls at a deployed Exchange on https.
+
+    The deployed counterpart of :func:`sdk_account_client`. Its resolvers read the
+    Exchange's manifest over https, which the SDK's https-only guard requires of
+    every leg outside this stack. Register and GetAccountStatus go to the endpoint
+    that manifest names, so ``exchange_url`` is where the client is addressed and
+    not what decides where the call goes.
+    """
+    return Client(
+        _agent_config(
+            exchange_url,
+            agent_id,
+            agent_signer(key_path),
+            no_offer_verifier(),
+            scheme=_DEPLOYED_SCHEME,
+        )
+    )
+
+
 def sdk_broker_client(
     stack: StackURLs,
     verifier: Verifier | None = None,
     *,
-    agent_id: str = USD_AGENT_ID,
-    key_path: Path = USD_AGENT_KEY_PATH,
+    agent_id: str,
+    key_path: Path | None = None,
     signer: SigningTransport | None = None,
     before_sign: BeforeSign | None = None,
     http: httpx.Client | None = None,
@@ -422,7 +393,9 @@ def sdk_broker_client(
 ) -> BrokerClient:
     """The SDK client for the Broker: Resolve to discover, ExecuteTransaction to buy.
 
-    ``verifier`` defaults to one holding every stack exchange's offer key.
+    The client signs as the agent the caller names (``agent_id``, ``key_path``), as
+    :func:`sdk_exchange_client` does; there is no default agent. ``verifier``
+    defaults to one holding every stack exchange's offer key.
     ``signer`` replaces the agent's own signer. ``before_sign`` alters each request
     before the SDK signs it, so the altered bytes still carry a valid signature;
     ``http`` replaces the client the SDK sends through, so a transport can alter a
@@ -432,32 +405,12 @@ def sdk_broker_client(
     config = _agent_config(
         stack.broker,
         agent_id,
-        signer if signer is not None else agent_signer(key_path),
+        _signer(key_path, signer),
         verifier if verifier is not None else stack_offer_verifier(),
         before_sign=before_sign,
         request_id=request_id,
     )
     return BrokerClient(config, http=http)
-
-
-def deployed_broker_client(
-    broker_url: str, *, agent_id: str, key_path: Path, exchange: str
-) -> BrokerClient:
-    """The SDK Broker client for a deployed stack that answers on https.
-
-    The verifier holds the selling Exchange's offer key, read from its directory
-    over https.
-    """
-    signer = agent_signer(key_path)
-    return BrokerClient(
-        _agent_config(
-            broker_url,
-            agent_id,
-            signer,
-            offer_verifier([exchange], scheme=_DEPLOYED_SCHEME),
-            scheme=_DEPLOYED_SCHEME,
-        )
-    )
 
 
 def sdk_catalog_client(

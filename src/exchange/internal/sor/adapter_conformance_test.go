@@ -78,7 +78,26 @@ func runSoRConformance(t *testing.T, f adapterFactory) {
 		sub("IsActive_EmptyBillingRef_Rejected", confIsActiveEmptyBillingRef)
 		sub("OnRegister_EmptySubdomain_Rejected", confEmptySubdomain)
 		sub("OnRegister_EmptyBillingRef_Rejected", confEmptyBillingRef)
+		sub("SetActive_Flips_IsActive", confSetActiveFlips)
+		sub("SetActive_Unknown_NotFound", confSetActiveUnknown)
+		sub("SetActive_EmptyBillingRef_Rejected", confSetActiveEmptyBillingRef)
 	})
+}
+
+// operatorSwitch is the operator's out-of-band switch every backend offers off
+// the Adapter port: the SoR owns the active flag, and the Exchange never changes
+// it through the port.
+type operatorSwitch interface {
+	SetActive(ctx context.Context, billingRef string, active bool) error
+}
+
+func switchOf(t *testing.T, a sor.Adapter) operatorSwitch {
+	t.Helper()
+	sw, ok := a.(operatorSwitch)
+	if !ok {
+		t.Fatalf("%T offers no SetActive switch", a)
+	}
+	return sw
 }
 
 func maybeParallel(t *testing.T, f adapterFactory) {
@@ -251,6 +270,53 @@ func confEmptyBillingRef(t *testing.T, f adapterFactory) {
 	})
 	if !errors.Is(err, sor.ErrBillingRefRequired) {
 		t.Fatalf("OnRegister(empty billing_ref) = %v, want ErrBillingRefRequired", err)
+	}
+}
+
+// confSetActiveFlips: the operator approves a held account and later switches it
+// off again, and IsActive — the read the Exchange makes — reports each change.
+func confSetActiveFlips(t *testing.T, f adapterFactory) {
+	ctx := context.Background()
+	a := f.new(t)
+	mustRegister(t, a, candidateA, subAcme, false)
+	sw := switchOf(t, a)
+
+	for _, want := range []bool{true, false} {
+		if err := sw.SetActive(ctx, candidateA, want); err != nil {
+			t.Fatalf("SetActive(%v): %v", want, err)
+		}
+		got, err := a.IsActive(ctx, candidateA)
+		if err != nil {
+			t.Fatalf("IsActive after SetActive(%v): %v", want, err)
+		}
+		if got != want {
+			t.Errorf("IsActive after SetActive(%v) = %v, want %v", want, got, want)
+		}
+	}
+}
+
+// confSetActiveUnknown: switching an account nobody registered is refused as not
+// found, and creates no account.
+func confSetActiveUnknown(t *testing.T, f adapterFactory) {
+	ctx := context.Background()
+	a := f.new(t)
+
+	err := switchOf(t, a).SetActive(ctx, candidateA, true)
+	if !errors.Is(err, sor.ErrAccountNotFound) {
+		t.Fatalf("SetActive(unknown) = %v, want ErrAccountNotFound", err)
+	}
+	if _, err := a.IsActive(ctx, candidateA); !errors.Is(err, sor.ErrAccountNotFound) {
+		t.Errorf("IsActive after a refused SetActive = %v, want ErrAccountNotFound (no side effect)", err)
+	}
+}
+
+// confSetActiveEmptyBillingRef: an empty billing_ref names no account, so it is
+// refused as invalid input, distinct from an unknown ref.
+func confSetActiveEmptyBillingRef(t *testing.T, f adapterFactory) {
+	a := f.new(t)
+	err := switchOf(t, a).SetActive(context.Background(), "", true)
+	if !errors.Is(err, sor.ErrBillingRefRequired) {
+		t.Fatalf("SetActive(\"\") = %v, want ErrBillingRefRequired", err)
 	}
 }
 

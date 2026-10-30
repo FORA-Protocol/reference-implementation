@@ -87,14 +87,15 @@ func setupExchangeDB(ctx context.Context, logger *slog.Logger) (*pgxpool.Pool, e
 // run is main() minus the os.Exit call; splitting it this way lets defers fire
 // cleanly regardless of which stage fails.
 func run(ctx context.Context, logger *slog.Logger) error {
-	// First, before anything connects. It reads only the environment, and a
-	// schema this Exchange could not enforce stops the boot, so resolving it
+	// First, before anything connects. It reads only the environment and the
+	// boot fixture's files, and a schema this Exchange could not enforce, or a
+	// boot fixture registration's rules refuse, stops the boot. Resolving them
 	// here spends a typo's cost on one parse rather than on a database
 	// connection, a migration run, a catalog bootstrap and a ledger
-	// health-check per restart of the crash loop it causes. The single value
-	// stays in scope for both construction sites below, so wiring the Register
+	// health-check per restart of the crash loop it causes. The single values
+	// stay in scope for the construction sites below, so wiring the Register
 	// gate later never needs a second read.
-	registration, err := loadRegistrationConfig(logger)
+	boot, err := loadBootSettings(logger)
 	if err != nil {
 		return err
 	}
@@ -124,7 +125,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	billingAdapter, ledgerCurrencies, sorAdapter, adaptersCleanup, err := selectAdapters(ctx, logger)
+	billingAdapter, ledgerCurrencies, accounts, adaptersCleanup, err := selectAdapters(ctx, logger)
 	if err != nil {
 		return err
 	}
@@ -133,7 +134,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// the welcome-credit configuration is validated against the currencies that
 	// adapter bills in: a credit in a currency the deployment does not carry
 	// fails boot here rather than failing the first Register.
-	defaultAgentCredits, err := bootTenantConfig(ctx, logger, queries, ledgerCurrencies)
+	defaultAgentCredits, err := bootTenantConfig(ctx, logger, tenantBoot{
+		pool: pool, queries: queries, keys: keystore, ledgerCurrencies: ledgerCurrencies, fixture: boot.fixture,
+	})
 	if err != nil {
 		return err
 	}
@@ -141,7 +144,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// Exchange mints obligations with it and the console's reads show it.
 	reportWindow := service.DefaultReportWindow
 	// Empty in a production build; the e2e build's control service otherwise.
-	controls := e2eControls(logger, queries)
+	controls := e2eControls(logger, controlDeps{pool: pool, queries: queries, accounts: accounts.store})
 	exchangeSvc, err := buildExchange(buildSvcDeps{
 		pool: pool, queries: queries, catalog: catalogSvc,
 		offerSigner:         offerSigner,
@@ -151,8 +154,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		defaultAgentCredits: defaultAgentCredits,
 		reportWindow:        reportWindow,
 		agentRegistry:       agentRegistry,
-		sor:                 sorAdapter,
-		registration:        registration,
+		sor:                 accounts.adapter,
+		registration:        boot.registration,
 		lifetimes:           controls.lifetimes,
 	})
 	if err != nil {
@@ -174,7 +177,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		pool: pool, exchange: exchangeSvc, catalog: catalogSvc,
 		agentRegistry: agentRegistry, offerSigner: offerSigner,
 		billing: billingAdapter, ledgerCurrencies: ledgerCurrencies,
-		admission: admission, registration: registration, console: console,
+		admission: admission, registration: boot.registration, console: console,
 	}))
 	if err != nil {
 		return err
@@ -293,6 +296,7 @@ func buildExchange(d buildSvcDeps) (*service.ExchangeService, error) {
 		Evidence:      repo.NewEvidenceRepo(d.queries),
 		Events:        repo.NewTransactionEventRepo(d.queries),
 		FeeOverrides:  repo.NewFeeOverrideRepo(d.queries),
+		Subscriptions: repo.NewSubscriptionTrustRepo(d.queries),
 		Billing:       d.billing,
 		OfferSigner:   d.offerSigner,
 		KeyStore:      d.keystore,

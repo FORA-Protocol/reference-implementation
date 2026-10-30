@@ -1,0 +1,29 @@
+# The rows exchange-a creates at start-up when they are absent (ADR-029): its
+# seat, a second seat it holds and does not sell as, which the tenant-isolation
+# suite names from exchange-a's own surfaces, and the philosophy site it sells.
+# Mounted read-only at /boot/fixture.yml, beside the shared terms file;
+# test_guards_exchange_boot_fixtures.py holds this file to the harness's
+# constants and to the compose file.
+version: 1
+seats:
+  - tenant_id: tenant-seat-a
+    domain: exchange:8081
+    ed25519_key_ref: exchange-primary
+    rsa_key_ref: cf-rsa-primary
+    allow_broker_relay: true
+    activate_new_agents_by_default: true
+  - tenant_id: tenant-seat-a2
+    domain: second-seat.exchange.example
+    ed25519_key_ref: exchange-primary
+    rsa_key_ref: cf-rsa-primary
+    allow_broker_relay: false
+    activate_new_agents_by_default: false
+publishers:
+  - publisher_id: demo-resource-owner
+    display_name: FORA demo publisher
+    sites:
+      - domain: demo.fora-protocol.org
+        signing_scheme: ED25519
+        listings:
+          - tenant_id: tenant-seat-a
+            terms_file: free-listing-terms.json

@@ -15,8 +15,10 @@ SELECT l.* FROM fora.publisher_domain_listings l
 
 -- name: CreatePublisherDomainListing :one
 -- Lists a site on a seat. The state is left to the column default,
--- PENDING_MANIFEST: a listing is never born proven, and taking the state from
--- the caller would let registration create an ACTIVE listing without a manifest.
+-- PENDING_MANIFEST: a listing registration creates is never born proven, and
+-- taking the state from the caller would let registration create an ACTIVE
+-- listing without a manifest. Only an operator's boot fixture creates a listing
+-- ACTIVE, through CreateActivePublisherDomainListingIfAbsent.
 -- No ON CONFLICT, so listing the same site twice on one seat surfaces the
 -- duplicate instead of silently overwriting the first listing's path scope or
 -- the licensing it agreed.
@@ -24,6 +26,20 @@ INSERT INTO fora.publisher_domain_listings (
     tenant_id, domain, content_path_scope, terms, sitemap_url,
     import_replaces_manual_terms
 ) VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING *;
+
+-- name: CreateActivePublisherDomainListingIfAbsent :one
+-- Lists a site on a seat ACTIVE, with its terms, because an operator's boot
+-- fixture declares it (ADR-029): the operator vouches for the listing, as the SQL
+-- that seeded deployments before the fixture did. No manifest check ran, so
+-- verified_at stays NULL, and catalog push still checks the site's manifest on
+-- every push. A listing already stored on this seat is left as it is, a
+-- PENDING_MANIFEST one included: the fixture never activates a listing that
+-- registration created. Tenant-scoped.
+INSERT INTO fora.publisher_domain_listings (
+    tenant_id, domain, state, content_path_scope, terms
+) VALUES ($1, $2, 'ACTIVE', $3, $4)
+ON CONFLICT (tenant_id, domain) DO NOTHING
 RETURNING *;
 
 -- name: ActivatePublisherDomainListing :one

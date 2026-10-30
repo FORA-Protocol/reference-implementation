@@ -6,10 +6,12 @@ Every purchase the harness makes through the Broker is made with
 Exchange's published key, and ``execute`` sends
 ``BrokerService.ExecuteTransaction`` with the agent's acceptances, signed by
 the SDK. Nothing here signs anything or reads a raw response; the answers are
-the SDK's typed results. The messages built here are the fields a suite chooses
-for a DiscoveryRequest (``resolve_request``) and for a ResourceQuery
-(``resource_query``), which the SDK completes and checks against the generated
-model before it signs.
+the SDK's typed results. The messages built here are generated models, a
+DiscoveryRequest (``resolve_request``) and a ResourceQuery (``resource_query``),
+carrying the fields a suite chooses. Neither names a requester (see
+:func:`unstamped`): the SDK stamps the sending client's, then checks the whole
+message against the generated model and the published strict schema before it
+signs.
 
 What this module adds is the small amount of reading every suite repeats: one
 offer group per requested URI, the one verified offer a test buys, and the one
@@ -23,57 +25,86 @@ says what arrived instead of an ``IndexError``.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from contextlib import closing
-from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
-from fora_sdk import ProtocolVersion
 from fora_sdk.core import DiscoveryResult, OfferGroupResult, VerifiedOffer
 from fora_sdk.sync import BrokerClient, Client
-from wire.models import BrokerTransactionResponse, TransactionResultItem
+from pydantic import BaseModel
+from wire.models import (
+    AcceptableRestriction,
+    BrokerTransactionResponse,
+    Cost,
+    DiscoveryRequest,
+    RequestConstraints,
+    Requester,
+    ResourceQuery,
+    RestrictionKind,
+    TransactionResultItem,
+)
 
-from .sdk_client import sdk_broker_client
-from .stack_urls import StackURLs
+from .fresh_agent import FreshAgent
+from .model_edits import require_declared
 
 #: The intended use every demo term permits. Sent as the FUNCTION axis of
 #: ``acceptable_restrictions``, which is how a DiscoveryRequest states a use.
 AI_INPUT = "ai-input"
 
+M = TypeVar("M", bound=BaseModel)
+
+
+def unstamped(model: type[M], **fields: Any) -> M:
+    """A ``model`` message with ``fields`` and no requester: the SDK stamps the sending client's.
+
+    The protocol requires a requester on a query, so a validated model cannot leave
+    it out, and the type checker refuses a ``model_construct`` call that leaves out
+    a required field; this builds the message with ``model_construct`` all the same.
+    The SDK then stamps ``ver`` and the configured requester, so the requester always
+    names the identity the client signs as, and validates and strict-checks the
+    whole message before it signs. A structured member is passed as its generated
+    model. ``model_construct`` would drop a field name the model does not declare,
+    and the type checker does not report one, so a misspelled name is refused here
+    (:func:`harness.model_edits.require_declared`).
+    """
+    require_declared(model, fields)
+    return model.model_construct(**fields)
+
 
 def resolve_request(
-    uris: Sequence[str],
+    uris: Sequence[str] | None = None,
     *,
     intended_use: str | None = None,
     period_budget: tuple[str, str] | None = None,
-) -> dict[str, Any]:
-    """The DiscoveryRequest fields a suite chooses; the SDK fills the envelope.
+    **fields: Any,
+) -> DiscoveryRequest:
+    """The DiscoveryRequest a suite sends to the Broker; the SDK stamps ``ver`` and the requester.
 
+    ``uris`` left out sends none, for a search by ``query`` or ``search_filters``.
     ``period_budget`` is ``(amount, currency)``, the amount a decimal string the
-    way ``Cost.amount`` travels. ``ver`` is stamped from the SDK's constant, as the
-    harness's ver-wire guard requires of every body; the SDK fills the requester.
+    way ``Cost.amount`` travels. ``fields`` sets any other member, for a test that
+    states one.
     """
-    request: dict[str, Any] = {"ver": ProtocolVersion, "uris": list(uris)}
     if intended_use is not None:
-        request["acceptable_restrictions"] = [
-            {"axis": "RESTRICTION_KIND_FUNCTION", "values": [intended_use]}
+        fields["acceptable_restrictions"] = [
+            AcceptableRestriction(
+                axis=RestrictionKind.RESTRICTION_KIND_FUNCTION, values=[intended_use]
+            )
         ]
     if period_budget is not None:
         amount, currency = period_budget
-        request["constraints"] = {"period_budget": {"amount": amount, "currency": currency}}
-    return request
+        fields["constraints"] = RequestConstraints(
+            period_budget=Cost(amount=amount, currency=currency)
+        )
+    if uris is not None:
+        fields["uris"] = list(uris)
+    return unstamped(DiscoveryRequest, **fields)
 
 
-def resource_query(exchange: str, uris: Sequence[str], **fields: Any) -> dict[str, Any]:
-    """The ResourceQuery fields a suite chooses, addressed to ``exchange``; the SDK fills the requester.
+def resource_query(exchange: str, uris: Sequence[str], **fields: Any) -> ResourceQuery:
+    """The ResourceQuery a suite sends to ``exchange``; the SDK stamps ``ver`` and the requester.
 
-    The query names no requester of its own: the SDK stamps the sending client's
-    configured one, so the requester always names the identity that client signs
-    as, whichever signer a test built it with. ``fields`` adds any other member,
-    or replaces one, for a test that states the requester's self-declared facets.
-    ``ver`` is stamped from the SDK's constant, as the harness's ver-wire guard
-    requires of every body.
+    ``fields`` sets any other member, or replaces one, for a test that states one.
     """
-    return {"ver": ProtocolVersion, "exchange": exchange, "uris": list(uris), **fields}
+    return unstamped(ResourceQuery, exchange=exchange, uris=list(uris), **fields)
 
 
 def one_group_per_uri(
@@ -128,12 +159,12 @@ def discover_group(
 ) -> OfferGroupResult:
     """Discover ``uri`` directly at the Exchange ``exchange`` and return its one offer group.
 
-    ``requester`` replaces the one the client fills in, for a test that states the
-    requester's self-declared facets. An offer that failed verification fails the
-    call here, with its reason, so the group's verified offers are every offer the
-    Exchange made.
+    ``requester`` replaces the one the client fills in, for a test that states a
+    requester of its own. An offer that failed verification fails the call here,
+    with its reason, so the group's verified offers are every offer the Exchange
+    made.
     """
-    stated = {} if requester is None else {"requester": requester}
+    stated = {} if requester is None else {"requester": Requester.model_validate(requester)}
     query = resource_query(exchange, [uri], **stated)
     group = one_group_per_uri(client.discover(query), [uri], leg)[uri]
     rejected = [(r.offer.get("offer_id"), r.reason) for r in group.result.rejected]
@@ -166,22 +197,13 @@ def only_item(response: BrokerTransactionResponse, leg: str) -> TransactionResul
     return item
 
 
-def buy_through_broker(
-    stack: StackURLs,
-    uri: str,
-    *,
-    agent_id: str,
-    key_path: Path,
-    intended_use: str | None = AI_INPUT,
-) -> tuple[VerifiedOffer, TransactionResultItem]:
-    """Resolve ``uri`` at the Broker, buy the winner through the Broker, return both.
+def resolve_and_buy(agent: FreshAgent, uri: str) -> TransactionResultItem:
+    """Resolve ``uri`` at the Broker as ``agent`` and buy the winner through the Broker.
 
-    One client, the buyer's own key, for both calls: the Broker resolves the
-    buyer from the signature on each, and the Exchange binds the delivery URL to
-    the key that signed the agent's acceptance.
+    Both calls go through the agent's own Broker client, so the Broker resolves the
+    buyer from the signature on each, and the Exchange binds the delivery URL to the
+    key that signed the agent's acceptance. A per-item denial is returned for the
+    caller to assert on.
     """
-    client = sdk_broker_client(stack, agent_id=agent_id, key_path=key_path)
-    with closing(client):
-        offer = resolve_offer(client, uri, intended_use=intended_use)
-        response = client.execute([offer])
-    return offer, only_item(response, f"broker purchase of {uri}")
+    offer = resolve_offer(agent.broker, uri)
+    return only_item(agent.broker.execute([offer]), f"broker purchase of {uri}")

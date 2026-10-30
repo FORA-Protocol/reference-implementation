@@ -1,21 +1,25 @@
-// The wizard's first three steps -- the business name, the domain and what
-// serves it, and the files the publisher deploys -- and the save both of its
-// last step's buttons send. The checks that gate each step are in
-// api_checks.go and the licensing step is in api_terms.go.
+// The wizard's business step; its domain step -- the domain, what serves it,
+// and the save that holds it -- and the files a saved domain is set up with.
+// The licensing step is in api_terms.go and the last step's check in
+// api_checks.go.
 
 package web
 
 import (
 	"net/http"
-	"net/url"
 	"strings"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/setupsteps"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/setup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/wizard"
 )
 
-// Publisher registers the business name.
+// Publisher is the business step's Next: it registers the business under the
+// name typed. A repeat -- a second tab opened before the first registered, a
+// second press of Enter -- goes on to the Exchange like the first call, and
+// registration there is idempotent by actor: it answers with the publisher the
+// account already holds, under its first name. The e2e obligation that
+// registering the business again returns the same publisher relies on the call
+// reaching it, so it is not answered here from the registrations instead.
 func (a *WizardAPI) Publisher(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DisplayName string `json:"display_name"`
@@ -46,16 +50,14 @@ type lookupBody struct {
 	// Yours is set when the domain is already one of this person's. Link is
 	// then where to go instead: its page when it is verified, and the page
 	// that finishes its setup when it is not.
-	Yours        bool      `json:"yours"`
-	Verified     bool      `json:"verified"`
-	Link         string    `json:"link,omitempty"`
-	LimitReached bool      `json:"limit_reached"`
-	Message      string    `json:"message,omitempty"`
-	Manifest     checkBody `json:"manifest"`
+	Yours        bool   `json:"yours"`
+	Verified     bool   `json:"verified"`
+	Link         string `json:"link,omitempty"`
+	LimitReached bool   `json:"limit_reached"`
+	Message      string `json:"message,omitempty"`
 }
 
-// Lookup answers which network serves a domain and whether it could be
-// registered.
+// Lookup answers which network serves a domain and whether it could be saved.
 func (a *WizardAPI) Lookup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Domain string `json:"domain"`
@@ -79,8 +81,43 @@ func (a *WizardAPI) Lookup(w http.ResponseWriter, r *http.Request) {
 		Taken:         found.Taken,
 		LimitReached:  found.LimitReached,
 		Message:       found.Message,
-		Manifest:      checkBodyOf(found.Manifest),
 	})
+}
+
+// SaveDomain is the first step's Next: it saves the domain, with no terms yet,
+// and answers with the domain as it is saved and the page that finishes its
+// setup, which the wizard's address becomes so that a reload reopens it.
+func (a *WizardAPI) SaveDomain(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Domain string `json:"domain"`
+		CDN    string `json:"cdn"`
+		Paths  string `json:"content_paths"`
+	}
+	if !readAPI(w, r, &req) {
+		return
+	}
+	saved, err := a.wizard.SaveDomain(r.Context(), actorOf(r.Context()), wizard.Draft{
+		Domain: req.Domain, CDN: req.CDN, Paths: req.Paths,
+	})
+	if err != nil {
+		apiFailure(w, r, err)
+		return
+	}
+	writeAPI(w, r, struct {
+		Domain string `json:"domain"`
+		CDN    string `json:"cdn"`
+		Paths  string `json:"content_paths"`
+		Setup  string `json:"setup"`
+	}{
+		Domain: saved.Domain, CDN: saved.CDN,
+		Paths: pathsField(saved.ContentPathScope), Setup: domainSetupURL(saved.Domain),
+	})
+}
+
+// pathsField is a saved domain's licensed paths as the domain step's field
+// holds them.
+func pathsField(scope []string) string {
+	return strings.Join(scope, ", ")
 }
 
 // fileBody is one generated file as the wizard shows it: the text to serve, and
@@ -92,22 +129,17 @@ type fileBody struct {
 	URL         string `json:"url"`
 }
 
-// draftOf reads a domain's answers from the fields every file route shares.
-func draftOf(domain, network, paths string) wizard.Draft {
-	return wizard.Draft{Domain: domain, CDN: network, Paths: paths}
-}
-
-// Files builds the files for a domain that is not saved yet.
+// Files answers a saved domain's files, built from what the Exchange holds for
+// it. Each one downloads from the domain's own page, the same link that page
+// offers.
 func (a *WizardAPI) Files(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Domain string `json:"domain"`
-		CDN    string `json:"cdn"`
-		Paths  string `json:"content_paths"`
 	}
 	if !readAPI(w, r, &req) {
 		return
 	}
-	out, err := a.wizard.Files(r.Context(), actorOf(r.Context()), draftOf(req.Domain, req.CDN, req.Paths))
+	out, err := a.wizard.Files(r.Context(), actorOf(r.Context()), req.Domain)
 	if err != nil {
 		apiFailure(w, r, err)
 		return
@@ -116,75 +148,15 @@ func (a *WizardAPI) Files(w http.ResponseWriter, r *http.Request) {
 	for _, f := range out.Bundle.Files {
 		files = append(files, fileBody{
 			Name: f.Name, Description: f.Description, Body: string(f.Body),
-			URL: wizardFileURL(out.Site, f.Name),
+			URL: domainFileURL(out.Site.Domain, f.Name),
 		})
 	}
 	writeAPI(w, r, struct {
 		Files     []fileBody        `json:"files"`
 		EdgeSteps []setupsteps.Step `json:"edge_steps"`
+		Deployed  string            `json:"deployed"`
 		Warnings  []string          `json:"warnings"`
-	}{Files: files, EdgeSteps: out.EdgeSteps, Warnings: out.Bundle.Warnings})
-}
-
-// wizardFileURL is where one generated file is downloaded from mid-wizard.
-//
-// The answers travel in the address because there is no row to read them back
-// from: a download is a navigation, so it cannot carry the answers in a body
-// the way every other call does.
-func wizardFileURL(s setup.Site, name string) string {
-	q := url.Values{
-		"name":          {name},
-		"domain":        {s.Domain},
-		"cdn":           {s.CDN},
-		"content_paths": {strings.Join(s.ContentPathScope, ",")},
-	}
-	return APIFilePath + "?" + q.Encode()
-}
-
-// File serves one generated file to a link the wizard rendered, rebuilt from
-// the answers in its address.
-func (a *WizardAPI) File(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	draft := draftOf(q.Get("domain"), q.Get("cdn"), q.Get("content_paths"))
-	out, err := a.wizard.Files(r.Context(), actorOf(r.Context()), draft)
-	if err != nil {
-		apiFailure(w, r, err)
-		return
-	}
-	serveBundleFile(w, r, out.Bundle, q.Get("name"))
-}
-
-// Register is what both of the last step's buttons send: it saves the domain,
-// and verifies it when it has terms and the site's file and package both
-// answer. Terms are null when the licensing step was skipped.
-func (a *WizardAPI) Register(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Domain  string        `json:"domain"`
-		CDN     string        `json:"cdn"`
-		Paths   string        `json:"content_paths"`
-		Sitemap string        `json:"sitemap_url"`
-		Terms   *controlsJSON `json:"terms"`
-		// ImportReplacesManualTerms is the last step's checkbox: whether the
-		// automatic import may replace the terms of pages already in the catalog.
-		ImportReplacesManualTerms bool `json:"import_replaces_manual_terms"`
-	}
-	if !readAPI(w, r, &req) {
-		return
-	}
-	done, err := a.wizard.Finish(r.Context(), actorOf(r.Context()), wizard.Registration{
-		Draft:                     draftOf(req.Domain, req.CDN, req.Paths),
-		Sitemap:                   req.Sitemap,
-		Controls:                  controlsOrNil(req.Terms),
-		ImportReplacesManualTerms: req.ImportReplacesManualTerms,
-	})
-	if err != nil {
-		apiFailure(w, r, err)
-		return
-	}
-	writeAPI(w, r, struct {
-		Domain   string `json:"domain"`
-		Verified bool   `json:"verified"`
-	}{Domain: done.Domain, Verified: done.Verified})
+	}{Files: files, EdgeSteps: out.EdgeSteps, Deployed: out.Deployed, Warnings: out.Bundle.Warnings})
 }
 
 // yoursLink is where a domain the person already holds is opened instead of

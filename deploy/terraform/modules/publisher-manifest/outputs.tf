@@ -1,29 +1,29 @@
-# The edge worker's publisher-manifest env values, rendered once for every
-# deployment shape: the cloudflare-edge module takes them as worker bindings
-# (EXCHANGES_JSON / CATALOG_CONTRIBUTORS_JSON), and the Lambda@Edge bundle
-# takes the same strings baked into its config zip. This is the only place
-# Terraform renders that JSON shape, so a change to the worker's env contract
-# changes the rendering here and nowhere else in Terraform.
+# The publisher's discovery document, the file its origin serves at
+# /.well-known/fora.json, rendered once for every deployment that runs a demo
+# publisher origin (stacks/staging-aws, stacks/demo-aws). The edge in front of
+# the publisher passes that address through to the origin, so this document is
+# the one every reader gets.
 #
-# The shape is written out by hand one more time outside Terraform, in
-# deploy/publisher-wellknown/template-env.json — the worked example operators are
-# told to compare their own deployment against. The test suite pins this
-# rendering to that file, so the two cannot drift apart.
+# The test pins it to deploy/publisher-wellknown/fora.json.example, the
+# reference copy of the document a publisher serves, which the Go suite reads
+# through the Exchange's own parser.
 
-output "exchanges_json" {
-  description = "JSON array of exchange entries the worker advertises in fora.json (EXCHANGES_JSON)."
-  value = jsonencode([{
-    domain             = var.exchange_fqdn
-    endpoint           = "https://${var.exchange_fqdn}"
+output "document" {
+  description = "The publisher's /.well-known/fora.json, as the JSON its origin serves."
+  value = jsonencode({
+    ver    = "1.0"
+    role   = "ROLE_PUBLISHER"
+    domain = var.publisher_domain
+    exchanges = [{
+      domain       = var.exchange_fqdn
+      endpoint     = "https://${var.exchange_fqdn}"
+      relationship = "PROVIDER_RELATIONSHIP_DIRECT"
+      ext          = { resource_owner_id = var.resource_owner_id }
+    }]
     supported_profiles = ["fora-news-v1", "fora-comp-v1", "fora-music-v1"]
-    ext                = { resource_owner_id = var.resource_owner_id }
-  }])
-}
-
-output "catalog_contributors_json" {
-  description = "JSON array of catalog contributors the worker advertises and the Exchange authorizes for signed catalog pushes (CATALOG_CONTRIBUTORS_JSON)."
-  value = jsonencode([{
-    domain       = var.catalog_contributor_id
-    relationship = "operator"
-  }])
+    catalog_contributors = [{
+      domain       = var.catalog_contributor_id
+      relationship = "operator"
+    }]
+  })
 }

@@ -193,11 +193,11 @@ commands to watch it.
 ```bash
 # still in deploy/terraform/stacks/demo-aws:
 terraform output -raw lambda_edge_config > lambda-edge-config.json
-../../scripts/build-lambda-edge.sh lambda-edge-config.json
+../../scripts/build-lambda-edge.sh lambda-edge-config.json "$(terraform output -raw lambda_edge_domain)"
 ```
 
-The output is derived only from variables, so it is available right after
-step 3's apply. The build writes the config into the `index.mjs` that
+Both outputs are derived only from variables, so they are available right
+after step 3's apply. The build writes the config into the `index.mjs` that
 sits beside the release bundle in `src/edge/dist/lambda-edge.zip`, and
 smoke-invokes the pair locally before zipping — a config the worker rejects fails here, not at the edge.
 
@@ -277,15 +277,17 @@ content is what viewers get. If caching is ever enabled on the distribution,
 content and behavior changes additionally need
 `aws cloudfront create-invalidation --distribution-id $(terraform output -raw cloudfront_distribution_id) --paths "/*"`.
 
-The publisher manifest `/.well-known/fora.json` is answered by the Lambda
-itself as a generated response — it never comes from the origin, so an
-origin problem cannot take it down, and it changes only when a new bundle
-is deployed. The worker's other discovery routes serve content only when it
-is in the package's config, and this stack configures none of it — in particular,
-the publisher's own key directory answers 404 (normal here —
+The publisher manifest `/.well-known/fora.json` is the publisher's own file
+on the origin. The Lambda hands that address back to CloudFront for every
+client, an AI bot included, and CloudFront fetches it from the origin, where
+Caddy serves the document this stack renders (the `publisher-manifest`
+module). So it changes when the stack is applied, not when a bundle is
+deployed, and an origin outage takes it down with the content. `/rsl.txt`
+goes to the origin the same way and answers 404, because the demo origin
+publishes no RSL document. The publisher's own key directory is the one
+discovery route the Lambda answers itself, and it answers 404 (normal here —
 agent and exchange keys are published by the Identity Service and the
-Exchange, not by the publisher hostname) and `/rsl.txt` answers 404 because
-no RSL document is configured.
+Exchange, not by the publisher hostname).
 
 ## Steps 6–9 — bootstrap, seed, fund, smoke
 

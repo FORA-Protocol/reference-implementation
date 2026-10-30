@@ -32,8 +32,6 @@ type WorkerEnv = Parameters<typeof worker.fetch>[1];
 const baseEnv = {
   EXCHANGE_URL: 'https://exchange.test',
   EXCHANGE_WBA_URL: 'https://exchange.test/.well-known/http-message-signatures-directory',
-  PROVIDER: 'pub.test',
-  EXCHANGES_JSON: '[{"domain":"exchange.test","endpoint":"https://exchange.test"}]',
 };
 
 describe('Cloudflare entry origin-mode validation', () => {
@@ -63,7 +61,6 @@ describe('Cloudflare entry origin-mode validation', () => {
 
 function sameZoneDeps(seen: string[]): AppDeps {
   return {
-    manifest: { ver: '1.0', role: 'ROLE_PUBLISHER', domain: 'pub.test' } as AppDeps['manifest'],
     resolveKey: async () => undefined,
     sameZoneOrigin: true,
     verify: async () => ({ valid: true, expired: false }),
@@ -104,7 +101,6 @@ describe('same-zone origin mode', () => {
 describe('same-zone origin mode with real verification', () => {
   function realVerifyDeps(seen: string[], resolveKey: AppDeps['resolveKey']): AppDeps {
     return {
-      manifest: { ver: '1.0', role: 'ROLE_PUBLISHER', domain: 'pub.test' } as AppDeps['manifest'],
       resolveKey,
       sameZoneOrigin: true,
       fetcher: (async (req: Request) => {

@@ -8,10 +8,13 @@ it is imported. Each step is a module-scoped fixture that runs once, in order,
 and each obligation is its own test, attached to the step that proves it:
 
   1. Registration (PUB-001 to PUB-004). The publisher signs in to the console,
-     registers its business twice, as a double submit would, and adds the domain:
-     the wizard detects the CDN from the site's own answer, builds the discovery
-     document, the publisher publishes it on the domain byte for byte, the
-     console's check passes and the last step registers the domain.
+     which opens the add-a-domain wizard on its business step, names its
+     business there, sends the step again with another name, as a second tab
+     would, and adds the domain:
+     the wizard detects the CDN from the site's own answer and saves the domain,
+     saves its terms, and builds the discovery document; the publisher publishes
+     it on the domain byte for byte, and the last step's check finds it and the
+     package in place and verifies the domain.
   2. Import (PUB-009 to PUB-011). The operator's importer runs (the stack's
      ``importer`` job). It imports the two sitemap pages inside the licensed path
      and leaves the one outside it, and the console's catalog page lists exactly
@@ -51,12 +54,12 @@ from dataclasses import dataclass
 from decimal import ROUND_FLOOR, Decimal
 
 import pytest
-from wire.models import Cost, Role
+from wire.models import Cost, Role, WellKnownManifest
 
 from ..admin_plane import require_admin_plane, tenant_fee_rate
 from ..broker_purchase import discover_group, only_verified_offer
 from ..conftest import StackURLs
-from ..console_client import Actor, Wizard, foreign_signed_list_status
+from ..console_client import Actor, foreign_signed_list_status
 from ..console_dashboard import (
     CatalogRow,
     IncomeRow,
@@ -77,7 +80,7 @@ from ..importer import COMPLETE, ListingOutcome, run_import
 from ..obligation_registry import Obligation, obligation
 from ..poll import poll_until
 from ..publisher_accounts import PublisherFactory, PublisherSession
-from ..publisher_journey import Onboarding, onboard
+from ..publisher_journey import DISPLAY_NAME, Onboarding, onboard
 from ..publisher_sites import Site, mint_site
 from ..sdk_client import agent_signer
 from ..seed import SeededFixture
@@ -161,9 +164,9 @@ class Imported:
 
 
 def _import(stack: StackURLs, registered: Registered) -> Imported:
-    assert registered.onboarding.registered.verified, (
-        f"step 1 did not register {registered.site.domain} (PUB-004), so the importer has "
-        f"no listing to import: {registered.onboarding.registered}"
+    assert registered.onboarding.connected.verified, (
+        f"step 1 did not verify {registered.site.domain} (PUB-004), so the importer has "
+        f"no listing to import: {registered.onboarding.connected}"
     )
     run = run_import(registered.site.domain)
     return Imported(run, catalog(registered.publisher.browser, stack.console))
@@ -242,23 +245,37 @@ def detail(compose_stack: StackURLs, registered: Registered, sale: Sale) -> Tran
 # ── Step 1: registration ───────────────────────────────────────────────────
 
 
+def _payees(manifest: WellKnownManifest) -> list[object]:
+    """The resource owner each exchange entry of a discovery document names, in order."""
+    return [(e.ext or {}).get("resource_owner_id") for e in manifest.exchanges or []]
+
+
 @obligation(Obligation.PUB_001)
 def test_registering_a_business_mints_a_publisher_id(registered: Registered) -> None:
+    """The wizard opens on the business step, and its Next is answered with the payee the Exchange minted.
+
+    The domains page shows the same payee, and the file the wizard builds names it.
+    """
     onboarding = registered.onboarding
-    assert onboarding.publisher_id.startswith("pub_"), onboarding
-    payees = [(e.ext or {}).get("resource_owner_id") for e in onboarding.manifest.exchanges or []]
-    assert payees == [onboarding.publisher_id], onboarding.manifest
+    assert onboarding.opened_on == "name", onboarding.opened_on
+    assert onboarding.publisher_id.startswith("pub_"), onboarding.business
+    assert onboarding.shown.payee_id == onboarding.publisher_id, onboarding.shown
+    assert _payees(onboarding.manifest) == [onboarding.publisher_id], onboarding.manifest
 
 
 @obligation(Obligation.PUB_002)
-def test_registering_the_business_again_returns_the_same_publisher(
-    compose_stack: StackURLs, registered: Registered
-) -> None:
+def test_registering_the_business_again_returns_the_same_publisher(registered: Registered) -> None:
+    """The business step sent again, with another name, is answered with the same publisher.
+
+    The business keeps its first name, the file built after it names the payee the
+    file built before it named, and the wizard no longer asks for the business.
+    """
     onboarding = registered.onboarding
-    assert onboarding.publisher_id_again == onboarding.publisher_id, onboarding
-    assert Wizard(registered.publisher.browser, compose_stack.console).registered, (
-        "the console forgot the business"
-    )
+    assert onboarding.business_again == onboarding.business, onboarding
+    assert onboarding.business.display_name == DISPLAY_NAME, onboarding.business
+    assert _payees(onboarding.manifest) == _payees(onboarding.manifest_before), onboarding
+    assert onboarding.shown.name == DISPLAY_NAME, onboarding.shown
+    assert not onboarding.asks_again, onboarding
 
 
 @obligation(Obligation.PUB_003)
@@ -283,8 +300,15 @@ def test_publishing_the_file_activates_the_domains_listing(
     compose_stack: StackURLs, registered: Registered
 ) -> None:
     onboarding = registered.onboarding
-    assert onboarding.check.passed and onboarding.check.reasons == [], onboarding.check
-    assert onboarding.registered.verified, onboarding.registered
+    # Control: before the file is published, the package answers and the domain
+    # is not verified, and the file task says the file is missing.
+    unpublished = onboarding.unpublished
+    assert unpublished.package.passed and not unpublished.verified, unpublished
+    assert unpublished.file.state == "missing", unpublished
+    assert "has no file at /.well-known/fora.json" in unpublished.file.status, unpublished
+    connected = onboarding.connected
+    assert connected.file.passed and connected.file.reasons == [], connected
+    assert connected.verified, connected
     domain = registered.site.domain
     sites = {
         s.domain: s for s in registered_sites(registered.publisher.browser, compose_stack.console)
@@ -387,13 +411,15 @@ def test_the_transaction_page_never_shows_the_delivery_address(
 def test_another_publisher_is_answered_not_found_for_the_transaction(
     compose_stack: StackURLs, publishers: PublisherFactory, sale: Sale, detail: TransactionDetail
 ) -> None:
-    """The other publisher holds a domain of its own.
+    """The other publisher holds a verified domain of its own.
 
-    The console sends a person with no domain to its home page before any read,
-    so only a publisher with one reaches the Exchange's grant check.
+    Any publisher reaches the Exchange's grant check -- one with no domain yet
+    too; only an account with no business is sent to the wizard before any read.
+    The other publisher is the strongest case: one whose own pages sell, asking
+    for a sale that is not theirs.
     """
     other = publishers()
-    assert onboard(compose_stack, other, mint_site()).registered.verified
+    assert onboard(compose_stack, other, mint_site()).connected.verified
     foreign = page_answer(
         other.browser, compose_stack.console, transaction_path(sale.transaction_id)
     )

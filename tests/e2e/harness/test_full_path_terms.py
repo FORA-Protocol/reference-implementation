@@ -24,33 +24,21 @@ The QUERY path pushes NOTHING — it reads the demo catalog the seed ingested.
 
 from __future__ import annotations
 
-from contextlib import closing
 from decimal import Decimal
 from http import HTTPStatus
 
-from wire.models import TransactionResultItem
+import pytest
 
-from .broker_purchase import buy_through_broker, one_group_per_uri, only_item, resolve_request
+from .broker_purchase import one_group_per_uri, only_item, resolve_and_buy, resolve_request
 from .catalog_push import PRICING_MODEL_FREE
 from .conftest import StackURLs
 from .edge_fetch import fetch_signed, fetch_without_proof, tamper_query_param
-from .sdk_client import sdk_broker_client
+from .fresh_agent import FreshAgent
+from .money_path import assert_bought
 from .seed import SeededFixture
 
-
-def _deliver_demo(compose_stack: StackURLs, res) -> TransactionResultItem:
-    """Resolve ``res`` at the Broker and buy the winner through the Broker.
-
-    Broker Resolve is discovery-only; the signed URL is minted on the purchase.
-    user_type / geography are not sent: the Broker stopped relaying them and the
-    Exchange no longer filters on them (ADR-014, 2026-06-15). Only the native
-    intended_use rides through.
-    """
-    _, item = buy_through_broker(
-        compose_stack, res.uri, agent_id=res.buyer_agent_id, key_path=res.buyer_key_path
-    )
-    assert item.denial_reason is None, f"the purchase of {res.uri} was denied: {item}"
-    return item
+# ADR-008 D5 — declare stack-isolation contract.
+pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +54,7 @@ def _deliver_demo(compose_stack: StackURLs, res) -> TransactionResultItem:
 def test_query_returns_an_offer_per_term_and_gets_content(
     compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """Any requester resolves plato (both terms returned) and is delivered bytes.
 
@@ -76,16 +65,19 @@ def test_query_returns_an_offer_per_term_and_gets_content(
     ranked winner, which is what ADR-019 left on the agent-facing wire.
     """
     res = seeded.restricted  # plato
-    signed_url = _deliver_demo(compose_stack, res).retrieval_endpoint
+    item = resolve_and_buy(fresh_agent, res.uri)
+    assert_bought(item, f"broker purchase of {res.uri}")
+    signed_url = item.retrieval_endpoint
     assert signed_url, f"the purchase minted no delivery URL for {res.uri}"
 
-    content = fetch_signed(signed_url, compose_stack, key_path=res.buyer_key_path)
+    content = fetch_signed(signed_url, compose_stack, key_path=fresh_agent.key_path)
     assert content.body.strip(), content.body[:256]
 
 
 def test_query_agent_picks_the_free_offer_and_pays_nothing(
     compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """The agent chooses plato's free term by price and is charged nothing.
 
@@ -98,25 +90,20 @@ def test_query_agent_picks_the_free_offer_and_pays_nothing(
     at its own price.
     """
     res = seeded.restricted  # plato
-    buyer = sdk_broker_client(
-        compose_stack, agent_id=res.buyer_agent_id, key_path=res.buyer_key_path
-    )
-    with closing(buyer) as client:
-        result = client.resolve(resolve_request([res.uri], intended_use="ai-input"))
-        group = one_group_per_uri(result, [res.uri], "broker resolve of plato")[res.uri]
-        assert not group.result.rejected, f"plato offers rejected: {group.result.rejected}"
-        offers = group.result.verified
-        assert len(offers) == 2, f"expected one offer per plato term, got {len(offers)}: {offers!r}"
-        for offer in offers:
-            assert len(offer.offer.get("terms") or []) == 1, (
-                f"an offer carries more than one term: {offer.offer!r}"
-            )
+    client = fresh_agent.broker
+    result = client.resolve(resolve_request([res.uri], intended_use="ai-input"))
+    group = one_group_per_uri(result, [res.uri], "broker resolve of plato")[res.uri]
+    assert not group.result.rejected, f"plato offers rejected: {group.result.rejected}"
+    offers = group.result.verified
+    assert len(offers) == 2, f"expected one offer per plato term, got {len(offers)}: {offers!r}"
+    for offer in offers:
+        assert len(offer.offer.get("terms") or []) == 1, (
+            f"an offer carries more than one term: {offer.offer!r}"
+        )
 
-        free = [
-            o for o in offers if (o.offer.get("pricing") or {}).get("model") == PRICING_MODEL_FREE
-        ]
-        assert len(free) == 1, f"expected exactly one FREE offer among {offers!r}"
-        item = only_item(client.execute(free), "broker purchase of plato's free offer")
+    free = [o for o in offers if (o.offer.get("pricing") or {}).get("model") == PRICING_MODEL_FREE]
+    assert len(free) == 1, f"expected exactly one FREE offer among {offers!r}"
+    item = only_item(client.execute(free), "broker purchase of plato's free offer")
 
     assert item.denial_reason is None, item
     signed_url = item.retrieval_endpoint
@@ -127,13 +114,13 @@ def test_query_agent_picks_the_free_offer_and_pays_nothing(
     assert Decimal(str(item.cost.unit_cost)) == 0, item.cost
     assert Decimal(str(item.cost.amount)) == 0, item.cost
 
-    content = fetch_signed(signed_url, compose_stack, key_path=res.buyer_key_path)
+    content = fetch_signed(signed_url, compose_stack, key_path=fresh_agent.key_path)
     assert content.body.strip(), content.body[:256]
 
 
 def test_query_us_requester_now_licensed(
-    compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """A requester that declares no permitted geography is STILL licensed (flip).
 
@@ -144,16 +131,18 @@ def test_query_us_requester_now_licensed(
     even sent on the wire; this asserts the behaviour the inversion produces.)
     """
     res = seeded.restricted  # plato
-    assert _deliver_demo(compose_stack, res).retrieval_endpoint, res.uri
+    assert_bought(resolve_and_buy(fresh_agent, res.uri), f"broker purchase of {res.uri}")
 
 
 def test_query_tampered_signature_is_rejected(
-    compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """Mutating the signature on a term-derived signed URL flips edge verify to 403."""
     res = seeded.restricted  # plato
-    signed_url = _deliver_demo(compose_stack, res).retrieval_endpoint
+    item = resolve_and_buy(fresh_agent, res.uri)
+    assert_bought(item, f"broker purchase of {res.uri}")
+    signed_url = item.retrieval_endpoint
     assert signed_url, res.uri
     bad = fetch_without_proof(tamper_query_param(signed_url))
     assert bad.status == HTTPStatus.FORBIDDEN, bad.text

@@ -1,0 +1,22 @@
+# The rows exchange-d creates at start-up when they are absent (ADR-029): its
+# seat, which refuses purchases a Broker relays, and the archive site it sells.
+# Mounted read-only at /boot/fixture.yml, beside the shared terms file;
+# test_guards_exchange_boot_fixtures.py holds this file to the harness's
+# constants and to the compose file.
+version: 1
+seats:
+  - tenant_id: tenant-seat-d
+    domain: exchange-d:8081
+    ed25519_key_ref: exchange-primary
+    rsa_key_ref: cf-rsa-primary
+    allow_broker_relay: false
+    activate_new_agents_by_default: true
+publishers:
+  - publisher_id: demo-resource-owner
+    display_name: FORA demo publisher
+    sites:
+      - domain: archive.demo.fora-protocol.org
+        signing_scheme: ED25519
+        listings:
+          - tenant_id: tenant-seat-d
+            terms_file: free-listing-terms.json

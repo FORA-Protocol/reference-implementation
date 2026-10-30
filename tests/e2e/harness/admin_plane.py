@@ -30,7 +30,6 @@ Three things come from here:
 from __future__ import annotations
 
 import base64
-import json
 import os
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
@@ -46,6 +45,7 @@ from fora_sdk.client import CallError
 from fora_sdk.signing_transport import SigningTransport
 from fora_sdk.sync import AdminClient
 from wire.models import (
+    Offer,
     ReportingPolicy,
     SetReportingPolicyRequest,
     SetReportingPolicyResponse,
@@ -56,6 +56,7 @@ from wire.models import (
 
 from .exchanges import seat_tenant_id
 from .malformed import Request, SeamHTTP
+from .protocol_documents import parse_document
 from .sdk_client import BeforeSign, sdk_admin_client
 
 T = TypeVar("T")
@@ -70,13 +71,18 @@ TRANSACTION_EVIDENCE_PATH = "/ops/transaction-evidence"
 _READ_TIMEOUT_SEC = 10.0
 
 
-def require_admin_plane() -> None:
-    """Skip unless this run is the runner inside the compose network.
+def admin_plane_reachable() -> bool:
+    """Whether this run is the runner inside the compose network.
 
     The admin listener publishes no host port, and its allowlist admits only the
     runner's address, so from anywhere else every call would be refused.
     """
-    if os.environ.get("FORA_E2E_IN_NETWORK") != "1":
+    return os.environ.get("FORA_E2E_IN_NETWORK") == "1"
+
+
+def require_admin_plane() -> None:
+    """Skip unless the admin listeners are reachable (:func:`admin_plane_reachable`)."""
+    if not admin_plane_reachable():
         pytest.skip("the admin listeners admit only the runner, inside the compose network")
 
 
@@ -279,7 +285,7 @@ class TransactionEvidence:
     request_id_minted: bool | None
     obligation: ObligationEvidence | None
     created_at: datetime
-    offer: dict[str, Any]
+    offer: Offer
 
 
 def _instant(raw: str | None) -> datetime | None:
@@ -300,11 +306,13 @@ def _obligation(raw: dict[str, Any] | None) -> ObligationEvidence | None:
     )
 
 
-def _offer(raw: str) -> dict[str, Any]:
-    """The stored canonical offer: base64 in the JSON body, a JSON document inside."""
-    offer = json.loads(base64.b64decode(raw))
-    assert isinstance(offer, dict), f"the stored canonical offer is not a JSON object: {offer!r}"
-    return offer
+def _offer(raw: str) -> Offer:
+    """The stored canonical offer: base64 in the JSON body, an Offer document inside.
+
+    Read as the SDK reads a document handed over as bytes: refused unless the
+    protocol's strict check accepts it, then the generated model.
+    """
+    return parse_document(Offer, base64.b64decode(raw))
 
 
 def _evidence_read(exchange_domain: str, transaction_id: str) -> httpx.Response:

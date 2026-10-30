@@ -17,14 +17,18 @@ keeping signatures distinct.
 
 WHAT THIS MODULE PROVES, leg by leg, through the agent's own surfaces:
 
-- the identity service's SDK legs (``fora_status``, ``fora_discover``) accept a
-  burst of identical concurrent MCP calls;
+- the discovery leg (``fora_discover``) accepts a burst of identical concurrent
+  MCP calls;
 - the purchase leg (``fora_execute``) accepts a burst of identical concurrent
   retries, and every retry returns the original transaction;
 - the replay store is still live: the exact same signed bytes, sent twice to the
-  Broker's ExecuteTransaction, are refused the second time. Without this
-  negative, the two positives would also pass on a Broker that had stopped
-  checking replays.
+  Broker's ExecuteTransaction, are refused the second time, and the refused send
+  reaches no Exchange. Without this negative, the two positives would also pass
+  on a Broker that had stopped checking replays.
+
+The bursts prove MCP-018 on the discovery and purchase legs: identical tool calls,
+so identical requests, each answered. ``obligations/test_mcp_tools.py`` proves it
+on the status leg. The replay is RELAY-004's stale case.
 
 Every MCP call goes through the MCP send seam (``mcp_client.py``), and each test
 signs up an agent of its own (ADR-028 D7). The replay is the agent's own purchase
@@ -39,7 +43,9 @@ That guarantee is deterministic: the fixed-window test in
 ``internal/forahttpsig/nonce_test.go`` signs identical requests with the same
 timestamps through both the local signer and the SDK transport, and checks that
 the signatures differ and that each one is refused when sent again;
-``test_httpsig_signer.py`` holds the harness's own signer to the same rule.
+``test_httpsig_signer.py`` holds the harness's own signer to the same rule; and
+``obligations/test_signature_freshness.py`` sends identical discoveries signed
+under one pinned clock to an Exchange (IDENTITY-015).
 """
 
 from __future__ import annotations
@@ -51,8 +57,10 @@ from typing import Any
 
 import pytest
 from fora_sdk.client import CallError
+from wire.models import TransactionRequest
 
 from .after_signing import Capture, after_signing, resend
+from .capture_proxy import CaptureProxy
 from .exchanges import EXCHANGE_A_DOMAIN
 from .fresh_agent import FreshAgent
 from .identity_requests import SIGNATURE_STALE, assert_auth_refusal, offer_for
@@ -60,6 +68,7 @@ from .mcp_agents import McpAgentFactory
 from .mcp_client import McpSession, ToolResult, mcp_session
 from .mcp_helpers import first_discovered_offer
 from .money_path import assert_bought, only_item
+from .obligation_registry import Obligation, obligation
 from .seed import SeededFixture
 from .stack_urls import StackURLs
 
@@ -103,28 +112,25 @@ async def _burst(
     return results, failures, elapsed
 
 
-@pytest.mark.parametrize("tool", ["fora_status", "fora_discover"])
-async def test_identical_sdk_calls_in_one_burst_are_all_accepted(
+@obligation(Obligation.MCP_018)
+async def test_identical_discoveries_in_one_burst_are_all_accepted(
     identity_ready: StackURLs,
     fresh_mcp_agent_factory: McpAgentFactory,
     seeded: SeededFixture,
-    tool: str,
 ) -> None:
-    """A burst of identical status or discovery calls: every call succeeds.
+    """A burst of identical discovery calls: every call succeeds.
 
-    Both tools sign through the protocol SDK's transport, which adds a fresh
-    nonce to each signature, so identical requests carry distinct signatures.
+    The tool signs through the protocol SDK's transport, which adds a fresh nonce
+    to each signature, so identical requests carry distinct signatures.
     """
-    arguments: dict[str, Any] = (
-        {"exchange": EXCHANGE_A_DOMAIN} if tool == "fora_status" else {"uris": [seeded.free.uri]}
-    )
     agent = fresh_mcp_agent_factory()
     async with mcp_session(identity_ready, agent.bearer) as mcp:
-        _, failures, elapsed = await _burst(mcp, tool, arguments)
+        _, failures, elapsed = await _burst(mcp, "fora_discover", {"uris": [seeded.free.uri]})
 
     assert not failures, _describe(failures, elapsed)
 
 
+@obligation(Obligation.MCP_018)
 async def test_identical_purchase_retries_in_one_burst_return_the_original(
     identity_ready: StackURLs,
     fresh_mcp_agent_factory: McpAgentFactory,
@@ -159,9 +165,11 @@ async def test_identical_purchase_retries_in_one_burst_return_the_original(
     )
 
 
+@obligation(Obligation.RELAY_004, negative=True)
 def test_the_same_signed_bytes_sent_twice_are_refused_as_a_replay(
     fresh_agent: FreshAgent,
     seeded: SeededFixture,
+    capture_proxy: CaptureProxy,
 ) -> None:
     """One signed purchase, sent twice: bought once, then refused as a replay.
 
@@ -170,16 +178,20 @@ def test_the_same_signed_bytes_sent_twice_are_refused_as_a_replay(
     through its own SDK Broker client, which records the request exactly as it
     went on the wire, and a second client sends those bytes again in place of
     the request it signed. The Broker owns the replay store on this route, and
-    it refuses the second send as a stale signature.
+    it refuses the second send as a stale signature. The first send's sub-request
+    is seen arriving at the Exchange, so the watch reads that leg; the refused
+    send adds none.
     """
     fresh_agent.fund(EXCHANGE_A_DOMAIN)
     offer = offer_for(fresh_agent, seeded.free.uri)
+    traffic = capture_proxy.watch(fresh_agent.host)
     capture = Capture()
     bought = fresh_agent.broker_client(http=capture.client()).execute([offer])
     assert_bought(only_item(bought, "the first send"), "the first send")
     original = capture.last()
 
     replay = fresh_agent.broker_client(http=after_signing(resend(original)))
-    with pytest.raises(CallError) as refused:
-        replay.execute([offer])
+    with traffic.adds_none(TransactionRequest, caller="broker", what="the replayed purchase"):
+        with pytest.raises(CallError) as refused:
+            replay.execute([offer])
     assert_auth_refusal(refused.value, SIGNATURE_STALE)

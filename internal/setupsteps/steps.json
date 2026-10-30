@@ -1,8 +1,12 @@
 {
   "_comment": [
-    "The onboarding path shown on the public preview page. Wording is provisional:",
-    "the onboarding guide written against a real publisher integration will own this",
-    "text, and replacing it is an edit to this file alone.",
+    "The onboarding path the public preview page answers with: the publisher console's",
+    "own four steps, in its order. Your business, Your domain, Your terms, and Connect",
+    "your site, whose two tasks are two entries here, done in either order: manifest,",
+    "which the preview hands the discovery file on, and edge, which is replaced by the",
+    "variant for the detected network. Both are found by those ids. The console reads",
+    "only the variants below, for the deploy commands on its last step; the step names",
+    "in the wizard's header are its own.",
     "Sources for the commands: the edge worker's deployment instructions for the",
     "Cloudflare path, the CloudFront edge Terraform module for the AWS path, and the",
     "publisher discovery-document reference for the manifest checks.",
@@ -17,38 +21,43 @@
   ],
   "steps": [
     {
-      "id": "register",
-      "title": "Register and describe your site",
-      "summary": "Tell us the domain, which paths carry licensed content, and the terms you want. Registration creates your account on the Exchange and records you as the party who gets paid. Nothing is published yet and nothing changes on your site."
+      "id": "business",
+      "title": "Your business",
+      "summary": "The name your payments are made out to. The console asks for it once, before your first domain, and you cannot change it there later. Saving it records you on the Exchange as the party who gets paid. It is the one step you cannot leave for later: the three that follow set up a domain, and you can stop at any of them and finish later."
+    },
+    {
+      "id": "domain",
+      "title": "Your domain",
+      "summary": "Tell us the hostname, and which paths carry licensed content if you license only part of the site. The console works out which CDN serves it, because that decides how the rest of the setup goes. On a network the console can set up, the domain is saved at once and held for you, and it stays Not verified until the last step is done. Nothing changes on your site. Each further domain starts here."
+    },
+    {
+      "id": "terms",
+      "title": "Your terms",
+      "summary": "Choose what an agent may do with your content and what it costs. The terms travel with every offer, so an agent knows the price and the permitted uses before it asks for anything. They are saved when you go on, and they cannot be changed in the console once the domain is verified."
     },
     {
       "id": "manifest",
-      "title": "Serve your discovery document at <host>/.well-known/fora.json",
-      "summary": "This document is how an AI agent that is refused access learns who sells that access and where to negotiate. The Exchange reads it too: it names the account that gets paid, and who may add content to the catalogue on your behalf. Serving it is also how you prove the domain is yours, so it is the step that activates your account. The edge package in the next step serves this document for you, which is why its routes have to cover the well-known paths.",
+      "title": "Connect your site: serve your discovery file at <host>/.well-known/fora.json",
+      "summary": "Connect your site has two tasks, done in either order: this file on your site, and the edge package on your CDN. The file tells AI agents and the Exchange who sells access to your pages and who gets paid, and who may add your pages to the catalogue; serving it is also how you prove the domain is yours. Serve it from your own site, as it is: the edge package passes this address through to your site, so your file is the one every agent reads. Edit it later only to change who may sell or import your pages. When the file and the package are both in place, the domain is verified.",
       "commands": [
         {
           "label": "Check what you are serving",
           "run": "curl -s https://<host>/.well-known/fora.json",
-          "expect": "The document below, with \"role\": \"ROLE_PUBLISHER\" and your own domain.",
+          "expect": "The file below, with \"role\": \"ROLE_PUBLISHER\" and your own domain.",
           "checked": true
         }
       ]
     },
     {
       "id": "edge",
-      "title": "Deploy the edge package",
+      "title": "Connect your site: install the package on your CDN",
       "summary": "Replaced per network."
-    },
-    {
-      "id": "terms",
-      "title": "Set your terms",
-      "summary": "Choose what an agent may do with your content and what it costs. The terms travel with every offer, so an agent knows the price and the permitted uses before it asks for anything. You can change them later; new offers carry the new terms."
     }
   ],
   "integrations": {
     "cloudfront": {
       "id": "edge",
-      "title": "Deploy the edge package on CloudFront",
+      "title": "Connect your site: install the package on CloudFront",
       "integration": "edge_package",
       "summary": "Your site is served by AWS CloudFront. The package is a Lambda@Edge function for your licensed paths: it lets people and search crawlers through, refuses unlicensed AI agents, and verifies the signed addresses of agents that have paid. Your settings are already inside the zip, so there is nothing to build or configure. Create the function in us-east-1, whatever region your distribution serves from.",
       "commands": [
@@ -69,7 +78,7 @@
         {
           "label": "Check an agent is refused",
           "run": "curl -s -D - -o /dev/null -A \"GPTBot/1.0\" \\\n  https://<host>/your-article-path",
-          "expect": "403, with an x-content-rules header pointing at your discovery document.",
+          "expect": "403, with an x-content-rules header pointing at your discovery file.",
           "checked": true
         },
         {
@@ -82,51 +91,50 @@
     },
     "cloudflare": {
       "id": "edge",
-      "title": "Deploy the edge package on Cloudflare",
+      "title": "Connect your site: install the package on Cloudflare",
       "integration": "edge_package",
-      "summary": "The package is a Cloudflare Worker. It lets people and search crawlers through, refuses AI agents without a licence, and serves paid agents a signed address. The zip is ready to deploy as it is. Keep your DNS records proxied, or requests never reach the Worker.",
+      "summary": "Cloudflare serves your domain. The package is a Worker: it lets people and search crawlers through, refuses AI agents without a licence, and serves paid agents a signed address. Keep your DNS records proxied, or requests never reach it.",
       "commands": [
         {
           "label": "Unpack it",
-          "run": "unzip fora-cloudflare.zip -d fora-edge\ncd fora-edge",
-          "expect": "The Worker and its wrangler.toml. Read the toml if you like -- it holds no secret, only your own settings."
+          "run": "unzip fora-cloudflare.zip -d fora-edge\ncd fora-edge"
         },
         {
           "label": "Deploy",
-          "run": "npx wrangler deploy",
-          "expect": "The upload, then the route it is attached to. That is the whole of it: the settings and the route are already in the file."
+          "run": "npx wrangler login\nnpx wrangler deploy",
+          "expect": "You need Node.js 22 or newer. The first command opens your browser once to authorise your Cloudflare account. The second uploads the Worker and attaches it to your route."
         },
         {
-          "label": "Check the routes reach the well-known paths",
-          "run": "curl -s -o /dev/null -w '%{http_code}\\n' \\\n  https://<host>/.well-known/fora.json",
-          "expect": "200. A 404 means your origin answered instead, so the route does not cover that path.",
+          "label": "Check your discovery file is reachable through the package",
+          "run": "curl -s -o /dev/null -w '%{http_code}\\n' -A \"GPTBot/1.0\" \\\n  https://<host>/.well-known/fora.json",
+          "expect": "200: the package passes the address through to your file, for an AI agent too. A 404 means your site has no file at that address. A 403 means something on your site refuses AI agents at that address; let them read it.",
           "checked": true
         },
         {
           "label": "Check an agent is refused",
           "run": "curl -s -D - -o /dev/null -A \"GPTBot/1.0\" \\\n  https://<host>/your-article-path",
-          "expect": "403, with an x-content-rules header pointing at your discovery document.",
+          "expect": "403, with an x-content-rules header pointing at your discovery file.",
           "checked": true
         }
       ]
     },
     "fastly": {
       "id": "edge",
-      "title": "Talk to us about your Fastly setup",
+      "title": "Connect your site: talk to us about your Fastly setup",
       "integration": "contact_us",
       "summary": "Your site is served by Fastly. We do not hand out a Fastly package yet, so there is nothing for you to deploy today. A publisher can set the package up themselves on Cloudflare and on AWS CloudFront. Adding a network is work we do rather than work you do: the part that runs on your side is small. Tell us about your setup and we will say what is involved.",
       "note": "You will receive the relevant edge package and its deployment instructions when onboarding for Fastly becomes available."
     },
     "akamai": {
       "id": "edge",
-      "title": "Talk to us about your Akamai setup",
+      "title": "Connect your site: talk to us about your Akamai setup",
       "integration": "contact_us",
       "summary": "Your site is served by Akamai. We do not ship an edge package for Akamai yet, so there is nothing for you to deploy today. A publisher can set the package up themselves on Cloudflare and on AWS CloudFront. Adding a network is work we do rather than work you do: the part that runs on your side is small. Tell us about your setup and we will say what is involved.",
       "note": "You will receive the relevant edge package and its deployment instructions when onboarding for Akamai becomes available."
     },
     "none": {
       "id": "edge",
-      "title": "Talk to us about your setup",
+      "title": "Connect your site: talk to us about your setup",
       "integration": "contact_us",
       "summary": "We could not hand you a package to deploy on <host>. Either we could not tell which content delivery network serves it, or it is one we do not ship a package for yet. A publisher can set the package up themselves on Cloudflare and on AWS CloudFront. That does not mean your site cannot take part: the part that runs on your side is small, and adding a network is work we do rather than work you do. Tell us what serves your site and we will say what is involved.",
       "note": "This answer is also what you see when a site sits behind something that hides its origin, so it is worth telling us even if you do run one of the two."

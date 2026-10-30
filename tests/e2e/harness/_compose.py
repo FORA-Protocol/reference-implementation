@@ -65,6 +65,31 @@ COMPOSE_FILE = resolve_compose_file()
 # body. Defined here, both become ordinary top-level imports.
 REPO_ROOT = COMPOSE_FILE.parent
 
+# The script every e2e compose call goes through, and the line in it that names
+# the optional overlay it adds when the tree carries one.
+_E2E_STACK = REPO_ROOT / "scripts" / "e2e-stack.sh"
+_OVERLAY_LINE = re.compile(r'^OPTIONAL_OVERLAY="\$ROOT/([^"]+)"$', re.MULTILINE)
+
+
+def stack_files() -> list[Path]:
+    """The compose files the stack is composed from by default, in compose order.
+
+    The base file, and the optional overlay ``scripts/e2e-stack.sh`` adds when
+    the tree carries it; the overlay is read from that script, so the two cannot
+    disagree about which file it is, and no harness module has to name it.
+    Overlays a caller adds itself, such as CI's build cache, define no service of
+    their own and are not read. Without the script (the e2e runner image) the
+    base file is all there is.
+    """
+    files = [COMPOSE_FILE]
+    if _E2E_STACK.is_file():
+        match = _OVERLAY_LINE.search(_E2E_STACK.read_text())
+        assert match, f"{_E2E_STACK.name} names no OPTIONAL_OVERLAY to read the stack by"
+        overlay = REPO_ROOT / match.group(1)
+        if overlay.is_file():
+            files.append(overlay)
+    return files
+
 
 # Compose's own project-name normalization (cli/utils.go::NormalizeProjectName):
 # lowercase the cwd basename, then drop characters that aren't [a-z0-9_-].

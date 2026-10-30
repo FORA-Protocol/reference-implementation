@@ -51,7 +51,7 @@ func TestDashboard_CatalogPagesThroughWhatTheCatalogRouteReturns(t *testing.T) {
 	for path != "" {
 		body := f.get2(t, path)
 		pages++
-		mustNotContain(t, "catalog page "+strconv.Itoa(pages), body, "0.05 USD per accesses")
+		mustNotContain(t, "catalog page "+strconv.Itoa(pages), body, "0.05 USD per access")
 		seen += body
 		for _, m := range reResourceLink.FindAllStringSubmatch(body, -1) {
 			linked = append(linked, m[1])
@@ -92,8 +92,9 @@ func TestDashboard_AResourcePageShowsItsTermsAndItsSales(t *testing.T) {
 	mustContain(t, "the resource page", body,
 		html.EscapeString(res.URI),
 		html.EscapeString(res.ResourceID),
-		"0.05 USD per accesses",
+		"0.05 USD per access",
 		"resource="+url.QueryEscape(res.ResourceID))
+	mustNotContain(t, "the resource page", body, "per accesses")
 }
 
 // TestDashboard_AnotherPublishersResourceRendersNotFound opens the rival's

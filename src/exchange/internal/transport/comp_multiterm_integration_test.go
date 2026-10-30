@@ -43,6 +43,9 @@ func TestComp_MultitermTermIndex(t *testing.T) {
 	client := h.signedCat(callerID, priv)
 
 	const premiumScope = "subscription:premium"
+	// A term with a subscription scope is presented and sold only to an agent
+	// whose delegation chain verifies for it; stating the scope proves nothing.
+	premiumAgent := newGatedAccess(t, h, premiumScope)
 
 	// LEG 1 — a filtered-out first term leaves the index gap visible. Resource
 	// stored [PREMIUM(index 0, scopes=[subscription:premium], $0.50),
@@ -71,8 +74,8 @@ func TestComp_MultitermTermIndex(t *testing.T) {
 	})
 
 	// LEG 2 — both terms eligible, premium stored first. SAME storage order as
-	// LEG 1 [PREMIUM(0), PUBLIC(1)]. A PREMIUM requester
-	// (scopes=[subscription:premium]) WITH the profile: Select keeps BOTH in
+	// LEG 1 [PREMIUM(0), PUBLIC(1)]. A PREMIUM agent (a verified chain covering
+	// subscription:premium) WITH the profile: Select keeps BOTH in
 	// stored order, so discovery answers with TWO offers — premium at stored
 	// index 0 priced $0.50, public at stored index 1 priced $0.05 — and each
 	// one executes on its own.
@@ -83,7 +86,7 @@ func TestComp_MultitermTermIndex(t *testing.T) {
 		pushTerms(t, h, client, callerID, path, premium, public)
 
 		uri := "https://" + h.publisherDom + path
-		offers := discoverCompOffers(t, h, uri, premiumScope)
+		offers := premiumAgent.discover(t, uri, "fora-comp-v1")
 		if len(offers) != 2 {
 			t.Fatalf("discover (comp profile) %s: got %d offers, want 2 (one per eligible term)", uri, len(offers))
 		}
@@ -92,14 +95,14 @@ func TestComp_MultitermTermIndex(t *testing.T) {
 		assertCompPackage(t, offers[0], compPackageID(h, uri, 0), 0.50)
 		assertCompPackage(t, offers[1], compPackageID(h, uri, 1), 0.05)
 		for _, o := range offers {
-			assertTransactParityScoped(t, h, o, premiumScope)
+			parityTransactGated(t, h, o, premiumAgent)
 		}
 	})
 
 	// LEG 3 — both terms eligible, public stored first. Resource stored
 	// [PUBLIC(index 0, empty scopes, $0.05),
-	//  PREMIUM(index 1, scopes=[subscription:premium], $0.50)]. A PREMIUM
-	// requester keeps BOTH, so the two offers come back in stored order with
+	//  PREMIUM(index 1, scopes=[subscription:premium], $0.50)]. The PREMIUM
+	// agent keeps BOTH, so the two offers come back in stored order with
 	// the indexes and prices swapped relative to LEG 2. This pins that no
 	// comp package bleeds across terms: each offer's package reflects the term
 	// that offer sells and nothing about its sibling.
@@ -110,7 +113,7 @@ func TestComp_MultitermTermIndex(t *testing.T) {
 		pushTerms(t, h, client, callerID, path, public, premium)
 
 		uri := "https://" + h.publisherDom + path
-		offers := discoverCompOffers(t, h, uri, premiumScope)
+		offers := premiumAgent.discover(t, uri, "fora-comp-v1")
 		if len(offers) != 2 {
 			t.Fatalf("discover (comp profile) %s: got %d offers, want 2 (one per eligible term)", uri, len(offers))
 		}
@@ -119,7 +122,7 @@ func TestComp_MultitermTermIndex(t *testing.T) {
 		assertCompPackage(t, offers[0], compPackageID(h, uri, 0), 0.05)
 		assertCompPackage(t, offers[1], compPackageID(h, uri, 1), 0.50)
 		for _, o := range offers {
-			assertTransactParityScoped(t, h, o, premiumScope)
+			parityTransactGated(t, h, o, premiumAgent)
 		}
 	})
 }

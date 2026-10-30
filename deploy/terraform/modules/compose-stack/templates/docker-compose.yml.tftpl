@@ -785,6 +785,11 @@ services:
       # Caddyfile's per-hostname site blocks serve them with file_server.
       - /opt/fora/wba:/srv/wba:ro
 %{ endif ~}
+%{ if origin_documents ~}
+      # The demo publisher's discovery document written by cloud-init; the
+      # origin hostname's site block serves it with file_server.
+      - /opt/fora/origin:/srv/origin:ro
+%{ endif ~}
 %{ if terms_enabled ~}
       # Terms documents written by cloud-init. Caddy runs in this container,
       # so the Caddyfile's `root * /srv/exchange-terms` resolves HERE, not on

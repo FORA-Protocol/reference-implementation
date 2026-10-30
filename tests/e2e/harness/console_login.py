@@ -7,8 +7,8 @@ exercises the real flow rather than a short-circuit around it.
 
 The provider's login form, the per-host cookie handling and the redirect
 following are shared with the identity service's sign-up driver and are
-defined in ``provider_login.py``. What is here is the console's own side: its
-landing page and the wizard's JSON calls.
+defined in ``provider_login.py``. What is here is the console's own side: the
+pages a sign-in lands on and the wizard's JSON calls.
 """
 
 from __future__ import annotations
@@ -35,6 +35,11 @@ from .provider_login import (
 # starting state as an escaped attribute rather than as form fields. The
 # browser un-escapes it through dataset; unescape does the same job here.
 _BOOT_RE = re.compile(r'data-boot="([^"]*)"')
+
+#: The add-a-domain wizard. The home page sends an account that has not named
+#: its business there, and the wizard opens on the step that asks for the name,
+#: so a new account's first sign-in lands on it.
+NEW_DOMAIN_PATH = "/domains/new"
 
 
 class ConsoleLoginError(ProviderLoginError):
@@ -65,22 +70,22 @@ def sign_in(
 
     The provider is passed as ``login_name`` with ``password``, or, given a
     ``registration``, by signing up a new account there. The sign-in counts
-    only when it ends on the console's home page, which needs a session whose
-    address the provider verified. A step the provider refuses raises with the
-    provider driver's own message, a refused password among them. Any other page
-    that answers 200 -- the console's unverified-address page, say -- is a
-    sign-in that did not complete.
+    only when it ends in the console (:func:`landed_in_console`), which needs a
+    session whose address the provider verified. A step the provider refuses
+    raises with the provider driver's own message, a refused password among
+    them. Any other page that answers 200 -- the console's unverified-address
+    page, say -- is a sign-in that did not complete.
 
     The caller owns the browser and should close it.
     """
     browser, page = _walk(
         console_base, Login(login_name, password, registration), accept_next_step=False
     )
-    if not landed_home(console_base, page):
+    if not landed_in_console(console_base, page):
         browser.close()
         raise ConsoleLoginError(
             f"sign-in ended at {page.request.url} with {page.status_code}, "
-            f"not the console's home page: {page.text[:400]}"
+            f"not the console's home page or its add-a-domain wizard: {page.text[:400]}"
         )
     return browser
 
@@ -134,11 +139,20 @@ def redirects_to_sign_in(browser: Browser, console_base: str) -> bool:
     )
 
 
-def landed_home(console_base: str, page: httpx.Response) -> bool:
-    """Whether ``page`` is the console's home page, answered 200."""
+def landed_in_console(console_base: str, page: httpx.Response) -> bool:
+    """Whether ``page`` is the console's home page or its add-a-domain wizard, answered 200.
+
+    An account that has not named its business lands on the wizard, which the
+    home page sends it to and which opens on the business step; one that has
+    lands on the home page.
+    """
     landed = urlsplit(str(page.request.url))
     home = urlsplit(console_base)
-    return page.status_code == httpx.codes.OK and (landed.netloc, landed.path) == (home.netloc, "/")
+    return (
+        page.status_code == httpx.codes.OK
+        and landed.netloc == home.netloc
+        and landed.path in ("/", NEW_DOMAIN_PATH)
+    )
 
 
 def wizard_boot(html: str) -> dict:

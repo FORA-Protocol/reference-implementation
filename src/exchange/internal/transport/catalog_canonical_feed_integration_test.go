@@ -195,8 +195,8 @@ func TestCanonicalFeed_FlatPricingAndAttributionObligationRoundTrip(t *testing.T
 // TestCanonicalFeed_SubscriptionReferenceOnlyRoundTrip drives the THIRD canonical
 // entry (tax return) through the ingestion surface and asserts its
 // REFERENCE_ONLY term — governed by the Premium License document and scoped to
-// subscription:premium — round-trips proto-exact. The term is scope-gated, so the
-// requester must declare the subscription:premium scope to discover it; a
+// subscription:premium — round-trips proto-exact. The term is subscription-gated,
+// so only an agent with a verified delegation for that scope discovers it; a
 // requester WITHOUT that scope must not see it (negative leg through the same
 // surface).
 func TestCanonicalFeed_SubscriptionReferenceOnlyRoundTrip(t *testing.T) {
@@ -208,20 +208,22 @@ func TestCanonicalFeed_SubscriptionReferenceOnlyRoundTrip(t *testing.T) {
 	wantTerm := entries[2].GetTerms()[0]
 	uri := "https://" + canonicalFeedDomain + records[2].Path
 
-	// Negative leg: a subscriber-less requester does not cover the term's
-	// subscription:premium scope, so the entry yields no projected offer.
+	// Negative legs: a requester without a grant does not reach the term's
+	// subscription:premium scope, whether it says nothing or states the scope.
+	// The term is gated on a verified delegation, not on a statement.
 	noScope := requesterWithExt("agent-no-sub", "", "", "ai-input")
 	if offers := discoverOffersAs(t, h, uri, noScope); len(offers) != 0 {
 		t.Fatalf("offers without subscription scope = %d, want 0 (scope-gated)", len(offers))
 	}
+	if offers := discoverOffersAs(t, h, uri, premiumSubscriber("agent-premium-stated")); len(offers) != 0 {
+		t.Fatalf("offers with the scope merely stated = %d, want 0 (a statement is no grant)", len(offers))
+	}
 
-	// Positive leg: a requester declaring the subscription:premium scope covers
-	// the term and discovers it.
-	subscriber := requesterWithExt("agent-premium", "", "", "ai-input")
-	subscriber.requester.Scopes = []string{"subscription:premium"}
-	offers := discoverOffersAs(t, h, uri, subscriber)
+	// Positive leg: an agent whose delegation chain verifies for the
+	// subscription:premium scope discovers the term.
+	offers := newGatedAccess(t, h, "subscription:premium").discover(t, uri)
 	if len(offers) != 1 {
-		t.Fatalf("offers with subscription scope = %d, want 1", len(offers))
+		t.Fatalf("offers with a verified subscription grant = %d, want 1", len(offers))
 	}
 
 	term := findOfferSelling(t, offers, wantTerm).GetTerms()[0]
@@ -255,22 +257,27 @@ func TestCanonicalFeed_MultiResourceAllDiscoverable(t *testing.T) {
 
 	// Each resource has its own gating axes; build a requester per entry that
 	// satisfies them, then assert exactly one offer projects for each URI.
+	premium := newGatedAccess(t, h, "subscription:premium")
 	type probe struct {
-		path string
-		req  requesterSpec
+		path     string
+		discover func(uri string) []*forav1.Offer
+	}
+	stated := func(spec requesterSpec) func(string) []*forav1.Offer {
+		return func(uri string) []*forav1.Offer { return discoverOffersAs(t, h, uri, spec) }
 	}
 	probes := []probe{
 		// entry 0: academic FREE term (functions ai-input/search, geos DE/EU,
 		// user academic) — an academic DE requester declaring ai-input matches.
-		{records[0].Path, requesterWithExt("agent-academic-de", "academic", "DE", "ai-input")},
+		{records[0].Path, stated(requesterWithExt("agent-academic-de", "academic", "DE", "ai-input"))},
 		// entry 1: FLAT EU term — an EU requester declaring ai-input matches.
-		{records[1].Path, requesterWithExt("agent-eu-flat", "", "EU", "ai-input")},
-		// entry 2: subscription:premium REFERENCE_ONLY term — a premium subscriber.
-		{records[2].Path, premiumSubscriber("agent-premium-multi")},
+		{records[1].Path, stated(requesterWithExt("agent-eu-flat", "", "EU", "ai-input"))},
+		// entry 2: subscription:premium REFERENCE_ONLY term — an agent holding a
+		// verified grant for that scope.
+		{records[2].Path, func(uri string) []*forav1.Offer { return premium.discover(t, uri) }},
 	}
 	for _, pr := range probes {
 		uri := "https://" + canonicalFeedDomain + pr.path
-		offers := discoverOffersAs(t, h, uri, pr.req)
+		offers := pr.discover(uri)
 		if len(offers) == 0 {
 			t.Errorf("discover %s: no offers, want at least one (multi-resource ingest)", uri)
 			continue

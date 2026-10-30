@@ -9,6 +9,6 @@ requires mypy to report nothing here.
 from harness.obligation_registry import Obligation, obligation
 
 
-@obligation(Obligation.RELAY_004, Obligation.MONEY_012)
+@obligation(Obligation.PROBE_001, Obligation.PROBE_002)
 def test_claims_two() -> None:
     pass

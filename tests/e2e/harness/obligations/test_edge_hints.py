@@ -28,7 +28,7 @@ from fora_sdk import parse_discovery_hint, reconcile_discovery_hint
 from wire.models import WellKnownManifest
 
 from ..admin_plane import require_admin_plane
-from ..constants import AI_BOT_UA, BROWSER_UA
+from ..constants import AI_BOT_UA, BROWSER_UA, MANIFEST_PATH
 from ..defects import EDGE_EXCHANGE_HINT_NOT_BARE, EDGE_REFUSAL_WITHOUT_HINT
 from ..edge_runtimes import (
     RUNTIMES,
@@ -39,10 +39,12 @@ from ..edge_runtimes import (
     read,
     tampered_url,
 )
+from ..edge_fetch import present
 from ..fresh_agent import FreshAgent
 from ..lambda_edge import ExchangeDeliveryKey, load_exchange_delivery_key
 from ..obligation_registry import Obligation, obligation
 from ..protocol_documents import parse_document
+from ..publisher_origins import PUBLISHER_ORIGINS
 from ..stack_urls import StackURLs
 
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
@@ -74,7 +76,20 @@ def _bot_refusal(stack: StackURLs, runtime: EdgeRuntime, query: str = "") -> Edg
 
 
 def _manifest(stack: StackURLs, runtime: EdgeRuntime) -> tuple[EdgeReply, WellKnownManifest]:
+    """The edge's answer for the manifest address, and the manifest a reader of it gets.
+
+    Over HTTP that is the edge's answer, the publisher's file passed through from
+    its origin. Lambda@Edge hands the request back to CloudFront, which fetches the
+    origin: the document is read from the publisher's origin directly, in
+    CloudFront's place (``harness/publisher_origins.py``), so that leg is the
+    origin's answer and not a CDN's.
+    """
     reply = read(stack, runtime, runtime.manifest_url)
+    if not runtime.http:
+        assert reply.forwarded, f"{runtime}: the manifest address was answered itself: {reply}"
+        origin = present(f"{PUBLISHER_ORIGINS[runtime.publisher]}{MANIFEST_PATH}", headers={})
+        assert origin.status == 200, f"{runtime}: the publisher's origin answered {origin.status}"
+        return reply, parse_document(WellKnownManifest, origin.body)
     assert reply.status == 200, f"{runtime}: the manifest was answered {reply.status}"
     return reply, parse_document(WellKnownManifest, reply.body)
 
@@ -146,7 +161,7 @@ def test_the_exchange_hint_is_a_bare_domain(compose_stack: StackURLs, runtime: E
 def test_the_exchange_hint_is_listed_in_the_publishers_manifest(
     compose_stack: StackURLs, runtime: EdgeRuntime
 ) -> None:
-    """The hinted Exchange is the domain of an exchanges[] entry of the manifest the edge serves."""
+    """The hinted Exchange is the domain of an exchanges[] entry of the manifest the publisher serves."""
     reply = _bot_refusal(compose_stack, runtime)
     raw = reply.header(EXCHANGE_HINT)
     assert raw is not None, f"{runtime}: this deployment is configured to send the Exchange hint"
@@ -163,7 +178,11 @@ def test_the_exchange_hint_is_listed_in_the_publishers_manifest(
 def test_the_discovery_headers_are_only_on_the_refusal(
     compose_stack: StackURLs, runtime: EdgeRuntime
 ) -> None:
-    """The manifest answer (200) and a browser read the edge lets through carry neither header."""
+    """The manifest answer and a browser read the edge lets through carry neither header.
+
+    On Lambda@Edge both are handed back to CloudFront, so the function adds no
+    header to either.
+    """
     manifest, _ = _manifest(compose_stack, runtime)
     browser = read(compose_stack, runtime, runtime.article, headers={"User-Agent": BROWSER_UA})
     assert_served(runtime, browser, runtime.article)

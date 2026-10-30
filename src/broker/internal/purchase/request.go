@@ -8,6 +8,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/agentid"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/subscriptionscope"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/broker"
 )
 
@@ -79,6 +80,10 @@ func validateRequest(req *forav1.TransactionRequest) *broker.Error {
 
 // validateItem checks one item carries what its Exchange needs: the reflected
 // offer, the Exchange it routes to, and the agent's acceptance of that offer.
+// A subscription-gated item (its offer's term carries a 'subscription:' scope)
+// may lack the acceptance: the protocol answers it with a per-item
+// DELEGATION_INVALID denial at the Exchange, so the Broker forwards it as it is
+// rather than refusing the whole purchase.
 func validateItem(i int, item *forav1.TransactionItem) *broker.Error {
 	index := strconv.Itoa(i)
 	switch {
@@ -89,11 +94,25 @@ func validateItem(i int, item *forav1.TransactionItem) *broker.Error {
 		return broker.Newf(broker.KindInvalidArgument,
 			"item %d: offer.exchange is required to route the item to its Exchange", i).
 			WithField("items.offer.exchange").WithMeta("item_index", index)
-	case item.GetAgentAcceptance().GetSignature() == "":
+	case item.GetAgentAcceptance().GetSignature() == "" && !subscriptionGated(item.GetOffer()):
 		return broker.Newf(broker.KindInvalidArgument, "item %d carries no agent_acceptance", i).
 			WithField("items.agent_acceptance").WithMeta("item_index", index)
 	}
 	return nil
+}
+
+// subscriptionGated reports whether the offer sells a term with a subscription
+// scope. The Broker reads the prefix only; the Exchange that owns the term is the
+// party that judges the scope and the delegation.
+func subscriptionGated(offer *forav1.Offer) bool {
+	for _, term := range offer.GetTerms() {
+		for _, scope := range term.GetScopes() {
+			if subscriptionscope.Is(scope) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // validateRequestAcceptance requires the AgentRequestAcceptance payload to be

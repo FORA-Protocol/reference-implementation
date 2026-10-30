@@ -11,6 +11,7 @@ import (
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/dashboard"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/exchangeclient"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/web"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 )
 
@@ -85,37 +86,89 @@ func assertOwnFigures(t *testing.T, who string, f *consoleFixture, totals exchan
 	}
 }
 
-// TestDashboard_WithNoDomainThereAreNoSections opens the dashboard as a person
-// registered nowhere, and as one whose business is registered but has no
-// domain yet. Neither has anything in any section, so every section sends them
-// to add their first domain, and no page shows the sidebar.
-func TestDashboard_WithNoDomainThereAreNoSections(t *testing.T) {
-	for name, arrange := range map[string]func(*testing.T, *consoleFixture){
-		"no publisher":           func(*testing.T, *consoleFixture) {},
-		"a publisher, no domain": func(t *testing.T, f *consoleFixture) { f.registerBusiness(t) },
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := startConsole(t, verifiedClaims())
-			f.signIn(t)
-			arrange(t, f)
-			for _, path := range []string{"/", "/domains", dashboard.PathOverview, dashboard.PathTransactions, dashboard.PathCatalog} {
-				resp := f.do(t, http.MethodGet, path, nil)
-				body := readAll(t, resp)
-				_ = resp.Body.Close()
-				if resp.StatusCode != http.StatusOK {
-					t.Fatalf("GET %s = %d", path, resp.StatusCode)
-				}
-				mustContain(t, "GET "+path, body, "Add your first domain")
-				mustNotContain(t, "GET "+path, body, `aria-label="Sections"`, "Your terms with the exchange")
-			}
-		})
+// consolePages are the pages that draw the console, by the section their
+// sidebar marks as the current one.
+var consolePages = map[string]string{
+	web.HomePath:               web.DomainsPath,
+	web.DomainsPath:            web.DomainsPath,
+	dashboard.PathOverview:     dashboard.PathOverview,
+	dashboard.PathTransactions: dashboard.PathTransactions,
+	dashboard.PathIncome:       dashboard.PathIncome,
+	dashboard.PathCatalog:      dashboard.PathCatalog,
+}
+
+// TestDashboard_WithoutABusinessEveryPageOpensTheWizard opens the console's
+// pages as a person whose account has not named its business. There is nothing
+// any section could show, and the business step is left only through its Next,
+// so every page ends on the add-a-domain wizard, opened on the business step,
+// with no sidebar and nothing registered.
+func TestDashboard_WithoutABusinessEveryPageOpensTheWizard(t *testing.T) {
+	f := startConsole(t, verifiedClaims())
+	f.signIn(t)
+	for path := range consolePages {
+		resp := f.do(t, http.MethodGet, path, nil)
+		body := readAll(t, resp)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || resp.Request.URL.Path != web.NewDomainPath {
+			t.Fatalf("GET %s ended at %s with %d, want the wizard", path, resp.Request.URL.Path, resp.StatusCode)
+		}
+		assertSteps(t, "GET "+path, bootIn(t, body), businessSteps)
+		mustNotContain(t, "GET "+path, body, `aria-label="Sections"`)
+	}
+	if f.mine(t).Registered {
+		t.Fatal("opening the pages registered a publisher")
+	}
+}
+
+// TestDashboard_BeforeTheFirstDomainTheConsoleIsEmpty opens the console's pages
+// as a publisher whose business is named and who has no domain yet, which is
+// where the wizard's Finish later leads before the first domain is saved. Each
+// page is the console as any publisher sees it -- the sidebar, the page's own
+// section marked -- and says it is empty, read from the Exchange for a
+// publisher that holds nothing yet. My domains offers one button, the one that
+// adds the first domain, beside the exchange's terms.
+func TestDashboard_BeforeTheFirstDomainTheConsoleIsEmpty(t *testing.T) {
+	// Over the ledger: without one the Exchange cannot read revenue at all, and
+	// the overview shows dashes rather than an empty period.
+	f := startConsoleOver(t, verifiedClaims(), sellingOver(func(*exchangetest.Options) {}))
+	f.signIn(t)
+	f.registerBusiness(t)
+
+	says := map[string]string{
+		web.HomePath:               "No domains yet.",
+		web.DomainsPath:            "No domains yet.",
+		dashboard.PathOverview:     "No transactions in this period.",
+		dashboard.PathTransactions: "No transactions in this period.",
+		dashboard.PathIncome:       "No transactions in this period.",
+		dashboard.PathCatalog:      "Nothing is listed yet.",
+	}
+	for path, current := range consolePages {
+		resp := f.do(t, http.MethodGet, path, nil)
+		body := readAll(t, resp)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || resp.Request.URL.Path != path {
+			t.Fatalf("GET %s ended at %s with %d, want the page itself", path, resp.Request.URL.Path, resp.StatusCode)
+		}
+		mustContain(t, "GET "+path, body, `aria-label="Sections"`, `aria-current="page" href="`+current+`"`,
+			`<div class="empty-state" role="status">`, says[path])
+		if got := countCurrent(body); got != 2 {
+			t.Errorf("GET %s marks %d sections current, want the one section in both lists", path, got)
+		}
+	}
+
+	domains := f.get2(t, web.DomainsPath)
+	mustContain(t, "My domains with no domain", domains,
+		`<a class="btn btn-primary btn-lg" href="/domains/new">Add domain</a>`,
+		"Your terms with the exchange", "10% of each sale")
+	if n := strings.Count(domains, `href="/domains/new"`); n != 1 {
+		t.Fatalf("My domains with no domain links the wizard %d times, want its one button", n)
 	}
 }
 
 // TestDashboard_AnotherPublishersTransactionRendersNotFound opens the rival's
 // transaction. The detail read is scoped to the person's own publisher, so the
 // transaction is not found and nothing of it shows. The page leads back to the
-// domains list, the one page every signed-in person has.
+// domains list, which every signed-in person can open.
 func TestDashboard_AnotherPublishersTransactionRendersNotFound(t *testing.T) {
 	f := startSeller(t)
 	r := newRival(t, f)
@@ -175,7 +228,7 @@ func countCurrent(body string) int {
 // publisher whose one domain is saved and not verified. Nothing of it can have
 // sold, so they land on their domains rather than on an overview of sales: the
 // list says the domain is not verified, and the dashboard's sections are drawn,
-// because a domain is saved.
+// as they are for every publisher.
 func TestDashboard_NothingVerifiedOpensOnMyDomains(t *testing.T) {
 	f := startConsole(t, verifiedClaims())
 	f.signIn(t)

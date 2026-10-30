@@ -118,7 +118,12 @@ type Config struct {
 	ExchangeDomain string
 }
 
-// Service is the add-a-domain wizard: one method per step or check.
+// Service is the add-a-domain wizard's steps -- the domain step's lookup and
+// save, the licensing step's read, preview and save, and a saved domain's
+// files -- and the registration of the business every step acts for. Where a
+// saved domain's setup stands is Resumer's to say; the last step's check of the
+// site, and the one verification it asks for, are checkConnection's, which
+// Resumer.Check calls.
 type Service struct {
 	registry Registry
 	bundles  Bundler
@@ -166,70 +171,36 @@ func defaultRateOr(configured string) string {
 
 // Start is everything the wizard needs before its first call.
 type Start struct {
-	Registered bool
-	// HasDomains reports whether this person already has a registered
-	// domain, so the wizard is adding one more rather than onboarding them.
-	HasDomains   bool
-	DisplayName  string
 	SupportEmail string
 	DefaultRate  string
 	Currency     string
-	Unit         string
+	// Unit is what one charge is for, said the way a price reads it: "fetch".
+	Unit string
 	// Terms is what the licensing step opens on before anything is read from
 	// the publisher's site.
 	Terms     termspreset.Controls
 	Functions []Choice
 }
 
-// Start reads what the wizard opens on: whether this person has registered a
-// business name, which decides whether the first step exists, whether they
-// have a domain already, and the denomination the price field is in.
-func (s *Service) Start(ctx context.Context, actor exchangeclient.Actor) (Start, error) {
-	start, _, err := s.startWith(ctx, actor)
-	return start, err
-}
-
-// startWith is Start, and the registrations it was read from.
-func (s *Service) startWith(
-	ctx context.Context, actor exchangeclient.Actor,
-) (Start, exchangeclient.Registrations, error) {
-	regs, err := s.registry.ListRegistrations(ctx, actor)
-	if err != nil {
-		return Start{}, exchangeclient.Registrations{}, err
-	}
+// Start is what the wizard opens on: the denomination the price field is in,
+// read from the Exchange, and the terms and uses the licensing step offers.
+func (s *Service) Start(ctx context.Context) (Start, error) {
 	d, err := s.registry.TermsDefaults(ctx)
 	if err != nil {
-		return Start{}, exchangeclient.Registrations{}, err
+		return Start{}, err
 	}
 	return Start{
-		Registered:   regs.Registered,
-		HasDomains:   exchangeclient.HasDomains(regs),
-		DisplayName:  regs.DisplayName,
 		SupportEmail: s.supportEmail,
 		DefaultRate:  s.defaultRate,
 		Currency:     d.Vocab().Currency,
-		Unit:         d.Vocab().Unit,
+		Unit:         termspreset.SingularUnit(d.Vocab().Unit),
 		Terms:        defaultTerms(),
 		Functions:    functionChoices(),
-	}, regs, nil
-}
-
-// publisherID reads back the payee this person acts for.
-//
-// It is read from the Exchange on every call rather than carried in the
-// session or sent by the browser: it decides which payee the generated document
-// attests, and a value the browser could set is a value the browser could
-// change.
-func (s *Service) publisherID(ctx context.Context, actor exchangeclient.Actor) (string, error) {
-	regs, err := s.registrations(ctx, actor)
-	if err != nil {
-		return "", err
-	}
-	return regs.PublisherID, nil
+	}, nil
 }
 
 // registrations reads what this person has registered, refusing a person who
-// has not registered a business: every step after the first acts for that
+// has not registered a business: every step of the wizard acts for that
 // business.
 func (s *Service) registrations(
 	ctx context.Context, actor exchangeclient.Actor,
@@ -239,11 +210,36 @@ func (s *Service) registrations(
 		return exchangeclient.Registrations{}, err
 	}
 	if !regs.Registered {
-		// The wizard's first step registers the business name. Reaching a later
-		// step without one means the wizard's own state and the Exchange's
-		// disagree, which a reload settles.
+		// The wizard's business step registers the name before any step that
+		// acts for it, so a call without one is a direct call, a tab left open
+		// across a sign-in as somebody else, or a page opened before an
+		// operator removed the grant. A reload settles each of them: the page
+		// then opens on the business step.
 		return exchangeclient.Registrations{}, refusal.New(refusal.KindNotRegistered,
 			"Your business is not registered yet. Please reload this page and start again.")
 	}
 	return regs, nil
+}
+
+// savedDomain finds one of the person's saved domains by what the browser sent:
+// the hostname rule first, then what the Exchange lists for them. A domain
+// that is not theirs is refused before anything is asked about it.
+//
+// The payee comes back with it, read from the Exchange on every call rather
+// than carried in the session or sent by the browser: it decides which payee
+// a generated document attests, and a value the browser could set is a value
+// the browser could change.
+func (s *Service) savedDomain(
+	ctx context.Context, actor exchangeclient.Actor, rawDomain string,
+) (exchangeclient.Registrations, exchangeclient.Registration, error) {
+	domain, err := Domain(rawDomain)
+	if err != nil {
+		return exchangeclient.Registrations{}, exchangeclient.Registration{}, err
+	}
+	regs, err := s.registrations(ctx, actor)
+	if err != nil {
+		return exchangeclient.Registrations{}, exchangeclient.Registration{}, err
+	}
+	reg, err := siteIn(regs, domain)
+	return regs, reg, err
 }

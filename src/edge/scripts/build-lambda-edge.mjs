@@ -13,12 +13,14 @@
 // process.env read in the bundle, dependencies included.
 //
 // Usage: node scripts/build-lambda-edge.mjs --config <deploy-config.json>
-//        [--out-dir dist/lambda-edge]
+//        --domain <publisher hostname> [--out-dir dist/lambda-edge]
 //
 // The config file is a flat JSON object of env-shaped string values
-// (EXCHANGE_URL, EXCHANGE_WBA_URL, PROVIDER, EXCHANGES_JSON, and the optional
-// keys the worker's EnvSchema documents). Values must be strings, because they
-// stand in for environment variables. Output: <out-dir>/index.mjs and
+// (EXCHANGE_URL, EXCHANGE_WBA_URL, and the optional keys the worker's EnvSchema
+// documents). Values must be strings, because they stand in for environment
+// variables. The domain is the publisher hostname the function fronts; it is
+// not a setting, and index.mjs names it in its header, as the console's
+// rendering of the same file does. Output: <out-dir>/index.mjs and
 // <out-dir>/lambda-edge.mjs; both go into the zip, and the handler string is
 // "index.handler".
 
@@ -34,12 +36,15 @@ import { buildTarget, edgeDir, lambdaTarget } from './release-targets.mjs';
 const { values } = parseArgs({
   options: {
     config: { type: 'string' },
+    domain: { type: 'string' },
     'out-dir': { type: 'string', default: 'dist/lambda-edge' },
   },
 });
 
-if (!values.config) {
-  console.error('usage: node scripts/build-lambda-edge.mjs --config <deploy-config.json>');
+if (!values.config || !values.domain) {
+  console.error(
+    'usage: node scripts/build-lambda-edge.mjs --config <deploy-config.json> --domain <publisher hostname>',
+  );
   process.exit(2);
 }
 
@@ -61,32 +66,33 @@ function loadConfig(path) {
 }
 
 // Invoke the BUILT package the way Lambda will: prove the settings reach the
-// env parser (a bad config throws here) and both response shapes work — a
-// generated response for the manifest route, a pass-through request for an
-// unsigned human read. Importing index.mjs assigns the settings onto this
-// process's env; that is confined to this short-lived build process.
-async function smokeInvoke(config) {
+// env parser (a bad config throws on the first invocation) and both response
+// shapes work — a generated response for the health route, a pass-through
+// request for the publisher's discovery document and for an unsigned human
+// read. Importing index.mjs assigns the settings onto this process's env; that
+// is confined to this short-lived build process.
+async function smokeInvoke(domain) {
   const { handler } = await import(pathToFileURL(join(outDir, LAMBDA_ENTRY)).href);
-  const origin = `https://${config.PROVIDER}`;
+  const origin = `https://${domain}`;
 
-  const manifest = await handler(viewerRequestEvent(`${origin}/.well-known/fora.json`));
-  if (manifest.status !== '200') {
-    throw new Error(`smoke: fora.json answered status ${manifest.status}, want 200`);
-  }
-  const domain = JSON.parse(manifest.body ?? '').domain;
-  if (domain !== config.PROVIDER) {
-    throw new Error(`smoke: fora.json domain is ${domain}, want ${config.PROVIDER}`);
+  const health = await handler(viewerRequestEvent(`${origin}/healthz`));
+  if (health.status !== '200') {
+    throw new Error(`smoke: /healthz answered status ${health.status}, want 200`);
   }
 
-  const passThrough = await handler(
-    viewerRequestEvent(`${origin}/smoke-article`, {
-      'user-agent': 'Mozilla/5.0 (Macintosh) Safari/605.1.15',
-    }),
-  );
-  if (!('uri' in passThrough)) {
-    throw new Error(
-      'smoke: an unsigned human read must pass through as a request object so CloudFront fetches the origin',
+  const reads = [
+    ['the discovery document', `${origin}/.well-known/fora.json`],
+    ['an unsigned human read', `${origin}/smoke-article`],
+  ];
+  for (const [what, url] of reads) {
+    const answer = await handler(
+      viewerRequestEvent(url, { 'user-agent': 'Mozilla/5.0 (Macintosh) Safari/605.1.15' }),
     );
+    if (!('uri' in answer)) {
+      throw new Error(
+        `smoke: ${what} must pass through as a request object so CloudFront fetches the origin`,
+      );
+    }
   }
 }
 
@@ -104,8 +110,8 @@ try {
   const config = loadConfig(values.config);
   mkdirSync(outDir, { recursive: true });
   buildTarget(lambdaTarget, outDir);
-  writeFileSync(join(outDir, LAMBDA_ENTRY), lambdaEntrySource(config.PROVIDER ?? '', config));
-  await smokeInvoke(config);
+  writeFileSync(join(outDir, LAMBDA_ENTRY), lambdaEntrySource(values.domain, config));
+  await smokeInvoke(values.domain);
 } catch (err) {
   removeOutputs();
   throw err;

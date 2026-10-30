@@ -14,6 +14,7 @@ import (
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/exchange"
 )
 
 // validateEntryTerms runs the SDK's ingest-tier checks
@@ -52,6 +53,15 @@ func validateEntryTerms(
 	var warnings []string
 	for i, term := range e.GetTerms() {
 		termWarnings, err := helpers.ValidateLicenseTerm(term)
+		if err == nil {
+			// The Exchange's own ingest rule on top of the SDK's: a term is gated
+			// by exactly one concrete subscription scope, or by none. Refused here,
+			// at push time, so the publisher learns about it; term selection hides
+			// such a term as a backstop should a row reach storage anyway.
+			if _, _, serr := exchange.SubscriptionScopeOf(term.GetScopes()); serr != nil {
+				err = &helpers.RuleViolation{Rule: "subscription_scope_concrete", Path: "scopes", Message: serr.Error()}
+			}
+		}
 		if err != nil {
 			violation := asRuleViolation(err)
 			reqctx.FromContext(ctx).WarnContext(

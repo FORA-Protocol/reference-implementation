@@ -200,27 +200,6 @@ func (c *Client) PreflightDomain(
 	return out, err
 }
 
-// HasDomains reports whether the person's publisher has saved a domain,
-// verified or not: whether they are past their first one. The console decides
-// from it whether a page draws the dashboard's sections and whether the wizard
-// offers to cancel.
-func HasDomains(r Registrations) bool {
-	return r.Registered && len(r.Sites) > 0
-}
-
-// HasVerifiedDomain reports whether any of the person's domains is verified,
-// which is what anything can be sold from. The console decides from it whether
-// a person opens on the dashboard, where sales are, or on their domains, where
-// a domain that is not verified says what it still needs.
-func HasVerifiedDomain(r Registrations) bool {
-	for _, site := range r.Sites {
-		if site.Active() {
-			return true
-		}
-	}
-	return false
-}
-
 // ListRegistrations reads back what this person has registered.
 func (c *Client) ListRegistrations(ctx context.Context, actor Actor) (Registrations, error) {
 	var out Registrations

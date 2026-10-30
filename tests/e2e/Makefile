@@ -1,11 +1,7 @@
 .PHONY: deps fmt fmt-check lint typecheck deadcode test-fast
 
-# Lint and format targets for the full-stack E2E harness (`tests/e2e/`) and
-# the sibling real-AWS acceptance tree (`tests/e2e-aws/`). The two trees
-# share one uv venv: tests/e2e/pyproject.toml carries the ruff config and
-# the dev dependency, and `tests/e2e-aws/` is a single test file under the
-# same lint scope (mirrors `make test-e2e-aws` at root, which invokes
-# pytest with `--with-editable . pytest -q ../e2e-aws`).
+# Lint and format targets for the full-stack E2E harness (`tests/e2e/`).
+# tests/e2e/pyproject.toml carries the ruff config and the dev dependency.
 #
 # Root delegation: the project Makefile's `fmt` and `lint` targets descend
 # here, closing the lint-coverage gap the build-tag pocket audit surfaced.
@@ -19,10 +15,10 @@ deps:
 	uv sync
 
 fmt:
-	uv run ruff format . ../e2e-aws/
+	uv run ruff format .
 
 fmt-check:
-	uv run ruff format --check . ../e2e-aws/
+	uv run ruff format --check .
 
 # The second command is the harness bans of ADR-028 D8 (ruff-harness.toml): what a
 # test module may not call. It walks this directory, which is what applies the
@@ -30,7 +26,7 @@ fmt-check:
 # itself. harness/test_harness_bans.py runs each ban on a sample violation and
 # checks that this recipe still carries these arguments.
 lint:
-	uv run ruff check . ../e2e-aws/
+	uv run ruff check .
 	uv run ruff check --config ruff-harness.toml --ignore-noqa .
 
 # The root `typecheck` target descends here. When the repo's only mypy
@@ -44,12 +40,12 @@ lint:
 # which is the property that was actually missing. This narrower gate is
 # deliberate: the alternative on offer was no Python type gate at all.
 #
-# Scope MATCHES `lint` above deliberately. A typecheck narrower than its sibling
-# lint gate leaves files that look covered and are not: the standalone drivers
-# (`demo_proof.py`, `register_staging_agent.py`, `smoke_staging.py`) and
-# `../e2e-aws/` are all linted, and the drivers construct the harness's own
-# types — exactly the arity/shape drift a type checker catches and a linter
-# does not.
+# The scope is the harness and the code that drives it. A typecheck narrower
+# than that leaves files that look covered and are not: the standalone drivers
+# (`register_staging_agent.py`, `smoke_staging.py`) are linted, and they
+# construct the harness's own types — exactly the arity/shape drift a type
+# checker catches and a linter does not. The stub servers the stack runs
+# (`agent-directory/`, `fake-bedrock/`, `sites/`) are linted only.
 #
 # The second command checks that mypy itself refuses a string passed to
 # obligation(), using two probe modules that are deliberately outside the first
@@ -61,7 +57,7 @@ lint:
 # vulture_whitelist.py is checked too: it names each symbol it excuses, so an entry
 # whose symbol was removed or renamed fails here instead of excusing nothing.
 typecheck:
-	uv run mypy harness/ demo_proof.py register_staging_agent.py smoke_staging.py ../e2e-aws/ \
+	uv run mypy harness/ register_staging_agent.py smoke_staging.py \
 		typecheck_probes/check.py vulture_whitelist.py
 	uv run python typecheck_probes/check.py
 
@@ -192,10 +188,44 @@ deadcode:
 # not in the e2e runner image, so on that tier it skips. It is what keeps the
 # e2e-only control service and the operator CLI out of the production images.
 # It reads files and needs nothing brought up.
+#
+# The WBA entry-shape guard belongs here because the key-directories entrypoint
+# and scripts/lib it reads are not in the e2e runner image, so on that tier it
+# skips. It runs the entrypoint's render step against the shared key helpers, and
+# is what keeps every fixed identity's directory entry in the one shape the
+# key-generation scripts write. It runs a Python subprocess and needs nothing
+# brought up.
+#
+# The health-timing guard belongs here because the compose files it reads are not
+# in the e2e runner image, so on that tier it skips. It is what keeps every health
+# check paced by the shared timing: often while a container starts, rarely once it
+# is healthy, which is most of the load the stack's checks put on a host. It reads
+# files and needs nothing brought up.
+#
+# The compose-version guard belongs here for the buildx guard's reason: it drives
+# scripts/check-compose-version.sh, which the e2e runner image does not carry,
+# against a stub docker. A current machine never runs the gate's refusing branch,
+# so this is where it is seen to fire.
+#
+# The CI-load guard belongs here for the same reason: scripts/host-load.sh and
+# deploy/ci/buildkitd.toml are not in the e2e runner image, so on that tier it
+# skips. It checks that the CI build's step limit is a key BuildKit reads, since
+# BuildKit ignores a misspelled one without an error, and it runs the host-load
+# script's summary on records whose answers are known and its recorder against
+# stub commands. Nothing else checks either: the CI job passes with no limit, and
+# prints whatever the summary says. It needs nothing brought up; the two cases
+# that sample the real vmstat take about a second each.
+#
+# The stack-isolation guard belongs here beside the collection guard. That guard
+# collects the real harness, so the conftest check refuses a test that declares no
+# stack_isolation mode before any e2e run; but it passes just as well if the check
+# stops refusing anything. This one feeds the check one stand-in test per kind of
+# violation and requires each refusal. Pure Python, under a second.
 test-fast:
 	uv run pytest -q harness/test_acceptance.py \
 		harness/test_httpsig_signer.py \
 		harness/test_guards_exchange_identity.py \
+		harness/test_guards_exchange_boot_fixtures.py \
 		harness/test_guards_self_contained_stack.py \
 		harness/test_recipient.py \
 		harness/test_guards_stale_proto.py \
@@ -209,7 +239,10 @@ test-fast:
 		harness/test_guards_sdk_pin.py harness/test_guards_sdk_pin_prerelease.py \
 		harness/test_guards_gate_args.py harness/test_guards_identity_lists.py \
 		harness/test_guards_publisher_sites.py harness/test_guards_e2e_images.py \
-		harness/test_guards_fixture_git_env.py \
+		harness/test_guards_publisher_documents.py \
+		harness/test_guards_fixture_git_env.py harness/test_guards_wba_entry_shape.py \
+		harness/test_guards_health_timing.py harness/test_guards_compose_version.py \
+		harness/test_guards_ci_load.py harness/test_guards_stack_isolation.py \
 		harness/test_obligation_registry.py harness/test_obligation_report_plugin.py \
 		harness/test_harness_seams.py harness/test_harness_bans.py \
 		harness/test_harness_deadcode.py harness/test_wba_oracle.py

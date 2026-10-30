@@ -6,9 +6,11 @@ How to stand the console up, in the order the steps depend on each other.
 
 ## 1. What this service is, and where it sits
 
-The console is the web application a publisher uses. They sign in, register
-their business and their sites, download the files to deploy, and press a
-button that confirms the site is theirs.
+The console is the web application a publisher uses. They sign in, name their
+business once, and set up each site in three steps: its domain, its terms, and
+connecting it, which means serving the discovery file on the site and
+installing the package on the CDN. The console checks both, and verifies the
+site once both are in place.
 
 The browser talks only to the console. The console talks to the Exchange
 server-side over a signed connection. Nothing a publisher owns is stored here:
@@ -48,7 +50,7 @@ this is the only place this document names one, and every command below reuses
 it:
 
 ```bash
-VERSION=1.0.0-rc.5
+VERSION=1.0.0
 docker pull ghcr.io/fora-protocol/console:$VERSION
 ```
 
@@ -138,17 +140,21 @@ That says the process is up and nothing more. To know the console can actually
 do its job, sign in and register a test site against a test publisher domain
 you control:
 
-1. Open the console and sign in. You should land on a page offering to register
-   a business.
-2. Register one, add a site, and download the files. The file named
-   `fora.json` should name your Exchange and your contributor hostname.
-3. Publish that file at `/.well-known/fora.json` on the test site, install the
-   package, and press the last button. The site should be listed as Verified.
+1. Open the console and sign in. You should land on the add-a-domain wizard,
+   on its **Your business** step. Enter a business name and press **Next**: the
+   wizard moves on to the domain.
+2. Add a site: enter the domain and press **Next**, then choose its terms and
+   press **Next**. On **Connect your site**, download `fora.json`: it should
+   name your Exchange and your contributor hostname.
+3. Publish that file at `/.well-known/fora.json` on the test site, and install
+   the package. The step checks both every 15 seconds while it is open, and
+   says the domain is verified once both pass. The site should be listed as
+   Verified.
 
 If the site is listed as not verified, press **Finish setup** on it: the wizard
-reopens at the first step that does not pass. The file step names what does not
-match, each reason one edit to that file, and the package step names what the
-site answered.
+reopens on its terms if none were chosen, and on **Connect your site**
+otherwise. That step names what does not match in the file, each reason one edit
+to that file, and what the site answered when asked as an AI agent.
 
 ---
 

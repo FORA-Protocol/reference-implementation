@@ -1,7 +1,8 @@
 """Obligation PAID-003: fetching the delivered URL returns the owner's content.
 
-Driven against the demo ``epicurus`` resource (PER_UNIT USD) as the USD demo
-buyer through the Broker, with the SDK's own ``BrokerClient``: the agent
+Driven against the demo ``epicurus`` resource (PER_UNIT USD), which exchange-a
+sells, as the test's own agent (``fresh_agent``, with an account at exchange-a)
+through the Broker, with the SDK's own ``BrokerClient``: the agent
 resolves at the Broker, buys the winning offer through
 ``BrokerService.ExecuteTransaction`` (the Exchange returns the agent-bound
 signed URL on the item's ``retrieval_endpoint``), then fetches that signed URL. The demo domain resolves to its
@@ -17,11 +18,12 @@ from __future__ import annotations
 
 import pytest
 
-from ..broker_purchase import buy_through_broker
+from ..broker_purchase import resolve_and_buy
 from ..conftest import StackURLs
 from ..edge_fetch import fetch_signed
-from ..seed import DEMO_PHILOSOPHY_DOMAIN, USD_AGENT_ID, SeededFixture
-from ..e2e_catalog import USD_AGENT_KEY_PATH
+from ..exchanges import EXCHANGE_A_DOMAIN
+from ..fresh_agent import FreshAgent
+from ..seed import DEMO_PHILOSOPHY_DOMAIN
 from ..obligation_registry import Obligation, obligation
 
 # ADR-008 D5 — declare stack-isolation contract.
@@ -33,13 +35,11 @@ _RESOURCE_URI = f"http://{DEMO_PHILOSOPHY_DOMAIN}/articles/philosophers/epicurus
 
 @obligation(Obligation.PAID_003)
 def test_agent_fetches_signed_url_and_receives_publisher_content(
-    compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: seed ingests the demo catalog
+    compose_stack: StackURLs, fresh_agent: FreshAgent
 ) -> None:
     """Broker purchase → Edge PoP fetch returns the demo publisher's bytes."""
-    _, item = buy_through_broker(
-        compose_stack, _RESOURCE_URI, agent_id=USD_AGENT_ID, key_path=USD_AGENT_KEY_PATH
-    )
+    fresh_agent.fund(EXCHANGE_A_DOMAIN)
+    item = resolve_and_buy(fresh_agent, _RESOURCE_URI)
     signed_url = item.retrieval_endpoint
     assert signed_url, f"the purchase answered no delivery URL: {item}"
 
@@ -52,5 +52,5 @@ def test_agent_fetches_signed_url_and_receives_publisher_content(
         signed_url,
         compose_stack,
         expect_marker="Epicurus",
-        key_path=USD_AGENT_KEY_PATH,
+        key_path=fresh_agent.key_path,
     )

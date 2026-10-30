@@ -29,7 +29,7 @@ func TestCatalogUpsertRequiresARegisteredPublisher(t *testing.T) {
 		siteDomain = "stoapress.example"
 		ownerID    = "pub-stoa"
 	)
-	seedTenantRow(t, ctx, q, tenantID, siteDomain)
+	seedTenantRow(t, ctx, pool, tenantID, siteDomain)
 	catalog := repo.NewCatalogRepo(q)
 
 	entry := repo.CatalogEntry{

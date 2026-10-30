@@ -26,6 +26,11 @@
 // registry port, and the message builders and signing transport are the ones
 // every suite sends with.
 //
+// AuditActions reads the seat's audit log back, for suites that assert a route
+// wrote its row, and CountAuditActions counts one action's rows over it. It is
+// the one read here that sits below the public routes, and it says why on
+// itself.
+//
 // It carries the integration build tag, like every suite that imports it, so a
 // build without the tag never compiles a test harness into anything.
 package exchangetest
@@ -145,6 +150,8 @@ type Exchange struct {
 	opts   Options
 	salt   string
 	market *market
+	// audit reads the seat's audit log back, for AuditActions.
+	audit repo.AuditRepo
 }
 
 // Start seeds the seat into pool, unless Options.WithoutSeat says not to, and
@@ -173,6 +180,7 @@ func Start(t testing.TB, pool *pgxpool.Pool, o Options) *Exchange {
 			HTTP: e.opts.DirectoryClient, Logger: testutil.DiscardLogger(),
 		}))
 	queries := sqlc.New(pool)
+	e.audit = repo.NewAuditRepo(queries)
 	// One gate for both services, as the composition root builds it.
 	gate := service.NewPublisherGate(
 		repo.NewPublisherGrantReadRepo(queries), repo.NewTenantReadRepo(queries), o.ExchangeDomain)
@@ -256,6 +264,42 @@ func registrationService(
 			TermsDefaults:   o.TermsDefaults,
 		},
 	})
+}
+
+// AuditActions reads back every action the seat's audit log records.
+//
+// It reads through the production audit repository rather than a public route,
+// because the Exchange publishes no read surface for its audit log -- the admin
+// plane exposes transaction evidence and nothing else. That is a corner cut
+// deliberately and named here rather than hidden: an assertion made with it is
+// one tier below the route it verifies, so it is a persistence check, not a
+// protocol round-trip. A publisher-visible activity read would let it move up a
+// tier.
+func (e *Exchange) AuditActions(t testing.TB) []string {
+	t.Helper()
+	records, err := e.audit.ByTenant(t.Context(), e.SeatID)
+	if err != nil {
+		t.Fatalf("exchangetest: read the audit log: %v", err)
+	}
+	actions := make([]string, 0, len(records))
+	for _, r := range records {
+		actions = append(actions, r.Action)
+	}
+	return actions
+}
+
+// CountAuditActions is how many rows of the seat's audit log record action.
+// It counts over AuditActions, so it is the same check, one tier below the
+// route it verifies, for the reason AuditActions gives.
+func (e *Exchange) CountAuditActions(t testing.TB, action string) int {
+	t.Helper()
+	var n int
+	for _, a := range e.AuditActions(t) {
+		if a == action {
+			n++
+		}
+	}
+	return n
 }
 
 // PublisherManifest is the document a correctly configured site serves for

@@ -10,7 +10,6 @@ and both balance readings are its GetAccountStatus.
 
 from __future__ import annotations
 
-from fora_sdk import to_wire
 from fora_sdk.core import VerifiedOffer
 from wire.models import TransactionResultItem
 
@@ -36,5 +35,5 @@ def buy_verified_and_observe_charge(
     item = items[0]
     assert item.denial_reason is None, f"{what}: the purchase was denied: {item}"
     assert item.transaction_id, f"{what}: the purchase names no transaction: {item}"
-    assert_charged(before, after, to_wire(item.cost) if item.cost else None, what)
+    assert_charged(before, after, item.cost, what)
     return item

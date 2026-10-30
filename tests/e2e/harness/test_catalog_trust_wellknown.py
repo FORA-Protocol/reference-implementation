@@ -42,7 +42,6 @@ from .seed import (
     SEAT_OF_PHILOSOPHY,
     SEAT_OF_SFX,
     SELFPUB_SFX_KEY_PATH,
-    SeededFixture,
 )
 
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
@@ -57,7 +56,6 @@ _UNRESOLVABLE_KEY_CODES = frozenset({"unauthenticated", "unavailable"})
 
 def test_self_publish_push_accepted_via_wellknown_aws_edge(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: seed registers the seat, sites and edges
     fresh_agent: FreshAgent,
 ) -> None:
     """Self-publish trust holds behind the AWS-shim edge too (sfx publisher, exchange-c).
@@ -79,7 +77,6 @@ def test_self_publish_push_accepted_via_wellknown_aws_edge(
 
 def test_unfetchable_domain_caller_rejected_at_gate1(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: seed registers the seat, sites and edges
     fresh_agent: FreshAgent,
 ) -> None:
     """A writer whose directory host serves no key is refused, and nothing is written.

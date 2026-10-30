@@ -3,6 +3,7 @@
 package transport_test
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -375,6 +376,36 @@ func readAuditRows(t *testing.T, h *testHarness, tenantID string) []repo.AuditRe
 		}
 	}
 	return out
+}
+
+// auditRecordsOf returns tenantID's audit rows that record action, newest first,
+// through the production repository surface. Tier-2 read: the Exchange publishes
+// no read surface for its audit log.
+func auditRecordsOf(
+	t *testing.T, ctx context.Context, audit repo.AuditRepo, tenantID, action string,
+) []repo.AuditRecord {
+	t.Helper()
+	records, err := audit.ByTenant(ctx, tenantID)
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	var out []repo.AuditRecord
+	for _, r := range records {
+		if r.Action == action {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// auditDetail decodes one audit row's detail.
+func auditDetail(t *testing.T, r repo.AuditRecord) map[string]any {
+	t.Helper()
+	var detail map[string]any
+	if err := json.Unmarshal(r.Detail, &detail); err != nil {
+		t.Fatalf("decode %s audit detail: %v", r.Action, err)
+	}
+	return detail
 }
 
 // readSingleAuditRow asserts exactly one admin audit row exists for tenantID and

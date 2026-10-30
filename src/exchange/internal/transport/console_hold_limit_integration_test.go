@@ -25,7 +25,7 @@ import (
 // Legs: every save goes signed HTTP -> service -> repositories -> database, and
 // what the payee holds is read back through the signed resume route. Audit rows
 // are read one tier lower, through the audit repository, for the reason
-// auditActions gives.
+// exchangetest's AuditActions gives.
 
 // heldDomain is the i-th site a test saves.
 func heldDomain(i int) string { return fmt.Sprintf("site%d.stoa.example", i) }
@@ -52,7 +52,7 @@ func TestConsoleRegistration_CapsTheSitesHeldWithoutProof(t *testing.T) {
 	if _, sites := listRegistrations(t, f, actor); len(sites) != consoleapi.MaxUnverifiedDomains {
 		t.Fatalf("after the refused save the payee holds %d sites, want %d", len(sites), consoleapi.MaxUnverifiedDomains)
 	}
-	if n := countActions(t, f, "RegisterDomain"); n != consoleapi.MaxUnverifiedDomains {
+	if n := f.exchange.CountAuditActions(t, "RegisterDomain"); n != consoleapi.MaxUnverifiedDomains {
 		t.Fatalf("%d RegisterDomain audit rows, want %d: the refused save wrote one", n, consoleapi.MaxUnverifiedDomains)
 	}
 

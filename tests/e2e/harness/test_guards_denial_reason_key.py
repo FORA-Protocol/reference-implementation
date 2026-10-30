@@ -15,8 +15,9 @@ Two copies of the slip existed (``test_00_failure_05_no_billing_arrangement`` an
 The detector is AST-based (a ``.get()`` call whose sole string argument is
 ``denialReason``), so there is no regex-slip case — positive + negative
 meta-tests suffice. It is a pure source scan: it imports nothing from the running
-stack, and ``stack_isolation("shared-without-cleanup")`` makes the autouse
-dispatch fixture a no-op so it needs no docker-compose infra.
+stack and needs no docker-compose infra, and its
+``stack_isolation("shared-without-cleanup")`` marker declares that it needs no
+setup either.
 """
 
 from __future__ import annotations

@@ -5,19 +5,23 @@ package app_test
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"testing"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/cdn"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/setup"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/web"
 )
 
-// The wizard's domain step and the files it hands over. The checks that gate
-// the later steps are in the sibling file, and so is the licensing step.
+// The wizard's domain step: the lookup, and the Next that saves the domain.
+// The licensing step and the last step's checks are in the sibling files.
 //
-// Every test here asserts the same thing twice over: what the publisher is
-// told, and that the Exchange still holds no domain. Nothing about a domain may
-// be written before the last step, because a hostname is claimed for the whole
-// deployment by whoever registers it first.
+// The lookup writes nothing, and the tests about it say so: a hostname is held
+// for the whole deployment by whoever saves it first, so only the step's Next
+// may save one. What the Exchange holds is read back through its signed
+// registrations route with the console's own client; whether a save was
+// recorded is read one tier lower, through the Exchange's audit repository,
+// because the Exchange publishes no read surface for its audit log
+// (exchangetest.AuditActions says so on itself).
 
 // errUnreadable stands for every reason a domain does not answer.
 var errUnreadable = errors.New("the domain could not be read")
@@ -29,7 +33,7 @@ func TestConsole_WorksOutWhichNetworkServesTheDomain(t *testing.T) {
 	f := startConsole(t, verifiedClaims(), withDetector(newStubDetector(cdn.ProviderCloudFront)))
 	f.signIn(t)
 
-	out := f.walkToDocument(t, "stoa.example")
+	out := f.lookUp(t, "stoa.example")
 	if out["provider"] != "cloudfront" {
 		t.Fatalf("the lookup answered %v, want the network it found", out["provider"])
 	}
@@ -54,7 +58,7 @@ func TestConsole_LookupReadsTheDomainsOwnHeaders(t *testing.T) {
 		withDetector(detector), withPages(stubPageReader{header: served}))
 	f.signIn(t)
 
-	f.walkToDocument(t, "stoa.example")
+	f.lookUp(t, "stoa.example")
 	hdr, called := detector.headers()
 	if !called {
 		t.Fatal("the lookup never ran")
@@ -102,7 +106,7 @@ func TestConsole_EndsTheWizardWhenTheNetworkIsNotOneWeSupport(t *testing.T) {
 				withDetector(newStubDetector(tc.provider)),
 				withPages(stubPageReader{header: http.Header{"Server": []string{"nginx"}}}))
 			f.signIn(t)
-			out := f.walkToDocument(t, "behind-something-else.example")
+			out := f.lookUp(t, "behind-something-else.example")
 
 			if out["supported"] != false {
 				t.Fatalf("the wizard went on past a network we cannot equip: %v", out)
@@ -138,7 +142,7 @@ func TestConsole_LookupSurvivesAnUnreadableDomain(t *testing.T) {
 		withDetector(detector), withPages(stubPageReader{err: errUnreadable}))
 	f.signIn(t)
 
-	out := f.walkToDocument(t, "stoa.example")
+	out := f.lookUp(t, "stoa.example")
 	hdr, called := detector.headers()
 	if !called {
 		t.Fatal("an unreadable domain stopped the lookup running at all")
@@ -151,92 +155,92 @@ func TestConsole_LookupSurvivesAnUnreadableDomain(t *testing.T) {
 	}
 }
 
-// TestConsole_HandsOverTheDocumentBeforeAnythingIsRegistered: the wizard hands
-// the discovery document over on a step before the last button, which is the
-// only one that saves the domain. So the file has to be built for a domain that
-// has no row to build it from -- everything in it comes from what they typed
-// plus the payee id their account already has.
-func TestConsole_HandsOverTheDocumentBeforeAnythingIsRegistered(t *testing.T) {
+// TestConsole_TheDomainStepSavesTheDomainNotVerified covers the step's Next,
+// and a publisher who closes the tab right after it: the domain is saved with
+// no terms, held for this publisher and listed as not verified with its setup
+// to finish, which reopens on the licensing step. Nothing about the site has
+// been checked, and the Exchange recorded the one save.
+func TestConsole_TheDomainStepSavesTheDomainNotVerified(t *testing.T) {
 	f := startConsole(t, verifiedClaims())
 	f.signIn(t)
-	f.walkToDocument(t, "stoa.example")
 
-	out := f.ok(t, "/api/domain/files", map[string]any{
-		"domain": "stoa.example", "cdn": "cloudflare", "content_paths": "/articles/",
-	})
-	files, _ := out["files"].([]any)
-	bodies := map[string]string{}
-	for _, raw := range files {
-		f, _ := raw.(map[string]any)
-		name, _ := f["name"].(string)
-		body, _ := f["body"].(string)
-		bodies[name] = body
+	saved := f.walkToTerms(t, "stoa.example")
+	if saved["domain"] != "stoa.example" || saved["cdn"] != "cloudflare" ||
+		saved["content_paths"] != "/articles/" || saved["setup"] != "/domains/stoa.example/setup" {
+		t.Fatalf("the domain step's Next answered %v; want stoa.example as saved, and its setup page", saved)
 	}
-	for _, want := range []string{"fora.json", "edge-config.json"} {
-		if bodies[want] == "" {
-			t.Fatalf("the wizard did not produce %s: %v", want, out)
-		}
+	sites := f.mine(t).Sites
+	if len(sites) != 1 || sites[0].Active() || sites[0].Terms != nil || sites[0].LastCheckedAt != nil ||
+		sites[0].ImportReplacesManualTerms || !slices.Equal(sites[0].ContentPathScope, []string{"/articles/"}) {
+		t.Fatalf("the Exchange holds %+v; want stoa.example saved with /articles/, no terms, never checked", sites)
 	}
-	// The document has to satisfy the reader that will later fetch it, so it is
-	// held to that reader rather than to a second opinion about the bytes.
-	owner, contributors, err := setup.ManifestReadsBack([]byte(bodies["fora.json"]), testExchangeDomain)
-	if err != nil {
-		t.Fatalf("the document handed over does not read back: %v", err)
+	if n := f.exchange.CountAuditActions(t, "RegisterDomain"); n != 1 {
+		t.Fatalf("the Exchange recorded %d saves, want 1", n)
 	}
-	if owner != f.publisherID {
-		t.Fatalf("the document attests %q, want this publisher's payee id", owner)
-	}
-	if len(contributors) != 1 || contributors[0] != "catalog-contributor.exchange.example" {
-		t.Fatalf("the document authorises %v", contributors)
-	}
-	f.assertNoDomains(t, "handing over the files")
-}
-
-// TestConsole_DownloadsTheFilesMidWizard proves the links beside those files
-// resolve. The answers travel in the address because there is no row to read
-// them back from, so this is also what pins that they survive the round trip.
-func TestConsole_DownloadsTheFilesMidWizard(t *testing.T) {
-	f := startConsole(t, verifiedClaims())
-	f.signIn(t)
-	f.walkToDocument(t, "stoa.example")
-	out := f.ok(t, "/api/domain/files", map[string]any{
-		"domain": "stoa.example", "cdn": "cloudflare", "content_paths": "/articles/",
-	})
-
-	files, _ := out["files"].([]any)
-	if len(files) == 0 {
-		t.Fatalf("no files to download: %v", out)
-	}
-	for _, raw := range files {
-		file, _ := raw.(map[string]any)
-		link, _ := file["url"].(string)
-		name, _ := file["name"].(string)
-		status, body := f.get(t, link)
-		if status != http.StatusOK {
-			t.Fatalf("downloading %s = %d", name, status)
-		}
-		if body != file["body"] {
-			t.Fatalf("the downloaded %s is not the one shown on the page", name)
-		}
+	mustContain(t, "the domains list", f.get2(t, "/domains"), "Not verified", `href="/domains/stoa.example/setup"`)
+	if boot := f.bootOn(t, "/domains/stoa.example/setup"); boot.Resume == nil || boot.Resume.Step != "terms" ||
+		boot.Resume.TermsSet {
+		t.Fatalf("the setup page reopens with %+v; want the licensing step of a domain with no terms", boot.Resume)
 	}
 }
 
-// TestConsole_RefusesFilesForANetworkItCannotEquip closes the door the download
-// link opens. Its answers travel in the address, so they are the caller's to
-// choose; a network we ship no package for must be refused there as firmly as
-// it is at the step that asks.
-func TestConsole_RefusesFilesForANetworkItCannotEquip(t *testing.T) {
+// TestConsole_SavingTheDomainAgainKeepsWhatItWasSavedWith: a second save of a
+// domain this publisher already saved -- a double press, or a direct call with
+// other paths -- answers with the domain as it was saved and writes nothing.
+// Its network and paths are fixed by the first save.
+func TestConsole_SavingTheDomainAgainKeepsWhatItWasSavedWith(t *testing.T) {
 	f := startConsole(t, verifiedClaims())
 	f.signIn(t)
-	f.walkToDocument(t, "stoa.example")
+	f.walkToTerms(t, "stoa.example")
 
-	status, out := f.api(t, "/api/domain/files", map[string]any{
+	again := f.ok(t, web.APIRegisterPath, map[string]any{
+		"domain": "stoa.example", "cdn": "cloudflare", "content_paths": "/news/",
+	})
+	if again["content_paths"] != "/articles/" {
+		t.Fatalf("saving again answered %v; want the paths it was saved with", again)
+	}
+	if sites := f.mine(t).Sites; len(sites) != 1 || !slices.Equal(sites[0].ContentPathScope, []string{"/articles/"}) {
+		t.Fatalf("the Exchange holds %+v; want stoa.example as it was first saved", sites)
+	}
+	if n := f.exchange.CountAuditActions(t, "RegisterDomain"); n != 1 {
+		t.Fatalf("the Exchange recorded %d saves, want the first one only", n)
+	}
+}
+
+// TestConsole_TheDomainStepRefusesANetworkItCannotEquip closes the door the
+// save opens. The network travels in the request, so it is the caller's to
+// choose; a network we ship no package for is refused there as firmly as the
+// lookup refuses it, and nothing is saved.
+func TestConsole_TheDomainStepRefusesANetworkItCannotEquip(t *testing.T) {
+	f := startConsole(t, verifiedClaims())
+	f.signIn(t)
+	f.registerBusiness(t)
+
+	status, out := f.api(t, web.APIRegisterPath, map[string]any{
 		"domain": "stoa.example", "cdn": "fastly", "content_paths": "",
 	})
-	if status != http.StatusBadRequest {
-		t.Fatalf("files for an unsupported network = %d, want %d", status, http.StatusBadRequest)
+	if status != http.StatusBadRequest || out["error"] == nil {
+		t.Fatalf("saving behind an unsupported network = %d %v, want 400 with a sentence", status, out)
 	}
-	if out["error"] == nil {
-		t.Fatalf("the refusal says nothing: %v", out)
+	f.assertNoDomains(t, "a save behind an unsupported network")
+	if n := f.exchange.CountAuditActions(t, "RegisterDomain"); n != 0 {
+		t.Fatalf("the Exchange recorded %d saves for a refused one", n)
 	}
+}
+
+// TestConsole_TheDomainStepShowsTheLicensedPathsField reads the domain step as
+// the page draws it. The licensed paths are an ordinary field under the domain,
+// marked optional and showing an example path, rather than a question folded
+// away behind a disclosure: a publisher who licenses only part of a site sees
+// where to say so.
+func TestConsole_TheDomainStepShowsTheLicensedPathsField(t *testing.T) {
+	f := startConsole(t, verifiedClaims())
+	f.signIn(t)
+	f.registerBusiness(t)
+
+	page := f.get2(t, web.NewDomainPath)
+	mustContain(t, "the domain step", page,
+		`<label class="form-label" for="paths">Licensed paths`, "(optional)",
+		`id="paths"`, `placeholder="/news/"`, "Leave this empty to license all of it.")
+	mustNotContain(t, "the domain step", page, "licensed-paths", "License only part of this site")
 }

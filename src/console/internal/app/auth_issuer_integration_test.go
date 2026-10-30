@@ -184,8 +184,8 @@ func TestConsole_DropsASessionSealedForAnotherIssuer(t *testing.T) {
 	moved.requireNoSession(t)
 
 	kept := consoleAt(t, f.config, cookie)
-	if a := kept.step(t, kept.home(t)); a.status != http.StatusOK {
-		t.Fatalf("the same session at a console that kept its provider = %d, want 200", a.status)
+	if !kept.signedIn(t) {
+		t.Fatal("the same session at a console that kept its provider was sent to sign in")
 	}
 }
 

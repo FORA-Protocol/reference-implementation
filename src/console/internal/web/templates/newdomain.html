@@ -2,22 +2,21 @@
 <div x-data="wizard()" x-cloak id="wizard" data-boot="{{.Boot}}">
 
   <!-- The progress header. Numbers are positions in the list the server sent,
-       so a publisher who already has a business name still starts at 1. -->
+       so a publisher who already has a business name still starts at 1. A step
+       already passed links back to it, except the business step, whose name
+       cannot be changed. -->
   <ol class="wiz-steps">
     <template x-for="(step, i) in steps" :key="step.key">
       <li :class="stepClass(i)">
-        <template x-if="i < index">
-          <!-- A step passed over with Skip for now shows a dash instead of the
-               tick, so it does not read as done. -->
-          <button type="button" class="wiz-stack" @click="goBack(i)"
-                  :aria-label="'Back to ' + step.title + (isSkipped(i) ? ', skipped' : '')">
-            <span class="wiz-num" aria-hidden="true" x-text="isSkipped(i) ? '–' : '✓'"></span>
+        <template x-if="canReturnTo(i)">
+          <button type="button" class="wiz-stack" @click="goBack(i)" :aria-label="'Back to ' + step.title">
+            <span class="wiz-num" aria-hidden="true">✓</span>
             <span class="wiz-label" x-text="step.title"></span>
           </button>
         </template>
-        <template x-if="i >= index">
+        <template x-if="!canReturnTo(i)">
           <span class="wiz-stack" :aria-current="i === index ? 'step' : false">
-            <span class="wiz-num" x-text="i + 1"></span>
+            <span class="wiz-num" x-text="stepDone(i) ? '✓' : i + 1"></span>
             <span class="wiz-label" x-text="step.title"></span>
           </span>
         </template>
@@ -25,12 +24,13 @@
     </template>
   </ol>
 
-  <div x-show="error" class="alert alert-danger" x-text="error"></div>
+  <div x-show="pageError" class="alert alert-danger" x-text="pageError"></div>
 
   <div class="card wiz-body"><div class="card-body">
 
-    <!-- 1. The business name. Shown only to someone who has not registered one;
-         there is no way to change it afterwards, so it is asked once. -->
+    <!-- 1. The business name. Shown only to an account that has not
+         registered one; there is no way to change it afterwards, so it is
+         asked once, and once Next has saved it the step is not shown again. -->
     <div x-show="step === 'name'">
       <h1 class="h4">What is your business called?</h1>
       <p class="text-secondary">This is the name your payments are made out to. It cannot be changed here later.</p>
@@ -41,35 +41,27 @@
 
     <!-- 2. The domain and what serves it. Detection decides: a network we
          cannot equip ends the wizard rather than becoming a question the
-         publisher would have to guess at. -->
+         publisher would have to guess at. Next saves the domain, so the
+         domain is held for this publisher from here on. -->
     <div x-show="step === 'domain'">
       <h1 class="h4">Which domain are you licensing?</h1>
       <p class="text-secondary">We work out which CDN serves it, because that decides how the rest of the setup goes.</p>
       <div class="mb-3">
         <label class="form-label" for="domain">Domain</label>
-        <!-- The check sits on the field it is about, and it is what opens the
-             way forward: a lookup takes a DNS query and a request to somebody
-             else's web server, so it runs when the publisher says the address
-             is right rather than on every keystroke.
+        <!-- Enter looks the domain up; Next looks it up too when that has not
+             happened for this address, and saves it. A lookup takes a DNS
+             query and a request to somebody else's web server, so it runs
+             when the publisher says the address is right rather than on every
+             keystroke.
 
-             The field stays editable on the dead end. Typing in it clears what
-             was found, which blocks Next again -- the commonest reason to end
-             up there is a typo, and a field locked to the wrong address would
-             leave the only way out through the dashboard. -->
-        <!-- Read-only when the wizard reopens a saved domain: the domain is
-             what was saved, and finishing its setup does not change it. -->
-        <div class="input-group">
-          <input class="form-control" id="domain" x-model="domain" @keyup.enter="checkNetwork()"
-                 placeholder="www.example.com" autocomplete="url" :readonly="resuming">
-          <button class="btn btn-primary" type="button" @click="checkNetwork()" x-show="!resuming"
-                  :disabled="busy || !domain.trim()">Check</button>
-        </div>
+             Read-only once the domain is saved: the domain is what was saved,
+             and finishing its setup does not change it. -->
+        <input class="form-control" id="domain" x-model="domain" @keyup.enter="checkNetwork()"
+               placeholder="www.example.com" autocomplete="url" :readonly="saved">
         <div class="form-text">The hostname only, with no https:// in front and no path after it.</div>
       </div>
 
-      <!-- What the check found, directly under the field it was about. The
-           three outcomes are mutually exclusive and all three decide the same
-           thing: whether there is a way forward from here. -->
+      <!-- What the lookup found, directly under the field it was about. -->
       <div x-show="network && !unsupported && !taken" class="alert alert-success"
            x-text="networkNotice"></div>
       <!-- The address is a link, not a sentence with an address in it. This
@@ -91,13 +83,13 @@
                                     : 'This domain is already one of yours, and it is not verified yet.'"></span>
         <a :href="yoursLink" x-text="yoursVerified ? 'Open it' : 'Finish its setup'"></a>
       </div>
-      <div x-show="taken" class="alert alert-danger">
-        This domain is already registered to another publisher. If it is yours, write to us and we will transfer it.
-      </div>
+      <div x-show="taken" class="alert alert-danger" x-text="message"></div>
 
+      <!-- Optional: left empty, the whole site is licensed. Read-only once the
+           domain is saved, like the domain itself: it is saved with it. -->
       <div class="mb-3" x-show="!unsupported">
         <label class="form-label" for="paths">Licensed paths <span class="text-secondary fw-normal">(optional)</span></label>
-        <input class="form-control" id="paths" x-model="paths_" :readonly="resuming">
+        <input class="form-control" id="paths" x-model="paths_" placeholder="/news/" :readonly="saved">
         <div class="form-text">
           Which parts of the domain you license. Leave this empty to license all of it.
           To license only some of it, list those paths separated by commas, like
@@ -106,94 +98,14 @@
       </div>
     </div>
 
-    <!-- 3. The discovery document. It is what proves the domain is theirs: the
-         domain is verified, and anything on it sold, only once the Exchange
-         has read it. -->
-    <div x-show="step === 'document'">
-      <h1 class="h4">Publish this file on your domain</h1>
-      <p class="text-secondary">
-        It proves <span x-text="domain"></span> is yours and names who gets paid.
-        Serve the file below, then check.
-      </p>
-      <template x-for="file in manifestFiles" :key="file.name">
-        <div>
-          <div class="filerow">
-            <div>
-              <span class="fw-semibold" x-text="file.name"></span>
-              <span class="d-block text-secondary small">Serve this at
-                <code x-text="domain + '/.well-known/fora.json'"></code>.</span>
-            </div>
-            <a class="btn btn-outline flex-shrink-0" :href="file.url" download>Download</a>
-          </div>
-        </div>
-      </template>
-      <div x-show="checks.document.reasons.length" class="alert alert-warning mt-3">
-        <p class="fw-semibold mb-2">We read the file at your domain and it does not match yet.</p>
-        <ul class="mb-0">
-          <template x-for="reason in checks.document.reasons" :key="reason">
-            <li x-text="reason"></li>
-          </template>
-        </ul>
-      </div>
-      <div x-show="checks.document.passed" class="alert alert-success mt-3">
-        Your domain is confirmed as yours.
-      </div>
-    </div>
-
-    <!-- 4. The edge package. The same three questions the written instructions
-         used to ask the publisher to ask their own site with curl. -->
-    <div x-show="step === 'package'">
-      <h1 class="h4">Install the package on your CDN</h1>
-      <p class="text-secondary" x-text="edge.message || 'This is the part that runs on your own account, so it is the one part we cannot do for you.'"></p>
-      <template x-for="file in edgeFiles" :key="file.name">
-        <div class="filerow mb-3">
-          <div>
-            <span class="fw-semibold" x-text="file.name"></span>
-            <span class="d-block text-secondary small" x-text="file.description"></span>
-          </div>
-          <a class="btn btn-outline flex-shrink-0" :href="file.url" download>Download</a>
-        </div>
-      </template>
-      <template x-for="s in edgeSteps" :key="s.id">
-        <div class="steps">
-          <p class="text-secondary" x-text="s.summary"></p>
-          <template x-for="cmd in (s.commands || [])" :key="cmd.label">
-            <div class="cmd">
-              <span class="cmd-label" x-text="cmd.label"></span>
-              <pre class="codebox" x-show="cmd.run"><code x-text="cmd.run"></code></pre>
-              <span class="cmd-expect" x-show="cmd.expect" x-text="cmd.expect"></span>
-            </div>
-          </template>
-          <p class="text-secondary small mb-0" x-show="s.note" x-text="s.note"></p>
-        </div>
-      </template>
-      <!-- Only what did not pass. The full list was three rows for a publisher
-           to read, most of them green, to learn one thing -- and that thing is
-           already in the sentence above. What cannot be dropped is the reason:
-           the heading says whether the package answered US, and a package that
-           answers us can still refuse readers or hide the discovery document,
-           which locks this step with nothing on screen to explain it. -->
-      <div class="probes mt-3" x-show="edgeFailures.length">
-        <template x-for="c in edgeFailures" :key="c.label">
-          <div class="probe" :class="'probe-' + c.outcome">
-            <span class="probe-mark" aria-hidden="true"
-                  x-text="c.outcome === 'failed' ? '\u00d7' : '?'"></span>
-            <span>
-              <span class="fw-semibold" x-text="c.label"></span>
-              <span class="d-block text-secondary small" x-text="c.detail"></span>
-            </span>
-          </div>
-        </template>
-      </div>
-    </div>
-
-    <!-- 5. The licensing, with the offer an agent would be shown beside it. -->
+    <!-- 3. The licensing, with the offer an agent would be shown beside it.
+         Next saves it on the domain. A verified domain is sold under the terms
+         it was verified with, so they are shown here and not changed. -->
     <div x-show="step === 'terms'">
       <h1 class="h4">What do you allow, and at what price?</h1>
       <p class="text-secondary" x-text="termsNote || 'This is what an agent is offered when it asks for one of your pages.'"></p>
-      <p class="text-secondary small" x-show="!resuming">Not ready to decide? Skip for now saves the domain without
-        terms. It is listed as not verified, and nothing on it is sold until you set them.</p>
-      <div class="sample">
+      <fieldset class="sample" :disabled="verified">
+        <legend class="visually-hidden">Your terms</legend>
         <div class="controls">
           <div class="ctl">
             <span class="k">price</span>
@@ -263,41 +175,154 @@
               own terms unless you tick this. Their titles and descriptions are kept either way.</span>
           </label>
         </div>
+      </fieldset>
+    </div>
+
+    <!-- 4. The two things that make the domain sellable, in either order: the
+         discovery file on the publisher's own site, and the package on their
+         CDN. The step asks the site about both when it opens and again every
+         few seconds, and the domain is verified on the check that finds both in
+         place. -->
+    <div x-show="step === 'connect'">
+      <h1 class="h4">Connect your site</h1>
+      <p class="text-secondary" x-show="!verified">Two things make <strong x-text="domain"></strong>
+        sellable: a file on your site that says who sells your pages and who gets paid, and a
+        package on your CDN that refuses agents without a licence. Do them in any order. When both
+        are in place, your domain is verified.</p>
+      <p class="text-secondary" x-show="verified">Both parts are in place for <strong x-text="domain"></strong>.</p>
+      <div class="alert alert-success" role="status" x-show="verified">
+        <strong class="d-block" x-text="domain + ' is verified.'"></strong>
+        Agents without a licence are refused and sent to buy access. Your pages are imported on the
+        next scheduled run; until then the catalog says nothing is listed yet.
       </div>
+
+      <div class="tasks">
+        <section class="task" aria-labelledby="task-file">
+          <div class="task-head">
+            <span class="task-mark" :class="fileDone && 'task-done'" aria-hidden="true">
+              <svg x-show="fileDone" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"></path></svg>
+            </span>
+            <h2 class="task-title" id="task-file">Serve your discovery file</h2>
+            <span class="task-badge" :class="fileDone ? 'done' : 'pending'" x-text="fileBadge"></span>
+          </div>
+          <p class="text-secondary small mb-0" x-show="!verified">This file tells AI agents and the Exchange who
+            sells access to your pages and who gets paid. Serve it as it is. Edit it later only to change who
+            may sell or import your pages.</p>
+          <template x-if="manifestFile">
+            <div class="filerow">
+              <div>
+                <span class="fw-semibold" x-text="manifestFile.name"></span>
+                <span class="d-block text-secondary small"><span x-text="verified ? 'Served at ' : 'Serve this at '"></span><code
+                  x-text="domain + '/.well-known/fora.json'"></code></span>
+              </div>
+              <a class="btn btn-outline flex-shrink-0" :href="manifestFile.url" download>Download</a>
+            </div>
+          </template>
+          <p class="task-status" :class="fileDone && 'done'" x-show="checkedAt && connection.file.status"
+             x-text="'Checked at ' + checkedAt + '. ' + connection.file.status"></p>
+          <ul class="task-reasons" x-show="connection.file.reasons.length">
+            <template x-for="reason in connection.file.reasons" :key="reason">
+              <li x-text="reason"></li>
+            </template>
+          </ul>
+        </section>
+
+        <section class="task" aria-labelledby="task-package">
+          <div class="task-head">
+            <span class="task-mark" :class="packageDone && 'task-done'" aria-hidden="true">
+              <svg x-show="packageDone" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"></path></svg>
+            </span>
+            <h2 class="task-title" id="task-package">Install the package on your CDN</h2>
+            <span class="task-badge" :class="packageDone ? 'done' : 'pending'" x-text="packageBadge"></span>
+          </div>
+          <template x-for="s in edgeSteps" :key="s.id">
+            <p class="text-secondary small mb-0" x-show="!verified" x-text="s.summary"></p>
+          </template>
+          <template x-for="file in packageFiles" :key="file.name">
+            <div class="filerow">
+              <div>
+                <span class="fw-semibold" x-text="file.name"></span>
+                <span class="d-block text-secondary small" x-text="verified && deployed ? deployed : file.description"></span>
+              </div>
+              <a class="btn btn-outline flex-shrink-0" :href="file.url" download>Download</a>
+            </div>
+          </template>
+          <details class="steps" x-show="!verified && edgeSteps.length">
+            <summary>Show the deploy commands</summary>
+            <template x-for="s in edgeSteps" :key="s.id">
+              <div>
+                <template x-for="cmd in (s.commands || [])" :key="cmd.label">
+                  <div class="cmd">
+                    <span class="cmd-label" x-text="cmd.label"></span>
+                    <pre class="codebox" x-show="cmd.run"><code x-text="cmd.run"></code></pre>
+                    <span class="cmd-expect" x-show="cmd.expect" x-text="cmd.expect"></span>
+                  </div>
+                </template>
+                <p class="text-secondary small mb-0 mt-2" x-show="s.note" x-text="s.note"></p>
+              </div>
+            </template>
+          </details>
+          <p class="task-status" :class="packageDone && 'done'" x-show="checkedAt && connection.package.status"
+             x-text="'Checked at ' + checkedAt + '. ' + connection.package.status"></p>
+          <!-- Once the package answers, the two things it does; until then,
+               only what did not come back clean, which is the one thing to
+               look at. -->
+          <ul class="task-checks" x-show="connection.package.passed">
+            <template x-for="c in connection.package.checks" :key="c.label">
+              <li><span class="probe-mark" aria-hidden="true">✓</span><span x-text="c.label"></span></li>
+            </template>
+          </ul>
+          <div class="probes" x-show="!connection.package.passed && packageProblems.length">
+            <template x-for="c in packageProblems" :key="c.label">
+              <div class="probe" :class="'probe-' + c.outcome">
+                <span class="probe-mark" aria-hidden="true" x-text="c.outcome === 'failed' ? '×' : '?'"></span>
+                <span>
+                  <span class="fw-semibold" x-text="c.label"></span>
+                  <span class="d-block text-secondary small" x-text="c.detail"></span>
+                </span>
+              </div>
+            </template>
+          </div>
+        </section>
+      </div>
+
+      <p class="text-secondary small mt-3 mb-0" x-show="!verified">We check both again every 15 seconds while
+        this page is open.<span x-show="checkedAt" x-text="' Last check ' + checkedAt + '.'"></span></p>
+      <p class="text-secondary small mt-3 mb-0" x-show="verified">Your setup files stay available on the
+        domain's page. Come back there any time from My domains.</p>
     </div>
 
   </div></div>
 
   <div class="wiz-actions">
-    <button class="btn btn-outline-secondary" type="button" @click="back()" x-show="index > 0">Back</button>
-    <!-- Only for a publisher who has a domain already: they are adding one
-         more and can go back to it. Leaving this way saves nothing, because
-         the domain is saved only by the last step's buttons. The answers held
-         in the browser are dropped, so the next visit starts clean rather than
-         on a domain given up on. On the domain step Skip for now does the same
-         for every publisher, and the dead end has its own way back, so this one
-         is shown on neither. -->
-    <a class="btn btn-outline-secondary" :href="paths.home" @click="forget()"
-       x-show="hasDomains && !unsupported && step !== 'domain'">Cancel</a>
+    <button class="btn btn-outline-secondary" type="button" @click="back()" x-show="canReturnTo(index - 1)">Back</button>
     <span class="spacer"></span>
-    <span class="text-secondary small" x-show="busy">Checking…</span>
-    <span class="text-secondary small" x-show="!busy && needsCheck && checkedAt"
-          x-text="'Checked at ' + checkedAt + ', not there yet'"></span>
-    <button class="btn btn-outline" type="button" x-show="needsCheck" @click="runCheck()" :disabled="busy">
-      Check again
-    </button>
-    <button class="btn btn-outline-secondary" type="button" x-show="skippable" @click="skip()" :disabled="busy">
-      Skip for now
-    </button>
-    <button class="btn btn-primary" type="button" x-show="!unsupported" @click="next()" :disabled="busy || !canAdvance">
-      <span x-text="last ? 'Finish setup' : 'Next'"></span>
-    </button>
-    <a class="btn btn-outline-secondary" :href="paths.home" x-show="unsupported">Back to your domains</a>
+    <span class="text-secondary small" x-show="busy && step === 'domain'">Checking…</span>
+    <!-- Every step after the business step can be left. What the earlier
+         steps saved is kept, and the domain is listed as not verified until
+         both checks pass. The business step is left only through its Next,
+         and the dead end has its own way back to the same list. -->
+    <a class="wiz-later" :href="paths.home" x-show="canFinishLater">Finish later</a>
+    <button class="btn btn-primary" type="button" x-show="!deadEnd && step !== 'connect'" @click="next()"
+            :disabled="busy || !canAdvance">Next</button>
+    <button class="btn btn-primary" type="button" x-show="step === 'connect' && !verified" @click="checkNow()"
+            :disabled="checking || busy" x-text="checking ? 'Checking…' : 'Check now'"></button>
+    <a class="btn btn-primary" x-show="step === 'connect' && verified"
+       :href="paths.domain_prefix + encodeURIComponent(domain)">Go to your domain</a>
+    <a class="btn btn-outline-secondary" :href="paths.home" x-show="deadEnd">Back to your domains</a>
   </div>
+  <!-- Only once the domain is saved: before the domain step's Next, leaving
+       keeps no domain, and the sentence would say otherwise. And only beside
+       Finish later, which the business step does not offer. -->
+  <p class="text-secondary small wiz-note" x-show="saved && canFinishLater">Finish later keeps everything you
+    entered. The domain stays in My domains as Not verified until both checks pass.</p>
 </div>
 
 <script src="/static/alpine.min.js" defer></script>
 <script src="/static/wizard-calls.js"></script>
 <script src="/static/wizard-flow.js"></script>
+<script src="/static/wizard-connect.js"></script>
 <script src="/static/wizard.js"></script>
 {{end}}

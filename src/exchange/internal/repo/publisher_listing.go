@@ -11,9 +11,11 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
 )
 
-// Listing states, mirroring the fora.listing_state enum. A listing is never born
-// proven: it starts PendingManifest and reaches Active only when the site's
-// served manifest names this seat with the registered payee.
+// Listing states, mirroring the fora.listing_state enum. A listing registration
+// creates is never born proven: it starts PendingManifest and reaches Active only
+// when the site's served manifest names this seat with the registered payee. The
+// one listing born Active is one an operator declares in the boot fixture
+// (SiteProvisionRepo), which the operator vouches for.
 const (
 	ListingStatePendingManifest = "PENDING_MANIFEST"
 	ListingStateActive          = "ACTIVE"
@@ -196,20 +198,24 @@ func (r *publisherListingRepo) ByPublisher(
 	return out, nil
 }
 
+// listingScope is the content_path_scope a new listing row stores. A nil scope
+// and an empty one mean the same thing -- the whole site is offered -- and the
+// column is NOT NULL, so nil is stored as an empty array rather than relied on
+// to encode as one. Every insert of a listing goes through it.
+func listingScope(scope []string) []string {
+	if scope == nil {
+		return []string{}
+	}
+	return scope
+}
+
 func (r *publisherListingRepo) Create(
 	ctx context.Context, tx pgx.Tx, in NewListing,
 ) (PublisherDomainListing, error) {
-	// A nil scope and an empty one mean the same thing -- the whole site is
-	// offered -- and the column is NOT NULL, so nil is normalized here rather
-	// than relied on to encode as an empty array.
-	scope := in.ContentPathScope
-	if scope == nil {
-		scope = []string{}
-	}
 	row, err := sqlc.New(tx).CreatePublisherDomainListing(ctx, sqlc.CreatePublisherDomainListingParams{
 		TenantID:         in.TenantID,
 		Domain:           in.Domain,
-		ContentPathScope: scope,
+		ContentPathScope: listingScope(in.ContentPathScope),
 		Terms:            in.Terms,
 		SitemapUrl:       in.SitemapURL,
 		// Set with the terms: here, or by SetTerms while the listing is pending.

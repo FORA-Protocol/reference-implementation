@@ -1,12 +1,11 @@
 // The page that reopens the wizard on a domain already saved, to finish its
-// setup at the first step that is not done.
+// setup at the step it stands on.
 
 package web
 
 import (
 	"net/http"
 	"net/url"
-	"strings"
 )
 
 // DomainSetupPattern is the page that finishes one saved domain's setup. It
@@ -26,7 +25,7 @@ func domainPageURL(domain string) string {
 }
 
 // resumeBoot is a saved domain's answers, which the wizard reopens with
-// instead of asking for them again.
+// instead of asking for them again, and the step it reopens on.
 type resumeBoot struct {
 	Domain       string `json:"domain"`
 	CDN          string `json:"cdn"`
@@ -37,17 +36,24 @@ type resumeBoot struct {
 	// licensing step then opens on the terms the wizard always opens on.
 	TermsSet                  bool `json:"terms_set"`
 	ImportReplacesManualTerms bool `json:"import_replaces_manual_terms"`
+	// Step is the step the wizard reopens on: the licensing step while the
+	// domain has no terms, the last step after that.
+	Step string `json:"step"`
 }
 
-// FinishSetup reopens the wizard on one of the person's saved domains. Where
-// it opens is decided after the page loads, by asking the site what it answers
-// now (see WizardAPI.Progress); this page only carries the saved answers.
+// FinishSetup reopens the wizard on one of the person's saved domains, at the
+// step its setup stands on. The step is decided here, from what the Exchange
+// holds, so the page opens on it; the last step then asks the site itself.
 //
 // A domain that is not this person's answers not-found, the answer a domain
 // nobody holds gets. A verified domain has nothing to finish, so the page sends
 // the publisher to it.
 func (h *Handler) FinishSetup(w http.ResponseWriter, r *http.Request) {
-	resume, err := h.resumer.Reopen(r.Context(), actorOf(r.Context()), r.PathValue("domain"))
+	regs, ok := pageRegistrations(w, r)
+	if !ok {
+		return
+	}
+	resume, err := h.resumer.Reopen(r.Context(), regs, r.PathValue("domain"))
 	if err != nil {
 		renderFailure(h.render, w, r, err, "")
 		return
@@ -57,14 +63,17 @@ func (h *Handler) FinishSetup(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, domainPageURL(site.Domain), http.StatusSeeOther)
 		return
 	}
-	boot := bootOf(resume.Start, wizardSteps(true))
+	// A saved domain is held by a business, so the wizard reopens without the
+	// business step.
+	boot := bootOf(resume.Start, regs)
 	boot.Resume = &resumeBoot{
 		Domain:                    site.Domain,
 		CDN:                       site.CDN,
 		NetworkLabel:              resume.NetworkLabel,
-		Paths:                     strings.Join(site.ContentPathScope, ", "),
+		Paths:                     pathsField(site.ContentPathScope),
 		TermsSet:                  site.Terms != nil,
 		ImportReplacesManualTerms: site.ImportReplacesManualTerms,
+		Step:                      resume.Step,
 	}
 	h.renderWizard(w, r, "Finish setting up "+site.Domain, boot)
 }

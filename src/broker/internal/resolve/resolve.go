@@ -8,6 +8,7 @@ import (
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/FORA-Protocol/protocol/sdk/go/core"
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
@@ -406,7 +407,12 @@ func buildResourceQuery(
 // requester.scopes, forwarded unchanged and in order: the Exchange selects terms
 // by them, so a Broker that dropped them would hide every scope-gated term from
 // an agent that holds the scope. The Broker neither adds, removes nor checks a
-// scope. uris ride on the enclosing ResourceQuery; intended_use was removed from
+// scope. Delegation is forwarded the same way, as a copy of what the agent sent:
+// an Exchange verifies the chain itself and binds it to the key that signed the
+// request it arrives on, so on a query the Broker originates today's Exchange
+// ignores it and hides gated terms; forwarding it is what a later Broker path
+// that preserves the agent's own signature needs. uris ride on the enclosing
+// ResourceQuery; intended_use was removed from
 // the selection path (ADR-014 scope-only). Domain is the requester.domain the
 // agent wrote, copied unchanged; nothing here checks it against the agent the
 // Broker verified. The Requester carries no caller-written billing field, and a
@@ -415,12 +421,16 @@ func buildResourceQuery(
 // signature, or its acceptances on a relayed purchase), never from anything a
 // request names.
 func buildRequester(_ context.Context, req Request, _ clock.Clock) *forav1.Requester {
-	return &forav1.Requester{
+	r := &forav1.Requester{
 		Id:     req.RequesterID,
 		Domain: req.RequesterDom,
 		Type:   forav1.RequesterType_REQUESTER_TYPE_AGENT,
 		Scopes: slices.Clone(req.Scopes),
 	}
+	if req.Delegation != nil {
+		r.Delegation, _ = proto.Clone(req.Delegation).(*forav1.Delegation)
+	}
+	return r
 }
 
 func orURI(req Request) string {

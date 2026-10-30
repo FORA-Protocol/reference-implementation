@@ -18,10 +18,12 @@ The ways to read an edge, and what each sends:
   URL, and its name says what is left out.
 * :func:`browse` is an ordinary browser-style GET with a chosen User-Agent, for
   the publisher's own pages and the bot gate in front of them.
-* :func:`present` sends one request with exactly the headers it is given, for a
-  case the SDK's ``fetch`` cannot express: a proof of possession the harness
-  altered, or a valid proof sent under a chosen User-Agent. The headers come
-  from ``harness.edge_runtimes``, which mints every proof through the SDK.
+* :func:`present` sends one request with exactly the headers it is given and
+  follows no redirect, for a case the SDK's ``fetch`` cannot express: a proof of
+  possession the harness altered, a valid proof sent under a chosen User-Agent,
+  or an AI bot the edge must refuse itself rather than through a redirect. A
+  proof's headers come from ``harness.edge_runtimes``, which mints every proof
+  through the SDK.
 * :func:`post_unsigned_json` POSTs a JSON body with no request signature to a
   route the protocol does not define, for a test that proves the route is gone.
 
@@ -73,22 +75,35 @@ class EdgeAnswer:
 
     @property
     def reason(self) -> str:
-        """The edge's refusal token, or a description of why there was none.
+        """The edge's refusal token, or a description of why there was none."""
+        return refusal_reason(self.media_type, self.body)
 
-        A 403 that arrives as HTML or empty is exactly the failure worth
-        diagnosing, so a body that is not a JSON object with a ``reason`` yields a
-        marker the assertion message can show, rather than an exception that hides
-        what arrived.
-        """
-        if self.media_type != "application/json":
-            return f"<non-JSON body: {self.text[:120]!r}>"
-        try:
-            payload = json.loads(self.body)
-        except ValueError:
-            return f"<unparseable JSON: {self.text[:120]!r}>"
-        if not isinstance(payload, dict):
-            return f"<JSON is {type(payload).__name__}, not an object>"
-        return str(payload.get("reason", "<no reason field>"))
+
+def media_type_of(content_type: str) -> str:
+    """The media type a Content-Type value names, without its parameters."""
+    return content_type.split(";")[0].strip()
+
+
+def refusal_reason(media_type: str, body: str | bytes) -> str:
+    """The ``reason`` token of an edge's refusal, or a marker saying why there is none.
+
+    Every runtime refuses with a JSON object whose ``reason`` is the token a test
+    asserts on; its ``error`` is text for people, which a test never asserts
+    (ADR-028 D4). A 403 that arrives as HTML or empty is exactly the failure worth
+    diagnosing, so a body that is not a JSON object with a ``reason`` yields a
+    marker the assertion message can show, rather than an exception that hides
+    what arrived. The one parser of that body, for every runtime's reader.
+    """
+    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
+    if media_type != "application/json":
+        return f"<non-JSON body: {text[:120]!r}>"
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return f"<unparseable JSON: {text[:120]!r}>"
+    if not isinstance(payload, dict):
+        return f"<JSON is {type(payload).__name__}, not an object>"
+    return str(payload.get("reason", "<no reason field>"))
 
 
 def edge_fetch_target(signed: str, compose_stack: StackURLs) -> tuple[str, dict[str, str]]:
@@ -243,7 +258,7 @@ def _send(
         response = client.send(request)
     return EdgeAnswer(
         status=HTTPStatus(response.status_code),
-        media_type=response.headers.get("content-type", "").split(";")[0].strip(),
+        media_type=media_type_of(response.headers.get("content-type", "")),
         body=response.content,
         headers={name: ", ".join(response.headers.get_list(name)) for name in response.headers},
     )

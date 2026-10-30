@@ -1,0 +1,23 @@
+# The rows exchange-c creates at start-up when they are absent (ADR-029): its
+# seat and the sfx site it sells, on the CloudFront RSA scheme with its key-pair
+# id. Mounted read-only at /boot/fixture.yml, beside the shared terms file;
+# test_guards_exchange_boot_fixtures.py holds this file to the harness's
+# constants and to the compose file.
+version: 1
+seats:
+  - tenant_id: tenant-seat-c
+    domain: exchange-c:8081
+    ed25519_key_ref: exchange-primary
+    rsa_key_ref: cf-rsa-primary
+    allow_broker_relay: true
+    activate_new_agents_by_default: true
+publishers:
+  - publisher_id: demo-resource-owner
+    display_name: FORA demo publisher
+    sites:
+      - domain: sfx.demo.fora-protocol.org
+        signing_scheme: AWS_CLOUDFRONT_RSA
+        cloudfront_key_pair_id: cf-rsa-primary
+        listings:
+          - tenant_id: tenant-seat-c
+            terms_file: free-listing-terms.json

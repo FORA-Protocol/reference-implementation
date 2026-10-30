@@ -6,22 +6,29 @@
 #   docker build -f Dockerfile.miniflare -t fora/edge-miniflare:dev .
 
 FROM node:22-slim AS builder
-# @fora-protocol/sdk is installed from the npm registry at an exact release
-# version, the same release the Go module and the two PyPI distributions name.
-# npm records a sha512 integrity for it and verifies that against the downloaded
-# tarball on every install, so the bytes this image builds on are pinned rather
-# than merely named. No sibling checkout is mirrored in and any shallow workdir
-# works.
+# @fora-protocol/sdk is a git dependency on the protocol repository, pinned to
+# one full 40-hex commit: between protocol releases the edge, the Go services and
+# the e2e harness all build from the same commit of the protocol's integration
+# branch (scripts/check-sdk-pin-consistency.sh holds the three pins together).
+# npm installs the repository's root package.json, which presents the TypeScript
+# SDK under sdk/ts; the import specifiers stay "@fora-protocol/sdk/...". At the
+# next protocol release the pin goes back to an exact registry version.
 #
-# It used to be a git pin at a commit SHA, which needed a paragraph of its own
-# here: npm fetched a codeload tarball for it and fell back to a real clone when
-# that failed, so `git` had to be installed for a path almost nothing took. The
-# registry install needs neither, and the apt layer went with the pin.
+# For a GitHub spec pinned to a commit, npm first fetches the codeload tarball of
+# that commit over HTTPS and falls back to a real `git clone` only when the
+# tarball fetch fails. git is installed for that fallback and for nothing else:
+# without it the normal path works and the fallback fails, on a machine nobody is
+# watching. The lock records the commit and the tarball's sha512, and `npm ci`
+# installs exactly that commit. No sibling checkout is mirrored in and any
+# shallow workdir works.
 WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
-# Persist npm's download cache across builds — every registry tarball this step
-# downloads, the SDK's among them. The mount lives with the builder, so nothing
-# here reaches a layer.
+# Persist npm's download cache across builds — every tarball this step
+# downloads, the SDK's codeload tarball among them. The mount lives with the
+# builder, so nothing here reaches a layer.
 #
 # id, because BuildKit otherwise names a cache mount after its target: all three
 # npm mounts in this stack would be ONE cache, and sharing=locked would then make

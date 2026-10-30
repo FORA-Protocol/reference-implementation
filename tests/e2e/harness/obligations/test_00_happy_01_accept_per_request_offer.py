@@ -1,7 +1,8 @@
 """Obligation PAID-002: accepting a per-request offer confirms it and returns a URL.
 
 Driven against the demo ``epicurus`` resource (PER_UNIT USD, individual,
-US/GB) as the USD demo buyer through the Broker, with the SDK's own
+US/GB), which exchange-a sells, as the test's own agent (``fresh_agent``, with an
+account at exchange-a) through the Broker, with the SDK's own
 ``BrokerClient``: the agent resolves at the Broker (discovery-only ranked
 offers, each verified by the SDK against its issuing Exchange's key), then buys
 the winning offer through ``BrokerService.ExecuteTransaction``, which the Broker
@@ -21,10 +22,10 @@ from __future__ import annotations
 
 import pytest
 
-from ..broker_purchase import buy_through_broker
-from ..conftest import StackURLs
-from ..seed import DEMO_PHILOSOPHY_DOMAIN, USD_AGENT_ID, SeededFixture
-from ..e2e_catalog import USD_AGENT_KEY_PATH
+from ..broker_purchase import resolve_and_buy
+from ..exchanges import EXCHANGE_A_DOMAIN
+from ..fresh_agent import FreshAgent
+from ..seed import DEMO_PHILOSOPHY_DOMAIN
 from ..obligation_registry import Obligation, obligation
 
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
@@ -34,15 +35,11 @@ _RESOURCE_URI = f"http://{DEMO_PHILOSOPHY_DOMAIN}/articles/philosophers/epicurus
 
 
 @obligation(Obligation.PAID_002)
-def test_agent_accepts_per_request_offer_and_receives_signed_url(
-    compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: seed ingests the demo catalog
-) -> None:
+def test_agent_accepts_per_request_offer_and_receives_signed_url(fresh_agent: FreshAgent) -> None:
     """Broker purchase of a per-request offer → a transaction_id and a delivery URL."""
+    fresh_agent.fund(EXCHANGE_A_DOMAIN)
     # (a) Broker Resolve, then buy the winning offer through the Broker.
-    _, item = buy_through_broker(
-        compose_stack, _RESOURCE_URI, agent_id=USD_AGENT_ID, key_path=USD_AGENT_KEY_PATH
-    )
+    item = resolve_and_buy(fresh_agent, _RESOURCE_URI)
     assert item.denial_reason is None, f"the per-request offer was denied: {item}"
     # (b)
     assert item.transaction_id, f"the item must carry a non-empty transaction_id: {item}"

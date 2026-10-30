@@ -3,9 +3,10 @@
 Each reader here fetches one page or file the console serves a signed-in
 publisher, requires the answer a working page gives, and returns it as a typed
 result: the income report as a file (``/income.csv``), the transaction list, one
-transaction with the signed evidence its Verify button checks, the catalog, and
-the publisher's list of domains. A test asserts on those results and never on a
-raw response or on markup.
+transaction with the signed evidence its Verify button checks, the catalog, the
+publisher's list of domains with the business it is headed by, and where a page
+of the console ends up and what its sidebar marks (:func:`console_page`). A test
+asserts on those results and never on a raw response or on markup.
 
 Pages are parsed structurally, with the standard library's HTML parser, into a
 small element tree (:class:`Element`), and each reader picks out the elements
@@ -40,8 +41,10 @@ from .console_login import ConsoleBrowser
 
 # The console's dashboard routes (src/console/internal/dashboard/paths.go).
 DOMAINS_PATH = "/domains"
+OVERVIEW_PATH = "/overview"
 TRANSACTIONS_PATH = "/transactions"
 CATALOG_PATH = "/catalog"
+INCOME_PATH = "/income"
 INCOME_CSV_PATH = "/income.csv"
 
 #: Elements HTML closes without an end tag.
@@ -416,11 +419,15 @@ def registered_sites(browser: ConsoleBrowser, base: str) -> list[SiteSummary]:
     """The domains the domains page lists for the publisher, in its order.
 
     The console's home page shows the same list only until the publisher has a
-    verified domain; from then on it opens the overview instead. Each row holds
+    verified domain; from then on it opens the overview instead. The list is read
+    from the domains page itself, never from a page a redirect led to, so an empty
+    list always means the page listed nothing. Each row holds
     the link to the domain's page, with its name and network, and its badge; a
     domain that is not verified also carries the link that finishes its setup.
     """
-    page = _page(browser, f"{base}{DOMAINS_PATH}")
+    response = _get(browser, f"{base}{DOMAINS_PATH}")
+    assert response.url.path == DOMAINS_PATH, f"the domains page sent the browser to {response.url}"
+    page = parse_html(response.text)
     out: list[SiteSummary] = []
     for item in page.find_all("div", lambda d: "list-group-item" in d.classes()):
         names = item.find_all("span", lambda s: "fw-semibold" in s.classes())
@@ -438,3 +445,60 @@ def registered_sites(browser: ConsoleBrowser, base: str) -> list[SiteSummary]:
             )
         )
     return out
+
+
+#: What separates the business's name from its payee id in the line the domains
+#: page heads its list with.
+_PAYEE_ID = " · Payee id "
+
+
+@dataclass(frozen=True)
+class Business:
+    """The business the domains page names above its list: its name and payee id."""
+
+    name: str
+    payee_id: str
+
+
+def business_named(browser: ConsoleBrowser, base: str) -> Business:
+    """The business the domains page heads its list with, and its payee id.
+
+    The page names it once the business is named, with or without a domain.
+    """
+    page = _page(browser, f"{base}{DOMAINS_PATH}")
+    lines = [p.text() for p in page.find_all("p", lambda p: _PAYEE_ID in p.text())]
+    assert len(lines) == 1, f"the domains page names {len(lines)} businesses: {lines}"
+    name, _, payee_id = lines[0].partition(_PAYEE_ID)
+    return Business(name=name.strip(), payee_id=payee_id.strip())
+
+
+# --- where a page of the console ends up -------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ConsolePage:
+    """Where a page of the console ended, once its redirects are followed.
+
+    ``current`` is the address of the section its sidebar marks as the current
+    one, "" for a page drawn without the console's sidebar (the add-a-domain
+    wizard). ``empty`` is whether the page shows the empty state the console's
+    sections share.
+    """
+
+    path: str
+    current: str
+    empty: bool
+
+
+def console_page(browser: ConsoleBrowser, base: str, path: str) -> ConsolePage:
+    """Open ``path`` the way a person does, following where it leads, and say where it ended."""
+    response = _get(browser, f"{base}{path}")
+    page = parse_html(response.text)
+    current = ""
+    sections = page.find_all("nav", lambda n: n.attrs.get("aria-label") == "Sections")
+    if sections:
+        marked = sections[0].find_all("a", lambda a: a.attrs.get("aria-current") == "page")
+        assert len(marked) == 1, f"{path} marks {len(marked)} sections current"
+        current = marked[0].attrs.get("href", "")
+    empty = bool(page.find_all("div", lambda d: "empty-state" in d.classes()))
+    return ConsolePage(path=response.url.path, current=current, empty=empty)

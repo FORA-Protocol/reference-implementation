@@ -13,6 +13,7 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/db"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/db/sqlc"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo/repotest"
 )
 
 // These are persistence round-trips: repository port -> sqlc -> Postgres and
@@ -23,20 +24,15 @@ import (
 // that goes repo -> DB and a read that comes back the same way is a persistence
 // round-trip, not a protocol one, and this file never claims the longer word.
 //
-// The tenant seed is one tier lower still. No production code creates a tenant
-// (an operator provisions it), so there is no repository port to arrange
-// through, and these tests call the generated sqlc InsertTenant query directly
-// -- the same held-open corner the package's sibling suites document.
+// The seat every tenant-scoped assertion needs is arranged through
+// repo.SeatProvisionRepo, by way of repotest.SeedSeat: no request path creates a
+// seat, and that port is the one a deployment's boot fixture provisions its
+// seats through.
 
-// seedTenantRow inserts the seat every tenant-scoped assertion below needs.
-func seedTenantRow(t *testing.T, ctx context.Context, q sqlc.Querier, tenantID, domain string) {
+// seedTenantRow creates the seat every tenant-scoped assertion below needs.
+func seedTenantRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tenantID, domain string) {
 	t.Helper()
-	if _, err := q.InsertTenant(ctx, sqlc.InsertTenantParams{
-		TenantID: tenantID, Domain: domain, Ed25519KeyRef: "k",
-		ReportingPolicy: []byte(`{}`),
-	}); err != nil {
-		t.Fatalf("seed tenant %q: %v", tenantID, err)
-	}
+	repotest.SeedSeat(t, ctx, pool, repotest.Seat{ID: tenantID, Domain: domain, Ed25519KeyRef: "k"})
 }
 
 // createPublisher drives PublisherWriteRepo.Create through a real transaction,
@@ -97,7 +93,7 @@ func TestPublisherRegistrationRoundTrip(t *testing.T) {
 		issuer      = "https://login.example"
 		subject     = "sub-1"
 	)
-	seedTenantRow(t, ctx, q, tenantID, "exchange.example")
+	seedTenantRow(t, ctx, pool, tenantID, "exchange.example")
 
 	created, err := createPublisher(t, ctx, pool, publisherID, "Stoa Press")
 	if err != nil {
@@ -369,8 +365,8 @@ func TestGrantIsScopedToOneSeat(t *testing.T) {
 		issuer      = "https://login.example"
 		subject     = "sub-1"
 	)
-	seedTenantRow(t, ctx, q, seatA, "exchange.example")
-	seedTenantRow(t, ctx, q, seatB, "other-exchange.example")
+	seedTenantRow(t, ctx, pool, seatA, "exchange.example")
+	seedTenantRow(t, ctx, pool, seatB, "other-exchange.example")
 	if _, err := createPublisher(t, ctx, pool, publisherID, "Stoa Press"); err != nil {
 		t.Fatalf("Create publisher: %v", err)
 	}
@@ -403,7 +399,7 @@ func TestGrantRejectsUnknownPublisher(t *testing.T) {
 	ctx := context.Background()
 	pool := newTestPool(t, ctx)
 	const tenantID = "t-grant-ghost"
-	seedTenantRow(t, ctx, sqlc.New(pool), tenantID, "exchange.example")
+	seedTenantRow(t, ctx, pool, tenantID, "exchange.example")
 
 	err := grant(t, ctx, pool, repo.PublisherGrant{
 		TenantID: tenantID, PublisherID: "pub-nobody",

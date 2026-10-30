@@ -59,7 +59,6 @@ from ..money_path import LECTURE_NOTES, THALES, assert_bought, discover_offer, o
 from ..obligation_registry import Obligation, obligation
 from ..reporting import report_body
 from ..sdk_client import offer_verifier, sdk_exchange_client
-from ..seed import SeededFixture
 from ..stack_urls import StackURLs
 
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
@@ -73,7 +72,6 @@ _NOT_IN_CATALOG = "OFFER_ABSENCE_REASON_NOT_IN_CATALOG"
 @obligation(Obligation.TENANT_001)
 def test_a_resource_pushed_to_one_seat_is_not_offered_by_the_other(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """Pushed to exchange-a's seat: exchange-a offers it, exchange-b offers nothing for it."""
@@ -195,7 +193,6 @@ def _refresh_naming(stack: StackURLs, tenant_id: str) -> None:
 @REMOVE_RESOURCES_UNIMPLEMENTED.mark
 def test_a_removal_naming_another_seat_is_refused_and_the_entry_stays(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """tenant_id naming exchange-c's seat in a removal at exchange-a: refused, entry still offered."""
@@ -206,7 +203,6 @@ def test_a_removal_naming_another_seat_is_refused_and_the_entry_stays(
 @REFRESH_CATALOG_UNIMPLEMENTED.mark
 def test_a_refresh_naming_another_seat_is_refused(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
 ) -> None:
     """RefreshCatalog at exchange-a naming exchange-c's seat: permission_denied, no refresh."""
     _refresh_naming(compose_stack, SEAT_OF_SFX)
@@ -219,7 +215,6 @@ def test_a_refresh_naming_another_seat_is_refused(
 @CATALOG_TENANT_MISMATCH_UNTYPED.mark
 def test_a_push_naming_the_second_seat_on_the_same_exchange_is_refused(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed writes the second seat
     fresh_agent: FreshAgent,
 ) -> None:
     """tenant_id naming exchange-a's second seat in a push to exchange-a: refused, nothing stored.
@@ -235,7 +230,6 @@ def test_a_push_naming_the_second_seat_on_the_same_exchange_is_refused(
 @REMOVE_RESOURCES_UNIMPLEMENTED.mark
 def test_a_removal_naming_the_second_seat_on_the_same_exchange_is_refused(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed writes the second seat
     fresh_agent: FreshAgent,
 ) -> None:
     """tenant_id naming exchange-a's second seat in a removal at exchange-a: entry still offered."""
@@ -246,7 +240,6 @@ def test_a_removal_naming_the_second_seat_on_the_same_exchange_is_refused(
 @REFRESH_CATALOG_UNIMPLEMENTED.mark
 def test_a_refresh_naming_the_second_seat_on_the_same_exchange_is_refused(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed writes the second seat
 ) -> None:
     """RefreshCatalog at exchange-a naming its second seat: permission_denied, no refresh."""
     _refresh_naming(compose_stack, SECOND_SEAT_OF_EXCHANGE_A)
@@ -271,7 +264,6 @@ def _window_at_exchange_a(agent: FreshAgent) -> str | None:
 
 @obligation(Obligation.TENANT_005)
 def test_an_operator_setting_naming_the_second_seat_reaches_that_seat_alone(
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed writes the second seat
     fresh_agent: FreshAgent,
 ) -> None:
     """exchange-a's admin listener sets its second seat's policy and rate; its own seat keeps its window.

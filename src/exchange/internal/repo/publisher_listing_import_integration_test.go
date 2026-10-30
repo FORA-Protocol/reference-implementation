@@ -126,7 +126,7 @@ const (
 func outcomeFixture(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	t.Helper()
 	pool := listingFixture(t, ctx, outcomeSeatA, outcomePublisher, outcomeSite)
-	seedTenantRow(t, ctx, sqlc.New(pool), outcomeSeatB, "seat-b.example")
+	seedTenantRow(t, ctx, pool, outcomeSeatB, "seat-b.example")
 	for _, seat := range []string{outcomeSeatA, outcomeSeatB} {
 		if _, err := createListing(t, ctx, pool, seat, outcomeSite, nil, termsFree); err != nil {
 			t.Fatalf("Create listing on %s: %v", seat, err)

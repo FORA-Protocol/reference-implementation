@@ -76,7 +76,7 @@ func (c *sorControl) callCount() int {
 // source, exactly as an operator edits the account inside the SoR.
 func (c *sorControl) setActive(t *testing.T, billingRef string, active bool) {
 	t.Helper()
-	if err := c.inner.SetActive(billingRef, active); err != nil {
+	if err := c.inner.SetActive(context.Background(), billingRef, active); err != nil {
 		t.Fatalf("SetActive(%q, %v): %v", billingRef, active, err)
 	}
 }

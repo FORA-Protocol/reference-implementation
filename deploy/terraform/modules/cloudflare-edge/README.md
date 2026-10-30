@@ -43,12 +43,6 @@ module "fora_edge" {
 
   exchange_url     = "https://exchange.operator.example"
   exchange_wba_url = "https://exchange.operator.example/.well-known/http-message-signatures-directory"
-  provider_domain  = "news.example.com"
-  exchanges_json = jsonencode([{
-    domain             = "exchange.operator.example"
-    endpoint           = "https://exchange.operator.example"
-    supported_profiles = ["fora-news-v1", "fora-comp-v1", "fora-music-v1"]
-  }])
 
   origin_url = "https://origin.example.com" # omit when the CDN routes to origin itself
 }
@@ -64,8 +58,6 @@ module "fora_edge" {
 | `route_patterns` | yes | Route patterns, e.g. `["news.example.com/*"]` |
 | `exchange_url` | yes | `EXCHANGE_URL` binding |
 | `exchange_wba_url` | yes | `EXCHANGE_WBA_URL` binding (WBA directory URL) |
-| `provider_domain` | yes | `PROVIDER` binding (publisher domain in fora.json) |
-| `exchanges_json` | yes | `EXCHANGES_JSON` binding (JSON array) |
 | `script_name` | no | Worker name (default `fora-edge`) |
 | `worker_hostname` | no | Create a proxied `AAAA 100::` placeholder record |
 | `compatibility_date` / `compatibility_flags` | no | Mirror `src/edge/wrangler.toml` |
@@ -73,9 +65,6 @@ module "fora_edge" {
 | `fora_verify_keys` | no | `FORA_VERIFY_KEYS` binding |
 | `fora_enforce_binding` | no | `FORA_ENFORCE_BINDING` binding (`"true"`/`"false"`) |
 | `origin_url` | no | `ORIGIN_URL` binding |
-| `rsl_body` | no | `RSL_BODY` binding |
-| `acme_tokens_json` | no | `ACME_TOKENS_JSON` binding |
-| `catalog_contributors_json` | no | `CATALOG_CONTRIBUTORS_JSON` binding |
 | `wba_keys_json` | no | `WBA_KEYS_JSON` binding |
 | `wba_revocation_url` | no | `WBA_REVOCATION_URL` binding |
 | `wba_signed_directory_json` | no | `WBA_SIGNED_DIRECTORY_JSON` binding: the key directory pre-signed for this host |
@@ -85,13 +74,12 @@ module "fora_edge" {
 
 Full descriptions live in `variables.tf`.
 
-`provider_domain`, `exchanges_json`, `catalog_contributors_json`, `wba_keys_json`
-and `wba_revocation_url` are the five inputs that decide what the worker
-publishes at `/.well-known/fora.json` and
-`/.well-known/http-message-signatures-directory`. `provider_domain` is easy to
-overlook: it becomes the `domain` field of `fora.json`, which is the first thing
-the Exchange compares a catalog pusher against. A filled-in copy of both
-documents, with each field traced back to the input that produced it, is in
+`wba_keys_json` and `wba_revocation_url` are the two inputs that decide what the
+worker publishes at `/.well-known/http-message-signatures-directory`. The
+worker publishes no `/.well-known/fora.json` and no `/rsl.txt`: both are the
+publisher's own files, served from its origin, and the worker passes both
+addresses through to it for every client. A filled-in copy of the discovery
+document and of the key directory is in
 [../../../publisher-wellknown/](../../../publisher-wellknown/).
 
 ## Zone protections (read before production)

@@ -3,15 +3,18 @@
 // the four prefixes the demo publishers sell. The demo stack renders the same
 // list into the bundle (licensed_paths in deploy/terraform/stacks/demo-aws).
 //
-// Two properties. An AI bot reading a license document, which sits outside
+// Three properties. An AI bot reading a license document, which sits outside
 // the scope, reaches the origin, so an agent can read the terms before it
-// buys. The same bot under each prefix that is for sale is still sent to
-// negotiate. Both are checked for a declared AI User-Agent and for a request
-// with no User-Agent, which the edge also treats as a bot.
+// buys. The publisher's own discovery document and RSL file reach the origin
+// too: they are never the edge's to answer. The same bot under each prefix that
+// is for sale is still sent to negotiate. Each is checked for a declared AI
+// User-Agent and for a request with no User-Agent, which the edge also treats
+// as a bot.
 import type { CloudFrontRequest } from 'hono/lambda-edge';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { handler as awsHandler } from '../../src/entries/aws-lambda.js';
+import { PUBLISHER_DOCUMENT_PATHS } from '../../src/types.js';
 import { makeViewerRequestEvent as makeEvent } from '../helpers/cloudfront.js';
 import { PUB_ORIGIN } from '../helpers/test-setup.js';
 
@@ -34,8 +37,6 @@ beforeAll(async () => {
     'EXCHANGE_WBA_URL',
     'https://exchange.test/.well-known/http-message-signatures-directory',
   );
-  vi.stubEnv('PROVIDER', 'pub.example.com');
-  vi.stubEnv('EXCHANGES_JSON', '[{"domain":"exchange.test","endpoint":"https://exchange.test"}]');
   vi.stubEnv('LICENSED_PATHS_JSON', JSON.stringify(SCOPE));
   ({ handler } = await import('../../src/entries/aws-lambda.js'));
 });
@@ -50,6 +51,13 @@ describe.each(Object.entries(BOTS))('AWS entry with the demo scope, bot with %s'
     expect(isRequest(result)).toBe(true);
     if (!isRequest(result)) return;
     expect(result.uri).toBe(LICENSE_PATH);
+  });
+
+  it.each(PUBLISHER_DOCUMENT_PATHS)('passes a read of %s to the origin', async (path) => {
+    const result = await handler(makeEvent(`${PUB_ORIGIN}${path}`, headers));
+    expect(isRequest(result)).toBe(true);
+    if (!isRequest(result)) return;
+    expect(result.uri).toBe(path);
   });
 
   it.each(SCOPE)('sends a read under %s to negotiate', async (prefix) => {

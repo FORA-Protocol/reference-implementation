@@ -1,7 +1,7 @@
-// The wizard's steps: the business name, the domain and what serves it, the
-// files the publisher deploys, and the checks that gate each step. The
-// licensing step is in page.go, the last button in finish.go, and reopening a
-// saved domain at the step its setup stands on in resume.go.
+// The wizard's domain step -- the domain and what serves it -- and the files a
+// saved domain is set up with. The business step is in business.go, the
+// licensing step in page.go, the last step's checks in connection.go, and
+// reopening a saved domain at the step it stands on in resume.go.
 
 package wizard
 
@@ -19,45 +19,26 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/setup"
 )
 
-// The wizard's steps, by the key the browser restores them by and Progress
-// answers in.
+// The wizard's steps, by the key the page walks them by and the page that
+// finishes a saved domain's setup reopens it on.
+//
+// StepName is the business name, shown only to an account that has not named
+// its business, before the others.
 const (
-	StepName     = "name"
-	StepDomain   = "domain"
-	StepDocument = "document"
-	StepPackage  = "package"
-	StepTerms    = "terms"
+	StepName    = "name"
+	StepDomain  = "domain"
+	StepTerms   = "terms"
+	StepConnect = "connect"
 )
 
-// RegisterPublisher registers the business name, which is the one thing the
-// wizard stores before its last step.
-//
-// It has to be stored, because the discovery document the next steps hand out
-// attests the payee id this call mints, and there is no document to publish
-// without one. What that stores is a name and a payee, not a claim on any
-// hostname -- a publisher with no domains is an ordinary state, the one that
-// skipping the domain step ends registration in -- and the domain, which is
-// what one party can take from another, is still written only on the last
-// step.
-func (s *Service) RegisterPublisher(
-	ctx context.Context, actor exchangeclient.Actor, displayName string,
-) (exchangeclient.Publisher, error) {
-	name := strings.TrimSpace(displayName)
-	if name == "" {
-		return exchangeclient.Publisher{}, refusal.New(refusal.KindInvalid, "Please enter the name of your business.")
-	}
-	return s.registry.RegisterPublisher(ctx, actor, name)
-}
-
 // Lookup is everything the console can find out about a domain before the
-// publisher has done any work on it.
+// publisher saves it.
 //
 // The network and the registration are answered together on purpose. They are
 // two questions -- who serves this, and could I register it -- but the
 // publisher asks both by typing one address, and answering them in one call
 // spares the wizard a second round trip while they are still reading the first
-// answer. Manifest is what makes the resume work: a publisher whose document is
-// already published arrives at the file step with it already passing.
+// answer.
 type Lookup struct {
 	Domain   string
 	Provider cdn.Provider
@@ -65,7 +46,9 @@ type Lookup struct {
 	// "cloudfront" becomes "AWS CloudFront".
 	ProviderLabel string
 	Supported     bool
-	Taken         bool
+	// Taken is set when another publisher holds the domain. Message then says
+	// so.
+	Taken bool
 	// Yours is set when the domain is already one of this person's, and
 	// Verified says whether it is verified. Nothing else is looked up then:
 	// the publisher finishes or opens that domain rather than adding it again.
@@ -76,11 +59,10 @@ type Lookup struct {
 	// then says so, and nothing else about the domain is looked up.
 	LimitReached bool
 	Message      string
-	Manifest     exchangeclient.PreflightResult
 }
 
 // Lookup works out which network serves a domain and whether it could be
-// registered.
+// saved.
 //
 // The network is not asked of the publisher. Detection reads DNS and one
 // response header, and a publisher who does not know what a CNAME is still
@@ -111,12 +93,10 @@ func (s *Service) Lookup(ctx context.Context, actor exchangeclient.Actor, rawDom
 	}
 	if atUnverifiedLimit(regs) {
 		// Said before anything is asked about the domain. The Exchange refuses
-		// the save at the last button anyway; this is what tells the publisher
-		// before they publish a file and install a package for nothing.
+		// the save anyway; this tells the publisher before they press Next.
 		out.LimitReached, out.Message = true, unverifiedLimitText
 		return out, nil
 	}
-	publisherID := regs.PublisherID
 	out.Provider, out.Supported, out.Message = s.detectNetwork(ctx, domain)
 	out.ProviderLabel = networkLabel(out.Provider)
 	if !out.Supported {
@@ -125,66 +105,21 @@ func (s *Service) Lookup(ctx context.Context, actor exchangeclient.Actor, rawDom
 		// somebody else's server made for a wizard that has already stopped.
 		return out, nil
 	}
-	res, err := s.registry.PreflightDomain(ctx, actor, publisherID, domain)
+	res, err := s.registry.PreflightDomain(ctx, actor, regs.PublisherID, domain)
 	if err != nil {
 		return Lookup{}, err
 	}
-	// Domain taken is the one reason the wizard reads rather than just shows,
-	// because it is the only one the publisher cannot repair by editing a file.
-	out.Taken = containsFold(res.Reasons, consoleapi.ReasonDomainTaken)
-	out.Manifest = res
+	// Domain taken is the one reason the domain step reads: it is the only one
+	// the publisher cannot repair, and saving the domain would be refused for
+	// it. The others are about the file, which the last step checks.
+	if containsFold(res.Reasons, consoleapi.ReasonDomainTaken) {
+		out.Taken, out.Message = true, reasonText[consoleapi.ReasonDomainTaken]
+	}
 	return out, nil
 }
 
-// CheckManifest asks the Exchange to read the domain's discovery document.
-//
-// The Exchange reads it, not the console. It is the party that reads it again
-// before it verifies the domain, so it has to be the party that answers here: a
-// second reader in the console would be a second opinion about the same
-// document, and the two would drift.
-//
-// Nothing is written: this call neither saves the domain nor verifies it.
-func (s *Service) CheckManifest(
-	ctx context.Context, actor exchangeclient.Actor, rawDomain string,
-) (exchangeclient.PreflightResult, error) {
-	domain, err := Domain(rawDomain)
-	if err != nil {
-		return exchangeclient.PreflightResult{}, err
-	}
-	publisherID, err := s.publisherID(ctx, actor)
-	if err != nil {
-		return exchangeclient.PreflightResult{}, err
-	}
-	return s.registry.PreflightDomain(ctx, actor, publisherID, domain)
-}
-
-// CheckEdge asks the publisher's own site what it now answers.
-//
-// Three requests to public addresses on their site: what an agent without a
-// licence gets, what an ordinary visitor gets, and whether the discovery
-// document is still served now that a package sits in front of it. All three
-// used to be curl commands in the written instructions, which was asking a
-// publisher to do our work and read a status code.
-//
-// The document question belongs here rather than at the previous step. The
-// package is what could break it, so asking before it is deployed answers a
-// question nobody has yet.
-func (s *Service) CheckEdge(ctx context.Context, rawDomain, paths string) (EdgeReport, error) {
-	domain, err := Domain(rawDomain)
-	if err != nil {
-		return EdgeReport{}, err
-	}
-	return s.edgeReport(ctx, domain, splitPaths(paths)), nil
-}
-
-// edgeReport asks the site about its package and says what the answer means.
-func (s *Service) edgeReport(ctx context.Context, domain string, paths []string) EdgeReport {
-	report := s.inspectEdge(ctx, domain, paths)
-	report.Message = edgeMessage(report.State, domain)
-	return report
-}
-
-// Draft is a domain's answers as the wizard holds them before registration.
+// Draft is the domain step's answers: the address, the network the lookup
+// found behind it, and the licensed paths field as the publisher filled it in.
 type Draft struct {
 	Domain string
 	CDN    string
@@ -192,82 +127,84 @@ type Draft struct {
 	Paths string
 }
 
-// Files is a domain's setup files, and what to do with the edge configuration
-// on its network.
+// SaveDomain is the domain step's Next: it saves the domain on the Exchange,
+// with no terms yet, and answers with the domain as it is saved.
+//
+// Saving holds the hostname for this publisher from here on, and the domain is
+// listed as not verified until it has terms and its file and its package both
+// answer, so a publisher who leaves after this step loses nothing. Its terms are asked on
+// the next step, and the import's answer beside them.
+//
+// The Exchange decides what cannot be saved -- a domain another publisher
+// holds, one too many domains not verified -- and nothing is written then. A
+// domain this publisher saved before is answered as it was saved, whatever was
+// typed this time: its address, network and paths are fixed by the first save.
+func (s *Service) SaveDomain(
+	ctx context.Context, actor exchangeclient.Actor, d Draft,
+) (exchangeclient.Registration, error) {
+	domain, err := Domain(d.Domain)
+	if err != nil {
+		return exchangeclient.Registration{}, err
+	}
+	network := strings.TrimSpace(d.CDN)
+	if !supported(cdn.Provider(network)) {
+		return exchangeclient.Registration{}, refusal.New(refusal.KindInvalid,
+			"We cannot set your domain up on that CDN.")
+	}
+	regs, err := s.registrations(ctx, actor)
+	if err != nil {
+		return exchangeclient.Registration{}, err
+	}
+	return s.registry.RegisterDomain(ctx, exchangeclient.NewSite{
+		Actor:            actor,
+		PublisherID:      regs.PublisherID,
+		Domain:           domain,
+		CDN:              network,
+		ContentPathScope: splitPaths(d.Paths),
+	})
+}
+
+// Files is a saved domain's setup files, what to do with the edge
+// configuration on its network, and where its package runs once it answers.
 type Files struct {
 	Site      setup.Site
 	Bundle    setup.Bundle
 	EdgeSteps []setupsteps.Step
+	// Deployed says where the package runs once it answers, for the last
+	// step to show beside it then.
+	Deployed string
 }
 
-// Files builds the files for a domain that is not saved yet.
-//
-// Everything they are built from is in the answers plus the payee id, so the
-// files exist before the domain is saved: the wizard hands the publisher the
-// discovery document to publish on the step before they press the last button.
-//
-// It rebuilds the bundle rather than reading a stored one: the answers are the
-// source, and the same answers produce the same file a week later.
-func (s *Service) Files(ctx context.Context, actor exchangeclient.Actor, d Draft) (Files, error) {
-	site, err := s.draftSite(ctx, actor, d)
+// Files builds the files for one of the person's saved domains, from the
+// registration the Exchange holds, never from anything the browser sent. They
+// are the files the domain's own page offers.
+func (s *Service) Files(ctx context.Context, actor exchangeclient.Actor, rawDomain string) (Files, error) {
+	regs, reg, err := s.savedDomain(ctx, actor, rawDomain)
 	if err != nil {
 		return Files{}, err
 	}
-	bundle, err := build(ctx, s.bundles, site, "Your files could not be produced. Nothing was changed.")
+	site := siteOf(regs.PublisherID, reg)
+	bundle, err := build(ctx, s.bundles, site)
 	if err != nil {
 		return Files{}, err
 	}
-	return Files{Site: site, Bundle: bundle, EdgeSteps: edgeSteps(site)}, nil
+	return Files{
+		Site: site, Bundle: bundle, EdgeSteps: edgeSteps(site), Deployed: deployedText(cdnProvider(site.CDN)),
+	}, nil
 }
 
-// build produces a site's bundle, or the refusal a publisher reads when it
-// cannot be produced. The refusal's sentence is the caller's, because what is
-// unaffected differs: nothing was changed mid-wizard, and a registration is
-// untouched on its own page.
-func build(ctx context.Context, b Bundler, site setup.Site, message string) (setup.Bundle, error) {
+// build produces a saved domain's bundle, or the refusal a publisher reads
+// when it cannot be produced. The domain is saved either way, which is what
+// the sentence says.
+func build(ctx context.Context, b Bundler, site setup.Site) (setup.Bundle, error) {
 	bundle, err := b.Build(ctx, site)
 	if err != nil {
 		reqctx.FromContext(ctx).ErrorContext(ctx, "console.bundle_failed",
 			"domain", site.Domain, "err", err)
-		return setup.Bundle{}, refusal.Wrap(refusal.KindBuildFailed, message, err)
+		return setup.Bundle{}, refusal.Wrap(refusal.KindBuildFailed,
+			"Something went wrong on our side. Your registration is unaffected.", err)
 	}
 	return bundle, nil
-}
-
-// draftSite assembles what the builders take from the wizard's answers.
-//
-// The payee comes from the Exchange and never from the request. It is the value
-// the generated document attests, and the whole proof of control rests on the
-// publisher being unable to choose it.
-func (s *Service) draftSite(ctx context.Context, actor exchangeclient.Actor, d Draft) (setup.Site, error) {
-	publisherID, err := s.publisherID(ctx, actor)
-	if err != nil {
-		return setup.Site{}, err
-	}
-	return draftSiteFor(publisherID, d)
-}
-
-// draftSiteFor is draftSite for a payee already read from the Exchange.
-func draftSiteFor(publisherID string, d Draft) (setup.Site, error) {
-	domain, err := Domain(d.Domain)
-	if err != nil {
-		return setup.Site{}, err
-	}
-	network := strings.TrimSpace(d.CDN)
-	if !supported(cdn.Provider(network)) {
-		return setup.Site{}, refusal.New(refusal.KindInvalid, "We cannot set your domain up on that CDN.")
-	}
-	// The file steps come before the licensing step, so nothing has been
-	// chosen yet. The sample feed a mid-wizard download can carry is priced by
-	// the terms the licensing step opens on, not by an empty set of controls,
-	// which would build a term that permits everything.
-	return setup.Site{
-		Domain:           domain,
-		PublisherID:      publisherID,
-		CDN:              network,
-		ContentPathScope: splitPaths(d.Paths),
-		Terms:            defaultTerms(),
-	}, nil
 }
 
 // unverifiedLimitText is what the domain step says to a publisher who cannot

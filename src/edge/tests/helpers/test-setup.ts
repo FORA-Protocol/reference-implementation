@@ -30,20 +30,11 @@ export function expectNoSignatureParams(url: string | URL): void {
 // Minimum env the CONFIG SCHEMA accepts — shared by the config-surface suites
 // (config.test.ts extends it per case; manifest-parity adds WBA_KEYS_JSON).
 // Scope note: this is deliberately NOT the runtime suites' env. Those need
-// https://exchange.test URLs (to line up with the fetch-mock origins) and
-// their own PROVIDER values that the tests assert on — sharing this fixture
-// there would mean overriding every field.
+// https://exchange.test URLs to line up with the fetch-mock origins, so sharing
+// this fixture there would mean overriding every field.
 export const BASE_SCHEMA_ENV = {
   EXCHANGE_URL: 'http://exchange:8081',
   EXCHANGE_WBA_URL: 'http://exchange:8081/.well-known/http-message-signatures-directory',
-  PROVIDER: 'edge.e2e.local',
-  EXCHANGES_JSON: JSON.stringify([
-    {
-      domain: 'exchange.e2e.local',
-      endpoint: 'http://exchange:8081',
-      supported_profiles: ['fora-news-v1'],
-    },
-  ]),
 };
 
 /**

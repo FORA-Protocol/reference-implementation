@@ -7,7 +7,7 @@ import { handle } from 'hono/lambda-edge';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createApp } from '../../src/app.js';
-import { type AppDeps, WBA_PATH } from '../../src/types.js';
+import { type AppDeps, PUBLISHER_DOCUMENT_PATHS, WBA_PATH } from '../../src/types.js';
 import { makeViewerRequestEvent as makeEvent } from '../helpers/cloudfront.js';
 import {
   type TestKeypair,
@@ -38,22 +38,8 @@ beforeAll(async () => {
   keypair = await generateKeypair('k1');
   exchangeKid = await keyThumbprint(keypair);
   const deps: AppDeps = {
-    manifest: {
-      ver: '1.0',
-      role: 'ROLE_PUBLISHER',
-      domain: 'pub.example.com',
-      exchanges: [
-        {
-          domain: 'exchange.test',
-          endpoint: 'https://exchange.test',
-          relationship: 'PROVIDER_RELATIONSHIP_DIRECT',
-        },
-      ],
-      supported_profiles: ['fora-news-v1'],
-    },
     exchangeUrl: 'https://exchange.test',
     resolveKey: async (kid) => (kid === exchangeKid ? rawPublicKey(keypair) : undefined),
-    acmeTokens: { demo: 'response-body' },
     originUrl: ORIGIN_URL,
     fetcher: (async (input: RequestInfo | URL) => {
       originRequests.push(input as Request);
@@ -75,12 +61,14 @@ describe('AWS Lambda@Edge handler', () => {
     expect(result.body).toBe('ok');
   });
 
-  it('serves fora.json manifest', async () => {
-    const result = await lambdaHandler(makeEvent(`${PUB_ORIGIN}/.well-known/fora.json`));
+  it.each(PUBLISHER_DOCUMENT_PATHS)('forwards %s to the origin for an AI bot', async (path) => {
+    // The publisher's own document: the origin answers it, whatever the client.
+    const result = await lambdaHandler(
+      makeEvent(`${PUB_ORIGIN}${path}`, { 'user-agent': 'GPTBot/1.0' }),
+    );
     expect(result.status).toBe('200');
-    const body = JSON.parse(result.body ?? '') as { role: string; domain: string };
-    expect(body.role).toBe('ROLE_PUBLISHER');
-    expect(body.domain).toBe('pub.example.com');
+    expect(result.body).toBe(ORIGIN_BODY);
+    expect(new URL(originRequests[0]?.url ?? 'https://invalid.test').pathname).toBe(path);
   });
 
   it('answers 404 on the key directory when the publisher issues no keys', async () => {
@@ -147,8 +135,6 @@ describe('AWS entry origin-mode validation', () => {
       'EXCHANGE_WBA_URL',
       'https://exchange.test/.well-known/http-message-signatures-directory',
     );
-    vi.stubEnv('PROVIDER', 'pub.example.com');
-    vi.stubEnv('EXCHANGES_JSON', '[{"domain":"exchange.test","endpoint":"https://exchange.test"}]');
     vi.stubEnv('SAME_ZONE_ORIGIN', 'true');
     try {
       const { handler } = await import('../../src/entries/aws-lambda.js');

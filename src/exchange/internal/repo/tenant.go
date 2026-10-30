@@ -71,11 +71,14 @@ type TenantReadRepo interface {
 	ByDomain(ctx context.Context, domain string) (Tenant, error)
 }
 
-// TenantWriteRepo is the admin control-plane write contract (AdminService only).
-// Both ports take an explicit pgx.Tx so the caller commits the setter and its
-// audit-log row in one transaction (Architecture Rule 7), and return rows-affected
-// so a call for a missing tenant is a detectable no-op rather than a silent
-// success.
+// TenantWriteRepo is the admin control-plane write contract: AdminService's
+// setters, and the activation policy the e2e control service (ADR-028 D6) sets.
+// Every port takes an explicit pgx.Tx, so a caller can commit the write with
+// whatever else belongs to it in one transaction (Architecture Rule 7):
+// AdminService commits each setter and its audit-log row together, and the e2e
+// control runs the activation write in a transaction of its own and writes no
+// audit row. Every port returns rows-affected, so a call for a missing tenant is
+// a detectable no-op rather than a silent success.
 type TenantWriteRepo interface {
 	// SetFeeRate replaces the tenant-level default commission (basis points) and
 	// its operator note in one write. A nil notes clears the column to NULL.
@@ -85,9 +88,9 @@ type TenantWriteRepo interface {
 	SetReportingPolicy(ctx context.Context, tx pgx.Tx, tenantID string, policyJSON []byte) (int64, error)
 	// SetActivateNewAgentsByDefault flips whether a newly registered agent
 	// starts active in the billing system-of-record. The column defaults to
-	// TRUE on insert, so this is only needed to opt a tenant out. No admin RPC
-	// writes it yet, so this port is currently the highest surface that reaches
-	// the column.
+	// TRUE on insert; this sets it either way. No admin RPC writes it yet, so
+	// this port is currently the highest surface that reaches the column; the
+	// e2e control service writes it through this port.
 	SetActivateNewAgentsByDefault(ctx context.Context, tx pgx.Tx, tenantID string, active bool) (int64, error)
 }
 

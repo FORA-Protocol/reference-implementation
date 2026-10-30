@@ -43,7 +43,8 @@ from ..exchanges import EXCHANGE_A_DOMAIN
 from ..fresh_agent import FreshAgent
 from ..ledger import balances
 from ..sdk_client import sdk_exchange_client, stack_offer_verifier
-from ..seed import DEMO_PHILOSOPHY_DOMAIN, SeededFixture
+from ..seed import DEMO_PHILOSOPHY_DOMAIN
+from ..seed_accounts import SeededBuyer
 from .flow import buy_verified_and_observe_charge
 from ..obligation_registry import Obligation, obligation
 
@@ -60,18 +61,18 @@ _INSUFFICIENT_BALANCE = "DENIAL_REASON_INSUFFICIENT_BALANCE"
 
 @obligation(Obligation.PAID_006, negative=True)
 def test_credit_less_agent_is_refused_with_billing_signal_and_no_url(
-    compose_stack: StackURLs, seeded: SeededFixture, fresh_agent: FreshAgent
+    compose_stack: StackURLs, credit_less_buyer: SeededBuyer, fresh_agent: FreshAgent
 ) -> None:
     """No billing arrangement → refusal, billing-family reason, no URL, no money moved."""
-    # The credit-less buyer is a fixed identity: its account has to be opened while
-    # the seats hold new agents for review, which only the seed can do.
+    # The credit-less buyer is the seed's, from its fixture: its account has to be
+    # opened while the seats hold new agents for review, which only the seed can do.
     with closing(
         sdk_exchange_client(
             compose_stack,
             EXCHANGE_A_DOMAIN,
             stack_offer_verifier(),
-            agent_id=seeded.nobilling_agent_id,
-            key_path=seeded.nobilling_agent_key_path,
+            agent_id=credit_less_buyer.agent_id,
+            key_path=credit_less_buyer.key_path,
         )
     ) as credit_less:
         group = discover_group(credit_less, EXCHANGE_A_DOMAIN, _RESOURCE_URI, "discovery")

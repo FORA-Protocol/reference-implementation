@@ -9,13 +9,14 @@ import (
 	"testing"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/consoleapi"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/web"
 )
 
 // TestConsole_SaysWhenTheUnverifiedLimitIsReached: a publisher who already
 // holds as many domains saved and not verified as one may is told so at the
 // domain step, before anything is looked up about the domain they typed. One
-// of the domains they hold is not another: it is answered as theirs. The last
-// button for a new domain is refused with the Exchange's own sentence, and
+// of the domains they hold is not another: it is answered as theirs. The
+// step's save of a new domain is refused with the Exchange's own sentence, and
 // nothing is saved.
 func TestConsole_SaysWhenTheUnverifiedLimitIsReached(t *testing.T) {
 	f := startConsole(t, verifiedClaims())
@@ -39,13 +40,12 @@ func TestConsole_SaysWhenTheUnverifiedLimitIsReached(t *testing.T) {
 		t.Fatalf("a domain the publisher already holds answered %v; want it named as theirs, not as one more", held)
 	}
 
-	status, refused := f.api(t, "/api/domain", map[string]any{
+	status, refused := f.api(t, web.APIRegisterPath, map[string]any{
 		"domain": "harmonia.example", "cdn": "cloudflare", "content_paths": "",
-		"sitemap_url": "", "terms": addDomainTerms(),
 	})
 	reason, _ := refused["error"].(string)
 	if status != http.StatusBadRequest || !strings.Contains(reason, "not verified") {
-		t.Fatalf("the last button past the limit = %d %v; want 400 with the Exchange's sentence", status, refused)
+		t.Fatalf("the domain step's save past the limit = %d %v; want 400 with the Exchange's sentence", status, refused)
 	}
 	if n := len(f.mine(t).Sites); n != consoleapi.MaxUnverifiedDomains {
 		t.Fatalf("the publisher holds %d domains after the refused save, want %d", n, consoleapi.MaxUnverifiedDomains)

@@ -21,7 +21,6 @@ import re
 from decimal import Decimal
 
 import pytest
-from fora_sdk import ProtocolVersion
 
 from ..catalog_calls import HOME_SEAT, accepted, contributor, fresh_entry
 from ..catalog_push import PRICING_MODEL_FLAT, license_term
@@ -42,6 +41,7 @@ from ..money_path import (
 )
 from ..obligation_registry import Obligation, obligation
 from ..seed import SeededFixture
+from ..seed_accounts import account_status_request
 from ..stack_urls import StackURLs
 
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
@@ -62,9 +62,7 @@ def _push_flat(stack: StackURLs, rate: str) -> str:
 
 def _raw_balances(agent: FreshAgent, exchange: str) -> list[tuple[str, str]]:
     """The balances GetAccountStatus reports, as (currency, amount string) pairs."""
-    status = agent.exchange(exchange).get_account_status(
-        {"ver": ProtocolVersion, "exchange": exchange}
-    )
+    status = agent.exchange(exchange).get_account_status(account_status_request(exchange))
     return [(str(cost.currency), str(cost.amount)) for cost in status.balances or []]
 
 

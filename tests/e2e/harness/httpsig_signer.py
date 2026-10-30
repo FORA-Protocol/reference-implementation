@@ -8,8 +8,7 @@ the test holds, into the signer an SDK client takes:
 - :func:`signing_transport` is the SDK's signer over that pair, with the
   keyid/directory split applied once, here, rather than at every client;
 - :func:`unpublished_signer` and :func:`mislabelled_signer` are the signers of the
-  "unknown key" and "wrong keyid" negatives, still signing inside the SDK;
-- :func:`key_thumbprint` names the key a keyfile holds the way a directory does.
+  "unknown key" and "wrong keyid" negatives, still signing inside the SDK.
 
 The SDK's transport puts a fresh RFC 9421 ``nonce`` on every signature. Ed25519
 is deterministic and the timestamps have one-second resolution, so without a
@@ -26,7 +25,6 @@ import json
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fora_sdk.b64 import b64url_decode
 from fora_sdk.identity import generate_key
 from fora_sdk.signing_transport import SigningTransport
@@ -107,14 +105,3 @@ def mislabelled_signer(directory: str, priv: Ed25519PrivateKey, keyid: str) -> S
         keyid=keyid,
         signature_agent=directory_origin(directory),
     )
-
-
-def key_thumbprint(key_path: Path) -> str:
-    """Return the RFC 7638 thumbprint of the key stored at ``key_path``.
-
-    The thumbprint is the identity a WBA directory and a revocation list name a
-    key by, so a test that has only the keyfile can still ask "which key is this?"
-    without reconstructing the JWK by hand.
-    """
-    _, priv = load_keypair(key_path)
-    return ed25519_thumbprint(priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw))

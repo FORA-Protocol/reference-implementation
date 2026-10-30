@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { URL, fileURLToPath } from 'node:url';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createApp } from '../../src/app.js';
 import { buildDeps, originModeConfigured, parseEnv } from '../../src/config.js';
@@ -10,32 +10,27 @@ import { readFastlyEnv } from '../../src/entries/fastly.js';
 import { WBA_PATH, WELL_KNOWN_PATH } from '../../src/types.js';
 import { assertValidManifest, assertValidWba } from '../helpers/wellknown-schema.js';
 
-// The files under deploy/publisher-wellknown/ are what an operator compares
-// against the documents their own Worker serves. That only works while the
-// templates and the Worker agree, and nothing in a JSON file can keep itself
-// aligned with the code that emits it.
+// The files under deploy/publisher-wellknown/ are the reference copies an
+// operator compares their own deployment against, and they are two different
+// kinds of file. fora.json.example is the discovery document the publisher
+// serves from its own origin; the Worker forwards that address there and
+// answers with whatever the origin sends. The key directory is the one the
+// Worker serves itself, built from WBA_KEYS_JSON in template-env.json, the
+// checked-in variable values that folder hands operators.
 //
-// So this suite drives template-env.json — the checked-in variable values that
-// folder hands operators as the input half of its worked example — through the
-// production path: parseEnv, then buildDeps, then a request to each address
-// through the Worker's own routes. Each response body must be deep-equal to the
-// template on disk. Schema validation alone would not do it: a template can
-// satisfy the schema perfectly and still describe a document this Worker never
-// emits.
+// So this suite drives template-env.json through the production path: parseEnv,
+// then buildDeps, then a request to each address through the Worker's own
+// routes. The key directory's response body must be deep-equal to the template
+// on disk. Schema validation alone would not do it: a template can satisfy the
+// schema perfectly and still describe a document this Worker never emits. The
+// discovery document must come back as the origin's bytes, unchanged: the
+// Worker adds nothing to it and takes nothing away.
 //
-// The request goes through the routes rather than stopping at the objects
-// buildDeps returns, because the routes are what produce the bytes an operator
-// receives. They also own the directory's content type. A handler that started
-// post-processing either document would leave a buildDeps-level comparison
-// passing while the served document changed.
-//
-// EXCHANGE_URL and EXCHANGE_WBA_URL are NOT pinned by the deep-equal assertions.
-// EXCHANGE_URL becomes deps.exchangeUrl and EXCHANGE_WBA_URL goes to
-// createKeyCache (src/config.ts), so neither reaches either document; both are in
-// the fixture only because EnvSchema requires them. ORIGIN_URL reaches neither
-// document either, and the last describe block is what pins it instead. Every
-// remaining key is pinned by the deep-equal assertions: change one and the
-// corresponding template must change with it, or they fail.
+// EXCHANGE_URL and EXCHANGE_WBA_URL reach neither document. EXCHANGE_URL becomes
+// deps.exchangeUrl and EXCHANGE_WBA_URL goes to createKeyCache (src/config.ts);
+// both are in the fixture only because EnvSchema requires them. ORIGIN_URL is
+// where the discovery document is read from, and the last describe block pins
+// that the fixture names an origin mode every runtime can use.
 //
 // The payee placeholder's SHAPE and the absent revocation_url are pinned on the
 // Go side, which reads the same two files through the CONSUMER path
@@ -50,11 +45,12 @@ import { assertValidManifest, assertValidWba } from '../helpers/wellknown-schema
 // ignores the rest, so an extra key would reach the served document with nothing
 // rejecting it.
 
+function templatePath(name: string): string {
+  return fileURLToPath(new URL(`../../../../deploy/publisher-wellknown/${name}`, import.meta.url));
+}
+
 function readTemplate(name: string): unknown {
-  const path = fileURLToPath(
-    new URL(`../../../../deploy/publisher-wellknown/${name}`, import.meta.url),
-  );
-  return JSON.parse(readFileSync(path, 'utf8'));
+  return JSON.parse(readFileSync(templatePath(name), 'utf8'));
 }
 
 // Typed once here because two of the assertions below index it by name, which
@@ -66,10 +62,24 @@ const templateEnv = readTemplate('template-env.json') as Record<string, string>;
 // The env the Cloudflare entry hands its fetch handler: Partial<EdgeEnv>.
 type WorkerEnv = Parameters<typeof worker.fetch>[1];
 
-describe('deploy/publisher-wellknown templates match what the Worker serves', () => {
+// The discovery document as the publisher's origin serves it: the template's
+// own bytes, with the origin's media type.
+const manifestBytes = readFileSync(templatePath('fora.json.example'), 'utf8');
+
+function originServingTheTemplate(seen: string[]): typeof fetch {
+  return (async (input: RequestInfo | URL) => {
+    seen.push((input as Request).url);
+    return new Response(manifestBytes, { headers: { 'content-type': 'application/json' } });
+  }) as unknown as typeof fetch;
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('deploy/publisher-wellknown templates: the key directory the Worker serves, the discovery document it passes through', () => {
   const manifestTemplate = readTemplate('fora.json.example');
   const wbaTemplate = readTemplate('http-message-signatures-directory.example');
-  const app = createApp(buildDeps(parseEnv(templateEnv)));
 
   it('fora.json.example satisfies the canonical manifest schema', () => {
     assertValidManifest(manifestTemplate);
@@ -79,13 +89,20 @@ describe('deploy/publisher-wellknown templates match what the Worker serves', ()
     assertValidWba(wbaTemplate);
   });
 
-  it('the manifest route serves fora.json.example for the documented env', async () => {
-    const res = await app.request(WELL_KNOWN_PATH);
+  it("the Worker answers the discovery address with the origin's fora.json.example, unchanged", async () => {
+    const seen: string[] = [];
+    const app = createApp({
+      ...buildDeps(parseEnv(templateEnv)),
+      fetcher: originServingTheTemplate(seen),
+    });
+    const res = await app.request(WELL_KNOWN_PATH, { headers: { 'user-agent': 'GPTBot/1.0' } });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual(manifestTemplate);
+    expect(await res.text()).toBe(manifestBytes);
+    expect(seen).toEqual([`${templateEnv.ORIGIN_URL}${WELL_KNOWN_PATH}`]);
   });
 
   it('the key-directory route serves the directory template under the Web Bot Auth media type', async () => {
+    const app = createApp(buildDeps(parseEnv(templateEnv)));
     const res = await app.request(WBA_PATH);
     expect(res.status).toBe(200);
     // Written out rather than compared against WBA_DIRECTORY_CONTENT_TYPE. The
@@ -102,7 +119,7 @@ describe('deploy/publisher-wellknown templates match what the Worker serves', ()
   it('the template attests one payee and nothing else in ext', () => {
     // The Go suite owns the placeholder's shape — it must be a value no operator
     // could mistake for a real id. This owns the key SET, which nothing else
-    // checks: a second key in ext is copied through to the served document and
+    // checks: a second key in ext is carried to every reader of the document and
     // then silently ignored by every consumer.
     const entry = (manifestTemplate as { exchanges: { ext?: Record<string, unknown> }[] })
       .exchanges[0];
@@ -124,20 +141,24 @@ describe('deploy/publisher-wellknown templates match what the Worker serves', ()
 // requires; these two assertions are what make that sentence checkable.
 //
 // What they prove: the Cloudflare entry's construction guard accepts these values
-// and the manifest route answers under them. What they do NOT prove: anything
-// about article traffic, and they are not real-runtime coverage. This suite reads
-// its fixtures off disk, which is what puts it in the plain-node project
-// (vitest.config.ts) rather than a Workers one. Both discovery routes do have
-// real-runtime coverage, through SELF in tests/wellknown-keyless/.
+// and the discovery address reaches the origin they name. What they do NOT
+// prove: anything about article traffic, and they are not real-runtime coverage.
+// This suite reads its fixtures off disk, which is what puts it in the plain-node
+// project (vitest.config.ts) rather than a Workers one. The discovery addresses
+// do have real-runtime coverage, through SELF in tests/workers/ and
+// tests/wellknown-keyless/.
 describe('the documented environment is one the Worker starts on', () => {
-  it('the Cloudflare entry accepts the fixture and serves the manifest', async () => {
-    // The host only has to be a valid absolute URL; this route does not read it.
+  it('the Cloudflare entry accepts the fixture and reaches the origin for the discovery document', async () => {
+    const seen: string[] = [];
+    vi.stubGlobal('fetch', originServingTheTemplate(seen));
+    // The host only has to be a valid absolute URL; the forward goes to ORIGIN_URL.
     const res = await worker.fetch(
       new Request(`https://www.publisher.example${WELL_KNOWN_PATH}`),
       templateEnv as unknown as WorkerEnv,
       {} as ExecutionContext,
     );
     expect(res.status).toBe(200);
+    expect(seen).toEqual([`${templateEnv.ORIGIN_URL}${WELL_KNOWN_PATH}`]);
   });
 
   it('the fixture names an origin mode the Fastly entry can also use', () => {

@@ -16,12 +16,13 @@ chain.
 
 Both vector files also carry a ``refused`` list: acceptances that name an empty
 requester, with the bytes and signature a signer without that check would
-produce. The SDK must refuse each one, signing and verifying alike. The harness's
-own unchecked rendering (``harness/requester_alteration.py``), which builds the
-empty-requester purchases the requester obligations send, must reproduce each
-one exactly, so those purchases carry acceptances that verify over the bytes
-they name. It is unit-tested because it is a cryptographic primitive and a parser,
-two of the categories the testing doctrine admits unit tests for.
+produce. The SDK must refuse each one, signing and verifying alike. The
+empty-requester purchases the requester obligations send are signed by the SDK's
+test-only twins in ``fora_sdk.testing`` (through ``harness/requester_alteration.py``),
+which the pinned module pins to those same rows, so the harness renders no
+acceptance bytes of its own. What this module checks of that alteration is its
+wiring: that it hands the SDK's signers the fields the altered purchase names, so
+every acceptance it re-signs verifies.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from typing import Any
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from fora_sdk import to_wire
 from fora_sdk.core import (
     ACCEPTANCE_SIGNATURE_ALGORITHM,
 )
@@ -47,17 +49,23 @@ from fora_sdk.core import (
 )
 from fora_sdk.identity import generate_key
 from fora_sdk.signing_transport import SigningTransport
-from .conftest import REPO_ROOT
-from .requester_alteration import (
-    acceptance_bytes,
-    key_from_seed,
-    request_acceptance_bytes,
-    sign_hex,
+from wire.models import (
+    AgentRequestAcceptance,
+    AgentRequestAcceptanceItem,
+    AgentRequestAcceptancePayload,
+    Offer,
+    Requester,
+    RequesterType,
+    TransactionItem,
+    TransactionRequest,
 )
 
-# Pure crypto-primitive test — no compose stack, no DB. Declare `isolated` so the
-# autouse `_stack_isolation_dispatch` per-test cleanup chain (which needs a live
-# Postgres DSN) is a no-op for this module.
+from .conftest import REPO_ROOT
+from .requester_alteration import renamed
+
+# Pure crypto-primitive test — no compose stack, no DB, so it owns its environment
+# and declares `isolated`; the autouse `_stack_isolation_dispatch` runs nothing
+# for it.
 pytestmark = pytest.mark.stack_isolation("isolated")
 
 # The shared cross-language oracle. Resolved via the harness's REPO_ROOT idiom
@@ -219,29 +227,58 @@ def test_sdk_refuses_a_request_acceptance_naming_an_empty_requester() -> None:
         ), vec["name"]
 
 
-def test_unchecked_rendering_reproduces_the_refused_offer_acceptances() -> None:
-    """The harness's empty-requester acceptance is byte-identical to the protocol's record."""
-    for vec in _refused(_VECTORS_PATH):
-        payload = acceptance_bytes(
-            offer_sig=vec["offer_sig"],
-            requester_id=vec["requester_id"],
-            requester_domain=vec["requester_domain"],
-            idempotency_key=vec["idempotency_key"],
-        )
-        assert payload == vec["canonical_jcs"].encode(), vec["name"]
-        signature = sign_hex(key_from_seed(bytes.fromhex(vec["seed_hex"])), payload)
-        assert signature == vec["signature_hex"], vec["name"]
+def test_a_renamed_requester_is_re_signed_into_acceptances_the_sdk_verifies() -> None:
+    """The requester alteration re-signs every acceptance over the new name, and they verify.
 
+    The requester obligations depend on it: their altered purchases carry
+    acceptances that verify, so a refusal is the requester's alone. The e2e
+    requester tests cannot show it, because the receiver refuses the requester
+    before it reads an acceptance. The purchase is built from the generated
+    models, with only the members the alteration reads, and rendered by the SDK's
+    wire serializer, as the pre-signing hook receives it. Each acceptance is
+    checked by the SDK's own verifiers under the agent's key.
+    """
+    key, _thumbprint = generate_key()
+    agent, offer_sig, exchange = "agent.example", "b2ZmZXI", "exchange.example"
+    idempotency_key = "purchase-1"
+    purchase = TransactionRequest(
+        requester=Requester(id=agent, domain=agent, type=RequesterType.REQUESTER_TYPE_AGENT),
+        idempotency_key=idempotency_key,
+        items=[TransactionItem(offer=Offer(exchange=exchange, signature=offer_sig))],
+        agent_request_acceptance=AgentRequestAcceptance(
+            payload=AgentRequestAcceptancePayload(
+                items=[AgentRequestAcceptanceItem(offer_sig=offer_sig, exchange=exchange)],
+                requester_id=agent,
+                requester_domain=agent,
+                idempotency_key=idempotency_key,
+            ),
+            # Any well-formed value: the alteration replaces it.
+            signature="00" * 64,
+        ),
+    )
+    body = to_wire(purchase)
+    renamed("domain", "other.example", key)(body)
+    altered = TransactionRequest.model_validate(body)
 
-def test_unchecked_rendering_reproduces_the_refused_request_acceptances() -> None:
-    """The harness's empty-requester request acceptance is byte-identical to the record."""
-    for vec in _refused(_REQUEST_VECTORS_PATH):
-        payload = request_acceptance_bytes(
-            items=vec["items"],
-            requester_id=vec["requester_id"],
-            requester_domain=vec["requester_domain"],
-            idempotency_key=vec["idempotency_key"],
-        )
-        assert payload == vec["canonical_jcs"].encode(), vec["name"]
-        signature = sign_hex(key_from_seed(bytes.fromhex(vec["seed_hex"])), payload)
-        assert signature == vec["signature_hex"], vec["name"]
+    pubkey_b64 = base64.b64encode(key.public_key().public_bytes_raw()).decode()
+    named = {"requester_id": agent, "requester_domain": "other.example"}
+    assert altered.items is not None, altered
+    (item,) = altered.items
+    assert item.agent_acceptance is not None, item
+    assert verify_offer_acceptance_jcs(
+        pubkey_b64=pubkey_b64,
+        signature_hex=item.agent_acceptance.signature,
+        offer_sig=offer_sig,
+        idempotency_key=idempotency_key,
+        **named,
+    ), item
+    envelope = altered.agent_request_acceptance
+    assert envelope is not None, altered
+    assert envelope.payload.requester_domain == "other.example", envelope
+    assert verify_request_acceptance_jcs(
+        pubkey_b64=pubkey_b64,
+        signature_hex=envelope.signature,
+        items=[(offer_sig, exchange)],
+        idempotency_key=idempotency_key,
+        **named,
+    ), envelope

@@ -13,7 +13,6 @@ import (
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/runhttp"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/billing"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/sor"
 )
 
 // selectAdapters constructs the billing and SoR adapters together and returns a
@@ -29,18 +28,18 @@ import (
 // fails, so a half-built pair leaks nothing.
 func selectAdapters(
 	ctx context.Context, logger *slog.Logger,
-) (billing.Adapter, []string, sor.Adapter, func(), error) {
+) (billing.Adapter, []string, sorBackend, func(), error) {
 	billingAdapter, currencies, billingCleanup, err := selectBillingAdapter(ctx, logger)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, sorBackend{}, nil, err
 	}
 	// Constructed at boot so a misconfigured SoR fails fast.
-	sorAdapter, sorCleanup, err := selectSoRAdapter(ctx, logger)
+	accounts, sorCleanup, err := selectSoRAdapter(ctx, logger)
 	if err != nil {
 		billingCleanup()
-		return nil, nil, nil, nil, err
+		return nil, nil, sorBackend{}, nil, err
 	}
-	return billingAdapter, currencies, sorAdapter, func() {
+	return billingAdapter, currencies, accounts, func() {
 		sorCleanup()
 		billingCleanup()
 	}, nil
@@ -106,12 +105,12 @@ func demoCurrencies() []string { return []string{demoCurrency} }
 // own configuration lives under EXCHANGE_SOR_* (this process's settings).
 //
 // The returned func() closes the SoR pool on shutdown.
-func selectSoRAdapter(ctx context.Context, logger *slog.Logger) (sor.Adapter, func(), error) {
+func selectSoRAdapter(ctx context.Context, logger *slog.Logger) (sorBackend, func(), error) {
 	switch kind := runhttp.EnvOr("FORA_SOR_ADAPTER", "postgres"); kind {
 	case "postgres":
 		return newPostgresSoRAdapter(ctx, logger)
 	default:
-		return nil, nil, fmt.Errorf("sor: unknown FORA_SOR_ADAPTER %q", kind)
+		return sorBackend{}, nil, fmt.Errorf("sor: unknown FORA_SOR_ADAPTER %q", kind)
 	}
 }
 

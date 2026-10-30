@@ -150,7 +150,7 @@ func TestConsoleRegistration_RepeatedSubmitsMintOnePublisher(t *testing.T) {
 // Legs: each check goes signed HTTP -> service -> repositories -> database, and
 // the listing state is read back through the signed resume route the console
 // uses. The audit assertion is one tier lower, through the audit repository,
-// for the reason auditActions gives.
+// for the reason exchangetest's AuditActions gives.
 func TestConsoleRegistration_CheckDomainActivatesOnAMatchingManifest(t *testing.T) {
 	f := startConsoleFixture(t)
 	actor := newActor("editor@publisher.example")
@@ -180,7 +180,7 @@ func TestConsoleRegistration_CheckDomainActivatesOnAMatchingManifest(t *testing.
 	}
 
 	want := []string{"CheckDomain", "CheckDomain", "RegisterDomain", "RegisterPublisher"}
-	if got := slices.Sorted(slices.Values(auditActions(t, f))); !slices.Equal(got, want) {
+	if got := slices.Sorted(slices.Values(f.exchange.AuditActions(t))); !slices.Equal(got, want) {
 		t.Fatalf("audit actions (sorted) = %v, want %v", got, want)
 	}
 	// Both checks write a CheckDomain row; the detail tells them apart. Exactly
@@ -307,27 +307,6 @@ func checkReasons(t *testing.T, body map[string]any) []string {
 	return out
 }
 
-// auditActions reads back every audit action recorded for the seat.
-//
-// This asserts through the repository interface rather than the public API,
-// because the Exchange publishes no read surface for its audit log -- the admin
-// plane exposes transaction evidence and nothing else. That is a corner cut
-// deliberately and named here rather than hidden: the assertion is one tier
-// below the route it verifies, so this is a persistence check, not a protocol
-// round-trip. A publisher-visible activity read would let it move up a tier.
-func auditActions(t *testing.T, f *consoleFixture) []string {
-	t.Helper()
-	records, err := f.audit.ByTenant(f.ctx, f.seatID)
-	if err != nil {
-		t.Fatalf("read audit log: %v", err)
-	}
-	actions := make([]string, 0, len(records))
-	for _, r := range records {
-		actions = append(actions, r.Action)
-	}
-	return actions
-}
-
 // TestConsoleRegistration_AuditRecordsTheActingPerson pins what an operator can
 // reconstruct afterwards: every registration write names the OIDC subject that
 // made it, not just the process that relayed it.
@@ -351,7 +330,7 @@ func TestConsoleRegistration_AuditRecordsTheActingPerson(t *testing.T) {
 			t.Fatalf("audit row %q names actor %v, want %q", r.Action, r.Actor, wantActor)
 		}
 	}
-	if got := auditActions(t, f); len(got) != 3 {
+	if got := f.exchange.AuditActions(t); len(got) != 3 {
 		t.Fatalf("audit actions = %v", got)
 	}
 }

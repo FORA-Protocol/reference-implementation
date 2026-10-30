@@ -1392,9 +1392,11 @@ check_npm_sdk_metadata "tests/e2e/fastly-edge" "${fastly_commit}"
 # module file's whole array with that module file's name.
 corpora=(
     "acceptance-vectors.json"
+    "delegation-chains.json"
     "licenseterm-vectors.json"
     "manifest-version-vectors.json"
     "request-acceptance-vectors.json"
+    "scope-match-vectors.json"
     "thumbprint-vectors.json"
 )
 module_dir=""

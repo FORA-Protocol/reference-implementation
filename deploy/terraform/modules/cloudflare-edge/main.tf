@@ -8,8 +8,6 @@ locals {
   required_bindings = {
     EXCHANGE_URL     = var.exchange_url
     EXCHANGE_WBA_URL = var.exchange_wba_url
-    PROVIDER         = var.provider_domain
-    EXCHANGES_JSON   = var.exchanges_json
   }
 
   optional_bindings = {
@@ -17,9 +15,6 @@ locals {
     FORA_ENFORCE_BINDING      = var.fora_enforce_binding
     ORIGIN_URL                = var.origin_url
     SAME_ZONE_ORIGIN          = var.same_zone_origin
-    RSL_BODY                  = var.rsl_body
-    ACME_TOKENS_JSON          = var.acme_tokens_json
-    CATALOG_CONTRIBUTORS_JSON = var.catalog_contributors_json
     WBA_KEYS_JSON             = var.wba_keys_json
     WBA_REVOCATION_URL        = var.wba_revocation_url
     WBA_SIGNED_DIRECTORY_JSON = var.wba_signed_directory_json

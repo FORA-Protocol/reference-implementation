@@ -128,11 +128,12 @@ func (s *RegistrationService) CheckDomain(
 // PreflightDomain reports what a check would say about a domain, whether or
 // not it is saved yet, and writes nothing at all.
 //
-// It exists because the console asks about a domain before saving it: the
-// publisher reaches the step that hands over the discovery document before the
-// domain is saved, and checks the document there. CheckDomain cannot answer
-// that -- it needs a listing and answers not-found without one, and it writes
-// what it finds -- and RegisterDomain saves the domain rather than checking it.
+// It exists because the console asks about a domain without changing
+// anything: before the domain is saved, to learn whether another publisher
+// holds it, and after, every few seconds while the publisher puts their file
+// in place. CheckDomain cannot answer either -- it needs a listing and answers
+// not-found without one, and it writes and audits what it finds on every
+// call -- and RegisterDomain saves the domain rather than checking it.
 //
 // So this is CheckDomain's question without CheckDomain's write: fetch the
 // document, compare it against this seat and this publisher, and report. No
@@ -238,10 +239,10 @@ func errTermsNotSet(domain string) error {
 // It takes the domain and the publisher id rather than a stored site, because
 // PreflightDomain asks it about a domain that may have no row yet.
 //
-// The fetch is a Refresh rather than a Get: the caller has just published or
-// corrected the document and pressed a button that says "check again", so
-// answering from a cache entry taken before that edit would report the old
-// document and send them to fix something they already fixed.
+// The fetch is a Refresh rather than a Get: the caller asks while the
+// publisher is publishing or correcting the document, and asks again until it
+// passes, so answering from a cache entry taken before that edit would report
+// the old document and send them to fix something they already fixed.
 func (s *RegistrationService) manifestReasons(
 	ctx context.Context, domain, publisherID string,
 ) ([]CheckReason, error) {

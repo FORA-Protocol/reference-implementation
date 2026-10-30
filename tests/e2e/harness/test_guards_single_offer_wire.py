@@ -53,9 +53,9 @@ RESOLVE/discovery path never builds offer+agentAcceptance dicts at all, so it is
 out of scope by construction.
 
 This guard is a pure SOURCE SCAN — it imports nothing from the running stack and
-needs no docker-compose infra. The ``stack_isolation("shared-without-cleanup")``
-marker makes the autouse ``_stack_isolation_dispatch`` fixture a no-op (it would
-otherwise run the DB cleanup chain, which needs Postgres). It collects and runs
+needs no docker-compose infra. Its ``stack_isolation("shared-without-cleanup")``
+marker declares that it needs no setup either, so the autouse
+``_stack_isolation_dispatch`` fixture runs nothing for it. It collects and runs
 under a plain ``uv run pytest`` against this file alone.
 """
 

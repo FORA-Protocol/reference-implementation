@@ -127,7 +127,7 @@ func networkLabel(p cdn.Provider) string {
 
 // supported reports whether a publisher can complete setup on this network by
 // themselves. The answer is cdn.SelfServe, the list the Exchange admits
-// registrations from, so the wizard cannot go on for a network the last button
+// registrations from, so the wizard cannot go on for a network its first save
 // would be refused on. The reason Fastly is not on it is written there.
 func supported(p cdn.Provider) bool {
 	return cdn.Supported(string(p))
@@ -147,6 +147,22 @@ func cdnProvider(name string) cdn.Provider {
 		return cdn.ProviderCloudFront
 	default:
 		return cdn.ProviderNone
+	}
+}
+
+// deployedText says where the package runs once it answers, for the last step
+// to show beside it then. Each sentence is what the package for that network
+// is built to do: the Cloudflare Worker's route covers the whole hostname, and
+// the Lambda@Edge function runs on the cache behaviours the publisher attached
+// it to.
+func deployedText(p cdn.Provider) string {
+	switch p {
+	case cdn.ProviderCloudflare:
+		return "Deployed on Cloudflare in front of the whole hostname."
+	case cdn.ProviderCloudFront:
+		return "Deployed on AWS CloudFront, on the cache behaviours you associated it with."
+	default:
+		return ""
 	}
 }
 

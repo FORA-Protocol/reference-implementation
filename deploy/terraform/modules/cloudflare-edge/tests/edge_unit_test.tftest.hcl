@@ -14,8 +14,6 @@ variables {
 
   exchange_url     = "https://exchange.operator.example"
   exchange_wba_url = "https://exchange.operator.example/.well-known/http-message-signatures-directory"
-  provider_domain  = "news.example.com"
-  exchanges_json   = "[{\"domain\":\"exchange.operator.example\",\"endpoint\":\"https://exchange.operator.example\"}]"
 
   # The module requires an origin mode (the Cloudflare worker refuses to run
   # without one), so every run carries one; the dedicated run below proves the
@@ -52,41 +50,34 @@ run "required_bindings_mirror_config_contract" {
 
   assert {
     condition = alltrue([
-      for name in ["EXCHANGE_URL", "EXCHANGE_WBA_URL", "PROVIDER", "EXCHANGES_JSON"] :
+      for name in ["EXCHANGE_URL", "EXCHANGE_WBA_URL"] :
       anytrue([
         for binding in cloudflare_workers_script.this.plain_text_binding :
         binding.name == name
       ])
     ])
-    error_message = "All four required config.ts bindings must be present"
+    error_message = "Both required config.ts bindings must be present"
   }
 
   assert {
-    # 4 required + the ORIGIN_URL every run carries as its origin mode.
-    condition     = length(cloudflare_workers_script.this.plain_text_binding) == 5
+    # 2 required + the ORIGIN_URL every run carries as its origin mode.
+    condition     = length(cloudflare_workers_script.this.plain_text_binding) == 3
     error_message = "Unset optional bindings must NOT be created (the worker's Zod schema treats empty strings as set)"
   }
 
-  assert {
-    condition = anytrue([
-      for binding in cloudflare_workers_script.this.plain_text_binding :
-      binding.name == "PROVIDER" && binding.text == "news.example.com"
-    ])
-    error_message = "PROVIDER binding must carry the publisher domain"
-  }
 }
 
 run "optional_bindings_render_when_set" {
   command = plan
 
   variables {
-    origin_url                = "https://origin.example.com"
-    catalog_contributors_json = "[{\"domain\":\"contrib.example\",\"relationship\":\"operator\"}]"
+    origin_url          = "https://origin.example.com"
+    licensed_paths_json = "[\"/paid/\"]"
   }
 
   assert {
-    condition     = length(cloudflare_workers_script.this.plain_text_binding) == 6
-    error_message = "Exactly the four required plus the two set optional bindings"
+    condition     = length(cloudflare_workers_script.this.plain_text_binding) == 4
+    error_message = "Exactly the two required plus the two set optional bindings"
   }
 
   assert {
@@ -100,9 +91,9 @@ run "optional_bindings_render_when_set" {
   assert {
     condition = anytrue([
       for binding in cloudflare_workers_script.this.plain_text_binding :
-      binding.name == "CATALOG_CONTRIBUTORS_JSON"
+      binding.name == "LICENSED_PATHS_JSON"
     ])
-    error_message = "CATALOG_CONTRIBUTORS_JSON must be the other rendered optional binding"
+    error_message = "LICENSED_PATHS_JSON must be the other rendered optional binding"
   }
 }
 
@@ -117,9 +108,6 @@ run "all_optional_bindings_render" {
     fora_enforce_binding      = "false"
     origin_url                = "https://origin.example.com"
     same_zone_origin          = "false"
-    rsl_body                  = "<rsl/>"
-    acme_tokens_json          = "{\"token\":\"keyAuthorization\"}"
-    catalog_contributors_json = "[{\"domain\":\"contrib.example\",\"relationship\":\"operator\"}]"
     wba_keys_json             = "[{\"kty\":\"OKP\",\"crv\":\"Ed25519\"}]"
     wba_revocation_url        = "https://news.example.com/wba/revoked"
     wba_signed_directory_json = "{\"body\":\"{}\",\"content_digest\":\"d\",\"signature_input\":\"i\",\"signature\":\"s\"}"
@@ -129,16 +117,16 @@ run "all_optional_bindings_render" {
   }
 
   assert {
-    condition     = length(cloudflare_workers_script.this.plain_text_binding) == 17
-    error_message = "Four required plus all thirteen optional bindings must render"
+    condition     = length(cloudflare_workers_script.this.plain_text_binding) == 12
+    error_message = "Two required plus all ten optional bindings must render"
   }
 
   assert {
     condition = alltrue([
       for name in [
         "FORA_VERIFY_KEYS", "FORA_ENFORCE_BINDING", "ORIGIN_URL", "SAME_ZONE_ORIGIN",
-        "RSL_BODY", "ACME_TOKENS_JSON", "CATALOG_CONTRIBUTORS_JSON", "WBA_KEYS_JSON",
-        "WBA_REVOCATION_URL", "WBA_SIGNED_DIRECTORY_JSON", "BOT_UA_ALLOW_JSON", "BOT_UA_DENY_JSON",
+        "WBA_KEYS_JSON", "WBA_REVOCATION_URL", "WBA_SIGNED_DIRECTORY_JSON",
+        "BOT_UA_ALLOW_JSON", "BOT_UA_DENY_JSON",
         "LICENSED_PATHS_JSON",
       ] :
       anytrue([
@@ -358,27 +346,15 @@ run "missing_worker_bundle_is_rejected" {
 # flavors for the array-shaped ones: not JSON at all, and valid JSON of the
 # wrong shape. ──
 
-run "non_json_exchanges_json_is_rejected" {
+run "non_json_fora_verify_keys_is_rejected" {
   command = plan
 
   variables {
-    exchanges_json = "not json"
+    fora_verify_keys = "not json"
   }
 
   expect_failures = [
-    var.exchanges_json,
-  ]
-}
-
-run "object_exchanges_json_is_rejected" {
-  command = plan
-
-  variables {
-    exchanges_json = "{\"domain\":\"exchange.operator.example\"}"
-  }
-
-  expect_failures = [
-    var.exchanges_json,
+    var.fora_verify_keys,
   ]
 }
 
@@ -391,31 +367,6 @@ run "non_array_fora_verify_keys_is_rejected" {
 
   expect_failures = [
     var.fora_verify_keys,
-  ]
-}
-
-# acme_tokens_json is the object-shaped one — an ARRAY is the wrong shape here.
-run "array_acme_tokens_json_is_rejected" {
-  command = plan
-
-  variables {
-    acme_tokens_json = "[\"token\"]"
-  }
-
-  expect_failures = [
-    var.acme_tokens_json,
-  ]
-}
-
-run "non_array_catalog_contributors_json_is_rejected" {
-  command = plan
-
-  variables {
-    catalog_contributors_json = "{\"domain\":\"contrib.example\"}"
-  }
-
-  expect_failures = [
-    var.catalog_contributors_json,
   ]
 }
 

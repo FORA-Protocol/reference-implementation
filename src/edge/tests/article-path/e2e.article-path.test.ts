@@ -8,7 +8,8 @@
 //      caller's proof of possession of that agent's key;
 //   3. no signature, browser-like client → pass through to the origin untouched;
 //   4. no signature, AI-bot User-Agent → 403 with X-Content-Rules pointing at
-//      /.well-known/fora.json, which itself stays fetchable without a signature.
+//      /.well-known/fora.json, which the edge passes through to the origin for
+//      that same client, without a signature.
 //
 // The origin is an external system, so it is mocked at the fetch boundary
 // (the shared fetch-mock helper) with net-connect disabled. That makes "the
@@ -21,6 +22,7 @@ import { SELF } from 'cloudflare:test';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { fetchMock } from '../helpers/fetch-mock.js';
 
+import { WELL_KNOWN_PATH } from '../../src/types.js';
 import {
   type TestKeypair,
   boundUrl,
@@ -31,6 +33,7 @@ import {
   signUrl,
   tamperSignature,
 } from '../helpers/ed25519.js';
+import { expectOriginAnswer, mockOrigin, originDocument } from '../helpers/publisher-documents.js';
 import { PUB_ORIGIN, setupE2ETest, setupWbaDirectoryMock } from '../helpers/test-setup.js';
 
 // The article's public URL path — identical for humans and agents.
@@ -325,14 +328,14 @@ describe('outcome 4: unsigned AI-bot request on the article URL', () => {
   });
 
   it('the fora.json the 403 points at is fetchable without any signature', async () => {
+    const answer = originDocument(WELL_KNOWN_PATH);
+    mockOrigin(WELL_KNOWN_PATH, answer);
     const denied = await SELF.fetch(ARTICLE_URL, { headers: { 'user-agent': 'GPTBot/1.0' } });
     const pointer = denied.headers.get('x-content-rules');
     expect(pointer).not.toBeNull();
     const manifest = await SELF.fetch(pointer as string, {
       headers: { 'user-agent': 'GPTBot/1.0' },
     });
-    expect(manifest.status).toBe(200);
-    const doc = (await manifest.json()) as { domain: string };
-    expect(doc.domain).toBe('pub.test');
+    await expectOriginAnswer(manifest, answer);
   });
 });

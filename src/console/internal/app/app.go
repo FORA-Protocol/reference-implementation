@@ -74,11 +74,9 @@ type SiteReader interface {
 
 // Build assembles the console's HTTP handler.
 //
-// The gating is the shape of this function, and it is worth reading as one
-// piece: the sign-in routes and the styles are open, everything else needs a
-// session, and the pages that write anything need a session whose address the
-// provider verified. Nothing is gated twice here and nothing is left ungated by
-// being added to the wrong group -- a route is in exactly one of the three.
+// What is gated behind what is the shape of the routing table (routes), and is
+// worth reading there as one piece. Build adds what every route shares: the
+// refusal of a state change another site's page caused, and the request id.
 func Build(cfg Config) (http.Handler, error) {
 	if len(cfg.SessionKey) != session.KeyLen {
 		return nil, errors.New("app: a 32-byte session key is required")
@@ -141,7 +139,8 @@ func Build(cfg Config) (http.Handler, error) {
 }
 
 // consoleHandlers wires the service layer and the transports over it: the
-// console's own pages, the dashboard's pages, and the wizard's JSON routes.
+// console's own pages, the read of the account's registrations in front of
+// them, the dashboard's pages, and the wizard's JSON routes.
 func consoleHandlers(cfg Config, renderer *web.Renderer, clk clock.Clock) (handlers, error) {
 	bundles := setup.NewBuilder(cfg.Deployment, cfg.Pages, cfg.Exchange)
 	svc, err := wizard.New(wizard.Config{
@@ -157,14 +156,19 @@ func consoleHandlers(cfg Config, renderer *web.Renderer, clk clock.Clock) (handl
 		return handlers{}, err
 	}
 	resumer := wizard.NewResumer(svc)
-	dash := dashboard.NewService(cfg.Exchange.Reads(), cfg.Exchange, clk, cfg.DashboardPageSize)
+	sites := wizard.NewSites(cfg.Exchange, bundles, cfg.Deployment.ExchangeDomain)
+	dash := dashboard.NewService(cfg.Exchange.Reads(), clk, cfg.DashboardPageSize)
 	pages, err := web.New(web.Config{
 		Renderer:  renderer,
-		Sites:     wizard.NewSites(cfg.Exchange, bundles, cfg.Deployment.ExchangeDomain),
+		Sites:     sites,
 		Wizard:    svc,
 		Resumer:   resumer,
 		Dashboard: dash,
 	})
+	if err != nil {
+		return handlers{}, err
+	}
+	registrations, err := web.NewRegistrationsReader(renderer, sites)
 	if err != nil {
 		return handlers{}, err
 	}
@@ -176,7 +180,7 @@ func consoleHandlers(cfg Config, renderer *web.Renderer, clk clock.Clock) (handl
 	if err != nil {
 		return handlers{}, err
 	}
-	return handlers{pages: pages, dash: dashPages, api: api}, nil
+	return handlers{pages: pages, registrations: registrations, dash: dashPages, api: api}, nil
 }
 
 // crossOriginProtection refuses every state-changing request a browser sends

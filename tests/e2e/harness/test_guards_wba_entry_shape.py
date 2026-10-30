@@ -1,8 +1,8 @@
-"""Meta-guard — the publisher-jwks entrypoint's WBA entry must match the shared builder.
+"""Meta-guard — the key-directories entrypoint's WBA entry must match the shared builder.
 
-The publisher-jwks entrypoint renders its Web Bot Auth directory through the
-shared builder ``scripts/lib/ed25519_keys.py`` (the image copies it in and the
-heredoc imports it from the lib dir passed as argv). That wiring is exactly
+The key-directories entrypoint renders each identity's Web Bot Auth directory
+through the shared builder ``scripts/lib/ed25519_keys.py`` (the image copies it
+in and the heredoc imports it from the lib dir passed as argv). That wiring is exactly
 what this guard exercises: it lifts the python heredoc out of
 ``deploy/publisher-jwks/entrypoint.sh`` verbatim, runs it against a synthetic
 key file with the in-repo ``scripts/lib`` as the lib dir, and compares the WBA
@@ -56,7 +56,7 @@ def _entrypoint_heredoc() -> str:
     text = _ENTRYPOINT.read_text()
     m = re.search(r"<<'PY'\n(.*?)\nPY\n", text, re.DOTALL)
     assert m, (
-        "could not find the <<'PY' heredoc in the publisher-jwks entrypoint — "
+        "could not find the <<'PY' heredoc in the key-directories entrypoint — "
         "the rendering moved; fix this guard's extraction so it keeps reading "
         "the real code"
     )
@@ -180,7 +180,7 @@ def test_entrypoint_wba_entry_matches_shared_builder(tmp_path: Path) -> None:
         pub_b64, entry.get("not_before", ""), entry.get("not_after", "")
     )
     assert entry == expected, (
-        "the publisher-jwks entrypoint and scripts/lib/ed25519_keys.py "
+        "the key-directories entrypoint and scripts/lib/ed25519_keys.py "
         "wba_directory_key no longer render the same WBA directory entry — "
         f"entrypoint: {json.dumps(entry, sort_keys=True)}\n"
         f"builder:    {json.dumps(expected, sort_keys=True)}"

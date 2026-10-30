@@ -20,7 +20,7 @@ import (
 // Legs: every write goes signed HTTP -> service -> repositories -> database,
 // and every listing is read back through the signed resume route the console
 // uses. Audit rows are read one tier lower, through the audit repository, for
-// the reason auditActions gives.
+// the reason exchangetest's AuditActions gives.
 
 // TestConsoleRegistration_SavesASiteBeforeItIsProven: the domain route saves a
 // site whose document says nothing at all, and asks nothing of the site to do
@@ -85,7 +85,7 @@ func TestConsoleRegistration_AHeldSiteIsRefusedToAnotherPublisher(t *testing.T) 
 	if terms, _ := listedSite(t, f, owner, "stoa.example")["terms"].(map[string]any); terms["pricing_model"] != "per_unit" {
 		t.Fatalf("the holder's listing terms = %v, want the terms they saved", terms)
 	}
-	if n := countActions(t, f, "RegisterDomain"); n != 1 {
+	if n := f.exchange.CountAuditActions(t, "RegisterDomain"); n != 1 {
 		t.Fatalf("%d RegisterDomain audit rows, want the holder's one", n)
 	}
 }
@@ -128,7 +128,7 @@ func TestConsoleRegistration_ASiteWithoutTermsIsNeverActivated(t *testing.T) {
 		t.Fatalf("after the refused check the site reads state %v, last_checked_at %v; want it untouched",
 			site["state"], site["last_checked_at"])
 	}
-	if n := countActions(t, f, "CheckDomain"); n != 0 {
+	if n := f.exchange.CountAuditActions(t, "CheckDomain"); n != 0 {
 		t.Fatalf("the refused check wrote %d CheckDomain audit rows", n)
 	}
 }

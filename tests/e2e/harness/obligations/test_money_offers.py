@@ -20,6 +20,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from wire.models import LicenseTerm
 
 from ..catalog_calls import HOME_SEAT, accepted, contributor, fresh_entry
 from ..catalog_push import (
@@ -51,7 +52,7 @@ from ..stack_urls import StackURLs
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
 
-def _push(stack: StackURLs, *terms: dict[str, Any], estimated_quantity: int | None = None) -> str:
+def _push(stack: StackURLs, *terms: LicenseTerm, estimated_quantity: int | None = None) -> str:
     """Push one new resource to exchange-a carrying ``terms``; return its URI."""
     assert terms, "a probe resource names the terms it sells"
     entry = fresh_entry(terms=terms, estimated_quantity=estimated_quantity)

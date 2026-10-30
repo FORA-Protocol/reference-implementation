@@ -23,8 +23,8 @@ from fora_sdk import ProtocolVersion
 from fora_sdk.client import CallError
 from wire.models import Usage, UsageReport
 
-from .e2e_catalog import USD_AGENT_ID, USD_AGENT_KEY_PATH
 from .exchanges import SERVICE_IDENTITIES
+from .model_edits import with_members
 from .sdk_client import sdk_exchange_client, stack_offer_verifier
 from .stack_urls import StackURLs
 
@@ -58,21 +58,20 @@ def report_body(
 
 def readdressed(report: UsageReport, exchange: str) -> UsageReport:
     """The same report, naming ``exchange`` as its recipient instead."""
-    return report.model_copy(update={"exchange": exchange})
+    return with_members(report, exchange=exchange)
 
 
 def file_report(
     stack: StackURLs,
     report: UsageReport,
     *,
-    agent_id: str = USD_AGENT_ID,
-    key_path: Path = USD_AGENT_KEY_PATH,
+    agent_id: str,
+    key_path: Path,
 ) -> str:
     """File ``report`` as the agent ``key_path`` signs as; return the report_id it was answered with.
 
-    The agent defaults to the seed's USD buyer. A test that bought as its own
-    agent (``fresh_agent``) reports as that agent: an Exchange accepts a report
-    only from the agent the transaction is recorded under.
+    The agent is the one that bought: an Exchange accepts a report only from the
+    agent the transaction is recorded under.
 
     The SDK routes a report to the exchange the report names, through that
     exchange's own manifest, so the client is addressed at that exchange too.
@@ -92,8 +91,8 @@ def assert_report_recorded_only_at(
     report: UsageReport,
     report_id: str,
     *,
-    agent_id: str = USD_AGENT_ID,
-    key_path: Path = USD_AGENT_KEY_PATH,
+    agent_id: str,
+    key_path: Path,
 ) -> None:
     """The exchange ``report`` names recorded it under ``report_id``, and no other holds its sale.
 

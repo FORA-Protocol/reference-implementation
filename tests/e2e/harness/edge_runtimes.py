@@ -37,7 +37,6 @@ than the SDK signs is made by a third-party Web Bot Auth library
 
 from __future__ import annotations
 
-import json
 import secrets
 import time
 from collections.abc import Iterator, Mapping
@@ -56,7 +55,14 @@ from fora_sdk.sync import BrokerClient
 from ._compose import restart_service, stopped_service
 from .e2e_catalog import CANARY_MARKER, DEMO_MUSIC_DOMAIN, DEMO_PHILOSOPHY_DOMAIN
 from .e2e_controls import short_lifetimes
-from .edge_fetch import EdgeAnswer, browse, present, tamper_query_param
+from .edge_fetch import (
+    EdgeAnswer,
+    browse,
+    media_type_of,
+    present,
+    refusal_reason,
+    tamper_query_param,
+)
 from .exchanges import EXCHANGE_A_DOMAIN, EXCHANGE_B_DOMAIN
 from . import wba_oracle
 from .fresh_agent import FreshAgent
@@ -201,13 +207,7 @@ class EdgeReply:
     @property
     def reason(self) -> str:
         """The edge's refusal token, or a marker saying why there is none."""
-        try:
-            payload = json.loads(self.body)
-        except ValueError:
-            return f"<non-JSON body: {self.body[:120]!r}>"
-        if not isinstance(payload, dict):
-            return f"<JSON is {type(payload).__name__}, not an object>"
-        return str(payload.get("reason", "<no reason field>"))
+        return refusal_reason(media_type_of(self.headers.get("content-type", "")), self.body)
 
 
 def _from_http(answer: EdgeAnswer) -> EdgeReply:
@@ -480,4 +480,4 @@ def key_directory_unreachable(
             yield
     finally:
         _directory_answers(stack, runtime)
-        wait_until_broker_routes(stack, broker)
+        wait_until_broker_routes(broker)

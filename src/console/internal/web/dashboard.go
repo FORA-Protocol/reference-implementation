@@ -179,20 +179,17 @@ func (h *DashboardHandler) Catalog(w http.ResponseWriter, r *http.Request) {
 }
 
 // navFor is a dashboard page's place: the one publisher the signed-in person
-// holds, as the Exchange reports it, and the page's section. ok is false when
-// the page has been answered already: a person with no domain yet is sent to
-// add their first one, and a failed call gets the failure page.
+// holds, from the registrations read in front of the page, and the page's
+// section. ok is false when the page has been answered already: an account
+// that has not named its business is sent to the wizard, the way consoleNav
+// sends it from every page that draws the console. A publisher with no domain
+// yet has a place like any other, and each section says it is empty.
 func (h *DashboardHandler) navFor(w http.ResponseWriter, r *http.Request, section string) (dashboard.Nav, bool) {
-	nav, err := h.dash.Nav(r.Context(), actorOf(r.Context()), section)
-	switch {
-	case errors.Is(err, dashboard.ErrNoDomain):
-		http.Redirect(w, r, HomePath, http.StatusSeeOther)
-		return dashboard.Nav{}, false
-	case err != nil:
-		renderFailure(h.render, w, r, err, "")
+	regs, ok := pageRegistrations(w, r)
+	if !ok {
 		return dashboard.Nav{}, false
 	}
-	return nav, true
+	return consoleNav(w, r, h.dash, regs, section)
 }
 
 // readFailure renders the page for a dashboard read that did not succeed. A

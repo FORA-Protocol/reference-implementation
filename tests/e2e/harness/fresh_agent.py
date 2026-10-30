@@ -23,12 +23,14 @@ run time:
   ``requester.domain``, and it is the ``Signature-Agent`` every request is signed
   under.
 
-No Exchange knows the agent before its first signed call. Each one resolves the
-key from the directory and registers the agent's identity row itself (lazy
-registration, ADR-009 D2). An agent that is to pay opens an account with
+No Exchange knows the agent until a call it serves resolves the caller: a
+purchase, a usage report, a Register or an account read. The Exchange then
+fetches the agent's directory and records the identity row itself (lazy
+registration, ADR-009 D2). A discovery verifies the signature against the same
+directory and records nothing. An agent that is to pay opens an account with
 :meth:`FreshAgent.fund`, a signed Register at each Exchange it names, which
-grants that Exchange's welcome credit: every seat activates new agents by
-default once the seed has run.
+grants that Exchange's welcome credit: every seat activates new agents, as its
+boot fixture declares, except while the seed holds it for its credit-less buyer.
 
 **One identity currency.** Every signing seam in this harness takes the keyfile
 ``scripts/gen-e2e-keys.sh`` writes (``load_keypair`` reads it). A fresh agent
@@ -36,9 +38,13 @@ writes its key to such a file under the test's temporary directory, so it signs
 through exactly the seams the fixed identities sign through instead of a second
 copy of each.
 
-**Fixed identities stay** where a test needs a party that was set up before it
-ran: the credit-less buyer, whose account is opened held and switched on unfunded;
-the lazy-registration agent; and the subjects of the identity-list guard.
+**Fixed identities stay** only where a test needs a party that was set up before
+it ran, and a test reaches each through its fixture: the seed's credit-less buyer,
+whose account is opened held and switched on unfunded (``credit_less_buyer``;
+``seed_agents.py`` holds it), and the MCP session agents signed up from the
+bootstrap's logins (``mcp_agents.py`` says when a test takes a fresh one
+instead). The identity-list guard reads the fixed identities' configuration as
+its subject.
 """
 
 from __future__ import annotations
@@ -66,6 +72,7 @@ from wire.models import KeyRevocationList, WBAFile
 from .constants import REVOCATION_PATH
 from .httpsig_signer import signing_transport
 from .ledger import Balances, balances
+from .model_edits import with_members
 from .sdk_client import (
     BeforeSign,
     RequestID,
@@ -171,16 +178,15 @@ def _directory(
     for index, key in enumerate(keys):
         window = (windows or {}).get(thumbprint_of(key))
         if window is not None:
-            published[index] = published[index].model_copy(
-                update={
-                    "not_before": window.not_before.isoformat(),
-                    "not_after": window.not_after.isoformat(),
-                }
+            published[index] = with_members(
+                published[index],
+                not_before=window.not_before.isoformat(),
+                not_after=window.not_after.isoformat(),
             )
     update: dict[str, object] = {"keys": published}
     if revocations is not None:
         update["revocation_url"] = revocations
-    built: dict[str, object] = to_wire(document.model_copy(update=update))
+    built: dict[str, object] = to_wire(with_members(document, **update))
     return built
 
 
@@ -255,7 +261,8 @@ class FreshAgent:
     key, and ``key_path`` the same key in the harness keyfile format, for the
     signing seams that take one.
 
-    Clients built here are closed when the test ends; a test does not close them.
+    Clients built here, and any HTTP client handed to them as ``http``, are closed
+    when the test ends; a test does not close them.
     """
 
     host: str
@@ -264,7 +271,7 @@ class FreshAgent:
     key_path: Path
     stack: StackURLs
     _exchanges: dict[str, Client] = field(default_factory=dict, repr=False)
-    _owned: list[Client | BrokerClient] = field(default_factory=list, repr=False)
+    _owned: list[Client | BrokerClient | httpx.Client] = field(default_factory=list, repr=False)
     _broker: BrokerClient | None = field(default=None, repr=False)
     _views: list[FreshAgent] = field(default_factory=list, repr=False)
 
@@ -315,7 +322,7 @@ class FreshAgent:
             http=http,
             request_id=request_id,
         )
-        self._owned.append(client)
+        self._own(client, http)
         return client
 
     def exchange_client(
@@ -342,8 +349,15 @@ class FreshAgent:
             before_sign=before_sign,
             http=http,
         )
-        self._owned.append(client)
+        self._own(client, http)
         return client
+
+    def _own(self, client: Client | BrokerClient, http: httpx.Client | None) -> None:
+        """Close ``client`` when the test ends, and ``http`` with it: the SDK leaves an
+        injected HTTP client open when it closes."""
+        self._owned.append(client)
+        if http is not None:
+            self._owned.append(http)
 
     def fund(self, *exchanges: str) -> None:
         """Open an active account at each of ``exchanges``, holding its welcome credit."""

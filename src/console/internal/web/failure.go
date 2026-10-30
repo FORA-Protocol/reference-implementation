@@ -15,7 +15,8 @@ import (
 // account, and a failure the Exchange reported. Each is mapped here once.
 
 // backToDomains is the way out of every failure page: the domains list, which
-// every signed-in person has.
+// every signed-in person can open, and which opens the wizard for an account
+// that has not named its business.
 const backToDomains = "Back to your domains"
 
 // renderFailure answers a page whose call did not succeed.

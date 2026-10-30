@@ -71,7 +71,7 @@ func listingFixture(
 ) *pgxpool.Pool {
 	t.Helper()
 	pool := newTestPool(t, ctx)
-	seedTenantRow(t, ctx, sqlc.New(pool), tenantID, "exchange.example")
+	seedTenantRow(t, ctx, pool, tenantID, "exchange.example")
 	if _, err := createPublisher(t, ctx, pool, publisherID, "Stoa Press"); err != nil {
 		t.Fatalf("seed publisher: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestOneSiteListsOnTwoSeatsWithDifferentScopes(t *testing.T) {
 		site        = "stoapress.example"
 	)
 	pool := listingFixture(t, ctx, seatA, publisherID, site)
-	seedTenantRow(t, ctx, sqlc.New(pool), seatB, "other-exchange.example")
+	seedTenantRow(t, ctx, pool, seatB, "other-exchange.example")
 
 	if _, err := createListing(t, ctx, pool, seatA, site, []string{"/articles/"}, termsPerAccess); err != nil {
 		t.Fatalf("Create listing on seat A: %v", err)
@@ -320,7 +320,7 @@ func TestListingReadIsSeatScoped(t *testing.T) {
 		site        = "harmonia.example"
 	)
 	pool := listingFixture(t, ctx, seatA, publisherID, site)
-	seedTenantRow(t, ctx, sqlc.New(pool), seatB, "other-exchange.example")
+	seedTenantRow(t, ctx, pool, seatB, "other-exchange.example")
 	if _, err := createListing(t, ctx, pool, seatA, site, nil, termsFree); err != nil {
 		t.Fatalf("Create listing on seat A: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestCreateListingRejectsUnregisteredSite(t *testing.T) {
 	ctx := context.Background()
 	const tenantID = "t-ghost-site"
 	pool := newTestPool(t, ctx)
-	seedTenantRow(t, ctx, sqlc.New(pool), tenantID, "exchange.example")
+	seedTenantRow(t, ctx, pool, tenantID, "exchange.example")
 
 	_, err := createListing(t, ctx, pool, tenantID, "unregistered.example", nil, termsPerAccess)
 	if !errors.Is(err, repo.ErrPublisherDomainNotFound) {

@@ -18,7 +18,8 @@ and it matches no row: every ``fora_register`` there is refused with a
 failed-precondition, and the exchange says so only in a boot warning nobody
 reads. The stack states the value rather than leaving the binary to fall back to
 ``EXCHANGE_DOMAIN`` on its own, so the seat each exchange reads is written where
-this guard and the seed can be compared against it.
+this guard and the exchange's boot fixture, which creates the seat, can be
+compared against it.
 
 THE EXCHANGE POLICY. The identity service refuses to sign and send to a domain
 outside ``IDENTITY_MCP_EXCHANGE_ALLOWLIST``. It names every exchange here so
@@ -26,26 +27,25 @@ the lever runs in its production posture rather than sitting empty; an exchange
 added to the stack and not to the list is refused by policy, which reads as a
 routing failure.
 
-THE RELAY OPT-OUT. The seed writes ``allow_broker_relay = FALSE`` on the seats
-``RELAY_REFUSING_EXCHANGES`` names and TRUE on every other. A name there that the
-stack does not run would leave the money-path suite asserting a refusal from an
-exchange that does not exist, and every other exchange accepting the relay is
-what the rest of the suite buys through.
+THE RELAY OPT-OUT. Each exchange's boot fixture declares ``allow_broker_relay``
+false on the seats ``RELAY_REFUSING_EXCHANGES`` names and true on every other
+(``test_guards_exchange_boot_fixtures.py``). A name there that the stack does not
+run would leave the money-path suite asserting a refusal from an exchange that
+does not exist, and every other exchange accepting the relay is what the rest of
+the suite buys through.
 
-THE LEDGERS. Each exchange bills on its own TigerBeetle replica. The ledger
-derives its platform and publisher revenue accounts with no per-Exchange salt,
-so two exchanges pointed at one replica would post into the same accounts, and
-every balance test would still pass. The address is an IP written in two places
-— the ledger's static address and the exchange's setting — because the client
-takes no hostname, so each exchange's address is checked against the ledger it
-waits for.
-
-THE ACCOUNT REGISTRIES. The credit-less buyer registers while the seats hold
-new agents for review, so it is granted no welcome credit, and the seed then
-switches its account on in each exchange's own account registry. The seed names
-those databases itself; one that names another exchange's registry matches no
-row there, and the buyer stays switched off at an exchange the money suites buy
-from, which reads as a billing failure.
+THE LEDGER. Every exchange bills on the stack's one TigerBeetle cluster, which
+is what keeps four ledgers' worth of memory out of the stack. A TigerBeetle id
+is unique per cluster, and the platform fee and liquidity accounts and a
+resource owner's revenue account are derived from fixed names, so each exchange
+salts every id it derives with its own namespace,
+``EXCHANGE_BILLING_TB_ID_NAMESPACE``. Two exchanges with the same namespace
+would post into the same accounts, and every balance test would still pass,
+because the balance suites read only the buyer's own account. The namespace is
+the exchange's service name, so the namespaces differ by construction. The
+address is an IP written in two places — the ledger's static address and the
+exchanges' shared setting — because the client takes no hostname, so it is
+checked against the ledger the exchanges wait for.
 
 THE BROKER REGISTRY. The Broker reads the exchanges it routes to from its
 registry file (``fixtures/broker_registry.yml``) at boot. An exchange missing
@@ -73,7 +73,9 @@ Pure file reading: no stack, no Docker, no database.
 
 from __future__ import annotations
 
+import copy
 import re
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -81,7 +83,7 @@ import pytest
 import yaml
 
 from .conftest import REPO_ROOT
-from .seed import SEEDED_SEAT_DOMAINS, SOR_DB_BY_EXCHANGE
+from .exchange_boot_fixtures import read_boot_fixture, seat_domains
 from .exchanges import (
     SERVICE_IDENTITIES,
     EXCHANGE_A_DOMAIN,
@@ -160,23 +162,6 @@ def test_the_in_network_url_of_each_exchange_names_that_exchange() -> None:
         )
 
 
-def test_the_seed_creates_a_seat_for_every_exchange_in_the_stack() -> None:
-    """The seed's seat list covers every exchange exchanges.py declares.
-
-    The default-tenant check below compares each service's setting against the
-    set of domains the seed creates seat rows under. If the seed stopped creating
-    one, that check would report the setting as unseeded rather than say which
-    side moved. Checked here instead, as the sentence a reader needs.
-    """
-    missing = sorted(set(SERVICE_IDENTITIES.values()) - SEEDED_SEAT_DOMAINS)
-    assert not missing, (
-        f"exchanges.py declares {missing}, which the seed creates no seat row for — "
-        f"every fora_register on those exchanges would be refused"
-    )
-    extra = sorted(SEEDED_SEAT_DOMAINS - set(SERVICE_IDENTITIES.values()))
-    assert not extra, f"the seed creates a seat for {extra}, which the stack no longer runs"
-
-
 def test_each_exchange_names_its_own_seat_as_the_default_tenant() -> None:
     """A registration needs a tenant row, and only the exchange's own seat is one."""
     for service, identity in SERVICE_IDENTITIES.items():
@@ -193,13 +178,10 @@ def test_each_exchange_names_its_own_seat_as_the_default_tenant() -> None:
             f"{configured!r} matches no row: every fora_register there is refused with a "
             f"failed-precondition, and the exchange says so only in a boot warning"
         )
-        # Named for what it holds, not "seeded": that is the name of the session
-        # fixture that brings the stack up and runs the ingest, and this module
-        # reads files only — a reader seeing it here would have to check whether
-        # the stack got involved.
-        assert configured in SEEDED_SEAT_DOMAINS, (
-            f"{service!r} names seat {configured!r}, which the seed never creates; "
-            f"it seeds {sorted(SEEDED_SEAT_DOMAINS)}"
+        declared = seat_domains(read_boot_fixture(service))
+        assert configured in declared, (
+            f"{service!r} names seat {configured!r}, which its boot fixture never creates; "
+            f"it declares {sorted(declared)}"
         )
 
 
@@ -220,11 +202,11 @@ def test_the_identity_policy_names_every_exchange_in_the_stack() -> None:
 
 
 def test_every_relay_refusing_exchange_runs_in_the_stack() -> None:
-    """The seats the seed opts out of the Broker relay belong to exchanges the stack runs."""
+    """The seats whose boot fixtures opt out of the Broker relay belong to exchanges the stack runs."""
     unknown = sorted(RELAY_REFUSING_EXCHANGES - set(SERVICE_IDENTITIES.values()))
     assert not unknown, (
-        f"RELAY_REFUSING_EXCHANGES names {unknown}, which the stack does not run; the seed "
-        f"would opt out a seat nobody serves and the refusal under test could not happen"
+        f"RELAY_REFUSING_EXCHANGES names {unknown}, which the stack does not run; no boot "
+        f"fixture opts that seat out, so the refusal under test cannot happen"
     )
     accepting = set(SERVICE_IDENTITIES.values()) - RELAY_REFUSING_EXCHANGES
     assert accepting, "every exchange refuses the Broker relay, so nothing can be bought through it"
@@ -242,55 +224,121 @@ def _ledger_ip(service: dict) -> str | None:
     return default.get("ipv4_address") if isinstance(default, dict) else None
 
 
-def test_each_exchange_bills_on_its_own_ledger() -> None:
-    """One TigerBeetle replica per exchange, and each address names its own."""
-    services = _compose_services()
-    used: dict[str, str] = {}
-    for service in SERVICE_IDENTITIES:
-        env = _compose_environment(service)
-        assert env.get("FORA_BILLING_ADAPTER") == "tigerbeetle", (
-            f"{service!r} bills with {env.get('FORA_BILLING_ADAPTER')!r}; the stack's "
-            f"balance suites assert on a real ledger"
-        )
-        address = env.get("EXCHANGE_BILLING_TB_ADDRESS", "")
-        host, _, port = address.rpartition(":")
-        deps = services[service].get("depends_on") or {}
-        ledgers = [
-            name
-            for name in deps
-            if services.get(name, {}).get("image", "").startswith("ghcr.io/tigerbeetle/")
-        ]
-        assert len(ledgers) == 1, (
-            f"{service!r} waits for ledgers {ledgers}; it must wait for exactly one, "
-            f"because it refuses to boot when its ledger does not answer"
-        )
-        assert deps[ledgers[0]].get("condition") == "service_healthy", (
-            f"{service!r} must wait for {ledgers[0]!r} to be healthy, not merely started"
-        )
-        assert host == _ledger_ip(services[ledgers[0]]) and port == "3000", (
-            f"{service!r} dials {address!r}, but the ledger it waits for, "
-            f"{ledgers[0]!r}, listens on {_ledger_ip(services[ledgers[0]])}:3000"
-        )
-        assert address not in used, (
-            f"{service!r} and {used.get(address)!r} share the ledger at {address}; "
-            f"their revenue and liquidity accounts would merge"
-        )
-        used[address] = service
+def _ledger_problems(services: dict) -> list[str]:
+    """Every way the exchanges fail to share the stack's one ledger safely.
 
-
-def test_the_seed_approves_accounts_in_each_exchanges_own_registry() -> None:
-    """SOR_DB_BY_EXCHANGE names the database each exchange's EXCHANGE_SOR_DSN opens."""
-    assert set(SOR_DB_BY_EXCHANGE) == set(SERVICE_IDENTITIES.values()), (
-        f"the seed names account registries for {sorted(SOR_DB_BY_EXCHANGE)}, but the "
-        f"stack runs {sorted(SERVICE_IDENTITIES.values())}"
+    Each problem is a sentence naming the service and what it does wrong. The
+    stack must run exactly one TigerBeetle service. Every exchange bills on it
+    with the TigerBeetle adapter, waits for it to be healthy (an exchange refuses
+    to boot when its ledger does not answer), dials its address, and salts its
+    ids with its own service name.
+    """
+    ledgers = sorted(
+        name
+        for name, svc in services.items()
+        if str((svc or {}).get("image", "")).startswith("ghcr.io/tigerbeetle/")
     )
-    for service, domain in SERVICE_IDENTITIES.items():
-        dsn = _compose_environment(service).get("EXCHANGE_SOR_DSN", "")
-        database = urlsplit(dsn).path.lstrip("/")
-        assert SOR_DB_BY_EXCHANGE[domain] == database, (
-            f"{service!r} keeps its accounts in {database!r}, but the seed approves the "
-            f"credit-less buyer's account in {SOR_DB_BY_EXCHANGE[domain]!r}"
-        )
+    if len(ledgers) != 1:
+        return [f"the stack runs {len(ledgers)} TigerBeetle services {ledgers}, not one"]
+    [ledger] = ledgers
+    address = f"{_ledger_ip(services[ledger])}:3000"
+    problems = []
+    for service in sorted(SERVICE_IDENTITIES):
+        svc = services.get(service) or {}
+        env = svc.get("environment") or {}
+        deps = svc.get("depends_on") or {}
+        wait = (deps.get(ledger) or {}).get("condition") if isinstance(deps, dict) else None
+        if env.get("FORA_BILLING_ADAPTER") != "tigerbeetle":
+            problems.append(
+                f"{service} bills with {env.get('FORA_BILLING_ADAPTER')!r}, not tigerbeetle"
+            )
+        if wait != "service_healthy":
+            problems.append(f"{service} waits for {ledger} with {wait!r}, not service_healthy")
+        if env.get("EXCHANGE_BILLING_TB_ADDRESS") != address:
+            problems.append(
+                f"{service} dials {env.get('EXCHANGE_BILLING_TB_ADDRESS')!r}, not {address}"
+            )
+        if env.get("EXCHANGE_BILLING_TB_ID_NAMESPACE") != service:
+            problems.append(
+                f"{service} salts its ids with {env.get('EXCHANGE_BILLING_TB_ID_NAMESPACE')!r}, "
+                f"not its own service name"
+            )
+    return problems
+
+
+def test_the_exchanges_share_one_ledger_under_their_own_namespaces() -> None:
+    """One TigerBeetle for every exchange, each salting its ids with its service name."""
+    assert _ledger_problems(_compose_services()) == []
+
+
+def _env_edit(service: str, key: str, value: str | None) -> Callable[[dict], None]:
+    """An edit that sets ``key`` in ``service``'s environment, or removes it."""
+
+    def edit(services: dict) -> None:
+        env = services[service]["environment"]
+        if value is None:
+            del env[key]
+        else:
+            env[key] = value
+
+    return edit
+
+
+def _second_ledger(services: dict) -> None:
+    services["tigerbeetle-2"] = copy.deepcopy(services["tigerbeetle"])
+
+
+def _started_not_healthy(services: dict) -> None:
+    services["exchange"]["depends_on"]["tigerbeetle"]["condition"] = "service_started"
+
+
+@pytest.mark.parametrize(
+    ("edit", "problem"),
+    [
+        pytest.param(
+            _second_ledger,
+            "the stack runs 2 TigerBeetle services ['tigerbeetle', 'tigerbeetle-2'], not one",
+            id="second-ledger",
+        ),
+        pytest.param(
+            _env_edit("exchange-c", "EXCHANGE_BILLING_TB_ID_NAMESPACE", "exchange-b"),
+            "exchange-c salts its ids with 'exchange-b', not its own service name",
+            id="repeated-namespace",
+        ),
+        pytest.param(
+            _env_edit("exchange-d", "EXCHANGE_BILLING_TB_ID_NAMESPACE", None),
+            "exchange-d salts its ids with None, not its own service name",
+            id="missing-namespace",
+        ),
+        pytest.param(
+            _env_edit("exchange", "EXCHANGE_BILLING_TB_ID_NAMESPACE", "exchange-a"),
+            "exchange salts its ids with 'exchange-a', not its own service name",
+            id="namespace-not-the-service-name",
+        ),
+        pytest.param(
+            _env_edit("exchange-b", "EXCHANGE_BILLING_TB_ADDRESS", "${FORA_E2E_NET}.212:3000"),
+            "exchange-b dials '${FORA_E2E_NET}.212:3000', not ${FORA_E2E_NET}.211:3000",
+            id="address-mismatch",
+        ),
+        pytest.param(
+            _started_not_healthy,
+            "exchange waits for tigerbeetle with 'service_started', not service_healthy",
+            id="started-not-healthy",
+        ),
+        pytest.param(
+            _env_edit("exchange-d", "FORA_BILLING_ADAPTER", "inmemory"),
+            "exchange-d bills with 'inmemory', not tigerbeetle",
+            id="not-tigerbeetle",
+        ),
+    ],
+)
+def test_the_ledger_check_refuses_each_unsafe_way_to_share(
+    edit: Callable[[dict], None], problem: str
+) -> None:
+    """Each mistake the ledger check exists to catch makes it report exactly that mistake."""
+    services = copy.deepcopy(_compose_services())
+    edit(services)
+    assert _ledger_problems(services) == [problem]
 
 
 _BROKER_REGISTRY = Path(__file__).resolve().parent / "fixtures" / "broker_registry.yml"

@@ -58,12 +58,15 @@ from .provider_login import (
     registration_page,
     submit_login_name,
 )
-from .seed import SeededFixture
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("FORA_E2E_IN_NETWORK") != "1",
-    reason="the provider is reachable only in-network (FORA_E2E_IN_NETWORK=1)",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        os.environ.get("FORA_E2E_IN_NETWORK") != "1",
+        reason="the provider is reachable only in-network (FORA_E2E_IN_NETWORK=1)",
+    ),
+    # ADR-008 D5 — declare stack-isolation contract.
+    pytest.mark.stack_isolation("shared-clean-fixtures"),
+]
 
 DEVELOPERS = "FORA Developers"
 PUBLISHERS = "FORA Publishers"
@@ -131,8 +134,6 @@ def test_a_developer_session_signs_nobody_in_at_the_console(identity_ready: Stac
 def test_one_address_holds_a_developer_and_a_publisher_account(
     identity_ready: StackURLs,
     mailbox: Mailbox,
-    # The console's home page reads the Exchange's own seat, which the seed writes.
-    seeded: SeededFixture,
 ) -> None:
     stack = identity_ready
     address = _new_address()

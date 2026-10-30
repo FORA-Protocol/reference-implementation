@@ -11,10 +11,11 @@ rather than a Node process pretending to be one. The other two runtimes (Cloudfl
 Fastly Compute via Viceroy) already have that; this closes the third.
 
 Two shapes are asserted throughout, and telling them apart is what the
-Lambda@Edge entry exists for: a denial or a well-known document comes back as a
+Lambda@Edge entry exists for: a denial or the key directory comes back as a
 GENERATED RESPONSE (status/headers/body) that CloudFront returns without
-touching the origin, while an authorized read comes back as the REQUEST OBJECT,
-which is how the function tells CloudFront to go and fetch the origin itself.
+touching the origin, while an authorized read, and a read of the publisher's
+own discovery document or RSL file, comes back as the REQUEST OBJECT, which is
+how the function tells CloudFront to go and fetch the origin itself.
 This deployment bakes no ORIGIN_URL, the CloudFront-native posture where the CDN
 owns that fetch.
 
@@ -45,13 +46,12 @@ from __future__ import annotations
 
 import pytest
 from fora_sdk.resolvers import WBA_DIRECTORY_MEDIA_TYPE
-from wire.models import WBAFile, WellKnownManifest
+from wire.models import WBAFile
 
 from .conftest import StackURLs
-from .constants import AI_BOT_UA, BROWSER_UA, WBA_DIRECTORY_PATH
-from .e2e_catalog import USD_AGENT_KEY_PATH
+from .constants import AI_BOT_UA, BROWSER_UA, PUBLISHER_DOCUMENT_PATHS, WBA_DIRECTORY_PATH
 from .edge_fetch import tamper_query_param
-from .httpsig_signer import key_thumbprint
+from .fresh_agent import FreshAgent
 from .lambda_edge import (
     ARTICLE_PATH,
     PUBLISHER,
@@ -65,12 +65,8 @@ from .lambda_edge import (
 from .obligation_registry import Obligation, obligation
 from .protocol_documents import parse_document
 
-# The exchange this deployment points agents at. Like the publisher it fronts
-# (lambda_edge.PUBLISHER), it is written into the package's index.mjs at build
-# time (tests/e2e/lambda-edge/write-configs.mjs), so asserting on both is how a
-# test notices that the built artifact no longer carries the configuration it
-# was built for.
-EXCHANGE_ENDPOINT = "http://exchange:8081"
+# ADR-008 D5 — declare stack-isolation contract.
+pytestmark = pytest.mark.stack_isolation("shared-without-cleanup")
 
 # Query the publisher's own site puts on its URLs. It must survive a
 # pass-through untouched, unlike the signature parameters.
@@ -109,24 +105,31 @@ def signed_url(
     return mint_delivery_url(key, base, agent_id=agent_id, ttl_seconds=ttl_seconds)
 
 
+@pytest.mark.parametrize("user_agent", [BROWSER_UA, AI_BOT_UA], ids=["browser", "ai-bot"])
+@pytest.mark.parametrize("path", PUBLISHER_DOCUMENT_PATHS)
 @pytest.mark.xdist_group("lambda-edge")
-def test_manifest_route_is_served_as_a_generated_response(compose_stack: StackURLs) -> None:
-    """GET /.well-known/fora.json answers the publisher manifest, origin untouched.
+def test_publisher_documents_are_handed_back_to_cloudfront(
+    compose_stack: StackURLs, path: str, user_agent: str
+) -> None:
+    """The publisher's discovery document and RSL file go to the origin, for any client.
 
     This is the document the whole discovery chain starts from: an agent that
-    was turned away reads it to learn which exchange sells access. It must come
-    back as a generated response — CloudFront must not forward this to an origin
-    that knows nothing about FORA.
+    was turned away reads it to learn which exchange sells access. It is the
+    publisher's own file, so the function must hand the request back for
+    CloudFront to fetch from the origin, never answer it itself, and never gate
+    it, the AI bot's read included. Viewer-request is where the function stops;
+    what the origin then answers is the publisher's, which this runtime's
+    container does not reach.
     """
     result = invoke(
         compose_stack.lambda_edge,
-        viewer_request_event(f"https://{PUBLISHER}/.well-known/fora.json"),
+        viewer_request_event(
+            f"https://{PUBLISHER}{path}?{SITE_QUERY}", headers={"User-Agent": user_agent}
+        ),
     )
-    assert result.status == "200", result
-    result.json_body()
-    manifest = parse_document(WellKnownManifest, result.body or "")
-    assert manifest.domain == PUBLISHER, manifest
-    assert [e.endpoint for e in manifest.exchanges or []] == [EXCHANGE_ENDPOINT], manifest
+    assert result.pass_through, result
+    assert result.uri == path, result
+    assert result.querystring == SITE_QUERY, result
 
 
 @pytest.mark.parametrize(
@@ -204,8 +207,7 @@ def test_tampered_signature_is_refused(
     url = tamper_query_param(signed_url(exchange_key))
     result = invoke(compose_stack.lambda_edge, viewer_request_event(url))
     assert result.status == "403", result
-    body = result.json_body()
-    assert body == {"error": "Invalid signature", "reason": "signature_mismatch"}, body
+    assert result.reason == "signature_mismatch", result
 
 
 @pytest.mark.xdist_group("lambda-edge")
@@ -222,8 +224,7 @@ def test_expired_delivery_url_is_refused(
     url = signed_url(exchange_key, ttl_seconds=-60)
     result = invoke(compose_stack.lambda_edge, viewer_request_event(url))
     assert result.status == "403", result
-    body = result.json_body()
-    assert body == {"error": "Signed URL has expired", "reason": "expired"}, body
+    assert result.reason == "expired", result
 
 
 @pytest.mark.xdist_group("lambda-edge")
@@ -246,9 +247,7 @@ def test_unsigned_ai_bot_is_sent_to_negotiate(compose_stack: StackURLs) -> None:
     )
     # X-FORA-Exchange is held to the protocol's shape (a bare domain the manifest
     # lists) in obligations/test_edge_hints.py.
-    body = result.json_body()
-    assert body["reason"] == "ai_bot", body
-    assert body["error"], body
+    assert result.reason == "ai_bot", result
 
 
 @pytest.mark.xdist_group("lambda-edge")
@@ -297,8 +296,7 @@ def test_unsigned_ai_bot_at_site_root_is_sent_to_negotiate(compose_stack: StackU
         viewer_request_event(f"https://{PUBLISHER}/", headers={"User-Agent": AI_BOT_UA}),
     )
     assert result.status == "403", result
-    body = result.json_body()
-    assert body["reason"] == "ai_bot", body
+    assert result.reason == "ai_bot", result
 
 
 @obligation(Obligation.DELIVERY_004, negative=True)
@@ -306,6 +304,7 @@ def test_unsigned_ai_bot_at_site_root_is_sent_to_negotiate(compose_stack: StackU
 def test_agent_bound_url_needs_the_key_it_names(
     compose_stack: StackURLs,
     exchange_key: ExchangeDeliveryKey,
+    fresh_agent: FreshAgent,
 ) -> None:
     """A bound delivery URL is worthless to anyone who cannot present its key.
 
@@ -313,19 +312,18 @@ def test_agent_bound_url_needs_the_key_it_names(
     the difference between the two answers is the check itself and not something
     about the URL. Without the proof the read is refused; with an RFC 9421
     signature made by the agent key the URL is bound to, it passes through. This
-    is what stops a leaked URL from being a bearer token.
+    is what stops a leaked URL from being a bearer token. The agent is the test's
+    own, so the URL is bound to a key no other test holds.
     """
-    agent_id = key_thumbprint(USD_AGENT_KEY_PATH)
-    url = signed_url(exchange_key, agent_id=agent_id)
+    url = signed_url(exchange_key, agent_id=fresh_agent.thumbprint)
 
     refused = invoke(compose_stack.lambda_edge, viewer_request_event(url))
     assert refused.status == "403", refused
-    body = refused.json_body()
-    assert body == {"error": "Agent binding check failed", "reason": "missing_agent_key"}, body
+    assert refused.reason == "missing_agent_key", refused
 
     proven = invoke(
         compose_stack.lambda_edge,
-        viewer_request_event(url, headers=proof_of_possession(url, USD_AGENT_KEY_PATH)),
+        viewer_request_event(url, headers=proof_of_possession(url, fresh_agent.key_path)),
     )
     assert proven.pass_through, proven
     assert proven.uri == ARTICLE_PATH, proven
@@ -348,44 +346,4 @@ def test_signed_read_url_replayed_as_a_write_is_refused(
     result = invoke(compose_stack.lambda_edge, viewer_request_event(url, method="POST"))
     assert result.status == "405", result
     assert result.header("Allow") == "GET, HEAD", result
-    body = result.json_body()
-    assert body == {
-        "error": "Signed URLs authorize content reads only",
-        "reason": "method_not_bound",
-    }, body
-
-
-@pytest.mark.xdist_group("lambda-edge")
-def test_rsl_document_is_served_as_a_generated_response(compose_stack: StackURLs) -> None:
-    """GET /rsl.txt answers the baked RSL body, origin untouched.
-
-    This route matters twice on this runtime. It is one of the four documents
-    the deployment generates at the edge. And with no body configured it would
-    produce exactly the empty 200 that made "empty body" unusable as the
-    pass-through signal — so it must come back as a generated response with the
-    baked body, never as a pass-through.
-    """
-    result = invoke(
-        compose_stack.lambda_edge,
-        viewer_request_event(f"https://{PUBLISHER}/rsl.txt"),
-    )
-    assert result.status == "200", result
-    content_type = result.header("content-type")
-    assert content_type is not None and content_type.startswith("text/plain"), result
-    assert result.body == "# e2e rsl lambda", result
-
-
-@pytest.mark.xdist_group("lambda-edge")
-def test_unknown_fora_verify_token_is_refused(compose_stack: StackURLs) -> None:
-    """GET /.well-known/fora-verify/<unknown token> answers a generated 404.
-
-    This deployment bakes no ACME tokens: the CloudFront certificate is
-    DNS-validated, so the route's whole surface here is the refusal. An unknown
-    token must get a generated 404 — not a pass-through that would hand the
-    challenge probe to an origin that knows nothing about it.
-    """
-    result = invoke(
-        compose_stack.lambda_edge,
-        viewer_request_event(f"https://{PUBLISHER}/.well-known/fora-verify/never-issued"),
-    )
-    assert result.status == "404", result
+    assert result.reason == "method_not_bound", result

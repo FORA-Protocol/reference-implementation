@@ -19,8 +19,8 @@ import uuid
 from typing import Any
 
 import pytest
-from fora_sdk import ProtocolVersion
 from fora_sdk.client import CallError
+from wire.models import AcceptableRestriction, RestrictionKind
 
 from ..broker_purchase import one_group_per_uri, resolve_request
 from ..catalog_calls import (
@@ -65,7 +65,7 @@ RESTRICTION_FILTERED = "OFFER_ABSENCE_REASON_RESTRICTION_FILTERED"
 NOT_IN_CATALOG = "OFFER_ABSENCE_REASON_NOT_IN_CATALOG"
 
 #: An ext key no profile defines, and the critical-extension request that names it.
-_CRITICAL = {"ext": {"acme.must": True}, "ext_critical": ["acme.must"]}
+_CRITICAL: dict[str, Any] = {"ext": {"acme.must": True}, "ext_critical": ["acme.must"]}
 
 
 def _priced(stack: StackURLs, *, terms: int = 1, **entry: Any) -> str:
@@ -86,7 +86,6 @@ def _ext_keys(agent: FreshAgent, uri: str, **fields: Any) -> set[str]:
 @EXT_WITHHELD_WITHOUT_PROFILES.mark
 def test_omitting_supported_profiles_withholds_no_ext_field(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """Every ext key the fora-comp-v1 discovery carries is on the discovery that names no profile."""
@@ -103,7 +102,6 @@ def test_omitting_supported_profiles_withholds_no_ext_field(
 @COMP_RENDERED_NESTED.mark
 def test_every_comp_offer_carries_a_flat_package_id(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """Two terms, two offers to a fora-comp-v1 caller: each carries its own comp.package_id."""
@@ -123,7 +121,6 @@ def test_every_comp_offer_carries_a_flat_package_id(
 @obligation(Obligation.PROFILE_004)
 def test_every_comp_key_a_publisher_pushes_comes_out_on_the_offer(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """comp.title, comp.seller and comp.citation_required come back unchanged to a comp caller."""
@@ -143,7 +140,6 @@ def test_every_comp_key_a_publisher_pushes_comes_out_on_the_offer(
 @COMP_INPUT_UNVALIDATED.mark
 def test_a_comp_value_breaking_the_profile_refuses_the_push(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """comp.citation_required is an integer in the profile; the string "yes" refuses the push."""
@@ -161,7 +157,6 @@ def test_a_comp_value_breaking_the_profile_refuses_the_push(
 @obligation(Obligation.PROFILE_006)
 def test_music_keys_are_forwarded_unchanged_and_unvalidated(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """An unknown music.iswc and an upper-case music.genre are accepted and offered as pushed."""
@@ -182,7 +177,6 @@ def test_music_keys_are_forwarded_unchanged_and_unvalidated(
 @BROKER_DROPS_SUPPORTED_PROFILES.mark
 def test_the_broker_forwards_the_agents_supported_profiles(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """Resolve declaring fora-comp-v1 returns every ext key a direct comp discovery returns.
@@ -195,8 +189,7 @@ def test_the_broker_forwards_the_agents_supported_profiles(
     """
     uri = _priced(compose_stack)
     direct = _ext_keys(fresh_agent, uri, supported_profiles=[COMP])
-    request = resolve_request([uri])
-    request["supported_profiles"] = [COMP]
+    request = resolve_request([uri], supported_profiles=[COMP])
     resolved = one_group_per_uri(fresh_agent.broker.resolve(request), [uri], "broker resolve")[uri]
     assert resolved.result.verified, f"Resolve offered nothing for {uri}: {resolved}"
     brokered = {key for offer in resolved.result.verified for key in entry_ext(offer)}
@@ -208,7 +201,6 @@ def test_the_broker_forwards_the_agents_supported_profiles(
 @obligation(Obligation.PROFILE_013)
 def test_acceptable_restrictions_drop_no_offer_or_say_why(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """A US requester's acceptable GEOGRAPHY, a term prohibiting US: the offer, or RESTRICTION_FILTERED."""
@@ -228,7 +220,9 @@ def test_acceptable_restrictions_drop_no_offer_or_say_why(
         fresh_agent,
         HOME_EXCHANGE,
         entry.uri,
-        acceptable_restrictions=[{"axis": RESTRICTION_KIND_GEOGRAPHY, "values": ["US"]}],
+        acceptable_restrictions=[
+            AcceptableRestriction(axis=RestrictionKind.RESTRICTION_KIND_GEOGRAPHY, values=["US"])
+        ],
     )
     if found.result.verified:
         assert found.absence_reason is None, found
@@ -240,7 +234,6 @@ def test_acceptable_restrictions_drop_no_offer_or_say_why(
 @obligation(Obligation.PROFILE_014)
 def test_an_unknown_non_critical_ext_key_is_ignored_by_the_exchange(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """ext {"acme.trace": "x"} with no ext_critical: the same offers as the plain query."""
@@ -254,7 +247,6 @@ def test_an_unknown_non_critical_ext_key_is_ignored_by_the_exchange(
 @EXCHANGE_IGNORES_EXT_CRITICAL.mark
 def test_an_unknown_critical_ext_key_is_answered_unknown_critical_extension(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """ext_critical ["acme.must"]: answered OK, no offers, UNKNOWN_CRITICAL_EXTENSION."""
@@ -272,13 +264,11 @@ def test_an_unknown_critical_ext_key_is_answered_unknown_critical_extension(
 @obligation(Obligation.PROFILE_015)
 def test_an_unknown_non_critical_ext_key_is_ignored_by_the_broker(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """A Resolve whose ext carries an unknown key that ext_critical does not list resolves normally."""
     uri = _priced(compose_stack)
-    request = resolve_request([uri])
-    request["ext"] = {"acme.trace": "x"}
+    request = resolve_request([uri], ext={"acme.trace": "x"})
     resolved = one_group_per_uri(fresh_agent.broker.resolve(request), [uri], "broker resolve")[uri]
     assert resolved.result.verified, f"Resolve offered nothing for {uri}: {resolved}"
 
@@ -287,13 +277,11 @@ def test_an_unknown_non_critical_ext_key_is_ignored_by_the_broker(
 @BROKER_IGNORES_EXT_CRITICAL.mark
 def test_the_broker_answers_an_unknown_critical_ext_key_unknown_critical_extension(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """A Resolve with ext_critical ["acme.must"]: answered OK, no offer, UNKNOWN_CRITICAL_EXTENSION."""
     uri = _priced(compose_stack)
-    request = resolve_request([uri])
-    request.update(_CRITICAL)
+    request = resolve_request([uri], **_CRITICAL)
     result = fresh_agent.broker.resolve(request)
     reasons = {result.absence_reason} | {g.absence_reason for g in result.groups}
     BROKER_IGNORES_EXT_CRITICAL.check(
@@ -308,9 +296,7 @@ def _track(name: str) -> str:
 
 
 def _music_search(agent: FreshAgent, **fields: Any) -> Any:
-    request: dict[str, Any] = {"ver": ProtocolVersion}
-    request.update(fields)
-    return agent.broker.resolve(request)
+    return agent.broker.resolve(resolve_request(**fields))
 
 
 @obligation(Obligation.PROFILE_007, negative=True)

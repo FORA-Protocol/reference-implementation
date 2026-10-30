@@ -1,15 +1,14 @@
-# publisher-jwks: test-only HTTP host that serves the catalog-
-# contributor's /.well-known/fora.json (§6.6 schema) so the
-# CatalogSignatureMiddleware self-signup flow can resolve the
-# contributor's pubkey.
+# The e2e stack's key-directories service: a test-only HTTP host that serves
+# the discovery documents of every fixed e2e identity, its Web Bot Auth key
+# directory and its keyless fora.json overlay, each under the identity's own
+# host name, from one nginx.
 #
 # Built for docker-compose.e2e.yml with the REPO ROOT as build context
 # (context: ., dockerfile: deploy/publisher-jwks/Dockerfile) so the shared
-# key helpers in scripts/lib travel into the image. The entrypoint reads the
-# resource-owner's Ed25519 private key from /keys (mounted by compose)
-# and renders the §6.6 manifest with the corresponding pubkey + a
-# wide-open valid_from/valid_until window into the nginx doc root on
-# every cold start.
+# key helpers in scripts/lib travel into the image. The entrypoint reads each
+# identity's Ed25519 private key from /keys (mounted by compose, one file per
+# identity) and, on every start, renders that identity's documents with a
+# wide-open not_before/not_after window into its own nginx doc root.
 
 # fora-sign-directory signs the rendered directory's response at start (see
 # entrypoint.sh). It is a package of the root Go module, built against go.mod's

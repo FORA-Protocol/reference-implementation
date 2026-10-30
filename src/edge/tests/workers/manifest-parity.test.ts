@@ -46,21 +46,39 @@ describe('WBA directory keys[] parity across edge runtimes', () => {
 });
 
 // Structural guard for the hand-enumeration itself: readFastlyEnv must ask its
-// env reader for every schema key, so a key added to the shared EnvSchema
-// cannot be silently dropped on the Fastly runtime. Cloudflare-only keys are
+// env reader for exactly the schema's keys. Every one of them, so a key added
+// to the shared EnvSchema cannot be silently dropped on the Fastly runtime. And
+// no other, so a key removed from the schema cannot stay behind in the Fastly
+// forward: parseEnv takes unknown and the schema strips keys it does not know,
+// so neither tsc nor zod would notice the leftover. Cloudflare-only keys are
 // the documented exception — a runtime that cannot honor a mode must not
 // pretend to read it.
 const CLOUDFLARE_ONLY_KEYS = ['SAME_ZONE_ORIGIN'];
 
+// The names readFastlyEnv asks its env reader for.
+function requestedKeys(): Set<string> {
+  const requested = new Set<string>();
+  readFastlyEnv((name) => {
+    requested.add(name);
+    return SOURCE[name];
+  });
+  return requested;
+}
+
 describe('env-key parity for the Fastly hand-enumeration', () => {
+  const expected = new Set<string>(ENV_KEYS.filter((k) => !CLOUDFLARE_ONLY_KEYS.includes(k)));
+
   it('readFastlyEnv requests every schema key except the Cloudflare-only ones', () => {
-    const requested = new Set<string>();
-    readFastlyEnv((name) => {
-      requested.add(name);
-      return SOURCE[name];
-    });
-    const expected = ENV_KEYS.filter((k) => !CLOUDFLARE_ONLY_KEYS.includes(k));
-    const missing = expected.filter((k) => !requested.has(k));
+    const requested = requestedKeys();
+    const missing = [...expected].filter((k) => !requested.has(k));
     expect(missing, `readFastlyEnv drops schema keys: ${missing.join(', ')}`).toEqual([]);
+  });
+
+  it('readFastlyEnv requests no key outside them', () => {
+    const extra = [...requestedKeys()].filter((k) => !expected.has(k));
+    expect(
+      extra,
+      `readFastlyEnv reads keys the schema lacks, or Cloudflare-only ones: ${extra.join(', ')}`,
+    ).toEqual([]);
   });
 });

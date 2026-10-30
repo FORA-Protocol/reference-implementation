@@ -49,8 +49,10 @@ Changing config means rebuilding the zip and re-applying.
 ## Design decisions encoded here
 
 - **One default cache behavior, no `/.well-known/*` bypass**: the shared app
-  serves well-known routes before its bot gate, so nothing can 403-lock
-  discovery, and one behavior keeps one code path.
+  handles the well-known routes before its bot gate (the publisher's own
+  `fora.json` and `rsl.txt` are handed back to CloudFront, which fetches them
+  from the origin), so nothing can 403-lock discovery, and one behavior keeps
+  one code path.
 - **`Managed-CachingDisabled`**: correctness first for a demo; the
   viewer-request placement keeps any later caching decision safe because the
   function also runs on cache hits.

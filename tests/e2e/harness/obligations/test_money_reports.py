@@ -47,6 +47,7 @@ from ..defects import (
 from ..exchanges import EXCHANGE_A_DOMAIN, EXCHANGE_B_DOMAIN, EXCHANGE_C_DOMAIN, EXCHANGE_D_DOMAIN
 from ..fresh_agent import FreshAgent
 from ..malformed import Alteration, Mutation, Request, SeamHTTP, malformed, patch_body
+from ..model_edits import with_members
 from ..money_path import (
     LECTURE_NOTES,
     TITANS,
@@ -302,7 +303,7 @@ def test_a_report_naming_another_transactions_billing_id_is_refused_malformed(
     assert item.billing_id and other.billing_id and item.billing_id != other.billing_id, (
         f"two paid purchases need two billing_ids: {item.billing_id!r}, {other.billing_id!r}"
     )
-    mismatched = _report(item).model_copy(update={"billing_id": other.billing_id})
+    mismatched = with_members(_report(item), billing_id=other.billing_id)
     refusal = _refused(fresh_agent, mismatched)
     assert refusal.code == "invalid_argument", f"refused as {refusal.code!r}: {refusal}"
     _file(fresh_agent, _report(item))

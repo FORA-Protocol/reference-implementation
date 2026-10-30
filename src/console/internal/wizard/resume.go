@@ -1,5 +1,6 @@
-// Finishing the setup of a domain that is saved and not verified: where its
-// setup stands, read off the site itself, and what the wizard reopens with.
+// A domain the wizard's first step saved: where its setup stands, read off its
+// registration and its site, what the wizard reopens with, and the last step's
+// check that verifies it.
 
 package wizard
 
@@ -9,14 +10,14 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/exchangeclient"
 )
 
-// Resumer reopens the wizard on a domain already saved: where its setup
-// stands, and what the wizard reopens with. It works through the wizard's own
-// service, whose ports and package check both answers need.
+// Resumer works on a domain already saved: what the wizard reopens with, and
+// the check that finds where its setup stands and verifies it. It works through
+// the wizard's own service, for its ports and its package check.
 type Resumer struct {
 	svc *Service
 }
 
-// NewResumer builds the reopening of saved domains over the wizard's service.
+// NewResumer builds the work on saved domains over the wizard's service.
 func NewResumer(svc *Service) *Resumer {
 	return &Resumer{svc: svc}
 }
@@ -26,86 +27,93 @@ type Progress struct {
 	Domain string
 	// Verified is set when there is nothing to finish: the domain is verified.
 	Verified bool
-	// Step is the first step whose check does not pass, or the licensing step
-	// when both pass: the step the wizard reopens on.
+	// Step is the step the setup stands on: the licensing step while the
+	// domain has no terms, the connect step after that. It is empty for a
+	// verified domain.
 	Step string
-	// Document is the Exchange's reading of the domain's discovery document.
-	Document exchangeclient.PreflightResult
-	// Edge is what the site answered about its package. It is asked only once
-	// the document passes, so it is the zero report before that.
-	Edge EdgeReport
+	// Connection is what the connect step's checks found. Its file and its
+	// package are asked about only when the setup stands on that step, so it
+	// is the zero value on any other.
+	Connection Connection
 }
 
-// Progress works out where the setup of one of the person's saved domains
-// stands, by asking the site what it answers now.
+// reopenStep is the step a saved domain's setup stands on, read off the
+// registration alone: the terms first, because the publisher decides them
+// without anybody else, and the file and the package after them. A verified
+// domain stands on none.
+func reopenStep(reg exchangeclient.Registration) string {
+	switch {
+	case reg.Active():
+		return ""
+	case reg.Terms == nil:
+		return StepTerms
+	default:
+		return StepConnect
+	}
+}
+
+// Check is the connect step's question about one of the person's saved
+// domains: where its setup stands, and on the connect step, what its site
+// answers now and -- once both its file and its package pass -- the
+// Exchange's verification (checkConnection). The answer says whether the
+// domain is verified after it.
 //
-// Nothing is kept about where the publisher stopped. Their site is what has
-// changed since, so it is what is asked. The document comes first, as in the
-// wizard; the package is asked about only once the document passes, because
-// the package check asks for the document too and would fail on it for the
-// same reason. A domain that is not this person's is refused before anything
-// is asked about it.
-func (r *Resumer) Progress(ctx context.Context, actor exchangeclient.Actor, rawDomain string) (Progress, error) {
-	domain, err := Domain(rawDomain)
+// Nothing is kept about where the publisher stopped. The terms are on the
+// Exchange, and the site is what has changed since, so those are what is read.
+// A domain that is not this person's is refused before anything is asked about
+// it, and a verified domain, or one without terms, is not asked about at all.
+func (r *Resumer) Check(ctx context.Context, actor exchangeclient.Actor, rawDomain string) (Progress, error) {
+	regs, reg, err := r.svc.savedDomain(ctx, actor, rawDomain)
 	if err != nil {
 		return Progress{}, err
 	}
-	regs, err := r.svc.registrations(ctx, actor)
+	at := Progress{Domain: reg.Domain, Verified: reg.Active(), Step: reopenStep(reg)}
+	if at.Step != StepConnect {
+		return at, nil
+	}
+	at.Connection, at.Verified, err = r.svc.checkConnection(ctx, actor, regs.PublisherID, reg)
 	if err != nil {
 		return Progress{}, err
 	}
-	reg, ok := siteNamed(regs, domain)
-	if !ok {
-		return Progress{}, notYours()
-	}
-	out := Progress{Domain: reg.Domain}
-	if reg.Active() {
-		out.Verified = true
-		return out, nil
-	}
-	out.Document, err = r.svc.registry.PreflightDomain(ctx, actor, regs.PublisherID, reg.Domain)
-	if err != nil {
-		return Progress{}, err
-	}
-	if !out.Document.Passed {
-		out.Step = StepDocument
-		return out, nil
-	}
-	out.Edge = r.svc.edgeReport(ctx, reg.Domain, reg.ContentPathScope)
-	if !out.Edge.CanAdvance() {
-		out.Step = StepPackage
-		return out, nil
-	}
-	out.Step = StepTerms
-	return out, nil
+	return at, nil
 }
 
 // Resume is what the wizard reopens with for a saved domain: what it opens on
-// for any domain, with the terms the domain was saved with, and the domain's
-// own saved answers.
+// for any domain, with the terms the domain was saved with, the domain's own
+// saved answers, and the step it reopens on.
 type Resume struct {
 	Start
 	Site exchangeclient.Registration
 	// NetworkLabel is the name of the network the domain was saved behind.
 	NetworkLabel string
+	// Step is the step the wizard reopens on.
+	Step string
 }
 
-// Reopen reads what the wizard reopens with for one of the person's saved
-// domains. A verified domain has nothing to finish: Site.Active says so, and
-// the page sends the publisher to the domain instead.
-func (r *Resumer) Reopen(ctx context.Context, actor exchangeclient.Actor, rawDomain string) (Resume, error) {
+// Reopen is what the wizard reopens with for one of the person's saved domains,
+// built from regs, which must be what the Exchange listed for the signed-in
+// person on this request. A verified domain has nothing to finish: Site.Active
+// says so, and the page sends the publisher to the domain instead.
+//
+// The step is decided here, from the registration, so the page opens on it
+// rather than asking a first question while it shows another step.
+func (r *Resumer) Reopen(
+	ctx context.Context, regs exchangeclient.Registrations, rawDomain string,
+) (Resume, error) {
 	domain, err := Domain(rawDomain)
 	if err != nil {
 		return Resume{}, err
 	}
-	start, regs, err := r.svc.startWith(ctx, actor)
+	reg, err := siteIn(regs, domain)
 	if err != nil {
 		return Resume{}, err
 	}
-	reg, ok := siteNamed(regs, domain)
-	if !ok {
-		return Resume{}, notYours()
+	start, err := r.svc.Start(ctx)
+	if err != nil {
+		return Resume{}, err
 	}
 	start.Terms = controlsOrDefault(reg.Terms)
-	return Resume{Start: start, Site: reg, NetworkLabel: networkLabel(cdnProvider(reg.CDN))}, nil
+	return Resume{
+		Start: start, Site: reg, NetworkLabel: networkLabel(cdnProvider(reg.CDN)), Step: reopenStep(reg),
+	}, nil
 }

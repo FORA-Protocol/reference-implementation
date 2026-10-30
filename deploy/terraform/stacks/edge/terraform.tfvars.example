@@ -21,21 +21,15 @@ exchange_url = "https://exchange.operator.example"
 # lives elsewhere.
 # exchange_wba_url = ""
 
-# Publisher identity advertised in /.well-known/fora.json.
+# The publisher hostname the worker fronts.
 #
 # provider_domain is the exact host where the licensed content lives, INCLUDING
-# the subdomain — "news.example.com", not the bare "example.com". It becomes the
-# manifest's "domain" field, and (unless route_patterns above overrides it) the
-# host the worker runs on ("<provider_domain>/*").
-#
-# It must match the host that actually serves the content and this fora.json.
-# If the manifest says "example.com" but readers reach the content at
-# "news.example.com", the identity does not line up and agents cannot verify it.
-# Use the bare "example.com" only when the content really sits at the apex.
-#
-# exchanges_json is the list of Exchanges this publisher works with.
+# the subdomain — "news.example.com", not the bare "example.com". Unless
+# route_patterns above overrides it, the worker runs on "<provider_domain>/*".
+# It is the host whose /.well-known/fora.json the publisher serves from its own
+# origin (the file the Exchange operator hands over): the worker passes that
+# address, and /rsl.txt, through to the origin for every client.
 provider_domain = "news.example.com"
-exchanges_json  = "[{\"domain\":\"exchange.operator.example\",\"endpoint\":\"https://exchange.operator.example\",\"supported_profiles\":[\"fora-news-v1\",\"fora-comp-v1\",\"fora-music-v1\"]}]"
 
 # Origin the worker forwards verified requests to. Remove when the CDN
 # already routes to origin (CloudFront-native style setups).

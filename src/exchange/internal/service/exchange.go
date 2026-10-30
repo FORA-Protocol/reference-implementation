@@ -120,11 +120,14 @@ type ExchangeService struct {
 	evidence     repo.EvidenceRepo
 	events       repo.TransactionEventRepo
 	feeOverrides repo.FeeOverrideRepo
-	billing      billing.Adapter
-	offerSigner  *signing.Ed25519Signer
-	keyStore     signing.KeyStore
-	clk          clock.Clock
-	cfg          ExchangeConfig
+	// subscriptions holds the root keys a subscription-gated term's delegation
+	// chain must be rooted in; see delegation_gate.go.
+	subscriptions repo.SubscriptionTrustRepo
+	billing       billing.Adapter
+	offerSigner   *signing.Ed25519Signer
+	keyStore      signing.KeyStore
+	clk           clock.Clock
+	cfg           ExchangeConfig
 	// lifetimes shortens the offer and delivery-URL lifetimes of one tenant; nil
 	// in production. See Lifetimes.
 	lifetimes Lifetimes
@@ -181,9 +184,13 @@ type ExchangeDeps struct {
 	// at Authorize. Required: every ExecuteTransaction resolves the effective fee
 	// rate so it can be frozen on the hold; a nil value would panic the hot path.
 	FeeOverrides repo.FeeOverrideRepo
-	Billing      billing.Adapter
-	OfferSigner  *signing.Ed25519Signer
-	KeyStore     signing.KeyStore
+	// Subscriptions is the trust anchor of subscription-gated terms: the record
+	// a delegation chain is verified against. Required for a deployment that
+	// gates any term; nil hides every gated term.
+	Subscriptions repo.SubscriptionTrustRepo
+	Billing       billing.Adapter
+	OfferSigner   *signing.Ed25519Signer
+	KeyStore      signing.KeyStore
 	// SoR is the account System of Record the Register flow and the paid charge
 	// path's active-flag gate depend on (ADR-021 D2/D4). The boot path
 	// (cmd/server) threads the selected adapter here — in production wrapped in
@@ -248,6 +255,7 @@ func NewExchangeService(d ExchangeDeps) *ExchangeService {
 		evidence:      d.Evidence,
 		events:        d.Events,
 		feeOverrides:  d.FeeOverrides,
+		subscriptions: d.Subscriptions,
 		billing:       d.Billing,
 		offerSigner:   d.OfferSigner,
 		keyStore:      d.KeyStore,
@@ -284,7 +292,6 @@ func (s *ExchangeService) DiscoverResources(
 	ctx context.Context,
 	req *forav1.ResourceQuery,
 ) (*forav1.ResourceResponse, error) {
-	_ = ctx // unused; kept for interface symmetry with ExecuteTransaction
 	if req == nil || req.GetRequester() == nil {
 		return nil, exchange.Newf(exchange.KindInvalidRequest, "requester required")
 	}
@@ -299,11 +306,14 @@ func (s *ExchangeService) DiscoverResources(
 	// Only project profiles the Exchange advertises (single source of truth =
 	// cfg.SupportedProfiles == WellKnownManifest.supported_profiles).
 	profiles := effectiveProfiles(req.GetSupportedProfiles(), s.cfg.SupportedProfiles)
+	// What this request proved for subscription-gated terms, decided once from
+	// the verified transport identity; see delegation_gate.go.
+	gate := s.newDiscoveryGate(ctx, req.GetRequester())
 	flatOffers := make([]*forav1.Offer, 0, len(uris))
 	groups := make([]*forav1.OfferGroup, 0, len(uris))
 	for _, uri := range uris {
 		entry, verdict := snap.Lookup(uri)
-		group, groupOffers, err := s.groupFor(uri, entry, verdict, req.GetRequester(), profiles)
+		group, groupOffers, err := s.groupFor(uri, entry, verdict, req.GetRequester(), gate, profiles)
 		if err != nil {
 			return nil, err
 		}

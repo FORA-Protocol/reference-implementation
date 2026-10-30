@@ -60,16 +60,16 @@
       EXISTENCE HIDING. A requester never learns about a resource outside its
       scopes.
   positive: >-
-    A public resource discovered in the same batch gets its offer, and the same agent
-    stating the scope is offered the gated resource, both at the Exchange and through
-    Broker Resolve. The protocol author's decision: when a requester's scopes leave
-    no presentable offer for a resource, the Exchange answers exactly as for any
-    resource with nothing to offer, with no offers and no absence reason, so the
-    requester never learns the resource exists. SCOPE_INSUFFICIENT is never sent.
-    An offer the Exchange presented is honoured until it expires, so a scope
-    refusal at purchase cannot arise either. Without the scope, the gated
-    resource's group carries no offer and no absence reason, at the Exchange and
-    through the Broker, so the resource is not served.
+    A public resource discovered in the same batch gets its offer, both at the
+    Exchange and through Broker Resolve. The protocol author's decision: when a
+    requester's scopes leave no presentable offer for a resource, the Exchange
+    answers exactly as for any resource with nothing to offer, with no offers and
+    no absence reason, so the requester never learns the resource exists.
+    SCOPE_INSUFFICIENT is never sent. A subscription scope is never satisfied by
+    stating it: the gated resource's group carries no offer and no absence reason
+    whether the agent states the scope or not, at the Exchange and through the
+    Broker, so the resource is not served. Only a verified delegation chain reaches
+    it (SUBSCRIPTION-001).
   negative: []
 
 - id: PUBLIC-005

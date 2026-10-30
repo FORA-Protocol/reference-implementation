@@ -128,8 +128,10 @@ echo "mcp bearer gate: ok (401, resource_metadata ${METADATA_URL})"
 check_mcp_resource "mcp discovery" "${MCP_URL}/.well-known/oauth-protected-resource" "${MCP_URL}"
 check_mcp_resource "mcp discovery via the 401" "${METADATA_URL}" "${MCP_URL}"
 
-echo "== edge manifest =="
-check_http "edge fora.json" "https://${PUBLISHER}/.well-known/fora.json" 200
+echo "== publisher discovery document =="
+# The publisher's own file, served by its origin; the edge passes the address
+# through, so this reads it the way an agent does.
+check_http "publisher fora.json, through the edge" "https://${PUBLISHER}/.well-known/fora.json" 200
 
 echo "== end-to-end proof =="
 FORA_STAGING_EXCHANGE_URL="${EXCHANGE_URL}" \

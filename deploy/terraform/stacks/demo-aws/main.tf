@@ -11,9 +11,9 @@
 #
 # Key material under keys/ comes from ../../scripts/gen-keys.sh demo-aws.
 # The Lambda bundle is built by
-# ../../scripts/build-lambda-edge.sh from the config this stack renders — see
-# the lambda_edge_config output and the deploy_edge variable for the
-# bootstrap order.
+# ../../scripts/build-lambda-edge.sh from the config this stack renders and
+# its publisher hostname — see the lambda_edge_config and lambda_edge_domain
+# outputs and the deploy_edge variable for the bootstrap order.
 
 locals {
   publisher_fqdn = "${var.publisher_subdomain}.${var.domain}"
@@ -94,23 +94,21 @@ locals {
   # the distribution. The Lambda never proxies article bodies.
   lambda_edge_config = merge(
     {
-      EXCHANGE_URL              = "https://${local.exchange_fqdn}"
-      EXCHANGE_WBA_URL          = "https://${local.exchange_fqdn}/.well-known/http-message-signatures-directory"
-      PROVIDER                  = local.publisher_fqdn
-      EXCHANGES_JSON            = module.manifest.exchanges_json
-      CATALOG_CONTRIBUTORS_JSON = module.manifest.catalog_contributors_json
-      LICENSED_PATHS_JSON       = jsonencode(var.licensed_paths)
+      EXCHANGE_URL        = "https://${local.exchange_fqdn}"
+      EXCHANGE_WBA_URL    = "https://${local.exchange_fqdn}/.well-known/http-message-signatures-directory"
+      LICENSED_PATHS_JSON = jsonencode(var.licensed_paths)
     },
     var.fora_enforce_binding == null ? {} : { FORA_ENFORCE_BINDING = var.fora_enforce_binding },
   )
 }
 
-# Resource-free, so it is always evaluated — including the bootstrap apply
-# with deploy_edge = false, where the rendered config must exist before the
-# bundle (and therefore before module.edge) can.
+# Renders the publisher's discovery document, which the origin serves at
+# /.well-known/fora.json (compose_stack below). Resource-free, so it is
+# evaluated on every apply, the bootstrap one with deploy_edge = false included.
 module "manifest" {
   source = "../../modules/publisher-manifest"
 
+  publisher_domain  = local.publisher_fqdn
   exchange_fqdn     = local.exchange_fqdn
   resource_owner_id = var.resource_owner_id
   # The contributor id IS the hostname its key directory is served at (the
@@ -127,6 +125,8 @@ module "compose_stack" {
   mcp_hostname      = local.mcp_fqdn
   zitadel_hostname  = local.zitadel_fqdn
   origin_hostname   = local.origin_fqdn
+  # The demo publisher's own discovery document, which the origin serves.
+  origin_discovery_document = module.manifest.document
 
   exchange_image  = local.exchange_image
   broker_image    = local.broker_image

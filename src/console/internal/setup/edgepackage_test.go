@@ -16,6 +16,7 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/termspreset"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/setup"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/setup/setuptest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/edge/edgerelease"
 )
 
@@ -23,33 +24,16 @@ import (
 // whole design rests on: one build per release, and the only per-publisher
 // part is settings that can be read.
 
-// releaseDir stands in for what the image ships. The bodies are markers rather
-// than real bundles -- what is under test is the assembly, and a real bundle
-// would make every assertion here about esbuild's output instead.
-func releaseDir(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	for name, body := range map[string]string{
-		"cloudflare-worker.mjs": "export default { fetch() {} };\n",
-		"lambda-edge.mjs":       "export { handler };\n",
-	} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return dir
-}
-
 func settings() map[string]string {
 	return map[string]string{
-		"PROVIDER":     "www.publisher.example",
-		"EXCHANGE_URL": "https://exchange.example",
+		"EXCHANGE_URL":        "https://exchange.example",
+		"LICENSED_PATHS_JSON": `["/articles/"]`,
 	}
 }
 
 // TestCloudflarePackageNeedsNothingFilledIn is what "we give a package, they
 // install it" has to mean on this runtime. Handing over the worker alone left
-// the publisher setting six variables by hand and writing a route, which is the
+// the publisher setting its variables by hand and writing a route, which is the
 // work this exists to remove.
 func TestCloudflarePackageNeedsNothingFilledIn(t *testing.T) {
 	t.Parallel()
@@ -57,7 +41,7 @@ func TestCloudflarePackageNeedsNothingFilledIn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := setup.NewEdgePackages(releaseDir(t))
+	p := setup.NewEdgePackages(setuptest.ReleaseDir(t))
 	pkg, err := p.For(setup.Site{Domain: "www.publisher.example", CDN: "cloudflare"}, settings())
 	if err != nil {
 		t.Fatal(err)
@@ -76,8 +60,8 @@ func TestCloudflarePackageNeedsNothingFilledIn(t *testing.T) {
 		`compatibility_date = "` + compat.Date + `"`,
 		`pattern = "www.publisher.example/*"`,
 		`zone_name = "publisher.example"`,
-		`PROVIDER = "www.publisher.example"`,
 		`EXCHANGE_URL = "https://exchange.example"`,
+		`LICENSED_PATHS_JSON = "[\"/articles/\"]"`,
 		// The worker refuses to start without an origin mode.
 		`SAME_ZONE_ORIGIN = "true"`,
 	} {
@@ -92,13 +76,13 @@ func TestCloudflarePackageNeedsNothingFilledIn(t *testing.T) {
 // worker, never the worker.
 func TestTheWorkerIsTheSameForEveryPublisher(t *testing.T) {
 	t.Parallel()
-	p := setup.NewEdgePackages(releaseDir(t))
+	p := setup.NewEdgePackages(setuptest.ReleaseDir(t))
 	first, err := p.For(setup.Site{Domain: "a.example", CDN: "cloudflare"}, settings())
 	if err != nil {
 		t.Fatal(err)
 	}
 	second, err := p.For(setup.Site{Domain: "b.example", CDN: "cloudflare"},
-		map[string]string{"PROVIDER": "b.example"})
+		map[string]string{"EXCHANGE_URL": "https://exchange.b.example"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,14 +99,16 @@ func TestTheWorkerIsTheSameForEveryPublisher(t *testing.T) {
 }
 
 // TestTheProjectFileKeepsAPublishersValuesAsValues is the Cloudflare half of
-// the hazard the Lambda package has: a domain full of quotes must stay a value
-// and not become configuration.
+// the hazard the Lambda package has: a value full of quotes and line breaks must
+// stay a value and not become configuration. It rides in LICENSED_PATHS_JSON,
+// the setting built from what a publisher typed; the encoder writes every
+// setting the same way, so one is enough.
 func TestTheProjectFileKeepsAPublishersValuesAsValues(t *testing.T) {
 	t.Parallel()
-	p := setup.NewEdgePackages(releaseDir(t))
-	hostile := `a.example"\nadmin = true\nx = "`
+	p := setup.NewEdgePackages(setuptest.ReleaseDir(t))
+	hostile := "/paid/\"\nadmin = true\nx = \""
 	pkg, err := p.For(setup.Site{Domain: "a.example", CDN: "cloudflare"},
-		map[string]string{"PROVIDER": hostile})
+		map[string]string{"LICENSED_PATHS_JSON": hostile})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +131,7 @@ func TestTheProjectFileKeepsAPublishersValuesAsValues(t *testing.T) {
 // entry module beside it differs.
 func TestLambdaCarriesItsSettingsBesideTheReleaseBundle(t *testing.T) {
 	t.Parallel()
-	dir := releaseDir(t)
+	dir := setuptest.ReleaseDir(t)
 	release, err := os.ReadFile(filepath.Join(dir, "lambda-edge.mjs"))
 	if err != nil {
 		t.Fatal(err)
@@ -163,7 +149,7 @@ func TestLambdaCarriesItsSettingsBesideTheReleaseBundle(t *testing.T) {
 		t.Fatal("the release bundle in the package is not the release bundle")
 	}
 	entry := entries["index.mjs"]
-	if !strings.Contains(entry, `"PROVIDER": "www.publisher.example"`) {
+	if !strings.Contains(entry, `"EXCHANGE_URL": "https://exchange.example"`) {
 		t.Fatalf("the settings are not in the entry:\n%s", entry)
 	}
 	if !strings.Contains(entry, "export { handler } from './lambda-edge.mjs';") {
@@ -177,7 +163,7 @@ func TestLambdaCarriesItsSettingsBesideTheReleaseBundle(t *testing.T) {
 // edge has not run.
 func TestLambdaEntryIsTheReleaseEntry(t *testing.T) {
 	t.Parallel()
-	p := setup.NewEdgePackages(releaseDir(t))
+	p := setup.NewEdgePackages(setuptest.ReleaseDir(t))
 	pkg, err := p.For(setup.Site{Domain: "www.publisher.example", CDN: "cloudfront"}, settings())
 	if err != nil {
 		t.Fatal(err)
@@ -196,7 +182,7 @@ func TestLambdaEntryIsTheReleaseEntry(t *testing.T) {
 // the second deploy would take over the first site's Worker.
 func TestTwoSitesInOneAccountDeployTwoWorkers(t *testing.T) {
 	t.Parallel()
-	p := setup.NewEdgePackages(releaseDir(t))
+	p := setup.NewEdgePackages(setuptest.ReleaseDir(t))
 	names := map[string]string{}
 	for _, domain := range []string{"a.example", "b.example"} {
 		pkg, err := p.For(setup.Site{Domain: domain, CDN: "cloudflare"}, settings())
@@ -216,15 +202,16 @@ func TestTwoSitesInOneAccountDeployTwoWorkers(t *testing.T) {
 }
 
 // TestLambdaPackageKeepsAPublishersValuesAsValues covers the one hazard of
-// putting somebody's typing into a file that will be executed. The settings are
-// JSON, so a domain full of quotes and braces is a string when it arrives and
+// putting what a publisher typed into a file that will be executed. The value
+// rides in LICENSED_PATHS_JSON, the setting built from their paths. The settings
+// are JSON, so a path full of quotes and braces is a string when it arrives and
 // never part of the program.
 func TestLambdaPackageKeepsAPublishersValuesAsValues(t *testing.T) {
 	t.Parallel()
-	p := setup.NewEdgePackages(releaseDir(t))
-	hostile := `a.example"};globalThis.stolen=1;Object.assign(process.env,{"x":"`
+	p := setup.NewEdgePackages(setuptest.ReleaseDir(t))
+	hostile := `/paid/"};globalThis.stolen=1;Object.assign(process.env,{"x":"`
 	pkg, err := p.For(setup.Site{Domain: "a.example", CDN: "cloudfront"},
-		map[string]string{"PROVIDER": hostile})
+		map[string]string{"LICENSED_PATHS_JSON": hostile})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +240,7 @@ func TestLambdaPackageKeepsAPublishersValuesAsValues(t *testing.T) {
 // registered is already normalized, so refusing anything else costs nothing.
 func TestADomainThatIsNotNormalizedGetsNoPackage(t *testing.T) {
 	t.Parallel()
-	p := setup.NewEdgePackages(releaseDir(t))
+	p := setup.NewEdgePackages(setuptest.ReleaseDir(t))
 	for _, domain := range []string{
 		"a.example\nglobalThis.stolen = 1;",
 		"a.example\r\nadmin = true",
@@ -289,7 +276,7 @@ func TestADeploymentWithoutPackagesSaysSo(t *testing.T) {
 // a Cloudflare worker would be worse than handing over nothing.
 func TestFastlyIsHandedNoPackage(t *testing.T) {
 	t.Parallel()
-	_, err := setup.NewEdgePackages(releaseDir(t)).
+	_, err := setup.NewEdgePackages(setuptest.ReleaseDir(t)).
 		For(setup.Site{Domain: "a.example", CDN: "fastly"}, settings())
 	if err == nil {
 		t.Fatal("a network we ship no package for was handed one")
@@ -339,7 +326,7 @@ func TestThePackageReplacesTheSettingsFile(t *testing.T) {
 	}
 
 	withPackages := deployment
-	withPackages.EdgePackageDir = releaseDir(t)
+	withPackages.EdgePackageDir = setuptest.ReleaseDir(t)
 	got := fileNames(t, setup.NewBuilder(withPackages, nil, termspreset.Defaults{}), site)
 	if slices.Contains(got, setup.FileEdgeConfig) {
 		t.Fatalf("the settings file was handed over beside the package: %v", got)
@@ -411,7 +398,7 @@ func packagingBuilder(t *testing.T) *setup.Builder {
 	t.Helper()
 	return setup.NewBuilder(setup.Deployment{
 		ExchangeDomain: "exchange.example", ExchangeEndpoint: "https://exchange.example",
-		ContributorHost: "catalog-contributor.exchange.example", EdgePackageDir: releaseDir(t),
+		ContributorHost: "catalog-contributor.exchange.example", EdgePackageDir: setuptest.ReleaseDir(t),
 	}, nil, termspreset.Defaults{})
 }
 

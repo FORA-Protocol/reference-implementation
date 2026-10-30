@@ -93,3 +93,22 @@ func (a *PostgresAdapter) IsActive(ctx context.Context, billingRef string) (bool
 	}
 	return active, nil
 }
+
+// SetActive sets the stored active flag of the account with this billing_ref,
+// returning ErrAccountNotFound for an unknown ref and ErrBillingRefRequired for
+// an empty one. Like InMemoryAdapter.SetActive it is deliberately NOT on the
+// Adapter port: the SoR owns the flag and the operator changes it inside the
+// SoR, out of band, so no production path of the Exchange calls it. It is the
+// same switch on this backend, for a harness that models the operator's action.
+//
+// It writes the SoR's own database and leaves the Exchange's read-through cache
+// alone, as the operator's own update does: an Exchange that has the flag cached
+// sees the change once that entry expires (CachingAdapter).
+func (a *PostgresAdapter) SetActive(ctx context.Context, billingRef string, active bool) error {
+	if err := validateBillingRef(billingRef); err != nil {
+		return err
+	}
+	return a.runner.WithTx(ctx, func(tx pgx.Tx) error {
+		return NewAccountRepo(sqlc.New(tx)).SetActive(ctx, billingRef, active)
+	})
+}

@@ -1,8 +1,8 @@
 """The publisher journey's refusals that need no sale, each beside its control.
 
 * A person whose address the login provider has not verified gets no publisher
-  functionality, while a verified one signs in to the console's home page
-  (PUB-005).
+  functionality, while a verified one signs in to the console, which asks it to
+  name its business first (PUB-005).
 * A domain one publisher registered cannot be registered by a second account,
   while it stays verified for the first (PUB-007).
 * A publisher that removes the operator's contributor from its published file
@@ -32,21 +32,27 @@ from wire.models import DomainVerificationRequest
 
 from ..conftest import StackURLs
 from ..console_client import Wizard, wizard_call_status
+from ..console_login import NEW_DOMAIN_PATH
 from ..console_dashboard import catalog, registered_sites
 from ..exchanges import EXCHANGE_A_DOMAIN
 from ..fresh_agent import FreshAgent
 from ..importer import COMPLETE, run_import
 from ..obligation_registry import Obligation, obligation
 from ..publisher_accounts import PublisherFactory
-from ..publisher_journey import DISPLAY_NAME, onboard, registration_request
-from ..publisher_sites import mint_site, publish, without_contributors
+from ..publisher_journey import DISPLAY_NAME, onboard
+from ..publisher_sites import LICENSED_PATH, mint_site, publish, without_contributors
 from ..sdk_client import sdk_domain_verification_client
 
 # ADR-008 D5 — declare stack-isolation contract.
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
-#: The wizard's business step, the first call that would mint a publisher.
-_PUBLISHER_CALL = "/api/publisher"
+#: Two of the wizard's JSON calls, the business step's and the domain lookup,
+#: which a browser without a session is refused in the shape a script reads
+#: rather than sent to sign in.
+_WIZARD_CALLS = {
+    "/api/publisher": {"display_name": DISPLAY_NAME},
+    "/api/domain/lookup": {"domain": "sites.example"},
+}
 
 #: The login provider's step for a person whose address it has not verified, as
 #: the path its form submits to. The provider asks for the code it mails to the
@@ -61,12 +67,17 @@ def test_an_unverified_address_gets_no_publisher_functionality(
 ) -> None:
     """The provider has not verified the address, so the person never acts as a publisher.
 
-    Control: a login whose address is verified signs in to the console's home page
-    and its business step is answered.
+    Control: a login whose address is verified signs in to the console, which
+    opens the add-a-domain wizard on its business step, and naming the business
+    there is answered.
     """
     verified = fresh_publisher(verified=True)
     assert verified.signed_in, verified.landed
-    assert Wizard(verified.browser, compose_stack.console).register_publisher(DISPLAY_NAME)
+    assert urlsplit(verified.landed).path == NEW_DOMAIN_PATH, verified.landed
+    wizard = Wizard(verified.browser, compose_stack.console)
+    assert wizard.steps[0] == "name", wizard.steps
+    named = wizard.register_publisher(DISPLAY_NAME)
+    assert named.publisher_id.startswith("pub_"), named
 
     unverified = fresh_publisher(verified=False)
     assert not unverified.signed_in, f"an unverified address reached {unverified.landed}"
@@ -81,30 +92,38 @@ def test_an_unverified_address_gets_no_publisher_functionality(
         f"the sign-in stopped at {unverified.form_actions}, not at the address check: "
         f"{unverified.page[:400]}"
     )
-    refused = wizard_call_status(
-        unverified.browser, compose_stack.console, _PUBLISHER_CALL, {"display_name": DISPLAY_NAME}
-    )
-    assert refused == 401, refused
+    # Without a session the wizard's calls, the business step's among them, are
+    # refused in JSON.
+    for path, body in _WIZARD_CALLS.items():
+        refused = wizard_call_status(unverified.browser, compose_stack.console, path, body)
+        assert refused == 401, (path, refused)
 
 
 @obligation(Obligation.PUB_007, negative=True)
 def test_a_second_account_cannot_register_a_registered_domain(
     compose_stack: StackURLs, fresh_publisher: PublisherFactory
 ) -> None:
-    """The domain is the first publisher's; the second is told so and registers nothing."""
+    """The domain is the first publisher's; the second is told so and saves nothing.
+
+    The lookup says the domain is taken, and the domain step's save, sent anyway,
+    is refused with the Exchange's own sentence.
+    """
     console = compose_stack.console
     first = fresh_publisher()
     site = mint_site()
     owned = onboard(compose_stack, first, site)
-    assert owned.registered.verified, owned.registered
+    assert owned.connected.verified, owned.connected
 
     second = fresh_publisher()
     wizard = Wizard(second.browser, console)
     wizard.register_publisher(f"Not {DISPLAY_NAME}")
     lookup = wizard.lookup(site.domain)
     assert lookup.taken is True, lookup
-    refused = wizard.add_domain_refused(registration_request(site, lookup.provider))
-    assert refused == 400, refused
+    refused = wizard.save_domain_refused(
+        site.domain, cdn=lookup.provider, content_paths=LICENSED_PATH
+    )
+    assert refused.status == 400, refused
+    assert "registered to another publisher" in refused.message, refused
 
     assert registered_sites(second.browser, console) == [], "the domain reached the second account"
     mine = {s.domain: s.verified for s in registered_sites(first.browser, console)}
@@ -123,7 +142,7 @@ def test_removing_the_contributor_stops_the_import_and_keeps_the_catalog(
     publisher = fresh_publisher()
     site = mint_site()
     registration = onboard(compose_stack, publisher, site)
-    assert registration.registered.verified, registration.registered
+    assert registration.connected.verified, registration.connected
     authorized = run_import(site.domain)
     assert (authorized.outcome, authorized.accepted) == (COMPLETE, len(site.licensed)), authorized
     before = catalog(publisher.browser, console)

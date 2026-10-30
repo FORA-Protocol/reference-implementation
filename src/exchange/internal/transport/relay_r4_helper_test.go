@@ -161,6 +161,12 @@ func (h *testHarness) relayClientAs(
 func (h *testHarness) brokerOnlyClient(t *testing.T) foraconnect.ExchangeServiceClient {
 	t.Helper()
 	_, brokerPriv := h.configuredBrokerKey(t)
+	return h.brokerOnlyClientAs(brokerPriv)
+}
+
+// brokerOnlyClientAs is brokerOnlyClient signing with a Broker key the test
+// already holds, for a test that needs the Broker's public key as well.
+func (h *testHarness) brokerOnlyClientAs(brokerPriv ed25519.PrivateKey) foraconnect.ExchangeServiceClient {
 	client := &http.Client{Transport: newSigningTransport(h.baseTransport, harnessBrokerHost, brokerPriv)}
 	return foraconnect.NewExchangeServiceClient(client, h.server.URL, connect.WithGRPC())
 }

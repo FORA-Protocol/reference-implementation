@@ -24,8 +24,9 @@ const (
 
 // Handler serves the console's own pages: the domains list and one domain, the
 // add-a-domain page, the page that finishes a saved domain's setup, and the
-// address-not-confirmed page. The dashboard's pages are DashboardHandler's, and
-// the wizard's JSON routes are WizardAPI's.
+// address-not-confirmed page. The read of the account's registrations in front
+// of every page is RegistrationsReader's, the dashboard's pages are
+// DashboardHandler's, and the wizard's JSON routes are WizardAPI's.
 type Handler struct {
 	render  *Renderer
 	sites   *wizard.Sites
@@ -37,7 +38,8 @@ type Handler struct {
 // Config wires the pages.
 type Config struct {
 	Renderer *Renderer
-	// Sites reads back what a person has registered.
+	// Sites builds a registered site's page and files from what the person has
+	// registered, as the read in front of the page found it.
 	Sites *wizard.Sites
 	// Wizard is what the add-a-domain page opens on.
 	Wizard *wizard.Service
@@ -81,18 +83,19 @@ func actorOf(ctx context.Context) exchangeclient.Actor {
 	}
 }
 
-// Home is where the console opens. A publisher with a verified domain lands on
-// their overview, where its sales are. Anybody else lands on their domains: a
-// publisher whose domains are all not verified sees what each one still needs,
-// and one with no domain is asked for their first, which is what the domains
-// list says when it has none.
+// Home is where the console opens, and where a sign-in lands. A publisher with
+// a verified domain lands on their overview, where its sales are. Anybody else
+// lands on their domains: a publisher whose domains are all not verified sees
+// what each one still needs, one with no domain yet sees the console with
+// nothing in it and the button that adds the first, and an account that has
+// not named its business is sent to the add-a-domain wizard, whose first step
+// asks for it.
 func (h *Handler) Home(w http.ResponseWriter, r *http.Request) {
-	regs, err := h.sites.Registrations(r.Context(), actorOf(r.Context()))
-	if err != nil {
-		renderFailure(h.render, w, r, err, "")
+	regs, ok := pageRegistrations(w, r)
+	if !ok {
 		return
 	}
-	if exchangeclient.HasVerifiedDomain(regs) {
+	if dashboard.HasVerifiedDomain(regs) {
 		http.Redirect(w, r, dashboard.PathOverview, http.StatusSeeOther)
 		return
 	}
@@ -100,30 +103,47 @@ func (h *Handler) Home(w http.ResponseWriter, r *http.Request) {
 }
 
 // Domains lists what this person has registered, read from the Exchange on
-// every visit, with the fee and the reporting policy the Exchange applies to
-// their sales. A person with no domain yet is asked for their first one, with
-// no terms and no sidebar: there is nothing in any section until a domain
-// sells.
+// every visit by the read in front of it, with the fee and the reporting policy
+// the Exchange applies to their sales. With no domain yet -- this is where the
+// wizard's Finish later leads before the first one is saved -- the list says
+// so and offers to add the first. An account that has not named its business
+// is sent to the wizard instead.
 func (h *Handler) Domains(w http.ResponseWriter, r *http.Request) {
-	regs, err := h.sites.Registrations(r.Context(), actorOf(r.Context()))
-	if err != nil {
-		renderFailure(h.render, w, r, err, "")
+	regs, ok := pageRegistrations(w, r)
+	if !ok {
 		return
 	}
 	h.renderDomains(w, r, regs)
 }
 
 func (h *Handler) renderDomains(w http.ResponseWriter, r *http.Request, regs exchangeclient.Registrations) {
-	actor := actorOf(r.Context())
-	page := Page{Title: "My domains", Registrations: regs}
-	if exchangeclient.HasDomains(regs) {
-		nav := dashboard.Nav{PublisherID: regs.PublisherID, Section: dashboard.SectionDomains}
-		terms, err := h.dash.ExchangeTerms(r.Context(), actor, nav)
-		if err != nil {
-			renderFailure(h.render, w, r, err, "")
-			return
-		}
-		page.Nav, page.ExchangeTerms = &nav, &terms
+	nav, ok := consoleNav(w, r, h.dash, regs, dashboard.SectionDomains)
+	if !ok {
+		return
 	}
-	h.render.Render(w, r, "home", page)
+	terms, err := h.dash.ExchangeTerms(r.Context(), actorOf(r.Context()), nav)
+	if err != nil {
+		renderFailure(h.render, w, r, err, "")
+		return
+	}
+	h.render.Render(w, r, "home", Page{
+		Title: "My domains", Nav: &nav, Registrations: regs, ExchangeTerms: &terms,
+	})
+}
+
+// consoleNav is the sidebar of a page in section, for the account regs
+// describes: every page that draws the console takes it from here. ok is false
+// when the page has been answered already. An account the Exchange lists no
+// publisher for has nothing any section could show, and is sent to the
+// add-a-domain wizard, whose first step names the business: until it is named,
+// every page that draws the console leads back to that step.
+func consoleNav(
+	w http.ResponseWriter, r *http.Request, dash *dashboard.Service,
+	regs exchangeclient.Registrations, section string,
+) (dashboard.Nav, bool) {
+	nav, ok := dash.Nav(regs, section)
+	if !ok {
+		http.Redirect(w, r, NewDomainPath, http.StatusSeeOther)
+	}
+	return nav, ok
 }

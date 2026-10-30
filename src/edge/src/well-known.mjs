@@ -1,20 +1,19 @@
-// Canonical ROLE_PUBLISHER discovery builders. Plain ESM JS — no types, no
-// dependencies — so they have exactly one home shared by two consumers that
-// cannot share a TypeScript module:
+// Canonical ROLE_PUBLISHER discovery addresses and the publisher's Web Bot Auth
+// directory builders. Plain ESM JS — no types, no dependencies — so they have
+// exactly one home shared by two consumers that cannot share a TypeScript
+// module:
 //
 //   * the Hono edge worker (src/edge), which re-exports through types.ts; and
 //   * the raw-Node AWS CloudFront E2E shim (tests/e2e/aws-edge/server.mjs),
 //     which has no build step and imports this file directly.
 //
-// One source means a protocol bump is edited once;
-// tests/e2e/harness/test_manifest_parity.py guards the two emitters against
-// drift. Per-entry supported_profiles are hoisted into the top-level
-// supported_profiles (the unified AuthorizedExchange has no per-entry slot);
-// relationship defaults to PROVIDER_RELATIONSHIP_DIRECT.
+// One source means an address or a directory shape is edited once.
 //
-// After the WBA split identity keys are NOT part of the overlay
-// manifest: a publisher's signing key(s) are published in a separate Web Bot
-// Auth directory (buildPublisherWba below), and referenced elsewhere only by
+// The publisher's discovery document and its RSL file are not built here: both
+// are the publisher's own files on its origin, and the edge forwards their
+// addresses there. Identity keys are not part of the discovery document either:
+// a publisher's signing key(s) are published in a separate Web Bot Auth
+// directory (buildPublisherWba below), and referenced elsewhere only by
 // RFC 7638 thumbprint.
 
 // Fixed path every FORA participant serves its commercial overlay manifest at.
@@ -22,6 +21,14 @@
 // build-step-less AWS shim share one literal — no drift between the route mount
 // and the X-Content-Rules header URL.
 export const WELL_KNOWN_PATH = '/.well-known/fora.json';
+
+// Fixed path of the publisher's RSL licensing document.
+export const RSL_PATH = '/rsl.txt';
+
+// The publisher's own documents. The edge serves neither: it forwards both
+// addresses to the origin, ahead of every check it makes on a request (app.ts,
+// mountWellKnownRoutes), and the AWS shim forwards them the same way.
+export const PUBLISHER_DOCUMENT_PATHS = Object.freeze([WELL_KNOWN_PATH, RSL_PATH]);
 
 // Fixed path every FORA participant serves its pure Web Bot Auth directory at.
 // The directory is a `keys` array of JWKs plus an optional directory-level
@@ -38,30 +45,6 @@ export const WBA_PATH = '/.well-known/http-message-signatures-directory';
 // import the SDK's TypeScript source; a Node test asserts the literal equals the
 // SDK's WBA_DIRECTORY_MEDIA_TYPE.
 export const WBA_DIRECTORY_CONTENT_TYPE = 'application/http-message-signatures-directory+json';
-
-export function buildPublisherManifest(provider, exchanges, contributors) {
-  const profiles = [...new Set(exchanges.flatMap((e) => e.supported_profiles ?? []))];
-  return {
-    // The manifest DOCUMENT version — the SDK's WellKnownManifestVersion, not
-    // ProtocolVersion. Written as a literal because this file is plain ESM shared
-    // with the raw-Node shim, which cannot import the SDK's TypeScript source; a
-    // Node test asserts the literal equals the SDK export.
-    ver: '1.0',
-    role: 'ROLE_PUBLISHER',
-    domain: provider,
-    exchanges: exchanges.map((e) => ({
-      domain: e.domain,
-      endpoint: e.endpoint,
-      relationship: 'PROVIDER_RELATIONSHIP_DIRECT',
-      // The publisher attests its resource_owner_id payee in ext for the Exchange's
-      // settlement gate. Conditional so an entry without ext stays byte-identical
-      // (the manifest-parity emitters and ext-less configs are unaffected).
-      ...(e.ext !== undefined ? { ext: e.ext } : {}),
-    })),
-    ...(profiles.length > 0 ? { supported_profiles: profiles } : {}),
-    ...(contributors !== undefined ? { catalog_contributors: contributors } : {}),
-  };
-}
 
 // buildPublisherWba assembles the publisher's Web Bot Auth directory: a JWK Set
 // carrying the publisher's Ed25519 signing key(s) with NO kid (keys are named

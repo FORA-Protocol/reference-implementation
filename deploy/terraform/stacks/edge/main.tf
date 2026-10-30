@@ -40,21 +40,16 @@ module "edge" {
 
   exchange_url     = var.exchange_url
   exchange_wba_url = local.exchange_wba_url
-  provider_domain  = var.provider_domain
-  exchanges_json   = var.exchanges_json
 
-  fora_verify_keys          = var.fora_verify_keys
-  fora_enforce_binding      = var.fora_enforce_binding
-  origin_url                = var.origin_url
-  same_zone_origin          = var.same_zone_origin
-  rsl_body                  = var.rsl_body
-  acme_tokens_json          = var.acme_tokens_json
-  catalog_contributors_json = var.catalog_contributors_json
-  wba_keys_json             = var.wba_keys_json
-  wba_revocation_url        = var.wba_revocation_url
-  bot_ua_allow_json         = var.bot_ua_allow_json
-  bot_ua_deny_json          = var.bot_ua_deny_json
-  licensed_paths_json       = var.licensed_paths_json
+  fora_verify_keys     = var.fora_verify_keys
+  fora_enforce_binding = var.fora_enforce_binding
+  origin_url           = var.origin_url
+  same_zone_origin     = var.same_zone_origin
+  wba_keys_json        = var.wba_keys_json
+  wba_revocation_url   = var.wba_revocation_url
+  bot_ua_allow_json    = var.bot_ua_allow_json
+  bot_ua_deny_json     = var.bot_ua_deny_json
+  licensed_paths_json  = var.licensed_paths_json
 
   create_waf_skip_rule = var.create_waf_skip_rule
   waf_skip_expression  = var.waf_skip_expression

@@ -48,8 +48,8 @@ from .obligation_builders import (
 
 pytest_plugins = ["pytester"]
 
-# No compose stack and no database. Declaring `isolated` keeps the autouse
-# cleanup chain, which needs a live Postgres, a no-op.
+# No compose stack and no database, so the module owns its environment and
+# declares `isolated`; the autouse dispatch runs nothing for it.
 pytestmark = pytest.mark.stack_isolation("isolated")
 
 _GO_ABSENT = "the go binary is absent (the runner image), so the pinned module cannot be found"

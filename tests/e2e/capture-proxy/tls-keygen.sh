@@ -42,8 +42,8 @@ SAN="$SAN,DNS:agents.example,DNS:*.agents.example,DNS:sites.example,DNS:*.sites.
 SAN="$SAN,DNS:demo.fora-protocol.org,DNS:music.demo.fora-protocol.org"
 SAN="$SAN,DNS:sfx.demo.fora-protocol.org,DNS:archive.demo.fora-protocol.org"
 # The static key-directory hosts the harness and the seed sign as.
-SAN="$SAN,DNS:examplenews,DNS:catalog-contributor-e2e,DNS:lazy-agent-e2e,DNS:agent-e2e"
-SAN="$SAN,DNS:agent-nobilling-e2e,DNS:agent-demo-eur,DNS:test-signer-e2e.v1"
+SAN="$SAN,DNS:examplenews,DNS:catalog-contributor-e2e"
+SAN="$SAN,DNS:agent-nobilling-e2e,DNS:test-signer-e2e.v1"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

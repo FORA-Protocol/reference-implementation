@@ -12,6 +12,7 @@ import { type DeliveryFacts, logDelivery, logDeny, logEvent } from './log.js';
 import {
   type AppDeps,
   type AppVariables,
+  PUBLISHER_DOCUMENT_PATHS,
   WBA_DIRECTORY_CONTENT_TYPE,
   WBA_PATH,
   WELL_KNOWN_PATH,
@@ -40,7 +41,19 @@ const requestIdMiddleware: MiddlewareHandler<{ Variables: AppVariables }> = asyn
 
 function mountWellKnownRoutes(app: App, deps: AppDeps): void {
   app.get('/healthz', (c) => c.text('ok'));
-  app.get(WELL_KNOWN_PATH, (c) => c.json(deps.manifest));
+  // The publisher's own documents, its discovery document and its RSL file,
+  // are files on its origin, and the edge only forwards them: a publisher
+  // changes who sells or imports its pages by editing its file, and nothing
+  // here can disagree with it. Routed ahead of the catch-all, so neither the
+  // bot gate, the licensed-path scope nor the signed-URL check sees them: an
+  // agent refused on an article is told to read the discovery document, and
+  // must be able to whatever its User-Agent. The forward is the catch-all's own
+  // pass-through, which strips the reserved signature params, writes no
+  // delivery record, and on a deployment whose CDN fetches the origin hands
+  // the request back to it.
+  for (const path of PUBLISHER_DOCUMENT_PATHS) {
+    app.get(path, (c) => passToOrigin(c, deps));
+  }
   // Pure Web Bot Auth directory: the publisher's Ed25519 signing key(s), served
   // with application/http-message-signatures-directory+json, the media type the
   // Web Bot Auth profile names. Absent (404) on deployments that publish no
@@ -54,16 +67,6 @@ function mountWellKnownRoutes(app: App, deps: AppDeps): void {
     }
     if (!deps.wba) return c.text('not found', 404);
     return c.body(JSON.stringify(deps.wba), 200, { 'content-type': WBA_DIRECTORY_CONTENT_TYPE });
-  });
-  app.get('/rsl.txt', (c) => {
-    if (!deps.rslBody?.trim()) return c.text('not found', 404);
-    return c.text(deps.rslBody, 200, { 'content-type': 'text/plain' });
-  });
-  app.get('/.well-known/fora-verify/:token', (c) => {
-    const token = c.req.param('token');
-    const body = deps.acmeTokens?.[token];
-    if (!body) return c.text('not found', 404);
-    return c.text(body, 200, { 'content-type': 'text/plain' });
   });
 }
 

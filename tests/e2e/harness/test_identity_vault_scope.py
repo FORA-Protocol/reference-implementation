@@ -40,6 +40,9 @@ from ._compose import running_service_env
 from .conftest import StackURLs
 from .identity_vault import VaultAnswer, VaultSession
 
+# ADR-008 D5 — declare stack-isolation contract.
+pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
+
 POLICY_NAME = "fora-identity"
 
 

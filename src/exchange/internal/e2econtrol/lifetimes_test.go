@@ -11,9 +11,10 @@ import (
 	"time"
 )
 
-// The lifetimes control holds its state in memory and touches no datastore, so
-// its routes are driven here through a real ServeMux over httptest. The relay
-// policy routes write the database and are driven end to end by the e2e suite
+// The lifetimes control holds its overrides in memory, so its routes are driven
+// here through a real ServeMux over httptest. Routes puts a seat check in front
+// of them, which reads the tenant repository; that check, like the other
+// controls, which write the database, is driven end to end by the e2e suite
 // against the running Exchange.
 
 const testTenant = "tenant-seat-test"
@@ -24,12 +25,30 @@ func lifetimesServer(t *testing.T) (*Lifetimes, *httptest.Server) {
 	t.Helper()
 	lifetimes := NewLifetimes(configured)
 	mux := http.NewServeMux()
-	for _, route := range Routes(Deps{Lifetimes: lifetimes}) {
+	for _, route := range lifetimes.routes() {
 		mux.Handle(route.Pattern, route.Handler)
 	}
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 	return lifetimes, server
+}
+
+// The seat check reads the path's id before it asks the store, so an id no
+// tenant can have is refused 400 without a lookup: the nil repository here is
+// never reached, and a check that looked the seat up first would panic on it.
+func TestASeatCheckRefusesAnIDNoTenantCanHaveBeforeAskingTheStore(t *testing.T) {
+	served := false
+	mux := http.NewServeMux()
+	mux.Handle("PUT "+LifetimesPath, seatOnly(nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		served = true
+	})))
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	status, _ := call(t, server, http.MethodPut, strings.Repeat("t", 256), `{"offer_ttl_seconds":3}`)
+	if status != http.StatusBadRequest || served {
+		t.Fatalf("PUT with a 256-byte id = %d (served %v), want 400 before the seat is looked up", status, served)
+	}
 }
 
 func call(t *testing.T, server *httptest.Server, method, tenant, body string) (int, lifetimesBody) {
@@ -91,7 +110,7 @@ func TestPutThatWouldWeakenOrIsMalformedIsRefusedAndChangesNothing(t *testing.T)
 		"negative offer": {testTenant, `{"offer_ttl_seconds":-1}`},
 		"unknown field":  {testTenant, `{"offer_ttl_seconds":3,"verify":false}`},
 		"not json":       {testTenant, `offer=3`},
-		"not a tenant":   {strings.Repeat("t", maxTenantIDBytes+1), `{"offer_ttl_seconds":3}`},
+		"not a tenant":   {strings.Repeat("t", maxPathValueBytes+1), `{"offer_ttl_seconds":3}`},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

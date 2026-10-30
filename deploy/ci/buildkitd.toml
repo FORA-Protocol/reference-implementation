@@ -1,0 +1,26 @@
+# BuildKit settings for the builder the CI e2e job builds the stack's images with:
+# at most two build steps run at the same time.
+#
+# Most of the stack's images compile Go, and they share one Go build cache.
+# Compose hands every image build to BuildKit at once, so without a limit they all
+# start together, none of them can reuse what another has compiled, and each one
+# compiles the standard library and the shared modules again. Measured on an
+# 8-core machine, building the stack's images with every cache empty:
+#
+#   no limit              133 s   897 CPU-seconds   up to 160 tasks running or waiting for a CPU
+#   two steps at a time    94 s   353 CPU-seconds   up to 35
+#
+# Each Go step runs `go build -p 3` (GO_BUILD_P in the Makefile), so two steps keep
+# about six compiles going, which is what a six-core CI host can run.
+#
+# BuildKit ignores a key it does not know, without an error, so a misspelled key
+# here would quietly remove the limit. tests/e2e/harness/test_guards_ci_load.py
+# checks the key's name and value.
+#
+# To build the same way on your own machine:
+#
+#   docker buildx create --name e2e-limited --driver docker-container \
+#     --buildkitd-config deploy/ci/buildkitd.toml --bootstrap
+#   BUILDX_BUILDER=e2e-limited make test-e2e
+[worker.oci]
+max-parallelism = 2

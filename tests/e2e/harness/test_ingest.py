@@ -29,10 +29,12 @@ import subprocess
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 
-from .broker_purchase import buy_through_broker
+from .broker_purchase import resolve_and_buy
 from .conftest import StackURLs
 from .edge_fetch import fetch_signed
+from .fresh_agent import FreshAgent
 from .protocol_documents import manifest_at, wba_directory_at
 from .seed import (
     CATALOG_CONTRIBUTOR_ID,
@@ -42,6 +44,9 @@ from .seed import (
     SELFPUB_PHILOSOPHY_KEY_PATH,
     SeededFixture,
 )
+
+# ADR-008 D5 — declare stack-isolation contract.
+pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
 # The philosophy feed (10 records) + the philosophy publisher's SELF-PUBLISH
 # key (kid == demo.fora-protocol.org). The Exchange learns this key ONLY by
@@ -115,6 +120,7 @@ def test_ingester_pushes_via_rpc_and_exits_clean(
 def test_requester_discovers_free_term_and_gets_content(
     compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """A requester discovers the ingested FREE socrates term and is delivered bytes.
 
@@ -130,9 +136,7 @@ def test_requester_discovers_free_term_and_gets_content(
     item.
     """
     res = seeded.free  # socrates: FREE EUR
-    _, item = buy_through_broker(
-        compose_stack, res.uri, agent_id=res.buyer_agent_id, key_path=res.buyer_key_path
-    )
+    item = resolve_and_buy(fresh_agent, res.uri)
     signed_url = item.retrieval_endpoint
     assert signed_url, f"the purchase answered no delivery URL: {item}"
     # ADR-019: the FREE-term delivered price rides on the canonical typed
@@ -144,13 +148,13 @@ def test_requester_discovers_free_term_and_gets_content(
     # The URL is bound to the buying agent — fetch_signed attaches
     # RFC 9421 proof-of-possession headers when key_path is set and the URL carries
     # agent_id= (edge enforces agent_id == keyid == thumbprint of presented key).
-    content = fetch_signed(signed_url, compose_stack, key_path=res.buyer_key_path)
+    content = fetch_signed(signed_url, compose_stack, key_path=fresh_agent.key_path)
     assert content.body.strip(), content.body[:256]
 
 
 def test_us_requester_now_licensed_on_geo_restricted_resource(
-    compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """A requester whose geography plato's terms do not permit is now LICENSED (flip).
 
@@ -164,9 +168,7 @@ def test_us_requester_now_licensed_on_geo_restricted_resource(
     signed URL is minted on the purchase.
     """
     res = seeded.restricted  # plato
-    _, item = buy_through_broker(
-        compose_stack, res.uri, agent_id=res.buyer_agent_id, key_path=res.buyer_key_path
-    )
+    item = resolve_and_buy(fresh_agent, res.uri)
     assert item.denial_reason is None, item
     assert item.retrieval_endpoint, item
 
@@ -176,7 +178,7 @@ def test_contributor_identity_is_served_via_wellknown(compose_stack: StackURLs) 
 
     The well-known-trust rule removed the fora.agents pre-seed: the Exchange learns the
     ``catalog-contributor-e2e`` key ONLY by fetching that contributor's own
-    discovery documents (the ``catalog-contributor-e2e-jwks`` compose host). This guard
+    discovery documents (its host on the ``key-directories`` compose service). This guard
     fetches them through the real host and asserts (a) the keyless overlay
     manifest's ``domain`` equals the contributor's agent_id (matched by
     caller_id), and (b) the key served in the contributor's WBA directory (x)

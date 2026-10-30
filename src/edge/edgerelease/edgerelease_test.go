@@ -27,22 +27,20 @@ import (
 
 const goldenDomain = "www.publisher.example"
 
-// goldenSettings are complete enough for the edge suite to run the manifest
-// route, a signed read, a denial and a pass-through outside the licensed paths.
+// goldenSettings are complete enough for the edge suite to run a signed read, a
+// denial, a pass-through outside the licensed paths, and the publisher's
+// discovery document and RSL file passed through to the origin.
 // The verify key is the public half of a key the edge tests derive from a fixed
 // seed, so the edge can check a URL signed there without fetching a directory.
 // The second licensed path carries an "&", which Go's encoder would escape and
 // JSON.stringify does not; the two renderers must agree on it.
 func goldenSettings() map[string]string {
 	return map[string]string{
-		"EXCHANGE_URL":              "https://exchange.example",
-		"EXCHANGE_WBA_URL":          "https://exchange.example/.well-known/http-message-signatures-directory",
-		"PROVIDER":                  goldenDomain,
-		"EXCHANGES_JSON":            `[{"domain":"exchange.example","endpoint":"https://exchange.example"}]`,
-		"CATALOG_CONTRIBUTORS_JSON": "[]",
-		"FORA_ENFORCE_BINDING":      "true",
-		"FORA_VERIFY_KEYS":          `[{"kty":"OKP","crv":"Ed25519","x":"l3cHOINRwzU9vsPaa4_UlbRlCQeb1OpNNXOdC3sjlb4"}]`,
-		"LICENSED_PATHS_JSON":       `["/article/","/q&a/"]`,
+		"EXCHANGE_URL":         "https://exchange.example",
+		"EXCHANGE_WBA_URL":     "https://exchange.example/.well-known/http-message-signatures-directory",
+		"FORA_ENFORCE_BINDING": "true",
+		"FORA_VERIFY_KEYS":     `[{"kty":"OKP","crv":"Ed25519","x":"l3cHOINRwzU9vsPaa4_UlbRlCQeb1OpNNXOdC3sjlb4"}]`,
+		"LICENSED_PATHS_JSON":  `["/article/","/q&a/"]`,
 	}
 }
 
@@ -178,11 +176,11 @@ func TestTheProjectFilesOfTwoDomainsNameTwoWorkers(t *testing.T) {
 func TestTheLambdaEntryKeepsValuesAsValues(t *testing.T) {
 	t.Parallel()
 	got, err := edgerelease.LambdaEntry("a.example", "lambda-edge.mjs",
-		map[string]string{"PROVIDER": "<a>&{{BUNDLE}}"})
+		map[string]string{"EXCHANGE_URL": "<a>&{{BUNDLE}}"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(got), `"PROVIDER": "<a>&{{BUNDLE}}"`) {
+	if !strings.Contains(string(got), `"EXCHANGE_URL": "<a>&{{BUNDLE}}"`) {
 		t.Fatalf("the value was rewritten:\n%s", got)
 	}
 }

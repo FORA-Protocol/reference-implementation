@@ -40,8 +40,10 @@ from fora_sdk.identity import directory_document, generate_key
 from fora_sdk.signing_transport import SigningTransport
 from wire.models import WBAFile, WellKnownManifest
 
+from .constants import MANIFEST_PATH
 from .fresh_agent import DIRECTORY_PATH
 from .httpsig_signer import signing_transport
+from .model_edits import with_members
 from .stack_urls import StackURLs
 
 #: The DNS zone every per-test site is minted in. The stack's wildcard-DNS
@@ -53,9 +55,6 @@ SITE_ZONE = "sites.example"
 #: The one path scope every per-test site licenses, as the console's wizard
 #: takes it (``content_paths``).
 LICENSED_PATH = "/articles/"
-
-#: Where a site's discovery document is published.
-MANIFEST_PATH = "/.well-known/fora.json"
 
 #: The media type the Web Bot Auth profile serves a key directory with.
 _DIRECTORY_TYPE = "application/http-message-signatures-directory+json"
@@ -219,11 +218,23 @@ def register_files(
     )
 
 
+def for_another_payee(manifest: WellKnownManifest) -> str:
+    """``manifest`` naming another payee and no catalog contributor, serialized by the SDK.
+
+    What a publisher serves who put up a document that is not the one the console
+    handed them: the Exchange's check of it reports both rules it breaks.
+    """
+    entry = (manifest.exchanges or [])[0]
+    elsewhere = with_members(entry, ext={**(entry.ext or {}), "resource_owner_id": "pub_elsewhere"})
+    copied = with_members(manifest, exchanges=[elsewhere], catalog_contributors=[])
+    return json.dumps(to_wire(copied))
+
+
 def without_contributors(manifest: WellKnownManifest) -> str:
     """``manifest`` with its catalog contributors removed, serialized by the SDK.
 
     What a publisher serves after revoking the operator's catalog contributor:
     the same document, naming no one who may push its catalog.
     """
-    revoked = manifest.model_copy(update={"catalog_contributors": []})
+    revoked = with_members(manifest, catalog_contributors=[])
     return json.dumps(to_wire(revoked))

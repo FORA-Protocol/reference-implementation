@@ -7,6 +7,8 @@ import (
 	"github.com/FORA-Protocol/protocol/gen/go/vocab/functiontokens"
 	"github.com/FORA-Protocol/protocol/gen/go/vocab/pricingunits"
 	"github.com/FORA-Protocol/protocol/gen/go/vocab/usertypes"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/subscriptionscope"
 )
 
 // Defaults fill in what an RSL document does not say.
@@ -136,7 +138,7 @@ func mapLicense(lic License, d Defaults, idx int) (*forav1.LicenseTerm, []string
 	if rule.subscription && d.Domain != "" {
 		// A subscription is not a pricing model: access is free at the point of
 		// use and settled elsewhere, gated on the buyer holding the scope.
-		term.Scopes = []string{"subscription:" + d.Domain}
+		term.Scopes = []string{subscriptionscope.Prefix + d.Domain}
 	}
 	if rule.obligation != forav1.ObligationKind_OBLIGATION_KIND_UNSPECIFIED {
 		term.Obligations = []*forav1.Obligation{{

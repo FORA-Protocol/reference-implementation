@@ -21,13 +21,19 @@ from __future__ import annotations
 
 from http import HTTPStatus
 
+import pytest
 from wire.models import TransactionResultItem
 
-from .broker_purchase import buy_through_broker
+from .broker_purchase import resolve_and_buy
 from .conftest import StackURLs
 from .edge_fetch import fetch_signed, fetch_without_proof, tamper_query_param
+from .exchanges import EXCHANGE_B_DOMAIN
+from .fresh_agent import FreshAgent
 from .obligation_registry import Obligation, obligation
 from .seed import DemoResource, SeededFixture
+
+# ADR-008 D5 — declare stack-isolation contract.
+pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
 # The refusal tests below fetch through ``edge_fetch.fetch_without_proof``. The
 # ed25519 edges enforce binding, so a bound URL fetched without proof is refused
@@ -42,25 +48,9 @@ def _delivered_url(item: TransactionResultItem) -> str:
     return item.retrieval_endpoint
 
 
-def _deliver_demo(compose_stack: StackURLs, res: DemoResource) -> TransactionResultItem:
-    """Resolve a DemoResource at the Broker and buy the winner through the Broker.
-
-    Broker Resolve is discovery-only, so the signed URL is minted on the
-    purchase, not on Resolve. intended_use ``ai-input`` is a real function every
-    demo term permits. Buyer is the currency-matched demo buyer.
-    """
-    _, item = buy_through_broker(
-        compose_stack,
-        res.uri,
-        agent_id=res.buyer_agent_id,
-        key_path=res.buyer_key_path,
-    )
-    return item
-
-
 def test_broker_resolve_returns_signed_url_and_writes_tx_log(
-    compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """A purchase through the Broker mints an Exchange-backed signed URL and a tx.
 
@@ -68,10 +58,11 @@ def test_broker_resolve_returns_signed_url_and_writes_tx_log(
     populated transaction_id means the Exchange committed the transaction_log row
     before returning the signed URL (the write-before-sign invariant). Resolve is
     discovery-only, so the URL and transaction_id are minted on the purchase, not
-    on Resolve. Driven on the FREE demo resource (socrates) as the EUR buyer.
+    on Resolve. Driven on the FREE demo resource (socrates) as the test's own
+    agent.
     """
     res = seeded.free
-    item = _deliver_demo(compose_stack, res)
+    item = resolve_and_buy(fresh_agent, res.uri)
     assert item.retrieval_endpoint, f"retrieval_endpoint missing from the item: {item}"
     assert item.transaction_id, f"transaction_id missing from the item: {item}"
 
@@ -79,18 +70,19 @@ def test_broker_resolve_returns_signed_url_and_writes_tx_log(
 def test_signed_url_fetches_origin_content_via_cloudflare_edge(
     compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """The Exchange-signed URL on the demo domain verifies at the Cloudflare edge and delivers bytes."""
     res = seeded.cloudflare  # socrates, demo.fora-protocol.org → Cloudflare
-    signed_url = _delivered_url(_deliver_demo(compose_stack, res))
+    signed_url = _delivered_url(resolve_and_buy(fresh_agent, res.uri))
     # socrates body is the real Stoa Press article content. Assert the ACTUAL
     # delivered article ("Socrates"), never a bare non-empty fallback — that
     # would pass on a 200 edge error-stub or a wrong-route body.
-    fetch_signed(signed_url, compose_stack, expect_marker="Socrates", key_path=res.buyer_key_path)
+    fetch_signed(signed_url, compose_stack, expect_marker="Socrates", key_path=fresh_agent.key_path)
 
 
 def _assert_bound_url_refused_without_key(
-    compose_stack: StackURLs, res: DemoResource, body_marker: str
+    agent: FreshAgent, res: DemoResource, body_marker: str
 ) -> None:
     """Drive the leaked-bound-URL refusal for one edge runtime.
 
@@ -98,7 +90,7 @@ def _assert_bound_url_refused_without_key(
     runtimes reach the check through different Ed25519 primitives), two copies of
     the assertions are not — they had already drifted in wording.
     """
-    signed_url = _delivered_url(_deliver_demo(compose_stack, res))
+    signed_url = _delivered_url(resolve_and_buy(agent, res.uri))
 
     # The URL must be agent-bound, or there is nothing to enforce and the refusal
     # below would be proving something else.
@@ -116,8 +108,8 @@ def _assert_bound_url_refused_without_key(
 
 @obligation(Obligation.DELIVERY_004, negative=True)
 def test_bound_url_is_refused_without_the_key_at_cloudflare_edge(
-    compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """A leaked bound URL is worthless: the edge requires the key it names.
 
@@ -128,27 +120,27 @@ def test_bound_url_is_refused_without_the_key_at_cloudflare_edge(
     URL being malformed. URL integrity is a separate axis: see
     test_tampered_signature_is_rejected.
     """
-    _assert_bound_url_refused_without_key(compose_stack, seeded.cloudflare, "Socrates")
+    _assert_bound_url_refused_without_key(fresh_agent, seeded.cloudflare, "Socrates")
 
 
 def test_tampered_signature_is_rejected(
-    compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """Mutating the ed25519 signature flips the Cloudflare edge verify to 403."""
     res = seeded.cloudflare
-    tampered = tamper_query_param(_delivered_url(_deliver_demo(compose_stack, res)))
+    tampered = tamper_query_param(_delivered_url(resolve_and_buy(fresh_agent, res.uri)))
     bad = fetch_without_proof(tampered)
     assert bad.status == HTTPStatus.FORBIDDEN, bad.text
 
 
 def test_aws_path_resolve_returns_cloudfront_signed_url(
-    compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """The sfx demo tenant (AWS_CLOUDFRONT_RSA scheme) mints a canned-policy signed URL."""
     res = seeded.aws  # rain-on-tin-roof, sfx.demo.fora-protocol.org → AWS
-    signed = _delivered_url(_deliver_demo(compose_stack, res))
+    signed = _delivered_url(resolve_and_buy(fresh_agent, res.uri))
     for name in ("Expires", "Signature", "Key-Pair-Id"):
         assert name in signed, f"{name} missing in {signed}"
 
@@ -156,10 +148,11 @@ def test_aws_path_resolve_returns_cloudfront_signed_url(
 def test_aws_signed_url_fetches_origin_via_cloudfront_shim(
     compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """RSA canned policy verifies at the AWS shim, which proxies to the publisher origin."""
     res = seeded.aws
-    delivered = _deliver_demo(compose_stack, res)
+    delivered = resolve_and_buy(fresh_agent, res.uri)
     # seeded.aws is rain-on-tin-roof (foleyworks sfx JSON). Assert the ACTUAL
     # delivered asset by its unique slug, not merely non-empty — a 200 edge
     # error-stub or wrong-route body must fail. An RSA URL carries no binding: the
@@ -168,17 +161,17 @@ def test_aws_signed_url_fetches_origin_via_cloudfront_shim(
         _delivered_url(delivered),
         compose_stack,
         expect_marker="rain-on-tin-roof",
-        key_path=res.buyer_key_path,
+        key_path=fresh_agent.key_path,
     )
 
 
 def test_aws_tampered_signature_is_rejected(
-    compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """Mutating a byte inside the CloudFront Signature flips the AWS shim verifier to 403."""
     res = seeded.aws
-    delivered = _deliver_demo(compose_stack, res)
+    delivered = resolve_and_buy(fresh_agent, res.uri)
     tampered = tamper_query_param(_delivered_url(delivered), param="Signature")
     bad = fetch_without_proof(tampered)
     assert bad.status == HTTPStatus.FORBIDDEN, bad.text
@@ -187,23 +180,25 @@ def test_aws_tampered_signature_is_rejected(
 def test_fastly_signed_url_fetches_origin_via_viceroy(
     compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """Ed25519-signed URL on the music demo domain verifies on Fastly Compute (Viceroy)."""
     res = seeded.fastly  # paper-satellites, music.demo.fora-protocol.org → Fastly
+    fresh_agent.fund(EXCHANGE_B_DOMAIN)
     # seeded.fastly is paper-satellites (harmonia-records lyrics). Assert the
     # ACTUAL delivered lyric by its title, not merely non-empty.
     fetch_signed(
-        _delivered_url(_deliver_demo(compose_stack, res)),
+        _delivered_url(resolve_and_buy(fresh_agent, res.uri)),
         compose_stack,
         expect_marker="Paper Satellites",
-        key_path=res.buyer_key_path,
+        key_path=fresh_agent.key_path,
     )
 
 
 @obligation(Obligation.DELIVERY_004, negative=True)
 def test_bound_url_is_refused_without_the_key_at_fastly_edge(
-    compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """The Cloudflare property above, proved on the second enforcing runtime.
 
@@ -216,16 +211,18 @@ def test_bound_url_is_refused_without_the_key_at_fastly_edge(
     The test above delivers the SAME resource successfully by presenting the buyer
     key, so the only variable here is the proof.
     """
-    _assert_bound_url_refused_without_key(compose_stack, seeded.fastly, "Paper Satellites")
+    fresh_agent.fund(EXCHANGE_B_DOMAIN)
+    _assert_bound_url_refused_without_key(fresh_agent, seeded.fastly, "Paper Satellites")
 
 
 def test_fastly_tampered_signature_is_rejected(
-    compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """Mutating the sig param trips Fastly Compute's ed25519 verify."""
     res = seeded.fastly
-    tampered = tamper_query_param(_delivered_url(_deliver_demo(compose_stack, res)))
+    fresh_agent.fund(EXCHANGE_B_DOMAIN)
+    tampered = tamper_query_param(_delivered_url(resolve_and_buy(fresh_agent, res.uri)))
     bad = fetch_without_proof(tampered)
     assert bad.status == HTTPStatus.FORBIDDEN, bad.text
 
@@ -233,6 +230,7 @@ def test_fastly_tampered_signature_is_rejected(
 def test_discover_execute_delivers_content(
     compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """discover → execute → fetch delivers the real publisher payload end to end.
 
@@ -248,10 +246,11 @@ def test_discover_execute_delivers_content(
     """
     # paper-satellites is FLAT USD with no geo/user-type restriction, so it
     # resolves cleanly via the canonical DiscoveryRequest (which carries no facet
-    # fields). It is fronted by the Fastly demo edge.
+    # fields). It is fronted by the Fastly demo edge, and exchange-b sells it.
     res = seeded.fastly
+    fresh_agent.fund(EXCHANGE_B_DOMAIN)
 
-    signed_url = _delivered_url(_deliver_demo(compose_stack, res))
+    signed_url = _delivered_url(resolve_and_buy(fresh_agent, res.uri))
 
     # Assert the ACTUAL delivered lyric by its title, not merely a 200: an edge
     # error-stub or a wrong-route body would otherwise pass.
@@ -259,5 +258,5 @@ def test_discover_execute_delivers_content(
         signed_url,
         compose_stack,
         expect_marker="Paper Satellites",
-        key_path=res.buyer_key_path,
+        key_path=fresh_agent.key_path,
     )

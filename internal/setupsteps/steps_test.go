@@ -17,11 +17,13 @@ var allProviders = []cdn.Provider{
 	cdn.ProviderNone,
 }
 
-// Every publisher sees the same four stages in the same order. A publisher on
-// no supported network gets a different third step, not a shorter path.
+// Every publisher sees the console's four steps in the console's order: the
+// business, the domain, the terms, and the two tasks of connecting the site,
+// the discovery file and the edge package. A publisher on no supported network
+// gets a different edge step, not a shorter path.
 func TestEveryProviderGetsTheWholePath(t *testing.T) {
 	t.Parallel()
-	want := []string{"register", "manifest", "edge", "terms"}
+	want := []string{"business", "domain", "terms", "manifest", "edge"}
 	for _, provider := range allProviders {
 		t.Run(string(provider), func(t *testing.T) {
 			t.Parallel()
@@ -227,8 +229,8 @@ func TestStepsWithoutAManifest(t *testing.T) {
 func TestEmptyHostLeavesTheTextIntact(t *testing.T) {
 	t.Parallel()
 	got := setupsteps.For(cdn.ProviderCloudflare, "", nil)
-	if len(got) != 4 {
-		t.Fatalf("steps = %d, want the whole path", len(got))
+	if whole := len(setupsteps.For(cdn.ProviderCloudflare, "publisher.example", nil)); len(got) != whole {
+		t.Fatalf("steps = %d, want the whole path of %d", len(got), whole)
 	}
 	found := false
 	for _, step := range got {
@@ -386,4 +388,28 @@ func TestOnlyPublicRequestsAreMarkedAnswerable(t *testing.T) {
 	if marked == 0 {
 		t.Fatal("no command is marked answerable, so the console has nothing to take over")
 	}
+}
+
+// A publisher who has never used wrangler has not authorised it for their
+// Cloudflare account. The commands the console shows on Cloudflare log in
+// first, in the same block as the deploy, so the authorisation is a step they
+// can read rather than a browser window they did not expect, and the block
+// says which Node.js wrangler needs, because wrangler declares one.
+func TestCloudflareDeployLogsInFirst(t *testing.T) {
+	t.Parallel()
+	step := edgeStep(t, setupsteps.RunnableByHand(setupsteps.For(cdn.ProviderCloudflare, "publisher.example", nil)))
+	for _, c := range step.Commands {
+		login, deploy := strings.Index(c.Run, "npx wrangler login"), strings.Index(c.Run, "npx wrangler deploy")
+		if deploy < 0 {
+			continue
+		}
+		if login < 0 || login > deploy {
+			t.Fatalf("%q runs %q; want npx wrangler login before npx wrangler deploy", c.Label, c.Run)
+		}
+		if !strings.Contains(c.Expect, "Node.js") {
+			t.Fatalf("%q does not say which Node.js wrangler needs: %q", c.Label, c.Expect)
+		}
+		return
+	}
+	t.Fatalf("the Cloudflare steps a publisher runs have no npx wrangler deploy: %+v", step.Commands)
 }

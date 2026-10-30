@@ -59,7 +59,7 @@ sites and have their catalogs filled without your help.
 | Redis | Exchange, Broker | Short-lived shared state: the record of already-accepted request signatures (so the same signed request cannot be replayed), and the Broker's per-agent spending counters. A plain managed Redis with default settings is enough. |
 | TigerBeetle | Exchange only | The financial ledger: agent balances, reservations, settled charges, publisher revenue. There is no managed TigerBeetle service — check the host requirements before planning anything else. |
 | Vault | Identity | Stores the agents' signing keys. |
-| Sign-in provider | Identity, publisher console | Where developers sign in before an agent is created for them, and where publishers sign in to the console. Each of the two services has a client of its own, and with Zitadel each side has an instance of its own: separate accounts, sessions and sign-in pages, so one email address can be a developer and a publisher with two passwords (`deploy/zitadel/CONFIGURATION.md` §3). Any standard OIDC provider works — if you already run one, use it. The console needs the person's email address, whether the provider has confirmed it, and their name in the ID token; both services read them only from there (`deploy/zitadel/CONFIGURATION.md` §3). Zitadel is the provider FORA is tested against, and the one the guides set up. |
+| Sign-in provider | Identity, publisher console | Where developers sign in before an agent is created for them, and where publishers sign in to the console. Each of the two services has a client of its own, and with Zitadel each side has an instance of its own: separate accounts, sessions and sign-in pages, so one email address can be a developer and a publisher with two passwords (`deploy/zitadel/CONFIGURATION.md` §3). Any standard OIDC provider works — if you already run one, use it. The console needs the person's email address and whether the provider has confirmed it, in the ID token, and records the name the token carries when it carries one; both services read them only from there (`deploy/zitadel/CONFIGURATION.md` §3). Zitadel is the provider FORA is tested against, and the one the guides set up. |
 
 The protocol definition lives in a separate published module — see
 References at the end of this document.
@@ -292,10 +292,11 @@ TLS on 443 and forwards to the services. No storage port and no admin
 port is open to the internet.
 
 Two edge rules that fail with no error anywhere when broken
-(`src/edge/DEPLOYMENT.md` §6): the worker's routes must cover
-`/.well-known/*`, or the documents that tell bots how to buy access
-stop being served; and the `workers.dev` hostname must be off and the
-DNS record proxied, or requests go around the worker entirely.
+(`src/edge/DEPLOYMENT.md` §6): the publisher's origin must serve its own
+`/.well-known/fora.json`, which the worker passes through to every
+client, or bots refused at an article find nothing that tells them how
+to buy access; and the `workers.dev` hostname must be off and the DNS
+record proxied, or requests go around the worker entirely.
 
 ### 4.4 Development settings that must never reach production
 

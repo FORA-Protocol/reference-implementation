@@ -15,10 +15,10 @@ Reads the signer's own output, so it needs no stack and no network.
 from __future__ import annotations
 
 import pytest
-from fora_sdk import sfv
 from fora_sdk.identity import generate_key
 
 from .httpsig_signer import signing_transport
+from .signature_fields import declared_signatures
 
 pytestmark = pytest.mark.stack_isolation("isolated")
 
@@ -40,11 +40,10 @@ def test_identical_requests_get_fresh_nonces_with_a_fixed_window() -> None:
 
     nonces = []
     for headers in signed:
-        members = list(sfv.parse_dictionary(headers["signature-input"]).values())
-        assert len(members) == 1, headers["signature-input"]
-        member = members[0]
-        assert isinstance(member, sfv.InnerList), member
-        params = member.params
+        signatures = declared_signatures([headers["signature-input"]])
+        assert len(signatures) == 1, headers["signature-input"]
+        (signature,) = signatures.values()
+        params = signature.params
         assert (params.get("created"), params.get("expires")) == (created, expires), params
         nonce = params.get("nonce")
         assert isinstance(nonce, str) and nonce, (

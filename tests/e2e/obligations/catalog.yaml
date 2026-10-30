@@ -1160,8 +1160,11 @@
       so protocol-aware agents discover the Exchange without triggering a 403.
   positive: >-
     GET /.well-known/fora.json under an AI bot's User-Agent, a search engine
-    crawler's, a browser's and with no User-Agent answers 200 with the manifest of
-    the refused host, on each runtime.
+    crawler's, a browser's and with no User-Agent is never refused, on each
+    runtime: over HTTP it answers 200 with the manifest of the refused host, which
+    the publisher serves from its origin and the edge passes through; on
+    Lambda@Edge the function hands the request back to CloudFront, which fetches
+    the origin.
   negative: []
 
 # untested: no edge in the e2e stack sets a licensed scope (LICENSED_PATHS_JSON), so

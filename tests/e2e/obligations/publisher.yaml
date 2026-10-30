@@ -24,9 +24,10 @@
       "Connect to `exchange.example`" runs `RegisterPublisher` on that Exchange, which
       mints the publisher id there (D2) and grants it to the actor.
   positive: >-
-    A fresh, verified publisher registers a business name in the console's wizard
-    and is handed a publisher id the Exchange minted (pub_-prefixed), and the file
-    the console then builds names that id as the payee.
+    A fresh, verified publisher's sign-in opens the console's add-a-domain wizard on
+    its business step; naming the business there is answered with a publisher id the
+    Exchange minted (pub_-prefixed), which the domains page shows, and the file the
+    console builds names that id as the payee.
   negative: []
 
 - id: PUB-002
@@ -40,8 +41,11 @@
       `RegisterPublisher` is idempotent by actor: a caller that already holds a grant
       gets that publisher back.
   positive: >-
-    The same publisher submitting the business step a second time is handed the
-    publisher id it was handed the first time.
+    The same publisher sending the wizard's business step a second time, with another
+    name, as a second tab would, is handed the publisher id it was handed the first
+    time, under the first name: the file the console builds afterwards names the payee
+    the file built before named, the domains page still shows the first name, and the
+    wizard opened again no longer asks for the business.
   negative: []
 
 - id: PUB-003
@@ -73,9 +77,9 @@
       `WellKnownManifest`, its `exchanges[]` has an entry whose `domain` is this seat's
       hostname with `ext.resource_owner_id` equal to the registered publisher id
   positive: >-
-    With the generated file published on the domain, the console's manifest check
-    passes with no repair sentences, the last wizard step registers the domain, and
-    the domains page lists the domain as verified.
+    With the generated file published on the domain and the package answering, the
+    connect step's check finds the file in place with no repair sentences and
+    verifies the domain, and the domains page lists the domain as verified.
   negative: []
 
 - id: PUB-005
@@ -88,12 +92,15 @@
     quote: >-
       everything that reads or writes a registration needs a session whose address the
       provider verified.
-  positive: A verified publisher's sign-in ends on the console's home page.
+  positive: >-
+    A verified publisher's sign-in ends in the console, on the add-a-domain wizard,
+    which opens on the step that asks for its business name.
   negative:
     - code: unauthenticated
       reason: >-
         the provider stops the sign-in at its own address check, so the console holds
-        no session, and the wizard refuses the business step with HTTP 401
+        no session, and the wizard's calls, the business step's among them, are
+        refused with HTTP 401
       side_effect: no publisher is registered for the person
 
 - id: PUB-006
@@ -128,8 +135,8 @@
   negative:
     - code: invalid_argument
       reason: >-
-        the wizard reports the domain taken, and the console refuses the last step with
-        HTTP 400
+        the wizard reports the domain taken, and the console refuses to save it at the
+        domain step with HTTP 400
       side_effect: the domain does not appear on the second publisher's domains page
 
 - id: PUB-008

@@ -72,6 +72,8 @@ module "compose_stack" {
   mcp_hostname      = local.mcp_fqdn
   zitadel_hostname  = local.zitadel_fqdn
   origin_hostname   = local.origin_fqdn
+  # The demo publisher's own discovery document, which the origin serves.
+  origin_discovery_document = module.manifest.document
 
   exchange_image  = local.exchange_image
   broker_image    = local.broker_image
@@ -112,12 +114,13 @@ module "compose_stack" {
   importer_key_json = file("${local.keys_dir}/contributor-key.json")
 }
 
-# Renders the worker's publisher-manifest env values (EXCHANGES_JSON,
-# CATALOG_CONTRIBUTORS_JSON) — the one Terraform home of that JSON shape,
-# shared with the Lambda@Edge config rendering in stacks/demo-aws.
+# Renders the publisher's discovery document, which the origin serves at
+# /.well-known/fora.json — the one Terraform home of that document, shared with
+# stacks/demo-aws.
 module "manifest" {
   source = "../../modules/publisher-manifest"
 
+  publisher_domain  = local.publisher_fqdn
   exchange_fqdn     = local.exchange_fqdn
   resource_owner_id = var.resource_owner_id
   # The contributor id IS the hostname its key directory is served at (the
@@ -160,7 +163,7 @@ module "dns" {
 }
 
 # The module's other optional standalone-publisher inputs (fora_verify_keys,
-# rsl_body, acme_tokens_json, wba_keys_json, wba_revocation_url) are omitted
+# wba_keys_json, wba_revocation_url) are omitted
 # on purpose, not by oversight: staging's Exchange serves agent keys over
 # exchange_wba_url, so inline key material is unnecessary. stacks/edge exposes
 # all of them because it is the generic surface a publisher configures alone.
@@ -184,13 +187,10 @@ module "edge" {
 
   exchange_url     = "https://${local.exchange_fqdn}"
   exchange_wba_url = "https://${local.exchange_fqdn}/.well-known/http-message-signatures-directory"
-  provider_domain  = local.publisher_fqdn
-  exchanges_json   = module.manifest.exchanges_json
 
+  # The origin serves the publisher's discovery document (module.manifest's,
+  # from Caddy) and its content; the worker passes both through.
   origin_url = "https://${local.origin_fqdn}"
-  # Rendered by the manifest module — the one Terraform home of this JSON
-  # shape, shared with the Lambda@Edge config rendering in stacks/demo-aws.
-  catalog_contributors_json = module.manifest.catalog_contributors_json
 
   fora_enforce_binding = var.fora_enforce_binding
 

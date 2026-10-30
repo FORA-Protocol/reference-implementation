@@ -20,8 +20,8 @@ import (
 // Legs: every write goes signed HTTP -> service -> repositories -> database,
 // and the site is read back through the signed resume route. Audit rows are
 // read one tier lower, through the audit repository, for the reason
-// auditActions gives, and so is the second seat's grant in the per-seat test,
-// for the reason secondSeatFor gives.
+// exchangetest's AuditActions gives, and so is the second seat's grant in the
+// per-seat test, for the reason secondSeatFor gives.
 
 // freeSearch is a licensing the tests set over the charging one sites are
 // saved with, so a write shows in what is read back.
@@ -154,7 +154,7 @@ func TestConsoleRegistration_RefusesTermsTheRouteMayNotSet(t *testing.T) {
 	if !reflect.DeepEqual(before, after) {
 		t.Fatalf("a refused call changed terms: before %v, after %v", before, after)
 	}
-	if n := countActions(t, f, "SetDomainTerms"); n != 0 {
+	if n := f.exchange.CountAuditActions(t, "SetDomainTerms"); n != 0 {
 		t.Fatalf("the refused calls wrote %d SetDomainTerms audit rows", n)
 	}
 }

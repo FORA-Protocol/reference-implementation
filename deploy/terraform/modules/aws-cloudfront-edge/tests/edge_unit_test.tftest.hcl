@@ -59,12 +59,18 @@ run "log_permissions_span_every_serving_region" {
   # Lambda@Edge writes logs in the region that served the request; a
   # single-region grant silently loses every request served elsewhere.
   assert {
-    condition     = startswith(jsondecode(aws_iam_role_policy.edge_logs.policy).Statement[0].Resource, "arn:aws:logs:*:")
+    condition = alltrue([
+      for stmt in jsondecode(aws_iam_role_policy.edge_logs.policy).Statement :
+      startswith(stmt.Resource, "arn:aws:logs:*:")
+    ])
     error_message = "The logs grant must span all regions (arn:aws:logs:*), name-scoped to the function's log groups"
   }
 
   assert {
-    condition     = strcontains(jsondecode(aws_iam_role_policy.edge_logs.policy).Statement[0].Resource, "/aws/lambda/*.demo-edge")
+    condition = alltrue([
+      for stmt in jsondecode(aws_iam_role_policy.edge_logs.policy).Statement :
+      strcontains(stmt.Resource, "/aws/lambda/*.demo-edge")
+    ])
     error_message = "The logs grant must stay scoped to this function's region-prefixed log-group names"
   }
 }
@@ -80,9 +86,10 @@ run "distribution_gates_every_request_at_viewer_request" {
     error_message = "Exactly one association, at viewer-request (runs on cache hits too), without body exposure"
   }
 
-  # No /.well-known/* bypass behavior: the shared app serves well-known routes
-  # before its bot gate, so a second behavior would only add a second code
-  # path. One behavior total means ordered_cache_behavior stays empty.
+  # No /.well-known/* bypass behavior: the shared app handles well-known
+  # routes before its bot gate (the publisher's documents go back to
+  # CloudFront for the origin to answer), so a second behavior would only add
+  # a second code path. One behavior total means ordered_cache_behavior stays empty.
   assert {
     condition     = length(aws_cloudfront_distribution.this.ordered_cache_behavior) == 0
     error_message = "One default behavior only — the well-known bypass from the previous deployment must not come back"

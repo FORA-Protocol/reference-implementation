@@ -6,7 +6,7 @@ variable "name_prefix" {
 }
 
 variable "lambda_zip_path" {
-  description = "Path to the pre-built Lambda@Edge bundle zip (src/edge/dist/lambda-edge.zip). Build it with deploy/terraform/scripts/build-lambda-edge.sh before apply — this module never builds it, and the per-deployment config is baked inside the zip (Lambda@Edge has no environment variables)."
+  description = "Path to the pre-built Lambda@Edge bundle zip (src/edge/dist/lambda-edge.zip). Build it with deploy/terraform/scripts/build-lambda-edge.sh <config.json> <publisher-domain> before apply — this module never builds it, and the per-deployment config is baked inside the zip (Lambda@Edge has no environment variables)."
   type        = string
   nullable    = false
 
@@ -15,7 +15,7 @@ variable "lambda_zip_path" {
   # legitimately lacks it and should be told what to run.
   validation {
     condition     = fileexists(var.lambda_zip_path)
-    error_message = "lambda_zip_path points at a file that does not exist — run deploy/terraform/scripts/build-lambda-edge.sh <config.json> first."
+    error_message = "lambda_zip_path points at a file that does not exist — run deploy/terraform/scripts/build-lambda-edge.sh <config.json> <publisher-domain> first."
   }
 }
 

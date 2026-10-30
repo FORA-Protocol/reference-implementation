@@ -1,0 +1,1626 @@
+{
+  "note": "Signed delegation chain cases with declared outcomes; regenerate with FORA_UPDATE_VECTORS=1 in sdk/go/helpers. expect.token_index is 0 when the refusal is found while decoding, before the chain depth is known (size, syntax, header and claim checks), otherwise the root-relative position, 1 for the root. mirrors are the plaintext Delegation fields next to the token; only an Exchange's own tests replay them, nothing in the protocol repository reads them.",
+  "cases": [
+    {
+      "name": "root_only_eddsa",
+      "note": "one token, alg EdDSA, holder bound to the request key",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiBlYXJuaW5nczoqIn0.afiAcjLPi8aGlp_PaOQvXz9C7e5owt0IdWwH8TgOZqs3EGf1owmj4YHt8Cd40DoI1aB-whoY2jgGf4zy3HiHCQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "earnings:*",
+          "quote:*"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "root_only_ed25519",
+      "note": "one token, alg Ed25519 (RFC 9864)",
+      "token": "eyJhbGciOiJFZDI1NTE5IiwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.b-if3xMuuuTPwgOFQ3C0GHXVdLSPCTUy1H2BPOWdU_R0UnpoO5aZL_aG_76LpPV4TB3qkZhXDC4uIBIusxSJDA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:*"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "two_tokens",
+      "note": "root EdDSA, child Ed25519 narrowing scope",
+      "token": "eyJhbGciOiJFZDI1NTE5IiwiandrIjp7ImNydiI6IkVkMjU1MTkiLCJrdHkiOiJPS1AiLCJ4IjoieUYwU2RxTHZHZnlIVjRMV2hMTS1nTXg3clBnX0xNeFpLcHBKZFk3blJ2WSJ9LCJ0eXAiOiJmb3JhLWRlbGVnYXRpb24rand0In0.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNYVnZkR1U2S2lCbFlYSnVhVzVuY3pvcUluMC5pa0tTX2tzVkZTSzk2eE9ja2ZjMW8zc2prd1VpUUhMSUFpNFpCM3B1eHdmMWJQOTgzcGl6RkhLNy16Q2pid2VLVmNWaFczeTlkOEEyTTJnVGxtTk5BUSIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUiLCJzY29wZSI6ImVhcm5pbmdzOioifQ.BYPx8_MNws93olALVra3qZDnx-Xw9wIhtansjrBcAJzEid1psR764LvcyE0pdJ1GhXfuMd9SYWRHQHRy6fOoCA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "earnings:*"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 2
+      }
+    },
+    {
+      "name": "two_tokens_mixed_reverse",
+      "note": "root Ed25519, child EdDSA",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkRJMU5URTVJaXdpZEhsd0lqb2labTl5WVMxa1pXeGxaMkYwYVc5dUsycDNkQ0o5LmV5SmhkV1FpT2xzaVpYaGphR0Z1WjJVdVpYaGhiWEJzWlNKZExDSmpibVlpT25zaWFtdDBJam9pV0dSM1lYSkVORXd3TVZCWk5sRmFNSFJoTXpCcGJrSk1SM1pVTlRkcGRFMVVXVWxrTWtoNlEzRlNSU0o5TENKbGVIQWlPakUzT0RBek1UZzRNREFzSW1semN5STZJbTFoY210bGRHUmhkR0V1WlhoaGJYQnNaU0lzSW5OamIzQmxJam9pY1hWdmRHVTZLaUo5LnRLSktnejhlVC16MVhNeWg0QVVTb1pIengyeGRINk94OUx4ZlRRSERUMGNzWVE3djhWOHRMSE5VaXB3eW9WX0dNSDBybloyaVpEMExwcks5MkxlckR3IiwiaXNzIjoiWGR3YXJENEwwMVBZNlFaMHRhMzBpbkJMR3ZUNTdpdE1UWUlkMkh6Q3FSRSIsInNjb3BlIjoicXVvdGU6KiJ9.JvfjbpFHXDFsSdOnE-FHhy6jq7mAZenEkvsmxfMdGgoxg9dfl2F-XBUovPc795qsey83iJcb3mE0tWrmQNphBg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:*"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 2
+      }
+    },
+    {
+      "name": "three_tokens",
+      "note": "root, principal, agent",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6Im8wOEhqQV9XOTM5Y2JjdWxNUkpNc243d3FUSkFQNnZKaWJ6YTlEejl0UTQifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJbXAzYXlJNmV5SmpjbllpT2lKRlpESTFOVEU1SWl3aWEzUjVJam9pVDB0UUlpd2llQ0k2SW5sR01GTmtjVXgyUjJaNVNGWTBURmRvVEUwdFowMTROM0pRWjE5TVRYaGFTM0J3U21SWk4yNVNkbGtpZlN3aWRIbHdJam9pWm05eVlTMWtaV3hsWjJGMGFXOXVLMnAzZENKOS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaU5YUkNSRk4zVjNCM1JWOWthbUZaY1d4clFtUlNUa1o2VGpaSFozcEhTbWxYYnpSaFpVazRZa1JXVlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltWnZjbUZmY0dGeVpXNTBJam9pWlhsS2FHSkhZMmxQYVVwR1drVlNWRkZUU1hOSmJsSTFZME5KTmtsdFduWmpiVVYwV2tkV2MxcFhaR2hrUjJ4MlltbDBjV1F6VVdsbVVTNWxlVXBvWkZkUmFVOXNjMmxhV0docVlVZEdkVm95VlhWYVdHaG9ZbGhDYzFwVFNtUk1RMHBxWW0xWmFVOXVjMmxoYlhRd1NXcHZhVmRIVWpOWldFcEZUa1YzZDAxV1FscE9iRVpoVFVoU2FFMTZRbkJpYTBwTlVqTmFWVTVVWkhCa1JURlZWMVZzYTAxcmFEWlJNMFpUVWxOS09VeERTbXhsU0VGcFQycEZNMDlFUVhwTlZHYzBUVVJCYzBsdGJIcGplVWsyU1cweGFHTnRkR3hrUjFKb1pFZEZkVnBZYUdoaVdFSnpXbE5KYzBsdVRtcGlNMEpzU1dwdmFXTllWblprUjFVMlMybEtPUzV2YTBkSWFuQm9NSEZDWlRGdk1uWlNObVo0VW1FeVJrZFNjbmgwUWkxaFZIWm5UVTF5T0RCWlFYbGlWMGhwTWpScE9FaHZMVVpuU3pSeFdUbDZaR1pVVjBscmFqaE5lbTFqUm5oVFdHNTNlRkJEVEc5Qlp5SXNJbWx6Y3lJNklsaGtkMkZ5UkRSTU1ERlFXVFpSV2pCMFlUTXdhVzVDVEVkMlZEVTNhWFJOVkZsSlpESklla054VWtVaUxDSnpZMjl3WlNJNkluRjFiM1JsT2lvaWZRLlVwVk92WmI4MGFiTnJKTVM4bVprVnF6UHlWbTBCU2pla1RCUURKdS1rT0dnQVpMM2hkRi1sTGhxMEU4N0M1TExEWnByb190bDRuNDAyaGNsOUNtNUNBIiwiaXNzIjoiNXRCRFN3V3B3RV9kamFZcWxrQmRSTkZ6TjZHZ3pHSmlXbzRhZUk4YkRWVSIsInNjb3BlIjoicXVvdGU6QUFQTCJ9.Uk_05oKsgURkQfu7RpRcz50dbwx0nAuhKHIj6SEX_aW7fib_S70axwe5Zrm1kicvXBZOUfGZwEDO9OO4A-5VAQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:AAPL"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 3
+      }
+    },
+    {
+      "name": "four_tokens",
+      "note": "the deepest chain the profile allows",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InZ1bzlQNXl0WEZXQ1l0alBVZTZndGhPQ0tjb3ZJd1ZUaExEOEZuWlREQkUifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJbXAzYXlJNmV5SmpjbllpT2lKRlpESTFOVEU1SWl3aWEzUjVJam9pVDB0UUlpd2llQ0k2SW04d09FaHFRVjlYT1RNNVkySmpkV3hOVWtwTmMyNDNkM0ZVU2tGUU5uWkthV0o2WVRsRWVqbDBVVFFpZlN3aWRIbHdJam9pWm05eVlTMWtaV3hsWjJGMGFXOXVLMnAzZENKOS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVJuSXRUbU5IYWtaNVNUWmhOazR6VUVKdlJrb3lOM04yUjJWdFdubGtOSFZuTUVkc1ZWOWxUMjFOT0NKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltWnZjbUZmY0dGeVpXNTBJam9pWlhsS2FHSkhZMmxQYVVwR1drVlNWRkZUU1hOSmJYQXpZWGxKTm1WNVNtcGpibGxwVDJsS1JscEVTVEZPVkVVMVNXbDNhV0V6VWpWSmFtOXBWREIwVVVscGQybGxRMGsyU1c1c1IwMUdUbXRqVlhneVVqSmFOVk5HV1RCVVJtUnZWRVV3ZEZvd01UUk9NMHBSV2pFNVRWUllhR0ZUTTBKM1UyMVNXazR5TlZOa2JHdHBabE4zYVdSSWJIZEphbTlwV20wNWVWbFRNV3RhVjNoc1dqSkdNR0ZYT1hWTE1uQXpaRU5LT1M1bGVVcG9aRmRSYVU5c2MybGFXR2hxWVVkR2RWb3lWWFZhV0dob1lsaENjMXBUU21STVEwcHFZbTFaYVU5dWMybGhiWFF3U1dwdmFVNVlVa05TUms0elZqTkNNMUpXT1d0aGJVWmFZMWQ0Y2xGdFVsTlVhMW8yVkdwYVNGb3pjRWhUYld4WVlucFNhRnBWYXpSWmExSlhWbE5LT1V4RFNteGxTRUZwVDJwRk0wOUVRWHBOVkdjMFRVUkJjMGx0V25aamJVWm1ZMGRHZVZwWE5UQkphbTlwV2xoc1MyRkhTa2haTW14UVlWVndSMWRyVmxOV1JrWlVVMWhPU21Kc1NURlpNRTVLVG10c2RGZHVXbXBpVlZZd1YydGtWMk14Y0ZoYVIyaHJVako0TWxsdGJEQmpWMUY2VlZkc2JWVlROV3hsVlhCdldrWmtVbUZWT1hOak1teGhWMGRvY1ZsVlpFZGtWbTk1VmxoV1lWZEhhRzlaYkdoRFl6RndWRk50VWsxUk1IQnhXVzB4V21GVk9YVmpNbXhvWWxoUmQxTlhjSFpoVm1SSVZXcE9XbGRGY0VaVWExWXpaREF4VjFGc2NFOWlSVnBvVkZWb1UyRkZNVFpSYmtKcFlUQndUbFZxVG1GV1ZUVlZXa2hDYTFKVVJsWldNVlp6WVRBeGNtRkVXbEpOTUZwVVZXeE9TMDlWZUVSVGJYaHNVMFZHY0ZReWNFWk5NRGxGVVZod1RsWkhZekJVVlZKQ1l6QnNkR0pJY0dwbFZXc3lVMWN3ZUdGSFRuUmtSM2hyVWpGS2IxcEZaRVprVm5CWllVZG9hVmRGU25wWGJFNUtZekJzZFZSdGNHbE5NRXB6VTFkd2RtRlhUbGxXYmxwclVqRlZNbE15YkV0UFV6VjJZVEJrU1dGdVFtOU5TRVpEV2xSR2RrMXVXbE5PYlZvMFZXMUZlVkpyWkZOamJtZ3dVV2t4YUZaSVdtNVVWVEY1VDBSQ1dsRlliR2xXTUdod1RXcFNjRTlGYUhaTVZWcHVVM3BTZUZkVWJEWmFSMXBWVmpCc2NtRnFhRTVsYlRGcVVtNW9WRmRITlRObFJrSkVWRWM1UWxwNVNYTkpiV3g2WTNsSk5rbHNhR3RrTWtaNVVrUlNUVTFFUmxGWFZGcFNWMnBDTUZsVVRYZGhWelZEVkVWa01sWkVWVE5oV0ZKT1ZrWnNTbHBFU2tsbGEwNTRWV3RWYVV4RFNucFpNamwzV2xOSk5rbHVSakZpTTFKc1QybHZhV1pSTGxWd1ZrOTJXbUk0TUdGaVRuSktUVk00YlZwclZuRjZVSGxXYlRCQ1UycGxhMVJDVVVSS2RTMXJUMGRuUVZwTU0yaGtSaTFzVEdoeE1FVTROME0xVEV4RVduQnliMTkwYkRSdU5EQXlhR05zT1VOdE5VTkJJaXdpYVhOeklqb2lOWFJDUkZOM1YzQjNSVjlrYW1GWmNXeHJRbVJTVGtaNlRqWkhaM3BIU21sWGJ6UmhaVWs0WWtSV1ZTSXNJbk5qYjNCbElqb2ljWFZ2ZEdVNktpSjkuTDZhbDhHVlUwSVJLLVNLOXFRX3FDdXMxUm5mbGtzaTFyZjNORVQ2UnNuekRoN3k2NjZkWWpFUHRudTlfckhRS05vX2Zhek9ySDVraDRxUzdCaEtMQ3ciLCJpc3MiOiJGci1OY0dqRnlJNmE2TjNQQm9GSjI3c3ZHZW1aeWQ0dWcwR2xVX2VPbU04Iiwic2NvcGUiOiJxdW90ZTpBQVBMIn0.0q35vRGpFUD3YjHZZ-ipN4pNkXPp0wDFnrS9dqnHc1fLrAHHm8efb1LD3kL-DYVXF3oUltMY1ORCnbjlcYRnDw",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:AAPL"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 4
+      }
+    },
+    {
+      "name": "five_tokens",
+      "note": "a fifth token is never decoded",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6ImV4NmlHdzZzVUE0cXB5Y2hQajBEZFRzTFVBTzRfYzk1Sl90bl9kYkREeDQifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJbXAzYXlJNmV5SmpjbllpT2lKRlpESTFOVEU1SWl3aWEzUjVJam9pVDB0UUlpd2llQ0k2SW5aMWJ6bFFOWGwwV0VaWFExbDBhbEJWWlRabmRHaFBRMHRqYjNaSmQxWlVhRXhFT0VadVdsUkVRa1VpZlN3aWRIbHdJam9pWm05eVlTMWtaV3hsWjJGMGFXOXVLMnAzZENKOS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVNVcHpjelpWVlZWeFFqbHJWVlpvVWxkbU4zcEViMnhHYlhsdFMzTnNkbTV6UjB0Zk4xRmxVVlp6WXlKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltWnZjbUZmY0dGeVpXNTBJam9pWlhsS2FHSkhZMmxQYVVwR1drVlNWRkZUU1hOSmJYQXpZWGxKTm1WNVNtcGpibGxwVDJsS1JscEVTVEZPVkVVMVNXbDNhV0V6VWpWSmFtOXBWREIwVVVscGQybGxRMGsyU1cwNGQwOUZhSEZSVmpsWVQxUk5OVmt5U21wa1YzaE9WV3R3VG1NeU5ETmtNMFpWVTJ0R1VVNXVXa3RoVjBvMldWUnNSV1ZxYkRCVlZGRnBabE4zYVdSSWJIZEphbTlwV20wNWVWbFRNV3RhVjNoc1dqSkdNR0ZYT1hWTE1uQXpaRU5LT1M1bGVVcG9aRmRSYVU5c2MybGFXR2hxWVVkR2RWb3lWWFZhV0dob1lsaENjMXBUU21STVEwcHFZbTFaYVU5dWMybGhiWFF3U1dwdmFWSnVTWFJVYlU1SVlXdGFOVk5VV21oT2F6UjZWVVZLZGxKcmIzbE9NMDR5VWpKV2RGZHViR3RPU0ZadVRVVmtjMVpXT1d4VU1qRk9UME5LT1V4RFNteGxTRUZwVDJwRk0wOUVRWHBOVkdjMFRVUkJjMGx0V25aamJVWm1ZMGRHZVZwWE5UQkphbTlwV2xoc1MyRkhTa2haTW14UVlWVndSMWRyVmxOV1JrWlVVMWhPU21KWVFYcFpXR3hLVG0xV05WTnRjR3BpYkd4d1ZESnNTMUpzY0VWVFZFWlBWa1ZWTVZOWGJETmhWMFY2VldwV1NtRnRPWEJXUkVJd1ZWVnNjR1F5Ykd4Uk1Hc3lVMWMxYzFJd01VZFViWFJxVmxobmVWVnFTbUZPVms1SFYxUkNWVkp0VW5aV1JWVjNaRVp2ZDAxVVVrOU5NSEJTVjJwRk5WUldVbGxoUjBaVVRUQktNMVV5TVZOWGF6UjVUbFpPYTJKSGRIQmFiRTR6WVZkU1NXSklaRXBoYlRsd1YyMHdOV1ZXYkZSTlYzUmhWak5vYzFkcVNrZE5SMFpZVDFoV1RFMXVRWHBhUlU1TFQxTTFiR1ZWY0c5YVJtUlNZVlU1YzJNeWJHRlhSMmh4V1ZWa1IyUldiM2xXV0ZaaFYwZG9iMWxzYUVOak1YQlVVMjFTVFZFd2NIRlpiVEZhWVZVNWRXTXliR2hpV0ZGM1UxZHdkbUZWTlZsVmEwNVRVbXMwZWxacVRrTk5NVXBYVDFkMGFHSlZXbUZaTVdRMFkyeEdkRlZzVGxWaE1XOHlWa2R3WVZOR2IzcGpSV2hVWWxkNFdWbHVjRk5oUm5CV1lYcFNXbUV4U2xoV2JFNUxUMVY0UkZOdGVHeFRSVVp3VkRKd1JrMHdPVVZSV0hCT1ZrZGpNRlJWVWtKak1HeDBWMjVhYW1KVldtMVpNR1JIWlZad1dFNVVRa3BoYlRsd1YyeG9jMU15UmtoVGEyaGFUVzE0VVZsV1ZuZFNNV1J5Vm14T1YxSnJXbFZWTVdoUFUyMUtjMU5VUmxwTlJUVkxWRzEwYzJSR1pIVlhiWEJwVmxaWmQxWXlkR3RXTWsxNFkwWm9ZVkl5YUhKVmFrbzBUV3hzZEdKRVFtcFdNVVkyVmxaa2MySldWbFJPVjNoc1ZsaENkbGRyV210VmJVWldUMWhPYWsxdGVHaFdNR1J2WTFac1ZscEZaR3RXYlRrMVZteG9WMWxXWkVoaFJ6bGFZa2RvUkZsNlJuZFdSazUwVldzeFVrMUlRbmhYVnpCNFYyMUdWazlZVm1wTmJYaHZXV3hvVW1ReFRsaGpTRnBvVm0xU1NWWlhjRTlYYkdSR1kwVmFWV0V4V1hwYVJFRjRWakZHYzJORk9XbFNWbkJ2VmtaV2IxVXlSa1pOVkZwU1ltdEtjRmxVUW5kVWJGWnhWRzFHVjFaVVZsWlhhMmhEWVRGS1ZWSnNXbGROVmxwNldWUkJlR050UmtWWGJFcE9UVVp3VlZaWGVFOVRNRGxXWlVWU1ZHSllhSE5WTUZaSFkwWlJlV05GV2s1TlJHeEdWVlpvZDFSc1draFpla0pWVmxaS1ExbDZRbk5rUjBwSlkwZHdiRlpYYzNsVk1XTjNaVWRHU0ZSdVVtdFNNMmh5VldwR1MySXhjRVphUlZwclZtNUNXbGxWWkc5aFZtUkdVMjV3V0dKRk5VdFpla0p6WkZaU2RHTkhiRTVOUlhCNlZURmtkMlJ0UmxoVWJHeFhZbXh3Y2xWcVJsWk5iRTE1WWtWMFVGVjZWakpaVkVKclUxZEdkVkZ0T1U1VFJWcEVWMnhTUjJSck1YVlhiRTVQWWxadk1GWlhNVVpsVmtweVdrWk9hbUp0WjNkVlYydDRZVVphU1ZkdE5WVldWRVkxVkRCU1ExZHNSbGxpUjJ4WFRVZG9kMVJYY0ZOalJUbEdZVWhhVFZaV2NIVlZNM0JUWlVaa1ZXSkVXbUZTTVhCV1ZtcENjMk50Um5GaFJUVnNZbFJHY1ZWdE5XOVdSbVJJVGxST2JGSnJTa1ZXUldNMVVXeHdOVk5ZVGtwaVYzZzJXVE5zU2s1cmJITmhSM1JyVFd0YU5WVnJVbE5VVlRGRlVteEdXRlpHY0ZOV01uQkRUVVpzVlZSWVpHaFdlbFpFVmtWV2EwMXNXa1ZXVkU1b1YwWktUMVpyV25OVGJIQkZVMnRzYkdFd05UUldWM1JXWVZWNFJGTnVjRnBOYW13elYyeE9TazVyYkhWU2FrWnBUVEZLYzFReWJIWmhWMXBTVEd4V2QxWnJPVEpYYlVrMFRVZEdhVlJ1U2t0VVZrMDBZbFp3Y2xadVJqWlZTR3hYWWxSQ1ExVXljR3hoTVZKRFZWVlNTMlJUTVhKVU1HUnVVVlp3VFUweWFHdFNhVEZ6VkVkb2VFMUZWVFJPTUUweFZFVjRSVmR1UW5saU1Ua3dZa1JTZFU1RVFYbGhSMDV6VDFWT2RFNVZUa0pKYVhkcFlWaE9la2xxYjJsT1dGSkRVa1pPTTFZelFqTlNWamxyWVcxR1dtTlhlSEpSYlZKVFZHdGFObFJxV2toYU0zQklVMjFzV0dKNlVtaGFWV3MwV1d0U1YxWlRTWE5KYms1cVlqTkNiRWxxYjJsaldGWjJaRWRWTmt0cFNqa3VURFpoYkRoSFZsVXdTVkpMTFZOTE9YRlJYM0ZEZFhNeFVtNW1iR3R6YVRGeVpqTk9SVlEyVW5OdWVrUm9OM2syTmpaa1dXcEZVSFJ1ZFRsZmNraFJTMDV2WDJaaGVrOXlTRFZyYURSeFV6ZENhRXRNUTNjaUxDSnBjM01pT2lKR2NpMU9ZMGRxUm5sSk5tRTJUak5RUW05R1NqSTNjM1pIWlcxYWVXUTBkV2N3UjJ4VlgyVlBiVTA0SWl3aWMyTnZjR1VpT2lKeGRXOTBaVG9xSW4wLjJCNmo1VG9IT2VKZ1NvcWNpMXRFQWhIaFUtZDAzQUJwdjJJSkVXYVRNaWlRdFk0cjkyZVZ1aEtwNHl3SUNvQ1pfSHlQX1J5T1FlMy1aTDVNLWZsa0FnIiwiaXNzIjoiSUpzczZVVVVxQjlrVVZoUldmN3pEb2xGbXltS3Nsdm5zR0tfN1FlUVZzYyIsInNjb3BlIjoicXVvdGU6KiJ9.h3qIw676jUUi2cp0gwm4lx1KEgRydDJ2dTbyCGTsfg8KMHy-rV8KfqFmRvT32Y8rSBhbhbgl9eiBI1zGhTbJDQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "too_deep"
+      }
+    },
+    {
+      "name": "five_tokens_fifth_malformed",
+      "note": "the fifth token is not a compact JWS; depth is counted before it would be decoded, so the outcome is too_deep, not malformed",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InZ1bzlQNXl0WEZXQ1l0alBVZTZndGhPQ0tjb3ZJd1ZUaExEOEZuWlREQkUifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJbXAzYXlJNmV5SmpjbllpT2lKRlpESTFOVEU1SWl3aWEzUjVJam9pVDB0UUlpd2llQ0k2SW04d09FaHFRVjlYT1RNNVkySmpkV3hOVWtwTmMyNDNkM0ZVU2tGUU5uWkthV0o2WVRsRWVqbDBVVFFpZlN3aWRIbHdJam9pWm05eVlTMWtaV3hsWjJGMGFXOXVLMnAzZENKOS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVJuSXRUbU5IYWtaNVNUWmhOazR6VUVKdlJrb3lOM04yUjJWdFdubGtOSFZuTUVkc1ZWOWxUMjFOT0NKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltWnZjbUZmY0dGeVpXNTBJam9pWlhsS2FHSkhZMmxQYVVwR1drVlNWRkZUU1hOSmJYQXpZWGxKTm1WNVNtcGpibGxwVDJsS1JscEVTVEZPVkVVMVNXbDNhV0V6VWpWSmFtOXBWREIwVVVscGQybGxRMGsyU1c1c1IwMUdUbXRqVlhneVVqSmFOVk5HV1RCVVJtUnZWRVV3ZEZvd01UUk9NMHBSV2pFNVRWUllhR0ZUTTBKM1UyMVNXazR5TlZOa2JHdHBabE4zYVdSSWJIZEphbTlwV20wNWVWbFRNV3RhVjNoc1dqSkdNR0ZYT1hWTE1uQXpaRU5LT1M1bGVVcG9aRmRSYVU5c2MybGFXR2hxWVVkR2RWb3lWWFZhV0dob1lsaENjMXBUU21STVEwcHFZbTFaYVU5dWMybGhiWFF3U1dwdmFVNVlVa05TUms0elZqTkNNMUpXT1d0aGJVWmFZMWQ0Y2xGdFVsTlVhMW8yVkdwYVNGb3pjRWhUYld4WVlucFNhRnBWYXpSWmExSlhWbE5LT1V4RFNteGxTRUZwVDJwRk0wOUVRWHBOVkdjMFRVUkJjMGx0V25aamJVWm1ZMGRHZVZwWE5UQkphbTlwV2xoc1MyRkhTa2haTW14UVlWVndSMWRyVmxOV1JrWlVVMWhPU21Kc1NURlpNRTVLVG10c2RGZHVXbXBpVlZZd1YydGtWMk14Y0ZoYVIyaHJVako0TWxsdGJEQmpWMUY2VlZkc2JWVlROV3hsVlhCdldrWmtVbUZWT1hOak1teGhWMGRvY1ZsVlpFZGtWbTk1VmxoV1lWZEhhRzlaYkdoRFl6RndWRk50VWsxUk1IQnhXVzB4V21GVk9YVmpNbXhvWWxoUmQxTlhjSFpoVm1SSVZXcE9XbGRGY0VaVWExWXpaREF4VjFGc2NFOWlSVnBvVkZWb1UyRkZNVFpSYmtKcFlUQndUbFZxVG1GV1ZUVlZXa2hDYTFKVVJsWldNVlp6WVRBeGNtRkVXbEpOTUZwVVZXeE9TMDlWZUVSVGJYaHNVMFZHY0ZReWNFWk5NRGxGVVZod1RsWkhZekJVVlZKQ1l6QnNkRmR1V21waVZWcHRXVEJrUjJWV2NGaE9WRUpLWVcwNWNGbHRNRFZOUlhoWVVsaFNXazFxYkRCWk1HUkhZVzFTUkUxWVJtdE5NREZ3VkVWT1MyTkhUWHBVVjJ4UVlWVndNRmRXYUV0amJIQlpWVzEwV2xkR1NtOVVSekZYVGtac1dFMVlaR2xTTVZad1ZFVk9TMlZzYTNsUFdHUmhWVEJyTWxOWE5VZE5WMGw2VlcxNFVHRlhPWEJhYkVWMVpEQTFTR1F6WjNoUFIzUjNVMjA1YVdOWWFFWldWV3h1WW5wU2IweFhjREpUTUZWNVlXdGpNbVZZU25GVFNGa3dZek5XUTFaVVFrMU9iRGxwVFcxU1VHTkhOV2xVYm1oNVlsZDBabFl5TVZsWk1uQkVVMnhOZVdSRlNqRmFWWGh6VVZWa05XSnVWa2hhU0Zac1ZETm9lbEZWUldsTVEwcHdZek5OYVU5cFNsbGFTR1JvWTJ0Uk1GUkVRWGhWUm1zeVZWWnZkMlJIUlhwTlIyeDFVV3Q0U0dSc1VURk9NbXd3VkZaU1dsTlhVWGxUU0hCRVkxWktSa2xwZDJsak1rNTJZMGRWYVU5cFNuaGtWemt3V2xSdmNVbHVNQzVoU1V0NmVqSTBjMDlPTTAxeFZFRnJXVlZ5U0d0SlpVYzFlbXBuYm1adWR5MTZXRlpmU1ZOMVFqSmtOVGxRWDNaellrVnBWVVZxY1RGblozTkZWa1JVWXpSbFZsUkpTR0pmZDJkNVJtTlVRbEk0VlhGQ2R5SXNJbWx6Y3lJNklqVjBRa1JUZDFkd2QwVmZaR3BoV1hGc2EwSmtVazVHZWs0MlIyZDZSMHBwVjI4MFlXVkpPR0pFVmxVaUxDSnpZMjl3WlNJNkluRjFiM1JsT2lvaWZRLktVXzYtaEcwVGYxczdNRmRNRDY5bzk2SE5yVE1kbUsyQTRpLXQ2aktwUUt3QUJzZEs3QmFac2taTWtqeXhPX1F3bFZ3X1lKd0JHYzd2cWxYaXdwY0J3IiwiaXNzIjoiRnItTmNHakZ5STZhNk4zUEJvRkoyN3N2R2VtWnlkNHVnMEdsVV9lT21NOCIsInNjb3BlIjoicXVvdGU6KiJ9.2wGABtn6HWIcMcnv1uWrgeJonLc19j1OrGFJ94qUd1MKvmrLRBRsimTg8-e9rMxjPVYCfkZGVFJJp_l94j8tCg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "too_deep"
+      }
+    },
+    {
+      "name": "jti_present",
+      "note": "jti is recommended and checked for shape only",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsImp0aSI6Im1kLTIwMjYtMDAwNDgxIiwic2NvcGUiOiJxdW90ZToqIn0.Ml16C75OaEql47jolG1GGwjEZsYfOz0DJneedtnLUhDM1Pbsd1Z_Bb5GvABBbclqXKsAFotAmSVtdZ382Q-wDQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:*"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "jti_empty",
+      "note": "an empty jti is a bad claim",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsImp0aSI6IiIsInNjb3BlIjoicXVvdGU6KiJ9.P5Pj9twnd2WK94B04miMYtzWhGkNVM7lMQ3cUzj3fUSmcUzKlTkHGH7ws2nRN54zGWmCIV6mU__Fa9U_pBg2Cw",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_claim"
+      }
+    },
+    {
+      "name": "typ_missing",
+      "note": "typ fora-delegation+jwt is required on every token",
+      "token": "eyJhbGciOiJFZERTQSJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.TEbAb8pH1kOC75CaxiEg20CWmdD4prQm0vYNGE4-nBXOBMuYi2T6X8zhUC51JQJ7xRLwdJaS2U_f_RtOt1xRDw",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_typ"
+      }
+    },
+    {
+      "name": "typ_wrong_on_child",
+      "note": "typ JWT on a child",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiSldUIn0.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNYVnZkR1U2S2lKOS5va0dIanBoMHFCZTFvMnZSNmZ4UmEyRkdScnh0Qi1hVHZnTU1yODBZQXliV0hpMjRpOEhvLUZnSzRxWTl6ZGZUV0lrajhNem1jRnhTWG53eFBDTG9BZyIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUiLCJzY29wZSI6InF1b3RlOioifQ.9UhS2CIqbQjQ148WOW56ztDM4bXTjvStKrDIuhLn5KhLt062ZcngqFGczdy3iLZU4Md6HroCiI-t1jmXppSHAA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_typ"
+      }
+    },
+    {
+      "name": "root_typ_wrong_under_child",
+      "note": "typ JWT on the root under a valid child: every token's header is checked",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNklrcFhWQ0o5LmV5SmhkV1FpT2xzaVpYaGphR0Z1WjJVdVpYaGhiWEJzWlNKZExDSmpibVlpT25zaWFtdDBJam9pV0dSM1lYSkVORXd3TVZCWk5sRmFNSFJoTXpCcGJrSk1SM1pVTlRkcGRFMVVXVWxrTWtoNlEzRlNSU0o5TENKbGVIQWlPakUzT0RBek1UZzRNREFzSW1semN5STZJbTFoY210bGRHUmhkR0V1WlhoaGJYQnNaU0lzSW5OamIzQmxJam9pY1hWdmRHVTZLaUo5Ll9WQklldTFOQVBsMUlLVnlSNkRhczNMbmdXcG8zWDNnSUJ4Y00yUGY3T2xGR3l2SWU2N0dLeFQ2enVNZGJZU1ZCdnNHUFY3WTNEem9aRm8tNWlFd0F3IiwiaXNzIjoiWGR3YXJENEwwMVBZNlFaMHRhMzBpbkJMR3ZUNTdpdE1UWUlkMkh6Q3FSRSIsInNjb3BlIjoicXVvdGU6KiJ9.Wi01--_tsrMPHd_MjTrRj9TGgULmjwbiKLirAMjF7y4_JwltXr-Le7UCDRdFAb_h6wOzqzBzxlOKl9L-dvsnBQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_typ"
+      }
+    },
+    {
+      "name": "middle_typ_wrong",
+      "note": "typ JWT on the middle token of three",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6Im8wOEhqQV9XOTM5Y2JjdWxNUkpNc243d3FUSkFQNnZKaWJ6YTlEejl0UTQifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJbXAzYXlJNmV5SmpjbllpT2lKRlpESTFOVEU1SWl3aWEzUjVJam9pVDB0UUlpd2llQ0k2SW5sR01GTmtjVXgyUjJaNVNGWTBURmRvVEUwdFowMTROM0pRWjE5TVRYaGFTM0J3U21SWk4yNVNkbGtpZlN3aWRIbHdJam9pU2xkVUluMC5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaU5YUkNSRk4zVjNCM1JWOWthbUZaY1d4clFtUlNUa1o2VGpaSFozcEhTbWxYYnpSaFpVazRZa1JXVlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltWnZjbUZmY0dGeVpXNTBJam9pWlhsS2FHSkhZMmxQYVVwR1drVlNWRkZUU1hOSmJsSTFZME5KTmtsdFduWmpiVVYwV2tkV2MxcFhaR2hrUjJ4MlltbDBjV1F6VVdsbVVTNWxlVXBvWkZkUmFVOXNjMmxhV0docVlVZEdkVm95VlhWYVdHaG9ZbGhDYzFwVFNtUk1RMHBxWW0xWmFVOXVjMmxoYlhRd1NXcHZhVmRIVWpOWldFcEZUa1YzZDAxV1FscE9iRVpoVFVoU2FFMTZRbkJpYTBwTlVqTmFWVTVVWkhCa1JURlZWMVZzYTAxcmFEWlJNMFpUVWxOS09VeERTbXhsU0VGcFQycEZNMDlFUVhwTlZHYzBUVVJCYzBsdGJIcGplVWsyU1cweGFHTnRkR3hrUjFKb1pFZEZkVnBZYUdoaVdFSnpXbE5KYzBsdVRtcGlNMEpzU1dwdmFXTllWblprUjFVMlMybEtPUzV2YTBkSWFuQm9NSEZDWlRGdk1uWlNObVo0VW1FeVJrZFNjbmgwUWkxaFZIWm5UVTF5T0RCWlFYbGlWMGhwTWpScE9FaHZMVVpuU3pSeFdUbDZaR1pVVjBscmFqaE5lbTFqUm5oVFdHNTNlRkJEVEc5Qlp5SXNJbWx6Y3lJNklsaGtkMkZ5UkRSTU1ERlFXVFpSV2pCMFlUTXdhVzVDVEVkMlZEVTNhWFJOVkZsSlpESklla054VWtVaUxDSnpZMjl3WlNJNkluRjFiM1JsT2lvaWZRLlBONlBBRVNKSkhFVk44bl9sazI1UUVTY2RTN3RzdXFwTTJKazEzWXBmQ2hpU0NLUUxsTExuNHg3cXk2bWZpWnRTOVFlLTNVTUtLNm9mbVA3OHRGY0NnIiwiaXNzIjoiNXRCRFN3V3B3RV9kamFZcWxrQmRSTkZ6TjZHZ3pHSmlXbzRhZUk4YkRWVSIsInNjb3BlIjoicXVvdGU6KiJ9.KK-VgzKx8InnZNg85gOW_JoHbA11SceEwgRGhnnYkPYXWppkMfpYJ2pggxXETJxgUMXlm6ARmsolQwoD5SqjBg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_typ"
+      }
+    },
+    {
+      "name": "alg_es256",
+      "note": "only EdDSA and Ed25519 are accepted",
+      "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.EHjBUJ5gZtO0Aob9mX6_KL6aK0LyRlkztL9s92WoZjnvGieuwRrwJllrh4fgEZ7lBfpb3b3RTbX3Wtw4vMX_BQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_alg"
+      }
+    },
+    {
+      "name": "crit_present",
+      "note": "the profile defines no critical header parameters",
+      "token": "eyJhbGciOiJFZERTQSIsImI2NCI6ZmFsc2UsImNyaXQiOlsiYjY0Il0sInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.6Yu5Hq0nXe6ykU1qNN86BA0qe0nxdpkeV81g8BeVMmCU_-AU60Kys6ALeZrpzYHj6I9Yop0LAv1WST_tylBzBg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "crit_present"
+      }
+    },
+    {
+      "name": "iss_missing",
+      "note": "",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsInNjb3BlIjoicXVvdGU6KiJ9.dzbdn8MfsFjrKDyov74PGvgoMUYqp-jnnUtbFQMifZGeOI4c8c-CX8iNvUZrZFoF15fNzvzbOX4YmCmBtIJxBQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "missing_claim"
+      }
+    },
+    {
+      "name": "aud_missing",
+      "note": "",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.5MFIhNTSm0VCiH0X8a_mO3XsbIdTd35GIjQINUmS6D-mBs23bFBUJKxD0203dZKuQ537FCWYfuYyOP0p50VQBQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "missing_claim"
+      }
+    },
+    {
+      "name": "cnf_missing",
+      "note": "",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.ZhxbceL78LTut1AWEtP4u0_IAJ_hfhHqkEL7f6CyA6f6KiVE_QlZz425-3WkF1J5HoWRpyH0cc9LcjFnzFqoAg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "missing_claim"
+      }
+    },
+    {
+      "name": "exp_missing",
+      "note": "",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJpc3MiOiJtYXJrZXRkYXRhLmV4YW1wbGUiLCJzY29wZSI6InF1b3RlOioifQ.ujo5k2I1M8tvma-QmO6N2k3e37eyPRU8QV8QIwv1zwLIQ-N9WzWtzXjRP84mNDICVKYSCHWlNzagOQQucG-vBw",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "missing_claim"
+      }
+    },
+    {
+      "name": "exp_not_a_number",
+      "note": "exp as a string",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOiIxNzgxNzg3MzQ1IiwiaXNzIjoibWFya2V0ZGF0YS5leGFtcGxlIiwic2NvcGUiOiJxdW90ZToqIn0.oRgYM86fdxIBMxEuiYCVhr0FYr0_iP-PLUYb1UmY0gADCJEk8_th2ZIUbIhLuxXN-2iV7HUPL_Sqho5hNZfADA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_claim"
+      }
+    },
+    {
+      "name": "exp_out_of_range",
+      "note": "exp 1e400 is not a finite number",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjFlNDAwLCJpc3MiOiJtYXJrZXRkYXRhLmV4YW1wbGUiLCJzY29wZSI6InF1b3RlOioifQ.msD5lDXQb3GpI1x0H3iAiRDSKEbFea5bAxgH9QhLELZcTeVG36_1RZPyn0IcJPub2M-RsF6oThGucN_BLPrvBg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_claim"
+      }
+    },
+    {
+      "name": "exp_inside_leeway",
+      "note": "59 seconds past exp is accepted; the returned expiry is still exp",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTUxNDEsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.BAp7LImazLTigcM56VcLAZbT_XLmFTZb2NaI2z3Njeee4FT7bPEAnHrOpPn7I_pPlDHgyTwESy1A6RHv-B5qAA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:*"
+        ],
+        "expires_at": "2026-06-01T11:59:01Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "exp_at_leeway",
+      "note": "60 seconds past exp is expired",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTUxNDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.hPoMB8JK5bKVMMU-MpMwm0w4lF0Hlkz3KndSC6rbQ63i1yH4FrWCd4EhHRAOHsSCcTTXOigHBh7MVY7GUbjsAw",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "expired",
+        "token_index": 1
+      }
+    },
+    {
+      "name": "nbf_inside_leeway",
+      "note": "nbf 60 seconds ahead is accepted",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsIm5iZiI6MTc4MDMxNTI2MCwic2NvcGUiOiJxdW90ZToqIn0.Qd16JmDoO9GsUe91hcRrpt16Ys6lQanPR27b585v39BvF8p-gWGt87dA2hhccSTNTf1_4LBalvr5bUJYiRsrDQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:*"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "nbf_beyond_leeway",
+      "note": "nbf 61 seconds ahead is not yet valid",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsIm5iZiI6MTc4MDMxNTI2MSwic2NvcGUiOiJxdW90ZToqIn0.nTNmbc29Ibcj8DrlyRQ7Z30OKb9yAPv2fkmNBiM98jZAzih_g_vO-knfbzYOO3hl3t3BvPGUsAw2plz1Pm-RDQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "not_yet_valid",
+        "token_index": 1
+      }
+    },
+    {
+      "name": "root_nbf_beyond_leeway",
+      "note": "nbf on the root only, under a valid child: time is checked on every token",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0ltNWlaaUk2TVRjNE1ETXhOVEkyTVN3aWMyTnZjR1VpT2lKeGRXOTBaVG9xSW4wLnJBSXdMeGQtVG15WG9kN1RoQVZzUmtPdEVQNk5TNVQ3emJyWHVuTURHNXZVYzJqbEVRY2dvWE85S1N6LUFhZEdQMWpNZjMwZnJWUGJPUFNPVmtSQ0RRIiwiaXNzIjoiWGR3YXJENEwwMVBZNlFaMHRhMzBpbkJMR3ZUNTdpdE1UWUlkMkh6Q3FSRSIsInNjb3BlIjoicXVvdGU6KiJ9.nwPJq3y19H9NRSI-zviovv3b2v2eokc_HkDAJ_gsUw2aIjcuuL-STxk7k5bQuXvWxLiT2-o1CKHTXS30W1MZBA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "not_yet_valid",
+        "token_index": 1
+      }
+    },
+    {
+      "name": "middle_nbf_beyond_leeway",
+      "note": "nbf on the middle token of three",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6Im8wOEhqQV9XOTM5Y2JjdWxNUkpNc243d3FUSkFQNnZKaWJ6YTlEejl0UTQifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJbXAzYXlJNmV5SmpjbllpT2lKRlpESTFOVEU1SWl3aWEzUjVJam9pVDB0UUlpd2llQ0k2SW5sR01GTmtjVXgyUjJaNVNGWTBURmRvVEUwdFowMTROM0pRWjE5TVRYaGFTM0J3U21SWk4yNVNkbGtpZlN3aWRIbHdJam9pWm05eVlTMWtaV3hsWjJGMGFXOXVLMnAzZENKOS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaU5YUkNSRk4zVjNCM1JWOWthbUZaY1d4clFtUlNUa1o2VGpaSFozcEhTbWxYYnpSaFpVazRZa1JXVlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltWnZjbUZmY0dGeVpXNTBJam9pWlhsS2FHSkhZMmxQYVVwR1drVlNWRkZUU1hOSmJsSTFZME5KTmtsdFduWmpiVVYwV2tkV2MxcFhaR2hrUjJ4MlltbDBjV1F6VVdsbVVTNWxlVXBvWkZkUmFVOXNjMmxhV0docVlVZEdkVm95VlhWYVdHaG9ZbGhDYzFwVFNtUk1RMHBxWW0xWmFVOXVjMmxoYlhRd1NXcHZhVmRIVWpOWldFcEZUa1YzZDAxV1FscE9iRVpoVFVoU2FFMTZRbkJpYTBwTlVqTmFWVTVVWkhCa1JURlZWMVZzYTAxcmFEWlJNMFpUVWxOS09VeERTbXhsU0VGcFQycEZNMDlFUVhwTlZHYzBUVVJCYzBsdGJIcGplVWsyU1cweGFHTnRkR3hrUjFKb1pFZEZkVnBZYUdoaVdFSnpXbE5KYzBsdVRtcGlNMEpzU1dwdmFXTllWblprUjFVMlMybEtPUzV2YTBkSWFuQm9NSEZDWlRGdk1uWlNObVo0VW1FeVJrZFNjbmgwUWkxaFZIWm5UVTF5T0RCWlFYbGlWMGhwTWpScE9FaHZMVVpuU3pSeFdUbDZaR1pVVjBscmFqaE5lbTFqUm5oVFdHNTNlRkJEVEc5Qlp5SXNJbWx6Y3lJNklsaGtkMkZ5UkRSTU1ERlFXVFpSV2pCMFlUTXdhVzVDVEVkMlZEVTNhWFJOVkZsSlpESklla054VWtVaUxDSnVZbVlpT2pFM09EQXpNVFV5TmpFc0luTmpiM0JsSWpvaWNYVnZkR1U2S2lKOS5QdTY1clhaYzhiUm84dFpLRHB2MV9jOU80aTJVT1pKNjBPT29SOVA2MUlUY0w1UnRsY3RRTF94LWtqLVpOY1ZITHA1N3hrLW5lSXhiT2ptZ21lbzRDQSIsImlzcyI6IjV0QkRTd1dwd0VfZGphWXFsa0JkUk5Gek42R2d6R0ppV280YWVJOGJEVlUiLCJzY29wZSI6InF1b3RlOioifQ.Mjdlr9T-X0W-ChZrcG8zZcTnulAxKxw6UhtxSk52en2qfS-ujb_xtKO1vSehDDAEzN_3zhEgqwjw00U2Cp42Dw",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "not_yet_valid",
+        "token_index": 2
+      }
+    },
+    {
+      "name": "child_expires_first",
+      "note": "the effective expiry is the earliest exp in the chain",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTgyMDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNYVnZkR1U2S2lKOS5va0dIanBoMHFCZTFvMnZSNmZ4UmEyRkdScnh0Qi1hVHZnTU1yODBZQXliV0hpMjRpOEhvLUZnSzRxWTl6ZGZUV0lrajhNem1jRnhTWG53eFBDTG9BZyIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUiLCJzY29wZSI6InF1b3RlOioifQ.mT-82tK9NT4wC9BIH9o9NM5E3FmL60EsJX6t3c50ACr5VfYOajpKer3cey_mWb95fACDqF_SknJU9x7mXuVUCw",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:*"
+        ],
+        "expires_at": "2026-06-01T12:50:00Z",
+        "depth": 2
+      }
+    },
+    {
+      "name": "audience_other_recipient",
+      "note": "aud names another Exchange",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOiJldS5leGNoYW5nZS5leGFtcGxlIiwiY25mIjp7ImprdCI6IldpLXZOVHZPODRwb2RKcEl2WEtVbEdORFV1aEtKS1M0elZ6aG5SdlQzWTQifSwiZXhwIjoxNzgwMzE4ODAwLCJpc3MiOiJtYXJrZXRkYXRhLmV4YW1wbGUiLCJzY29wZSI6InF1b3RlOioifQ.JU2zXpyBseThF6GJZ04zfbw-ZQe1PfIBPaENl4NhObgzvlSnDH0zYeMrImaMoNSTiBIrcxouHGyOz5osxHQ0Dg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "audience_mismatch",
+        "token_index": 1
+      }
+    },
+    {
+      "name": "audience_case_and_443_fold",
+      "note": "Exchange.Example:443 names exchange.example",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOiJFeGNoYW5nZS5FeGFtcGxlOjQ0MyIsImNuZiI6eyJqa3QiOiJXaS12TlR2Tzg0cG9kSnBJdlhLVWxHTkRVdWhLSktTNHpWemhuUnZUM1k0In0sImV4cCI6MTc4MDMxODgwMCwiaXNzIjoibWFya2V0ZGF0YS5leGFtcGxlIiwic2NvcGUiOiJxdW90ZToqIn0.kFjBvWf_l3qbASHQ8g9KuSFrpk5U9lAk5xwURgUr-ywUUlkFAWikrpwqY-mPi3K4QGvjL_QzkwSn-DrMisncAQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:*"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "audience_not_bare_host",
+      "note": "a URL is not a recipient identity",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOiJodHRwczovL2V4Y2hhbmdlLmV4YW1wbGUiLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.-VwnDFP9cWxC-FFsYhv2wBPR4WMlTxJduXAasmiwf5VtXolHUmXAMz46S85x0oDYAmDFxO-rFQWfu1wTeD79Dg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_claim"
+      }
+    },
+    {
+      "name": "child_widens_audience",
+      "note": "a child adds a recipient its parent did not list",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSIsImV1LmV4Y2hhbmdlLmV4YW1wbGUiXSwiY25mIjp7ImprdCI6IldpLXZOVHZPODRwb2RKcEl2WEtVbEdORFV1aEtKS1M0elZ6aG5SdlQzWTQifSwiZXhwIjoxNzgwMzE4ODAwLCJmb3JhX3BhcmVudCI6ImV5SmhiR2NpT2lKRlpFUlRRU0lzSW5SNWNDSTZJbVp2Y21FdFpHVnNaV2RoZEdsdmJpdHFkM1FpZlEuZXlKaGRXUWlPbHNpWlhoamFHRnVaMlV1WlhoaGJYQnNaU0pkTENKamJtWWlPbnNpYW10MElqb2lXR1IzWVhKRU5Fd3dNVkJaTmxGYU1IUmhNekJwYmtKTVIzWlVOVGRwZEUxVVdVbGtNa2g2UTNGU1JTSjlMQ0psZUhBaU9qRTNPREF6TVRnNE1EQXNJbWx6Y3lJNkltMWhjbXRsZEdSaGRHRXVaWGhoYlhCc1pTSXNJbk5qYjNCbElqb2ljWFZ2ZEdVNktpSjkub2tHSGpwaDBxQmUxbzJ2UjZmeFJhMkZHUnJ4dEItYVR2Z01NcjgwWUF5YldIaTI0aThIby1GZ0s0cVk5emRmVFdJa2o4TXptY0Z4U1hud3hQQ0xvQWciLCJpc3MiOiJYZHdhckQ0TDAxUFk2UVowdGEzMGluQkxHdlQ1N2l0TVRZSWQySHpDcVJFIiwic2NvcGUiOiJxdW90ZToqIn0.FYKGJEkqRumeY8ZVMah3oxjGCJfEMt06tJ80ZeGwckdhb8WZWytklaskqIUTFbYhV1mS8ynEwFt1KXRRdCr0Dg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "audience_widened",
+        "token_index": 2
+      }
+    },
+    {
+      "name": "child_narrows_audience",
+      "note": "a child drops one of the parent's recipients",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSXNJbVYxTG1WNFkyaGhibWRsTG1WNFlXMXdiR1VpWFN3aVkyNW1JanA3SW1wcmRDSTZJbGhrZDJGeVJEUk1NREZRV1RaUldqQjBZVE13YVc1Q1RFZDJWRFUzYVhSTlZGbEpaREpJZWtOeFVrVWlmU3dpWlhod0lqb3hOemd3TXpFNE9EQXdMQ0pwYzNNaU9pSnRZWEpyWlhSa1lYUmhMbVY0WVcxd2JHVWlMQ0p6WTI5d1pTSTZJbkYxYjNSbE9pb2lmUS41YkYxUXo2eXhkcm9rWGI3Uk1tUVpUak5IQkIycGdZOVgxR0VhYkdBN3VNckxidHVwcUhVdW1UWUF2ODM2MlRZWXZBaTRkRVdZcEdQZ2x4d25kazRDUSIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUiLCJzY29wZSI6InF1b3RlOioifQ.s-Wi8QlMxo1qF-wcZrGnNC3fb7jSnhk9Lyr_dvgdl1tcWXjR0ReSi9zO51YWc4ocQPNT7-Wau_fGNmjjTgCCBQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:*"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 2
+      }
+    },
+    {
+      "name": "untrusted_root",
+      "note": "the root is signed by a key that is not configured",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.VQAPTDsuC-wAN9UVlUbl6lZwiLyiUnITeE2fAVXQ2sdGaxEn6rMlURIkuJYCAIGNVK1IQycyHAOmCpzy7hHHBw",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_signature",
+        "token_index": 1
+      }
+    },
+    {
+      "name": "issuer_two_keys_old_signed",
+      "note": "two keys listed under one identity while a key is being replaced; the root signed with the old key verifies",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.pr2ux5pWGLBl8t5SDdj4EyOUBkaH_WyRqR3DR2xawwuTAK64Ky13IdrilNJNrhNlZlHHJpm58p15dU0uCxHXAA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        },
+        {
+          "identity": "marketdata.example",
+          "key_x": "Gbry6M2SGFcpzBJCnfNhyd2WvkuQxEN_hRWojjOvQXE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:*"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "issuer_two_keys_new_signed",
+      "note": "two keys listed under one identity; the root signed with the new key verifies",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.2IaWHk2tAoGcQZchHb7JheETHRLiJ8c62M6zC54pO8cly_pihQSWm6xy5fRHXaaibNTkTVDx6kkePRWL0TZWDg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        },
+        {
+          "identity": "marketdata.example",
+          "key_x": "Gbry6M2SGFcpzBJCnfNhyd2WvkuQxEN_hRWojjOvQXE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:*"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "issuer_key_withdrawn",
+      "note": "only the new key is listed; a root signed with the withdrawn key is refused",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.pr2ux5pWGLBl8t5SDdj4EyOUBkaH_WyRqR3DR2xawwuTAK64Ky13IdrilNJNrhNlZlHHJpm58p15dU0uCxHXAA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "Gbry6M2SGFcpzBJCnfNhyd2WvkuQxEN_hRWojjOvQXE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_signature",
+        "token_index": 1
+      }
+    },
+    {
+      "name": "root_iss_not_configured",
+      "note": "root iss names an identity with no configured key",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im90aGVyLmV4YW1wbGUiLCJzY29wZSI6InF1b3RlOioifQ.Ak978yA8msDw_oKqcEpgN9KCeVKBxOpIPKk5hSg8sqKFf6Hi0WzO6hC3K70D36vroSNNnpjuuucJaxJcXS7CCg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "untrusted_issuer",
+        "token_index": 1
+      }
+    },
+    {
+      "name": "root_signature_tampered",
+      "note": "the root payload was changed after signing",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGY6KiJ9.pr2ux5pWGLBl8t5SDdj4EyOUBkaH_WyRqR3DR2xawwuTAK64Ky13IdrilNJNrhNlZlHHJpm58p15dU0uCxHXAA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_signature",
+        "token_index": 1
+      }
+    },
+    {
+      "name": "child_signature_tampered",
+      "note": "the child payload was changed after signing",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNYVnZkR1U2S2lKOS5va0dIanBoMHFCZTFvMnZSNmZ4UmEyRkdScnh0Qi1hVHZnTU1yODBZQXliV0hpMjRpOEhvLUZnSzRxWTl6ZGZUV0lrajhNem1jRnhTWG53eFBDTG9BZyIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUiLCJzY29wZSI6InF1b3RmOioifQ.yLE179xRbLjULSQt9yL1ZNrfUcWA7qUElc3Nj46beZlADSRmHuJCot9ygBFIgwYcfei25Mx476Py8KMeUPdJCw",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_signature",
+        "token_index": 2
+      }
+    },
+    {
+      "name": "child_iss_wrong",
+      "note": "signature and jwk linkage are valid but iss is not the signing key's thumbprint",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNYVnZkR1U2S2lKOS5va0dIanBoMHFCZTFvMnZSNmZ4UmEyRkdScnh0Qi1hVHZnTU1yODBZQXliV0hpMjRpOEhvLUZnSzRxWTl6ZGZUV0lrajhNem1jRnhTWG53eFBDTG9BZyIsImlzcyI6ImFjbWUiLCJzY29wZSI6InF1b3RlOioifQ.xWK3v3r9CjI6svpuZFSVGe4BtV0w3szCRNDGm4Y6XGBK-E45-jJr8Zlm7kUdzQGVPx7Hirfbt1tV3LNl35rvAA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "child_issuer_mismatch",
+        "token_index": 2
+      }
+    },
+    {
+      "name": "child_signed_by_other_key",
+      "note": "jwk and iss name the principal, the signature was made with another key",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNYVnZkR1U2S2lKOS5va0dIanBoMHFCZTFvMnZSNmZ4UmEyRkdScnh0Qi1hVHZnTU1yODBZQXliV0hpMjRpOEhvLUZnSzRxWTl6ZGZUV0lrajhNem1jRnhTWG53eFBDTG9BZyIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUiLCJzY29wZSI6InF1b3RlOioifQ.nEn9SS-sx_eOy4PiGsJzjfrH2VORMXDh8FNk8B98tXYcytuKKZWcDZ2lNJ6-uf-vHhDseBIwY5BDqdazdcrcBQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_signature",
+        "token_index": 2
+      }
+    },
+    {
+      "name": "parent_substituted",
+      "note": "a child re-attached to a different valid root",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVNVcHpjelpWVlZWeFFqbHJWVlpvVWxkbU4zcEViMnhHYlhsdFMzTnNkbTV6UjB0Zk4xRmxVVlp6WXlKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNYVnZkR1U2S2lKOS5CZER1REU3UVlibDRQY1Z1NFo0cGNublQ5WmhQWGRndW4wN0tZaHZUYm4yQ1JCMUlRQW40Y3YzSmhRTjY3bmNvalZtTWpiMjNsUmhUc1BNS1FPTC1CdyIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUiLCJzY29wZSI6InF1b3RlOioifQ.sEynKg8qCP3G4GyPa5p4mWQkrXOvFrSPOPOESgO5n3ZRiB489lkBKe2Q3aXEgIlBgpGHmOoAysZbjTC3AMkEBQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "jwk_mismatch",
+        "token_index": 2
+      }
+    },
+    {
+      "name": "child_jwk_not_parents_cnf",
+      "note": "the child's jwk is not the key the parent's cnf.jkt names",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6ImV4NmlHdzZzVUE0cXB5Y2hQajBEZFRzTFVBTzRfYzk1Sl90bl9kYkREeDQifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNYVnZkR1U2S2lKOS5va0dIanBoMHFCZTFvMnZSNmZ4UmEyRkdScnh0Qi1hVHZnTU1yODBZQXliV0hpMjRpOEhvLUZnSzRxWTl6ZGZUV0lrajhNem1jRnhTWG53eFBDTG9BZyIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUiLCJzY29wZSI6InF1b3RlOioifQ.oacVCov8B95n92dmBwfWe1GhqB1bY40fUMUAdSquo18jdYzVm2Nno5t-J1JVJWVGdPUW8HeAtXQAaEUi-mrQDQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "jwk_mismatch",
+        "token_index": 2
+      }
+    },
+    {
+      "name": "child_jwk_missing",
+      "note": "",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNYVnZkR1U2S2lKOS5va0dIanBoMHFCZTFvMnZSNmZ4UmEyRkdScnh0Qi1hVHZnTU1yODBZQXliV0hpMjRpOEhvLUZnSzRxWTl6ZGZUV0lrajhNem1jRnhTWG53eFBDTG9BZyIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUiLCJzY29wZSI6InF1b3RlOioifQ.iYPakSwgNV01hbkFkfxYk3lSktWDDinvNVtkhZzF9VGHtAucc0U4gGNjUJ02qCqrWuTSZVy0ytmdRVWUpqdrAA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_jwk",
+        "token_index": 2
+      }
+    },
+    {
+      "name": "child_jwk_not_ed25519",
+      "note": "an EC P-256 jwk",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6ImY4M09KM0QyeEYxQmc4dnViOXRMZTFnSE16Vjc2ZThUdXM5dVBIdlJWRVUiLCJ5IjoieF9GRXpSdTltMzZITE5fdHVlNjU5TE5wWFc2cEN5U3Rpa1lqS0lXSTVhMCJ9LCJ0eXAiOiJmb3JhLWRlbGVnYXRpb24rand0In0.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNYVnZkR1U2S2lKOS5va0dIanBoMHFCZTFvMnZSNmZ4UmEyRkdScnh0Qi1hVHZnTU1yODBZQXliV0hpMjRpOEhvLUZnSzRxWTl6ZGZUV0lrajhNem1jRnhTWG53eFBDTG9BZyIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUiLCJzY29wZSI6InF1b3RlOioifQ.7ZXfvmftUV0C-U8j3uAuWHxULbN3sGkaQC9a7RMImv-CzwhhxrR87iO3fL0vL6VvfFnXqkPy70v1yDq-m5qJDg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_jwk",
+        "token_index": 2
+      }
+    },
+    {
+      "name": "root_jwk_ignored",
+      "note": "a jwk on the root is not read; the configured key verifies it",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6ImV4NmlHdzZzVUE0cXB5Y2hQajBEZFRzTFVBTzRfYzk1Sl90bl9kYkREeDQifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.npfZ-zrbeoqFgXrkfh-7VsXTPO-hCfjzhwjEsNc3tsBLN1AKjGmFJAHW1ThGutlh4-5sFpELmZrhPd8xJnLLBg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:*"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "holder_mismatch",
+      "note": "the terminal cnf.jkt is not the key the request proved",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiNXRCRFN3V3B3RV9kamFZcWxrQmRSTkZ6TjZHZ3pHSmlXbzRhZUk4YkRWVSJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.u4eA6MMcsKIU2SIE0jdPb-VuPN3nKmhhA-8mafZD6h_Uw_qVLZowjYxFS8Z44AUHcpHX-n-sjnsjLrc3C2OjAw",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "holder_mismatch",
+        "token_index": 1
+      }
+    },
+    {
+      "name": "oversized_token",
+      "note": "a token over 32768 bytes is refused before parsing",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfYWR2aXNvcnkiOnsicGFkIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEifSwiaXNzIjoibWFya2V0ZGF0YS5leGFtcGxlIiwic2NvcGUiOiJxdW90ZToqIn0.9d98C-J-l_IUqLXd_tSfN8f0mqWcf1oPq7j9qVu2smRj2fVpzZ95bsAE81bLxh1VoVoJ2h0FXs9DfObO4BBdDQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "oversized"
+      }
+    },
+    {
+      "name": "child_scope_outside_parent",
+      "note": "",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNYVnZkR1U2S2lKOS5va0dIanBoMHFCZTFvMnZSNmZ4UmEyRkdScnh0Qi1hVHZnTU1yODBZQXliV0hpMjRpOEhvLUZnSzRxWTl6ZGZUV0lrajhNem1jRnhTWG53eFBDTG9BZyIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUiLCJzY29wZSI6ImNyZWRpdDpyZWFkIn0.P7lJnGk0_S7uHrGArFGgyTambPNBSGbA1MsvCsthTVVjp6ahFFCkAogOX6IlNV7TA6V4LYGrMtp3o-QDXJQlDg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "scope_widened",
+        "token_index": 2
+      }
+    },
+    {
+      "name": "child_narrows_wildcard",
+      "note": "publisher:news:read under publisher:*:read",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNIVmliR2x6YUdWeU9pbzZjbVZoWkNKOS5CQWV5ZXV5YlJwSVZNVVlqRVo1TnJpS1pBSnQ0eHdEbjdLcWpOdEtzQnhzS0daeHdCRWlnUi14SUotZFdxcjJhQjRtWm9ZZDBkalpBYjVTbFljdUNDdyIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUiLCJzY29wZSI6InB1Ymxpc2hlcjpuZXdzOnJlYWQifQ.tHDdFptIwHOHwEEc6uGKfBhp_DjBY5h9riFwq-kU2rY4SBtTTWGiXV4ipYWIkp5bTlhq1MDOFcSKXKPdUAsLBg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "publisher:news:read"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 2
+      }
+    },
+    {
+      "name": "child_wildcard_widens_parent",
+      "note": "publisher:news:* under publisher:*:read",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNIVmliR2x6YUdWeU9pbzZjbVZoWkNKOS5CQWV5ZXV5YlJwSVZNVVlqRVo1TnJpS1pBSnQ0eHdEbjdLcWpOdEtzQnhzS0daeHdCRWlnUi14SUotZFdxcjJhQjRtWm9ZZDBkalpBYjVTbFljdUNDdyIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUiLCJzY29wZSI6InB1Ymxpc2hlcjpuZXdzOioifQ.AJMJm2BBjsHtBnoMhd5mN5SZp0YI8HMfG0exiurB3My9yOBWf-Cdwnb6ellMbusY2wQ17atc7JLDFmyZkWGvAg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "scope_widened",
+        "token_index": 2
+      }
+    },
+    {
+      "name": "child_without_scope",
+      "note": "a child with no scope grants no scoped access and is still valid",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNYVnZkR1U2S2lKOS5va0dIanBoMHFCZTFvMnZSNmZ4UmEyRkdScnh0Qi1hVHZnTU1yODBZQXliV0hpMjRpOEhvLUZnSzRxWTl6ZGZUV0lrajhNem1jRnhTWG53eFBDTG9BZyIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUifQ.wBZa9HgDd3XzSQp1lePZq_jbst0X81IopIf8HBj8hpNFx5Ez7NLpeNv6z2Za8GWPGe23CW0jCkUDfKHuAp5CDw",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 2
+      }
+    },
+    {
+      "name": "child_exp_later_than_parent",
+      "note": "",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDEsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNYVnZkR1U2S2lKOS5va0dIanBoMHFCZTFvMnZSNmZ4UmEyRkdScnh0Qi1hVHZnTU1yODBZQXliV0hpMjRpOEhvLUZnSzRxWTl6ZGZUV0lrajhNem1jRnhTWG53eFBDTG9BZyIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUiLCJzY29wZSI6InF1b3RlOioifQ.vIzVGAcbriclQLQWNYGoVzXR6tI-2lH5CP5WfAmTlTE9g7tnoVDDeihBliD2CebXFoH4BxfqE-xf4GOl0Y1bAQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "expiry_widened",
+        "token_index": 2
+      }
+    },
+    {
+      "name": "spend_cap_unsupported",
+      "note": "this verifier enforces no cap, so a cap claim is refused rather than dropped",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfbWF4X3NwZW5kX2NlbnRzIjo1MDAwMCwiaXNzIjoibWFya2V0ZGF0YS5leGFtcGxlIiwic2NvcGUiOiJxdW90ZToqIn0.8UlkoZ_lWnT1ervHkTRUR331k6EaOgC2MQwhJdQVKsA6LCGdKXRWrS9tkj48cHcjMFP3i956jJebhu4QtWVYCQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "unsupported_restriction"
+      }
+    },
+    {
+      "name": "unknown_claim",
+      "note": "a claim the profile does not list is a restriction the verifier cannot evaluate",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiIsInZlbmRvcjpwbGFuIjoiZ29sZCJ9.R29GZ6ZvSGgPDBdSe4s7YmnXThNhl1-FtKeOcCB3_l_jQb3x_GGqtNkeog_Js6tOy_D1dY5HQlhAUJHHi-aOAA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "unknown_claim"
+      }
+    },
+    {
+      "name": "root_cap_unsupported",
+      "note": "a cap on the root under a clean child: claims are checked on every token",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltWnZjbUZmYldGNFgzTndaVzVrWDJObGJuUnpJam8xTURBd01Dd2lhWE56SWpvaWJXRnlhMlYwWkdGMFlTNWxlR0Z0Y0d4bElpd2ljMk52Y0dVaU9pSnhkVzkwWlRvcUluMC5fSU9fU2lkZ1Y4ZEpvLUM0SFJTa1BITjQtVFV5RU9yaWF4OUttOTZSUlJib2hIdnZZWmFoYjlTQXZYWlVDZHVJUGl6UDFhSEVXdzFBU0l1bTNjTU9BQSIsImlzcyI6Ilhkd2FyRDRMMDFQWTZRWjB0YTMwaW5CTEd2VDU3aXRNVFlJZDJIekNxUkUiLCJzY29wZSI6InF1b3RlOioifQ.MkEsj27SitBICg5JWhFbHFEaHC2mxahW4p8KVVPAMMAvXEfKLEmIrahtG-DB8NQL1CVMJi9dpiLBtS8u3HiSBg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "unsupported_restriction"
+      }
+    },
+    {
+      "name": "root_unknown_claim",
+      "note": "an unknown claim on the root under a clean child",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6InlGMFNkcUx2R2Z5SFY0TFdoTE0tZ014N3JQZ19MTXhaS3BwSmRZN25SdlkifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVdHUjNZWEpFTkV3d01WQlpObEZhTUhSaE16QnBia0pNUjNaVU5UZHBkRTFVV1Vsa01raDZRM0ZTUlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW0xaGNtdGxkR1JoZEdFdVpYaGhiWEJzWlNJc0luTmpiM0JsSWpvaWNYVnZkR1U2S2lJc0luWmxibVJ2Y2pwd2JHRnVJam9pWjI5c1pDSjkubHl3ZDN4b2tac2dZMGlQOW9SSDJfa0o2VXU1TndBTm14WUdmV3pHYzNkZERyUGNjOGZSMWk0UGU3dGlJeURmSGRuRUhENnlHUFJxb0EtcHpVNnBMQmciLCJpc3MiOiJYZHdhckQ0TDAxUFk2UVowdGEzMGluQkxHdlQ1N2l0TVRZSWQySHpDcVJFIiwic2NvcGUiOiJxdW90ZToqIn0.40RbXxuMO4jDh1OorN44ZI4Ec66sZlQyH932_WFBor-gavj9P-8FF-7v3Y7Fh0_TUWEQl2Zp8Q-xAjrgZTNACw",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "unknown_claim"
+      }
+    },
+    {
+      "name": "middle_cap_unsupported",
+      "note": "a cap on the middle token of three",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6Im8wOEhqQV9XOTM5Y2JjdWxNUkpNc243d3FUSkFQNnZKaWJ6YTlEejl0UTQifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJbXAzYXlJNmV5SmpjbllpT2lKRlpESTFOVEU1SWl3aWEzUjVJam9pVDB0UUlpd2llQ0k2SW5sR01GTmtjVXgyUjJaNVNGWTBURmRvVEUwdFowMTROM0pRWjE5TVRYaGFTM0J3U21SWk4yNVNkbGtpZlN3aWRIbHdJam9pWm05eVlTMWtaV3hsWjJGMGFXOXVLMnAzZENKOS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaU5YUkNSRk4zVjNCM1JWOWthbUZaY1d4clFtUlNUa1o2VGpaSFozcEhTbWxYYnpSaFpVazRZa1JXVlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltWnZjbUZmYldGNFgyRmpZMlZ6YzJWeklqb3hNQ3dpWm05eVlWOXdZWEpsYm5RaU9pSmxlVXBvWWtkamFVOXBTa1phUlZKVVVWTkpjMGx1VWpWalEwazJTVzFhZG1OdFJYUmFSMVp6V2xka2FHUkhiSFppYVhSeFpETlJhV1pSTG1WNVNtaGtWMUZwVDJ4emFWcFlhR3BoUjBaMVdqSlZkVnBZYUdoaVdFSnpXbE5LWkV4RFNtcGliVmxwVDI1emFXRnRkREJKYW05cFYwZFNNMWxZU2tWT1JYZDNUVlpDV2s1c1JtRk5TRkpvVFhwQ2NHSnJTazFTTTFwVlRsUmtjR1JGTVZWWFZXeHJUV3RvTmxFelJsTlNVMG81VEVOS2JHVklRV2xQYWtVelQwUkJlazFVWnpSTlJFRnpTVzFzZW1ONVNUWkpiVEZvWTIxMGJHUkhVbWhrUjBWMVdsaG9hR0pZUW5OYVUwbHpTVzVPYW1JelFteEphbTlwWTFoV2RtUkhWVFpMYVVvNUxtOXJSMGhxY0dnd2NVSmxNVzh5ZGxJMlpuaFNZVEpHUjFKeWVIUkNMV0ZVZG1kTlRYSTRNRmxCZVdKWFNHa3lOR2s0U0c4dFJtZExOSEZaT1hwa1psUlhTV3RxT0UxNmJXTkdlRk5ZYm5kNFVFTk1iMEZuSWl3aWFYTnpJam9pV0dSM1lYSkVORXd3TVZCWk5sRmFNSFJoTXpCcGJrSk1SM1pVTlRkcGRFMVVXVWxrTWtoNlEzRlNSU0lzSW5OamIzQmxJam9pY1hWdmRHVTZLaUo5LjhsU182ZVNseFcyZk1BU2g5ZWFhM1hDM2VJVDAtRkJUY0pNbVFadkttZzVpR3N0QzVvODJza2wtYmlHc3B4RTFuU1hVQmdCVkZpWmQweEpSY2p3U0FRIiwiaXNzIjoiNXRCRFN3V3B3RV9kamFZcWxrQmRSTkZ6TjZHZ3pHSmlXbzRhZUk4YkRWVSIsInNjb3BlIjoicXVvdGU6KiJ9._koA3STLQINlc4TDYEp-Ba_dP4guVBUnEQKQRow5wc31CZH4cxDbxEshX53AiDIz9MT-ofYRTD7mOt1k0lAHCw",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "unsupported_restriction"
+      }
+    },
+    {
+      "name": "middle_unknown_claim",
+      "note": "an unknown claim on the middle token of three",
+      "token": "eyJhbGciOiJFZERTQSIsImp3ayI6eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6Im8wOEhqQV9XOTM5Y2JjdWxNUkpNc243d3FUSkFQNnZKaWJ6YTlEejl0UTQifSwidHlwIjoiZm9yYS1kZWxlZ2F0aW9uK2p3dCJ9.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJbXAzYXlJNmV5SmpjbllpT2lKRlpESTFOVEU1SWl3aWEzUjVJam9pVDB0UUlpd2llQ0k2SW5sR01GTmtjVXgyUjJaNVNGWTBURmRvVEUwdFowMTROM0pRWjE5TVRYaGFTM0J3U21SWk4yNVNkbGtpZlN3aWRIbHdJam9pWm05eVlTMWtaV3hsWjJGMGFXOXVLMnAzZENKOS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaU5YUkNSRk4zVjNCM1JWOWthbUZaY1d4clFtUlNUa1o2VGpaSFozcEhTbWxYYnpSaFpVazRZa1JXVlNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltWnZjbUZmY0dGeVpXNTBJam9pWlhsS2FHSkhZMmxQYVVwR1drVlNWRkZUU1hOSmJsSTFZME5KTmtsdFduWmpiVVYwV2tkV2MxcFhaR2hrUjJ4MlltbDBjV1F6VVdsbVVTNWxlVXBvWkZkUmFVOXNjMmxhV0docVlVZEdkVm95VlhWYVdHaG9ZbGhDYzFwVFNtUk1RMHBxWW0xWmFVOXVjMmxoYlhRd1NXcHZhVmRIVWpOWldFcEZUa1YzZDAxV1FscE9iRVpoVFVoU2FFMTZRbkJpYTBwTlVqTmFWVTVVWkhCa1JURlZWMVZzYTAxcmFEWlJNMFpUVWxOS09VeERTbXhsU0VGcFQycEZNMDlFUVhwTlZHYzBUVVJCYzBsdGJIcGplVWsyU1cweGFHTnRkR3hrUjFKb1pFZEZkVnBZYUdoaVdFSnpXbE5KYzBsdVRtcGlNMEpzU1dwdmFXTllWblprUjFVMlMybEtPUzV2YTBkSWFuQm9NSEZDWlRGdk1uWlNObVo0VW1FeVJrZFNjbmgwUWkxaFZIWm5UVTF5T0RCWlFYbGlWMGhwTWpScE9FaHZMVVpuU3pSeFdUbDZaR1pVVjBscmFqaE5lbTFqUm5oVFdHNTNlRkJEVEc5Qlp5SXNJbWx6Y3lJNklsaGtkMkZ5UkRSTU1ERlFXVFpSV2pCMFlUTXdhVzVDVEVkMlZEVTNhWFJOVkZsSlpESklla054VWtVaUxDSnpZMjl3WlNJNkluRjFiM1JsT2lvaUxDSjJaVzVrYjNJNmNHeGhiaUk2SW1kdmJHUWlmUS5SRm5oenF1eVI1QlpLOXlrcmhUTEM2TGJOelU4SzdGODlHaHZwZkptNk9UUHJzWWdQQmxYdnRIY0R5X1J3MkNNMGhGa0VCVUtVbUlRSjg3RzhSRDZCQSIsImlzcyI6IjV0QkRTd1dwd0VfZGphWXFsa0JkUk5Gek42R2d6R0ppV280YWVJOGJEVlUiLCJzY29wZSI6InF1b3RlOioifQ.2hTNoSuNR5hYAoPuIJLz5iSI246ya9l-LCd_r4d31Ydvk99zuoqLTnPxVdUSI_9JVCsf3fnCzbGWolgfBGzGAg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "unknown_claim"
+      }
+    },
+    {
+      "name": "advisory_unknown_content_ignored",
+      "note": "",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfYWR2aXNvcnkiOnsicGxhbiI6eyJ0aWVyIjoyfSwidmVuZG9yIjoieCJ9LCJpc3MiOiJtYXJrZXRkYXRhLmV4YW1wbGUiLCJzY29wZSI6InF1b3RlOioifQ.RUsfC-bWuuHhIYCelTq_7zas5caJLiR3l_cWt-qaElyB6WgQdW8zmRT2vvDiXf9ul_j407XBXVXxJgCWa_j-CA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:*"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "advisory_shadows_profile_claim",
+      "note": "scope inside fora_advisory",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImZvcmFfYWR2aXNvcnkiOnsic2NvcGUiOiIqIn0sImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.lBCvQcOX-G7roLVU2sA_aoowj4BDEFhA1snzRuJWeVZiemtW37IJsZ54KRn8Z20xWuTA_th2MwTnR1hcYah7BA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "advisory_shadows_claim"
+      }
+    },
+    {
+      "name": "mirrors_disagree_no_effect",
+      "note": "plaintext Delegation fields that disagree with the signed chain change nothing; an Exchange verifies the chain and never reads them for trust",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZSIsInNjb3BlIjoicXVvdGU6KiJ9.pr2ux5pWGLBl8t5SDdj4EyOUBkaH_WyRqR3DR2xawwuTAK64Ky13IdrilNJNrhNlZlHHJpm58p15dU0uCxHXAA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "mirrors": {
+        "issuer": "attacker.example",
+        "principal_domain": "attacker.example",
+        "scopes": [
+          "*"
+        ],
+        "expires_at": "2099-01-01T00:00:00Z"
+      },
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:*"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "raw_baseline",
+      "note": "the raw-signed root every raw syntax case starts from",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJpc3MiOiJtYXJrZXRkYXRhLmV4YW1wbGUiLCJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJleHAiOjE3ODAzMTg4MDAsInNjb3BlIjoicXVvdGU6KiIsImNuZiI6eyJqa3QiOiJXaS12TlR2Tzg0cG9kSnBJdlhLVWxHTkRVdWhLSktTNHpWemhuUnZUM1k0In19.RaDmXu0At-6BCwtbBaVhSHLRfRoVLjW7Xx1jkk3TnPL8_E140yPlCgewpohI13OcLYJDqGIcYhGV35tZZbWGAw",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:*"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "payload_trailing_object",
+      "note": "a second JSON object after the claims object, under a valid signature",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJpc3MiOiJtYXJrZXRkYXRhLmV4YW1wbGUiLCJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJleHAiOjE3ODAzMTg4MDAsInNjb3BlIjoicXVvdGU6KiIsImNuZiI6eyJqa3QiOiJXaS12TlR2Tzg0cG9kSnBJdlhLVWxHTkRVdWhLSktTNHpWemhuUnZUM1k0In19IHsic2NvcGUiOiIqIn0.jL1reIpgSllgn-xhmiKCbOD0jt321zBRHFhdCddyuxazWfV2cR3fca5N4lQVv4sPKb9V-hWqbPuY9aVNQsN-DQ",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "malformed"
+      }
+    },
+    {
+      "name": "payload_trailing_text",
+      "note": "text after the claims object, under a valid signature",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJpc3MiOiJtYXJrZXRkYXRhLmV4YW1wbGUiLCJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJleHAiOjE3ODAzMTg4MDAsInNjb3BlIjoicXVvdGU6KiIsImNuZiI6eyJqa3QiOiJXaS12TlR2Tzg0cG9kSnBJdlhLVWxHTkRVdWhLSktTNHpWemhuUnZUM1k0In19anVuaw.mdD9Ivx3dXaHf_1QOA3Z45Id4nUfasPXj_jLTPM5vMpFGzdN8D2zsuRQ1IbnkPQusgJc8lNJBjtcW9VPbjEXAg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "malformed"
+      }
+    },
+    {
+      "name": "payload_not_object",
+      "note": "a JSON array as payload",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.WzFd.PsabWxjdcznvpOlb5u-kTl781Kl8pj8ACe7Ry1S1JEI7-gXIlsUoaXwurpr77PpH0mJbfsR3ssSVEgPBbL9-Bw",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "malformed"
+      }
+    },
+    {
+      "name": "header_b64_false",
+      "note": "RFC 7797 b64:false without crit",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QiLCJiNjQiOmZhbHNlfQ.eyJpc3MiOiJtYXJrZXRkYXRhLmV4YW1wbGUiLCJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJleHAiOjE3ODAzMTg4MDAsInNjb3BlIjoicXVvdGU6KiIsImNuZiI6eyJqa3QiOiJXaS12TlR2Tzg0cG9kSnBJdlhLVWxHTkRVdWhLSktTNHpWemhuUnZUM1k0In19.nQtr-rlnLsFjrzxb3prW3H_kQ8nX5Zs4gyWzIXyUBvRC90-VtpT9u21ogQRXMKMKFNqZZN3CxXh4GpGtxXLTDA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "malformed"
+      }
+    },
+    {
+      "name": "signature_crlf",
+      "note": "CR LF appended to the signature segment",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJpc3MiOiJtYXJrZXRkYXRhLmV4YW1wbGUiLCJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJleHAiOjE3ODAzMTg4MDAsInNjb3BlIjoicXVvdGU6KiIsImNuZiI6eyJqa3QiOiJXaS12TlR2Tzg0cG9kSnBJdlhLVWxHTkRVdWhLSktTNHpWemhuUnZUM1k0In19.RaDmXu0At-6BCwtbBaVhSHLRfRoVLjW7Xx1jkk3TnPL8_E140yPlCgewpohI13OcLYJDqGIcYhGV35tZZbWGAw\r\n",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "malformed"
+      }
+    },
+    {
+      "name": "signature_padded",
+      "note": "a padding character in the signature segment",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJpc3MiOiJtYXJrZXRkYXRhLmV4YW1wbGUiLCJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJleHAiOjE3ODAzMTg4MDAsInNjb3BlIjoicXVvdGU6KiIsImNuZiI6eyJqa3QiOiJXaS12TlR2Tzg0cG9kSnBJdlhLVWxHTkRVdWhLSktTNHpWemhuUnZUM1k0In19.RaDmXu0At-6BCwtbBaVhSHLRfRoVLjW7Xx1jkk3TnPL8_E140yPlCgewpohI13OcLYJDqGIcYhGV35tZZbWGAw=",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "malformed"
+      }
+    },
+    {
+      "name": "exp_beyond_numeric_date_range",
+      "note": "exp 1e100 is finite but no date the profile can return",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJpc3MiOiJtYXJrZXRkYXRhLmV4YW1wbGUiLCJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJleHAiOjFlMTAwLCJzY29wZSI6InF1b3RlOioiLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9fQ.GGyNSSAUCrX56_o-0T7l-_QQmlh1KfQwl1BMHz-5QBvv7kak31ehILTOipUEI1dUJaG3lSrTWVo1Trpg8dH9Bg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_claim"
+      }
+    },
+    {
+      "name": "exp_negative",
+      "note": "",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJpc3MiOiJtYXJrZXRkYXRhLmV4YW1wbGUiLCJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJleHAiOi0xLCJzY29wZSI6InF1b3RlOioiLCJjbmYiOnsiamt0IjoiV2ktdk5Udk84NHBvZEpwSXZYS1VsR05EVXVoS0pLUzR6VnpoblJ2VDNZNCJ9fQ.l0xObm_vpP6v7ZMkm0ythyuzRpSt4x7L8indSGxrhg_Gl1MqwfTugPsNhDLZJpoQoawfnj5WiNRunyxsIM1kAA",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": false,
+        "failure": "bad_claim"
+      }
+    },
+    {
+      "name": "exp_at_numeric_date_max",
+      "note": "253402300799 is the last accepted second",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJpc3MiOiJtYXJrZXRkYXRhLmV4YW1wbGUiLCJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJleHAiOjI1MzQwMjMwMDc5OSwic2NvcGUiOiJxdW90ZToqIiwiY25mIjp7ImprdCI6IldpLXZOVHZPODRwb2RKcEl2WEtVbEdORFV1aEtKS1M0elZ6aG5SdlQzWTQifX0.s1Xu2NMIfF2ZM0Lp14nk_Hx0pZs2xHN4ZNlkSbL9ofiBgjOEkmbUSkltK3aH8ZZ5kXpqdFJGYRXC4gdAPwmDBg",
+      "trusted": [
+        {
+          "identity": "marketdata.example",
+          "key_x": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example",
+        "holder": "Wi-vNTvO84podJpIvXKUlGNDUuhKJKS4zVzhnRvT3Y4",
+        "scopes": [
+          "quote:*"
+        ],
+        "expires_at": "9999-12-31T23:59:59Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "docs_subscription_agent",
+      "note": "authentication page, Subscription Agent example: a MarketData root token bound to FinBot's request key",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoibTBMODhtcUx3MnZzRnpMY0FHVGlNdWlOajY3RjF0QXlBb2RoOW13S3p4OCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZS5jb20iLCJqdGkiOiJtZC1zdWItMjAyNi0wNDgxIiwic2NvcGUiOiJzdWJzY3JpcHRpb246bWFya2V0ZGF0YS0yMDI2IHF1b3RlOiogZWFybmluZ3M6KiJ9.d7R4gaXcCgy9nR304l_KxO9sQEWpKDk8uV4PEnIsze-Qnr_J0_9__m3gW8bGFeibWezuTB8jF2G7JlelimohAg",
+      "trusted": [
+        {
+          "identity": "marketdata.example.com",
+          "key_x": "dPyio7OJ-xpk2b9SzA3UwpZPOATAz3x1XoUTxtuBmNw"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "m0L88mqLw2vsFzLcAGTiMuiNj67F1tAyAodh9mwKzx8",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example.com",
+        "holder": "m0L88mqLw2vsFzLcAGTiMuiNj67F1tAyAodh9mwKzx8",
+        "scopes": [
+          "earnings:*",
+          "quote:*",
+          "subscription:marketdata-2026"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "docs_enterprise_agent",
+      "note": "authentication page, Enterprise Agent example: an IAM root token bound to the legal research agent's key",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiRmVmSksyT0taSmJCUlljemdMOHlZazRrUzVUSF9UUmoxd3I3R1JyaTMyNCJ9LCJleHAiOjE3ODAzMTg4MDAsImlzcyI6ImlhbS5raXJrbGFuZC5jb20iLCJqdGkiOiJpYW0tN2MxZSIsInNjb3BlIjoibGVnYWw6Y2FzZS1sYXcgbGVnYWw6c3RhdHV0ZXMgY3JlZGl0OnJlYWQiLCJzdWIiOiJ1c2VyQGtpcmtsYW5kLmNvbSJ9.r6naxJkO-OaCSG3lCgasFEuEP9-lx7PSCUMrtmikP9a-knEgu9rGQpbOdU7OmiisbdoTXOX7HHxvll7ZstTMCQ",
+      "trusted": [
+        {
+          "identity": "iam.kirkland.com",
+          "key_x": "f9aRjdu6IDj0_FWvwovQxY99vRgm_2PyKfwWCN2Mt5c"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "FefJK2OKZJbBRYczgL8yYk4kS5TH_TRj1wr7GRri324",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "iam.kirkland.com",
+        "holder": "FefJK2OKZJbBRYczgL8yYk4kS5TH_TRj1wr7GRri324",
+        "scopes": [
+          "credit:read",
+          "legal:case-law",
+          "legal:statutes"
+        ],
+        "expires_at": "2026-06-01T13:00:00Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "docs_delegated_sub_agent",
+      "note": "authentication page, Delegated Sub-Agent example: the legal agent narrows the IAM grant to credit:read for a sub-agent, one hour shorter",
+      "token": "eyJhbGciOiJFZDI1NTE5IiwiandrIjp7ImNydiI6IkVkMjU1MTkiLCJrdHkiOiJPS1AiLCJ4IjoiZGtVeVJWNmttN1pDVkpZWWZsUTMwMXFZcmJ6NDJvZGhyYlVSWHFkbVRzOCJ9LCJ0eXAiOiJmb3JhLWRlbGVnYXRpb24rand0In0.eyJhdWQiOlsiZXhjaGFuZ2UuZXhhbXBsZSJdLCJjbmYiOnsiamt0IjoiVmliRjMyQkM1T2VyRHYtSjNtcDFYQ3V3bzk3WFJDSi1FdVNKbGxKS0JxVSJ9LCJleHAiOjE3ODAzMTcwMDAsImZvcmFfcGFyZW50IjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltWnZjbUV0WkdWc1pXZGhkR2x2Yml0cWQzUWlmUS5leUpoZFdRaU9sc2laWGhqYUdGdVoyVXVaWGhoYlhCc1pTSmRMQ0pqYm1ZaU9uc2lhbXQwSWpvaVJtVm1Ta3N5VDB0YVNtSkNVbGxqZW1kTU9IbFphelJyVXpWVVNGOVVVbW94ZDNJM1IxSnlhVE15TkNKOUxDSmxlSEFpT2pFM09EQXpNVGc0TURBc0ltbHpjeUk2SW1saGJTNXJhWEpyYkdGdVpDNWpiMjBpTENKcWRHa2lPaUpwWVcwdE4yTXhaU0lzSW5OamIzQmxJam9pYkdWbllXdzZZMkZ6WlMxc1lYY2diR1ZuWVd3NmMzUmhkSFYwWlhNZ1kzSmxaR2wwT25KbFlXUWlMQ0p6ZFdJaU9pSjFjMlZ5UUd0cGNtdHNZVzVrTG1OdmJTSjkucjZuYXhKa08tT2FDU0czbENnYXNGRXVFUDktbHg3UFNDVU1ydG1pa1A5YS1rbkVndTlyR1FwYk9kVTdPbWlpc2Jkb1RYT1g3SEh4dmxsN1pzdFRNQ1EiLCJpc3MiOiJGZWZKSzJPS1pKYkJSWWN6Z0w4eVlrNGtTNVRIX1RSajF3cjdHUnJpMzI0IiwianRpIjoibGVnYWwtc3ViLTAwMDciLCJzY29wZSI6ImNyZWRpdDpyZWFkIn0.cbAX6Z6n-7iUG4AaA49kSQW4xn-LigUQcwGtQiTEOeCB0aFUlPvNvihP6XNppUZ898n1sN2hICofcsm2BwtXBQ",
+      "trusted": [
+        {
+          "identity": "iam.kirkland.com",
+          "key_x": "f9aRjdu6IDj0_FWvwovQxY99vRgm_2PyKfwWCN2Mt5c"
+        }
+      ],
+      "audience": "exchange.example",
+      "holder": "VibF32BC5OerDv-J3mp1XCuwo97XRCJ-EuSJllJKBqU",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "iam.kirkland.com",
+        "holder": "VibF32BC5OerDv-J3mp1XCuwo97XRCJ-EuSJllJKBqU",
+        "scopes": [
+          "credit:read"
+        ],
+        "expires_at": "2026-06-01T12:30:00Z",
+        "depth": 2
+      }
+    },
+    {
+      "name": "docs_walkthrough_v1",
+      "note": "walkthrough v1 scenario B: the MarketData root token for the hedge fund's agent, addressed to exchange.marketdata-data.com",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2UubWFya2V0ZGF0YS1kYXRhLmNvbSJdLCJjbmYiOnsiamt0IjoiU2ZjeWZUQnpUUmhSby1lMVBlRC1pTC1JX1gtUURsZ0FKZ3ZVeTZON29DRSJ9LCJleHAiOjE3OTg3NjE1OTksImlzcyI6Im1hcmtldGRhdGEuZXhhbXBsZS5jb20iLCJqdGkiOiJtZC1oZi0wMDEtMjAyNiIsInNjb3BlIjoicXVvdGU6KiBlYXJuaW5nczoqIG5ld3M6cmVhZCBzdWJzY3JpcHRpb246ZW50ZXJwcmlzZS1zdWItSEYtMDAxIiwic3ViIjoiZW50ZXJwcmlzZS1zdWItSEYtMDAxIn0.I_vfPKVVHJ0aQFJxjqgyXGy1--0q86P7gef2WSOtiXvCZk_yskXuF-XTy0tTn7jT7vmLYCEe0iNQJbI1oR8bDw",
+      "trusted": [
+        {
+          "identity": "marketdata.example.com",
+          "key_x": "dPyio7OJ-xpk2b9SzA3UwpZPOATAz3x1XoUTxtuBmNw"
+        }
+      ],
+      "audience": "exchange.marketdata-data.com",
+      "holder": "SfcyfTBzTRhRo-e1PeD-iL-I_X-QDlgAJgvUy6N7oCE",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "marketdata.example.com",
+        "holder": "SfcyfTBzTRhRo-e1PeD-iL-I_X-QDlgAJgvUy6N7oCE",
+        "scopes": [
+          "earnings:*",
+          "news:read",
+          "quote:*",
+          "subscription:enterprise-sub-HF-001"
+        ],
+        "expires_at": "2026-12-31T23:59:59Z",
+        "depth": 1
+      }
+    },
+    {
+      "name": "docs_walkthrough_academic",
+      "note": "academic walkthrough: Stanford's root token for the literature review agent, addressed to exchange.scholarsgate.com",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImZvcmEtZGVsZWdhdGlvbitqd3QifQ.eyJhdWQiOlsiZXhjaGFuZ2Uuc2Nob2xhcnNnYXRlLmNvbSJdLCJjbmYiOnsiamt0IjoiQVNOaUFFU3NQcXU3ZFhNNThMNkNhb0tsTGRFVVhMVG5iUEpraEhpal95RSJ9LCJleHAiOjE3OTg3NjE1OTksImlzcyI6InN0YW5mb3JkLmVkdSIsImp0aSI6Imluc3Qtc3ViLXN0YW5mb3JkLTIwMjYtMDE5MyIsInNjb3BlIjoiYWNhZGVtaWM6KiBzdWJzY3JpcHRpb246aW5zdC1zdWItc3RhbmZvcmQtMjAyNiIsInN1YiI6Imluc3Qtc3ViLXN0YW5mb3JkLTIwMjYifQ.q1otny5g3OvYlg8zrQE6iCYdWxxImOJf64r04r5Z0PaYY69nTUX_MXzBqFfp5HZ4ZM45mkux6AcdVyRUlrP_Cw",
+      "trusted": [
+        {
+          "identity": "stanford.edu",
+          "key_x": "5kt46ox_9BiBFTo9HiQjl-7djqeHDWcGzCjkERqlCEs"
+        }
+      ],
+      "audience": "exchange.scholarsgate.com",
+      "holder": "ASNiAESsPqu7dXM58L6CaoKlLdEUXLTnbPJkhHij_yE",
+      "now": "2026-06-01T12:00:00Z",
+      "expect": {
+        "valid": true,
+        "root_issuer": "stanford.edu",
+        "holder": "ASNiAESsPqu7dXM58L6CaoKlLdEUXLTnbPJkhHij_yE",
+        "scopes": [
+          "academic:*",
+          "subscription:inst-sub-stanford-2026"
+        ],
+        "expires_at": "2026-12-31T23:59:59Z",
+        "depth": 1
+      }
+    }
+  ]
+}

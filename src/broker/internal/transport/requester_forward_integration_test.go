@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 
+	connect "connectrpc.com/connect"
+
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 	"github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -62,10 +64,43 @@ func TestResolve_ForwardsRequesterScopesUnchanged(t *testing.T) {
 	}
 }
 
+// TestResolve_ForwardsRequesterDelegationUnchanged drives Resolve with a
+// requester carrying a delegation. The query the Broker sends the Exchange
+// carries the delegation byte for byte, token and plaintext fields alike: the
+// Exchange verifies the chain itself, and a Broker that dropped it would hide
+// every subscription-gated term from an agent that holds a grant. (Today's
+// Exchange still hides gated terms on a Broker-originated query; forwarding is
+// what a later Broker path that preserves the agent's signature needs.)
+func TestResolve_ForwardsRequesterDelegationUnchanged(t *testing.T) {
+	ex, rec := startRecordingExchange(t)
+	fx := newFixture(t, context.Background(), fixtureOpts{providerDomain: "acme.example", upstream: ex})
+	delegation := &forav1.Delegation{
+		PrincipalDomain: "issuer.example", Scopes: []string{"subscription:acme.example:premium"},
+		Token: []byte("eyJhbGciOiJFZERTQSJ9.e30.c2ln"),
+	}
+
+	resolveOverConnect(t, fx, reqOpts{uri: "https://acme.example/item", delegation: delegation})
+
+	sent := rec.requests()
+	if len(sent) == 0 {
+		t.Fatal("the Broker sent the Exchange nothing; the test needs the query it forwards")
+	}
+	for i, f := range sent {
+		var q forav1.ResourceQuery
+		if err := forwardedCodec(t, f).Unmarshal(f.body, &q); err != nil {
+			t.Fatalf("decode forwarded query %d: %v", i, err)
+		}
+		if got := q.GetRequester().GetDelegation(); !proto.Equal(got, delegation) {
+			t.Errorf("query %d: requester.delegation = %v, want exactly what the agent sent %v", i, got, delegation)
+		}
+	}
+}
+
 // TestPurchase_ForwardsTheRequesterUnchanged drives ExecuteTransaction with a
-// requester that states scopes. The sub-request the Broker sends the Exchange
-// carries that requester field for field: the acceptances are signatures over
-// it, and the Exchange selects terms by its scopes.
+// requester that states scopes and carries a delegation. The sub-request the
+// Broker sends the Exchange carries that requester field for field: the
+// acceptances are signatures over it, the Exchange selects terms by its scopes
+// and verifies the delegation for a subscription-gated item.
 func TestPurchase_ForwardsTheRequesterUnchanged(t *testing.T) {
 	ex, rec := startRecordingExchange(t)
 	env := newPurchaseTestEnvAt(t, ex, false)
@@ -74,6 +109,9 @@ func TestPurchase_ForwardsTheRequesterUnchanged(t *testing.T) {
 		Domain: requesterDomain,
 		Type:   forav1.RequesterType_REQUESTER_TYPE_AGENT,
 		Scopes: []string{"subscription:premium", "dist:US:*"},
+		Delegation: &forav1.Delegation{
+			PrincipalDomain: "issuer.example", Token: []byte("eyJhbGciOiJFZERTQSJ9.e30.c2ln"),
+		},
 	}
 
 	env.buy(t, env.purchaseRequestBy(t, "tx-requester-forwarded", requester, line{"offer-1", env.exchangeDom}))
@@ -122,5 +160,43 @@ func forwardedCodec(t *testing.T, f forwarded) unmarshaler {
 	default:
 		t.Fatalf("the Broker sent content type %q, which is neither Connect codec", f.contentType)
 		return nil
+	}
+}
+
+// TestPurchase_GatedItemWithoutAcceptanceIsForwarded pins the Broker's admission
+// of a subscription-gated item that carries no acceptance: the protocol answers
+// it with a per-item DELEGATION_INVALID denial at the Exchange, so the Broker
+// forwards the item as it is, acceptance absent, instead of refusing the whole
+// purchase. A non-gated item without an acceptance is still refused by the
+// Broker before anything is sent.
+func TestPurchase_GatedItemWithoutAcceptanceIsForwarded(t *testing.T) {
+	ex, rec := startRecordingExchange(t)
+	env := newPurchaseTestEnvAt(t, ex, false)
+
+	req := env.purchaseRequest(t, "tx-gated-no-acceptance", line{"offer-gated", env.exchangeDom}, line{"offer-plain", env.exchangeDom})
+	req.Items[0].Offer.Terms[0].Scopes = []string{"subscription:publisher.example:premium"}
+	req.Items[0].AgentAcceptance = nil
+	env.buy(t, req)
+
+	sent := rec.requests()
+	if len(sent) != 1 {
+		t.Fatalf("sub-requests = %d, want 1", len(sent))
+	}
+	var sub forav1.TransactionRequest
+	if err := forwardedCodec(t, sent[0]).Unmarshal(sent[0].body, &sub); err != nil {
+		t.Fatalf("decode the forwarded sub-request: %v", err)
+	}
+	if len(sub.GetItems()) != 2 || sub.GetItems()[0].GetAgentAcceptance() != nil || sub.GetItems()[1].GetAgentAcceptance() == nil {
+		t.Fatalf("forwarded items = %v, want the gated item without acceptance and the plain item with it", sub.GetItems())
+	}
+
+	plain := env.purchaseRequest(t, "tx-plain-no-acceptance", line{"offer-plain-2", env.exchangeDom})
+	plain.Items[0].AgentAcceptance = nil
+	ce := env.refused(t, plain)
+	if ce.Code() != connect.CodeInvalidArgument || !strings.Contains(ce.Message(), "agent_acceptance") {
+		t.Fatalf("plain item without acceptance: %v, want InvalidArgument naming agent_acceptance", ce)
+	}
+	if len(rec.requests()) != 1 {
+		t.Fatal("the refused purchase reached the Exchange")
 	}
 }

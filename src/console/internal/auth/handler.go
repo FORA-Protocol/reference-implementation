@@ -210,7 +210,6 @@ func (h *Handler) startSession(
 		Subject:       account.Subject,
 		Email:         account.Email,
 		EmailVerified: account.EmailVerified,
-		DisplayName:   account.DisplayName,
 	}
 	if err := h.cookies.Set(w, SessionCookie, sess, sessionTTL); err != nil {
 		return err

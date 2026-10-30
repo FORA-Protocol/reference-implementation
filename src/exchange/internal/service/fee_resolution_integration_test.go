@@ -18,24 +18,32 @@ import (
 const feeTestTenantID = "t1"
 
 // setupFeeTest brings up a migrated testcontainer Postgres and seeds the tenant
-// prerequisite, returning the pool (for the payee seed), the sqlc querier (for
-// the fixture mutators) and the tenant id. Shared by the resolution and negative
-// tests.
+// prerequisite, returning the pool (for the payee seed and the admin setter),
+// the sqlc querier the repository ports are built over, and the tenant id.
+// Shared by the resolution and negative tests.
 func setupFeeTest(t *testing.T) (context.Context, *pgxpool.Pool, sqlc.Querier, string) {
 	t.Helper()
 	ctx := context.Background()
 	pool := servicetest.AcquireTestDB(t, ctx)
 	q := sqlc.New(pool)
-	// pt9 documented corner: no public tenant-provisioning RPC exists yet, so the
-	// tenant prerequisite is seeded via the sqlc InsertTenant query (the same
-	// surface sibling Exchange tests use), not a raw SQL string.
-	if _, err := q.InsertTenant(ctx, sqlc.InsertTenantParams{
-		TenantID: feeTestTenantID, Domain: "publisher.example", Ed25519KeyRef: "k",
-		ReportingPolicy: []byte(`{}`),
-	}); err != nil {
-		t.Fatalf("seed tenant: %v", err)
-	}
+	// No public RPC creates a seat, so the tenant prerequisite is arranged through
+	// repo.SeatProvisionRepo, the port a deployment's boot fixture provisions its
+	// seats through.
+	repotest.SeedSeat(t, ctx, pool, repotest.Seat{ID: feeTestTenantID, Domain: "publisher.example", Ed25519KeyRef: "k"})
 	return ctx, pool, q, feeTestTenantID
+}
+
+// setDefaultFeeRate sets the seat's default commission the way the operator
+// does: through the admin plane's SetTenantFeeRate setter, which writes the
+// rate and its audit row in one transaction. The service is the highest surface
+// this package reaches.
+func setDefaultFeeRate(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tenantID string, bps int) {
+	t.Helper()
+	admin := NewAdminServiceFromPool(pool, sqlc.New(pool))
+	in := FeeRateValues{TenantID: tenantID, FeeRateBps: bps}
+	if _, err := admin.SetTenantFeeRate(ctx, AdminCaller{SourceAddr: "127.0.0.1"}, in); err != nil {
+		t.Fatalf("set tenant %s default rate to %d bps: %v", tenantID, bps, err)
+	}
 }
 
 // TestFeeRateResolutionPersists drives the commission-rate resolution through the
@@ -54,11 +62,9 @@ func setupFeeTest(t *testing.T) (context.Context, *pgxpool.Pool, sqlc.Querier, s
 // hold and posts net-of-fee" assertion belongs to the settlement-split slice.
 func TestFeeRateResolutionPersists(t *testing.T) {
 	ctx, pool, q, tenantID := setupFeeTest(t)
-	// Configure a non-zero tenant default via the fixture mutator (column
+	// Configure a non-zero tenant default through the admin setter (the column
 	// defaults to 0 on insert).
-	if _, err := q.SetTenantFeeRateBps(ctx, sqlc.SetTenantFeeRateBpsParams{TenantID: tenantID, FeeRateBps: 250}); err != nil {
-		t.Fatalf("set tenant default rate: %v", err)
-	}
+	setDefaultFeeRate(t, ctx, pool, tenantID, 250)
 	feeRepo := repo.NewFeeOverrideRepo(q)
 	tenantRepo := repo.NewTenantReadRepo(q)
 
@@ -134,25 +140,17 @@ func TestFeeOverrideRejectsOutOfRange(t *testing.T) {
 // namespace — one owner may span tenants (TestPushResources_ResourceOwnerGroupsDomains
 // establishes exactly that) — so the tenant predicate in the override query is
 // load-bearing: dropping it would misroute money between platform and owner while a
-// single-tenant suite stayed green. Seeded through the repo write surface and the sqlc
-// InsertTenant query (the same tier-2 fallback the sibling fee tests use — no public
-// tenant-provisioning RPC exists yet).
+// single-tenant suite stayed green. Seeded through production write surfaces: the
+// seats through repo.SeatProvisionRepo (no public RPC creates a seat), their default
+// rates through the admin setter, and the payee and the override through the repo
+// write ports.
 func TestFeeOverrideTenantIsolation(t *testing.T) {
 	ctx, pool, q, tenantA := setupFeeTest(t)
 	const tenantB = "t2"
-	if _, err := q.InsertTenant(ctx, sqlc.InsertTenantParams{
-		TenantID: tenantB, Domain: "sibling.example", Ed25519KeyRef: "k",
-		ReportingPolicy: []byte(`{}`),
-	}); err != nil {
-		t.Fatalf("seed tenant B: %v", err)
-	}
+	repotest.SeedSeat(t, ctx, pool, repotest.Seat{ID: tenantB, Domain: "sibling.example", Ed25519KeyRef: "k"})
 	// Distinct tenant defaults so a leak is unambiguous.
-	if _, err := q.SetTenantFeeRateBps(ctx, sqlc.SetTenantFeeRateBpsParams{TenantID: tenantA, FeeRateBps: 250}); err != nil {
-		t.Fatalf("set tenant A default: %v", err)
-	}
-	if _, err := q.SetTenantFeeRateBps(ctx, sqlc.SetTenantFeeRateBpsParams{TenantID: tenantB, FeeRateBps: 700}); err != nil {
-		t.Fatalf("set tenant B default: %v", err)
-	}
+	setDefaultFeeRate(t, ctx, pool, tenantA, 250)
+	setDefaultFeeRate(t, ctx, pool, tenantB, 700)
 	feeRepo := repo.NewFeeOverrideRepo(q)
 	tenantRepo := repo.NewTenantReadRepo(q)
 

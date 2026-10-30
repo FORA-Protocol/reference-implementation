@@ -21,22 +21,14 @@ import (
 // arranges and asserts through the production CatalogRepo surface and proves
 // the write itself refuses the move even with the precheck out of the picture.
 //
-// The tenant seed uses sqlc InsertTenant — the same held-open arrange as the
-// package's other tests: no production code inserts tenants (operator SQL
-// provisions them), so a repository insert port would exist only for tests.
-// Converting these arrange sites behind a real tenant-provisioning surface is
-// filed as its own task.
+// The seat is arranged through repo.SeatProvisionRepo, the port a deployment's
+// boot fixture provisions its seats through.
 func TestCatalogUpsert_URIMoveRefused(t *testing.T) {
 	ctx := context.Background()
 	pool := newTestPool(t, ctx)
 	q := sqlc.New(pool)
 	const tenantID = "t-uri-immutable"
-	if _, err := q.InsertTenant(ctx, sqlc.InsertTenantParams{
-		TenantID: tenantID, Domain: "uri-immutable.example", Ed25519KeyRef: "k",
-		ReportingPolicy: []byte(`{}`),
-	}); err != nil {
-		t.Fatalf("seed tenant: %v", err)
-	}
+	seedTenantRow(t, ctx, pool, tenantID, "uri-immutable.example")
 	// The payee is a real record now: catalog.resource_owner_id references
 	// fora.publishers, so the entry below cannot be written until its owner is
 	// registered. Seeded through the production write port.

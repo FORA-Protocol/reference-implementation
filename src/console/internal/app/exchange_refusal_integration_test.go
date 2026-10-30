@@ -12,6 +12,7 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/oidcup"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/app"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/exchangeclient"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/web"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 )
 
@@ -28,57 +29,53 @@ func otherClaims() oidcup.Claims {
 // TestConsole_SaysWhenADomainBelongsToAnotherPublisher covers the one refusal a
 // publisher cannot repair by editing a file.
 //
-// It is reported at the domain step rather than at the last button on purpose.
-// Everything between the two is work -- publishing a document, installing a
-// package -- and asking someone to do it for a hostname they will never be able
-// to register is the worst possible time to tell them.
+// It is reported at the domain step, by the lookup the step's Next runs before
+// it saves: the publisher reads it before anything is saved or done for a
+// hostname they will never be able to register.
 //
 // The domain is taken the way it is taken in production: somebody else walks
-// the wizard to the end first, through the same console and the same Exchange.
+// the wizard first, through the same console and the same Exchange.
 func TestConsole_SaysWhenADomainBelongsToAnotherPublisher(t *testing.T) {
 	f := startConsole(t, verifiedClaims())
 	addDomain(t, f.otherPerson(t, otherClaims()))
 	f.signIn(t)
 
-	out := f.walkToDocument(t, "stoa.example")
+	out := f.lookUp(t, "stoa.example")
 	if out["taken"] != true {
 		t.Fatalf("a domain another publisher holds was not reported: %v", out)
 	}
-	manifest, _ := out["manifest"].(map[string]any)
-	reasons := reasonsOf(t, manifest)
-	if len(reasons) != 1 || !strings.Contains(reasons[0], "registered to another publisher") {
-		t.Fatalf("the domain step does not say why: %v", reasons)
+	if msg, _ := out["message"].(string); !strings.Contains(msg, "registered to another publisher") {
+		t.Fatalf("the domain step does not say why: %v", out)
 	}
 	f.assertNoDomains(t, "a domain another publisher holds")
 }
 
-// TestConsole_ShowsTheExchangesRefusal is the last button pressed anyway, on a
-// domain somebody else registered. The console's own checks all pass -- the
-// domain is well formed, the network is supported, the terms can be offered --
-// so the refusal is the Exchange's, and the publisher reads the Exchange's own
-// sentence with a status that says the request was refused rather than failed.
+// TestConsole_ShowsTheExchangesRefusal is the domain step's save sent anyway,
+// on a domain somebody else registered. The console's own checks all pass --
+// the domain is well formed and the network is supported -- so the refusal is
+// the Exchange's, and the publisher reads the Exchange's own sentence with a
+// status that says the request was refused rather than failed. Nothing is
+// saved for them, and the owner's domain is as it was.
 func TestConsole_ShowsTheExchangesRefusal(t *testing.T) {
 	f := startConsole(t, verifiedClaims())
 	other := f.otherPerson(t, otherClaims())
 	addDomain(t, other)
 	f.signIn(t)
-	f.walkToDocument(t, "stoa.example")
+	f.lookUp(t, "stoa.example")
 
-	status, out := f.api(t, "/api/domain", map[string]any{
+	status, out := f.api(t, web.APIRegisterPath, map[string]any{
 		"domain": "stoa.example", "cdn": "cloudflare", "content_paths": "",
-		"sitemap_url": "",
-		"terms": map[string]any{
-			"pricing_model": "free", "permitted_functions": []string{"search"},
-		},
 	})
 	if status != http.StatusBadRequest {
-		t.Fatalf("registering somebody else's domain = %d, want %d: %v", status, http.StatusBadRequest, out)
+		t.Fatalf("saving somebody else's domain = %d, want %d: %v", status, http.StatusBadRequest, out)
 	}
-	msg, _ := out["error"].(string)
-	if !strings.Contains(msg, "registered to another publisher") {
+	if msg, _ := out["error"].(string); !strings.Contains(msg, "registered to another publisher") {
 		t.Fatalf("the publisher is not shown the Exchange's refusal: %q", msg)
 	}
-	f.assertNoDomains(t, "a refused registration")
+	f.assertNoDomains(t, "a refused save")
+	if n := f.exchange.CountAuditActions(t, "RegisterDomain"); n != 1 {
+		t.Fatalf("the Exchange recorded %d saves; want the owner's one", n)
+	}
 	if got := other.mine(t).Sites; len(got) != 1 || got[0].Domain != "stoa.example" {
 		t.Fatalf("the refusal disturbed the owner's registration: %+v", got)
 	}
@@ -86,19 +83,23 @@ func TestConsole_ShowsTheExchangesRefusal(t *testing.T) {
 
 // TestConsole_SaysWhenTheExchangeCannotBeReached covers the Exchange being
 // down. Nothing is known about the other side, so the publisher is told nothing
-// changed and invited to try again -- on the wizard's calls and on a page.
+// changed and invited to try again -- on the wizard's calls, the business
+// step's among them, and on a page.
 func TestConsole_SaysWhenTheExchangeCannotBeReached(t *testing.T) {
 	f := startConsole(t, verifiedClaims())
 	f.signIn(t)
-	f.openWizard(t)
 	f.exchange.Server.Close()
 
-	status, out := f.api(t, "/api/publisher", map[string]any{"display_name": "Stoa Press"})
+	status, out := f.api(t, "/api/domain/lookup", map[string]any{"domain": "stoa.example"})
 	if status != http.StatusBadGateway {
 		t.Fatalf("a call with the Exchange down = %d, want %d", status, http.StatusBadGateway)
 	}
 	if msg, _ := out["error"].(string); !strings.Contains(msg, "Nothing was changed") {
 		t.Fatalf("the call does not say nothing changed: %v", out)
+	}
+	status, out = f.api(t, web.APIPublisherPath, map[string]any{"display_name": "Stoa Press"})
+	if msg, _ := out["error"].(string); status != http.StatusBadGateway || !strings.Contains(msg, "Nothing was changed") {
+		t.Fatalf("the business step with the Exchange down = %d: %v", status, out)
 	}
 	status, body := f.get(t, "/")
 	if status != http.StatusBadGateway || !strings.Contains(body, "could not reach the exchange") {

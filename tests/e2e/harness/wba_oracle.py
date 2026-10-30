@@ -132,6 +132,7 @@ def sign(
     legacy: bool = False,
     unquoted: bool = False,
     tag: str | None = WBA_TAG,
+    cover_agent: bool = True,
 ) -> dict[str, str]:
     """Sign ``request`` as a WG-00 agent and return the three WBA headers.
 
@@ -150,8 +151,10 @@ def sign(
     Section 5.2.1 lets verifiers accept and forbids signers to send.
     ``unquoted=True`` emits the bare, unquoted origin instead (see
     :func:`signature_agent_header`); like the legacy form it is covered as the
-    bare ``"signature-agent"``. ``tag=None`` leaves the WG-00 tag out, which a
-    conformant signer never does; it exists for refusal tests.
+    bare ``"signature-agent"``. ``tag=None`` leaves the WG-00 tag out, and
+    ``cover_agent=False`` leaves the Signature-Agent member uncovered while the
+    header is still sent. A conformant signer does neither; both exist for refusal
+    tests.
 
     ``request`` is not modified. Its own Signature* headers are replaced.
     """
@@ -188,7 +191,11 @@ def sign(
         nonce=(nonce or fresh_nonce()) if include_nonce else None,
         label=label,
         tag=tag,
-        covered_component_ids=[target, agent_component, *extra_components],
+        covered_component_ids=[
+            target,
+            *([agent_component] if cover_agent else []),
+            *extra_components,
+        ],
     )
     return {
         "Signature-Agent": agent_header,

@@ -38,7 +38,12 @@ from fora_sdk.client import CallError
 from fora_sdk.core import DiscoveryResult
 from fora_sdk.signing_transport import SigningTransport
 from fora_sdk.sync import BrokerClient
-from wire.models import AcceptableRestriction, ResourceQuery, TransactionRequest
+from wire.models import (
+    AcceptableRestriction,
+    ResourceQuery,
+    RestrictionKind,
+    TransactionRequest,
+)
 
 from ..after_signing import Capture
 from ..broker_purchase import resolve_request
@@ -67,8 +72,8 @@ _COMP = "fora-comp-v1"
 
 #: Two axes, one with two values, so a reordered or narrowed list shows.
 _RESTRICTIONS = [
-    {"axis": "RESTRICTION_KIND_FUNCTION", "values": ["ai-input"]},
-    {"axis": "RESTRICTION_KIND_GEOGRAPHY", "values": ["US", "CA"]},
+    AcceptableRestriction(axis=RestrictionKind.RESTRICTION_KIND_FUNCTION, values=["ai-input"]),
+    AcceptableRestriction(axis=RestrictionKind.RESTRICTION_KIND_GEOGRAPHY, values=["US", "CA"]),
 ]
 
 
@@ -88,8 +93,7 @@ def _resolve_everywhere(
     """Resolve one resource per Exchange as ``agent``; the queries the Broker fanned out."""
     request_id = _request_id()
     traffic = capture_proxy.watch(request_id)
-    request = resolve_request(list(ROUTED_URIS.values()))
-    request.update(fields)
+    request = resolve_request(list(ROUTED_URIS.values()), **fields)
     agent.broker_client(request_id=lambda: request_id).resolve(request)
     return _fan_out(traffic)
 
@@ -211,7 +215,7 @@ def test_every_fan_out_query_carries_the_agents_acceptable_restrictions(
 ) -> None:
     """FUNCTION and GEOGRAPHY in the Resolve: each query carries exactly those axes and values, in order."""
     queries = _resolve_everywhere(fresh_agent, capture_proxy, acceptable_restrictions=_RESTRICTIONS)
-    want = [AcceptableRestriction.model_validate(r) for r in _RESTRICTIONS]
+    want = _RESTRICTIONS
     forwarded = [query.acceptable_restrictions or [] for query in queries]
     BROKER_NARROWS_ACCEPTABLE_RESTRICTIONS.check(
         all(got == want for got in forwarded),

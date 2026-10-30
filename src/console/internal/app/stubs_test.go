@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/cdn"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/pagefetch"
 )
 
@@ -136,9 +137,11 @@ func servedNormally() pagefetch.Probe {
 
 // deployedPackage is a site with the edge package in front of it: an agent
 // without a licence is refused with the package's answer, and anything else is
-// served. Its pages cannot be read, which is what a console with no site
-// reader sees, so the lookup, the licensing step and the files go on as they do
-// without one; only the package check is answered.
+// served. The discovery document is served to the agent too, because the
+// package passes that address through to the site for every client. Its pages
+// cannot be read, which is what a console with no site reader sees, so the
+// lookup, the licensing step and the files go on as they do without one; only
+// the package check is answered.
 func deployedPackage() scriptedProber {
 	var up atomic.Bool
 	up.Store(true)
@@ -151,12 +154,34 @@ func switchablePackage(up *atomic.Bool) scriptedProber {
 	return scriptedProber{
 		stubPageReader: stubPageReader{err: errUnreadable},
 		answer: func(rawURL, userAgent string) (pagefetch.Probe, error) {
-			if up.Load() && asAgent(userAgent) {
+			if up.Load() && asAgent(userAgent) && !atDocument(rawURL) {
 				return refusedByPackage(hostOf(rawURL)), nil
 			}
 			return servedNormally(), nil
 		},
 	}
+}
+
+// packageServingTheDocument is deployedPackage on a site that answers its
+// discovery document as document says for the client asking. The package
+// passes that address through, so what the site answers there is what each
+// client gets.
+func packageServingTheDocument(document func(userAgent string) pagefetch.Probe) scriptedProber {
+	p := deployedPackage()
+	elsewhere := p.answer
+	p.answer = func(rawURL, userAgent string) (pagefetch.Probe, error) {
+		if atDocument(rawURL) {
+			return document(userAgent), nil
+		}
+		return elsewhere(rawURL, userAgent)
+	}
+	return p
+}
+
+// atDocument reports whether a probe asked for the site's discovery document.
+func atDocument(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	return err == nil && u.Path == forawellknown.Path
 }
 
 // countedProbes is p, counting in n every probe the console sends the site.

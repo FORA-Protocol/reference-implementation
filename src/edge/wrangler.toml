@@ -20,8 +20,6 @@ head_sampling_rate = 1
 # [vars]
 # EXCHANGE_URL = "https://exchange.example.com"
 # EXCHANGE_WBA_URL = "https://exchange.example.com/.well-known/http-message-signatures-directory"
-# RSL_BODY = "# RSL hint"
-# ACME_TOKENS_JSON = "{}"
 # FORA_VERIFY_KEYS = "[]"
 # FORA_ENFORCE_BINDING = "true"   # default; "false" downgrades to bearer addresses
 
@@ -50,7 +48,9 @@ name = "fora-edge-staging"
 # origin forwarding cannot work there), so it stays off.
 workers_dev = false
 # Adjust patterns to the publisher's staging zone before deploying. The route
-# must cover the article paths AND /.well-known/* (discovery files).
+# must cover the article paths. The discovery files (/.well-known/fora.json,
+# /rsl.txt) are the publisher's own: on a covered path the Worker passes them
+# through to the origin, and on an uncovered one the origin answers them itself.
 routes = [
   { pattern = "staging.publisher.example/*", zone_name = "publisher.example" },
 ]
@@ -58,8 +58,6 @@ routes = [
 [env.staging.vars]
 EXCHANGE_URL = "https://exchange.example"
 EXCHANGE_WBA_URL = "https://exchange.example/.well-known/http-message-signatures-directory"
-PROVIDER = "www.publisher.example"
-EXCHANGES_JSON = '[{"domain":"exchange.example","endpoint":"https://exchange.example","supported_profiles":[]}]'
 # Proof-of-possession on agent-bound delivery addresses. "false" serves them as
 # bearer credentials instead. See CONFIGURATION.md §3.6.
 FORA_ENFORCE_BINDING = "true"

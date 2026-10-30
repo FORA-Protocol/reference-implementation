@@ -3,12 +3,15 @@
 package e2econtrol
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/db"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/repo"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/transport"
@@ -16,10 +19,12 @@ import (
 
 // LifetimesPath is the per-tenant lifetimes resource. GET reads what the tenant's
 // offers and URLs are issued with, PUT replaces its overrides and DELETE clears
-// them. Each answers with the lifetimes now in force.
+// them. Each answers with the lifetimes now in force. A tenant that does not
+// exist is 404, checked before a PUT's body is read; the boolean controls read
+// the body first.
 const LifetimesPath = "/e2e/v1/tenants/{tenant}/lifetimes"
 
-// maxBodyBytes bounds a PUT body; the message is two integers.
+// maxBodyBytes bounds a PUT body; the largest message is two integers.
 const maxBodyBytes = 1 << 10
 
 // lifetimesBody is the wire form of a tenant's lifetimes, in whole seconds. On a
@@ -34,26 +39,103 @@ type lifetimesBody struct {
 type Deps struct {
 	// Lifetimes holds the per-tenant lifetime overrides the Exchange reads.
 	Lifetimes *Lifetimes
-	// Tenants reads a seat back, and RelayPolicy writes its relay opt-in.
+	// Tenants reads a seat back. RelayPolicy writes its relay opt-in, and
+	// Activation its agent-activation policy, inside a transaction of Tx.
 	Tenants     repo.TenantReadRepo
 	RelayPolicy repo.TenantRelayPolicyRepo
+	Activation  ActivationWriter
+	Tx          db.TxRunner
+	// Accounts is the reference SoR's store: the operator's out-of-band switch
+	// of an account's active flag, and its uncached read.
+	Accounts AccountSwitch
+	// Subscriptions writes and reads the seat's subscription records.
+	Subscriptions repo.SubscriptionTrustRepo
 }
 
-// Routes are the control routes, for the admin listener.
+// Routes are the control routes, for the admin listener. Building them calls
+// nothing on d, so a test that drives only some routes may leave the others'
+// dependencies nil. The lifetimes routes read d.Tenants as well as d.Lifetimes:
+// each answers only for a path that names a seat (seatOnly).
 func Routes(d Deps) []transport.AdminRoute {
-	l := d.Lifetimes
-	relay := relayPolicy{tenants: d.Tenants, writes: d.RelayPolicy}
+	routes := d.Lifetimes.routes()
+	for i := range routes {
+		routes[i].Handler = seatOnly(d.Tenants, routes[i].Handler)
+	}
+	routes = append(routes, relayPolicy(d.Tenants, d.RelayPolicy).routes(RelayPolicyPath)...)
+	routes = append(routes, agentActivation(d.Tenants, d.Activation, d.Tx).routes(ActivationPolicyPath)...)
+	routes = append(routes, subscriptions{tenants: d.Tenants, trust: d.Subscriptions}.routes()...)
+	return append(routes, accountActive(d.Accounts).routes(AccountActivePath)...)
+}
+
+// routes are the lifetimes resource's GET, PUT and DELETE on LifetimesPath, over
+// the overrides alone. Routes puts the seat check in front of each.
+func (l *Lifetimes) routes() []transport.AdminRoute {
 	return []transport.AdminRoute{
 		{Pattern: "GET " + LifetimesPath, Handler: http.HandlerFunc(l.serveGet)},
 		{Pattern: "PUT " + LifetimesPath, Handler: http.HandlerFunc(l.servePut)},
 		{Pattern: "DELETE " + LifetimesPath, Handler: http.HandlerFunc(l.serveDelete)},
-		{Pattern: "GET " + RelayPolicyPath, Handler: http.HandlerFunc(relay.serveGet)},
-		{Pattern: "PUT " + RelayPolicyPath, Handler: http.HandlerFunc(relay.servePut)},
 	}
 }
 
+// seatOnly serves next only for a path whose {tenant} names a seat the Exchange
+// holds. The id is checked by pathValue first, so an empty or over-long one is
+// refused 400 before any store is asked; a tenant that does not exist is 404.
+func seatOnly(tenants repo.TenantReadRepo, next http.Handler) http.Handler {
+	failure := subjectFailure{
+		pathKey: "tenant", event: "exchange.e2e_control.seat_read_failed",
+		subject: "tenant_id", what: "the seat could not be read",
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tenant, ok := pathValue(w, r, "tenant")
+		if !ok {
+			return
+		}
+		if _, err := seatByID(r.Context(), tenants, tenant); failure.failed(w, r, tenant, err) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// seatByID reads the seat tenantID names. The repository's not-found becomes
+// errNoSubject, which every control answers 404.
+func seatByID(ctx context.Context, tenants repo.TenantReadRepo, tenantID string) (repo.Tenant, error) {
+	seat, err := tenants.ByID(ctx, tenantID)
+	if errors.Is(err, repo.ErrTenantNotFound) {
+		return repo.Tenant{}, errNoSubject
+	}
+	return seat, err
+}
+
+// subjectFailure is how a control answers a store error for the subject its path
+// names: the path wildcard that names it, and the log event, attribute and
+// message of a failure.
+type subjectFailure struct {
+	pathKey string
+	event   string
+	subject string
+	what    string
+}
+
+// failed answers err for the subject key and reports whether it answered. A
+// subject that does not exist (errNoSubject) is 404; any other error is a 500
+// the log records. A nil err answers nothing, and the caller goes on.
+func (s subjectFailure) failed(w http.ResponseWriter, r *http.Request, key string, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, errNoSubject):
+		http.Error(w, "no such "+s.pathKey, http.StatusNotFound)
+	default:
+		ctx := r.Context()
+		reqctx.FromContext(ctx).ErrorContext(ctx, s.event, slog.String(s.subject, key), "err", err)
+		http.Error(w, s.what, http.StatusInternalServerError)
+	}
+	return true
+}
+
 func (l *Lifetimes) serveGet(w http.ResponseWriter, r *http.Request) {
-	tenant, ok := tenantOf(w, r)
+	tenant, ok := pathValue(w, r, "tenant")
 	if !ok {
 		return
 	}
@@ -61,7 +143,7 @@ func (l *Lifetimes) serveGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (l *Lifetimes) servePut(w http.ResponseWriter, r *http.Request) {
-	tenant, ok := tenantOf(w, r)
+	tenant, ok := pathValue(w, r, "tenant")
 	if !ok {
 		return
 	}
@@ -88,7 +170,7 @@ func (l *Lifetimes) servePut(w http.ResponseWriter, r *http.Request) {
 }
 
 func (l *Lifetimes) serveDelete(w http.ResponseWriter, r *http.Request) {
-	tenant, ok := tenantOf(w, r)
+	tenant, ok := pathValue(w, r, "tenant")
 	if !ok {
 		return
 	}
@@ -137,17 +219,20 @@ func writeJSON(w http.ResponseWriter, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-// maxTenantIDBytes bounds the tenant id a path may name. A tenant id is the
-// seat's own opaque text key, so its shape is not checked beyond its length.
-const maxTenantIDBytes = 200
+// maxPathValueBytes bounds the id a path may name: 255 bytes, the admin plane's
+// 255-character bound on a tenant id (fora.admin.v1 in the pinned protocol
+// module), exact for the ASCII ids the boot fixture's id pattern allows. A
+// billing_ref is a 36-character UUID the Exchange mints. Neither id's shape is
+// checked beyond its length.
+const maxPathValueBytes = 255
 
-// tenantOf reads the tenant id from the path. An id longer than any seat's is
-// refused before it can be stored.
-func tenantOf(w http.ResponseWriter, r *http.Request) (string, bool) {
-	tenant := r.PathValue("tenant")
-	if tenant == "" || len(tenant) > maxTenantIDBytes {
-		http.Error(w, "the path must name a tenant id", http.StatusBadRequest)
+// pathValue reads the id the path wildcard key names. An empty id, or one longer
+// than maxPathValueBytes, is refused before it reaches a store.
+func pathValue(w http.ResponseWriter, r *http.Request, key string) (string, bool) {
+	value := r.PathValue(key)
+	if value == "" || len(value) > maxPathValueBytes {
+		http.Error(w, "the path must name a "+key, http.StatusBadRequest)
 		return "", false
 	}
-	return tenant, true
+	return value, true
 }

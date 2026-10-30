@@ -23,7 +23,6 @@ from typing import Any, cast
 import pytest
 
 from ..broker_purchase import discover_group
-from ..constants import requester
 from ..exchanges import EXCHANGE_A_DOMAIN
 from ..fresh_agent import FreshAgent
 from ..seed import DEMO_PHILOSOPHY_DOMAIN
@@ -68,7 +67,6 @@ def test_paid_resource_offer_list_with_plain_prices_and_currencies(
         EXCHANGE_A_DOMAIN,
         _RESOURCE_URI,
         "paid-URI discovery",
-        requester=requester(fresh_agent.agent_id, user_type="individual", geography="US"),
     )
     offers = [verified.offer for verified in group.result.verified]
 

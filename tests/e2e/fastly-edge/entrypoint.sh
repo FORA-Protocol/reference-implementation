@@ -7,7 +7,7 @@
 
 set -eu
 
-REQUIRED="EXCHANGE_URL EXCHANGE_WBA_URL ORIGIN_URL PROVIDER EXCHANGES_JSON"
+REQUIRED="EXCHANGE_URL EXCHANGE_WBA_URL ORIGIN_URL"
 for name in $REQUIRED; do
   eval "v=\${$name:-}"
   if [ -z "$v" ]; then
@@ -37,12 +37,8 @@ service_id = ""
       [local_server.config_stores.fora_edge.contents]
       EXCHANGE_URL = "${EXCHANGE_URL}"
       ORIGIN_URL = "${ORIGIN_URL}"
-      PROVIDER = "${PROVIDER}"
-      EXCHANGES_JSON = $(printf '%s' "$EXCHANGES_JSON" | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0,"utf8")))')
       EXCHANGE_WBA_URL = "${EXCHANGE_WBA_URL:-}"
       FORA_ENFORCE_BINDING = "${FORA_ENFORCE_BINDING:-}"
-      RSL_BODY = "${RSL_BODY:-}"
-      CATALOG_CONTRIBUTORS_JSON = $(printf '%s' "${CATALOG_CONTRIBUTORS_JSON:-}" | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0,"utf8")))')
       WBA_KEYS_JSON = $(printf '%s' "${WBA_KEYS_JSON:-}" | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0,"utf8")))')
       WBA_REVOCATION_URL = "${WBA_REVOCATION_URL:-}"
       WBA_SIGNED_DIRECTORY_JSON = $(printf '%s' "${WBA_SIGNED_DIRECTORY_JSON:-}" | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0,"utf8")))')
@@ -50,4 +46,6 @@ service_id = ""
 [setup]
 EOF
 
-exec fastly compute serve --skip-build --addr="${FASTLY_SERVE_ADDR:-0.0.0.0:7676}"
+# The image's pinned Viceroy (see the Dockerfile), not one the CLI downloads.
+exec fastly compute serve --skip-build --viceroy-path=/usr/local/bin/viceroy \
+  --addr="${FASTLY_SERVE_ADDR:-0.0.0.0:7676}"

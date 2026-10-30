@@ -13,7 +13,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { POP_ACCEPT_SIGNATURE } from '@fora-protocol/sdk/pop';
 
 import { createApp } from '../../src/app.js';
-import { type AppDeps, buildPublisherManifest } from '../../src/types.js';
+import type { AppDeps } from '../../src/types.js';
 import {
   type TestKeypair,
   generateKeypair,
@@ -33,9 +33,6 @@ beforeAll(async () => {
   exchangeKeypair = await generateKeypair('exchange');
   exchangeKid = await keyThumbprint(exchangeKeypair);
   const deps: AppDeps = {
-    manifest: buildPublisherManifest('pub.example.com', [
-      { domain: 'exchange.test', endpoint: 'https://exchange.test' },
-    ]),
     exchangeUrl: 'https://exchange.test',
     // Hand-wired verify key — no WBA directory fetch, so the app runs fully
     // in-memory with no worker env involved.

@@ -129,6 +129,10 @@ table below gives both.
 | `billing adapter: tigerbeetle` | INFO | Boot. Carries `ledger`, `currency`, `address`. Its **absence** means the `free` adapter. |
 | `billing adapter seeded` | INFO | Boot, `inmemory` adapter only. Carries the number of seeded agents. |
 | `sor adapter: postgres` | INFO | Boot. The account registry is connected and migrated. Carries `cache_ttl`. **Not optional** — its absence means the Exchange is not running. |
+| `boot fixture: none configured` | INFO | Boot. `EXCHANGE_BOOT_FIXTURE_FILE` is unset, so the Exchange creates no rows at boot. |
+| `boot fixture loaded` | INFO | Boot, before any database connection. The fixture was read and passed every check. Carries `path`, `sha256`, `seats` and `publishers` (counts). |
+| `boot fixture applied` | INFO | Boot. Carries `path`, `created` (each row this boot created, by name), `kept` and `drifted` (counts). On every boot after the first, `created` is empty. |
+| `boot fixture: a stored row differs from the fixture; the stored values are kept` | WARN | Boot. One line per stored row whose settings differ from the fixture: `row` names it and `fields` the settings. Nothing was changed. Either the file is out of date or the row was changed since it was created; correct whichever is wrong, the row through its own surface. |
 | `default tenant not found yet — Register will fail until it is seeded` | WARN | Boot. No tenant row matches `EXCHANGE_DEFAULT_TENANT` (or `EXCHANGE_DOMAIN`). **No agent can register, so no agent can buy.** Boot continues anyway. Carries `default_tenant_domain`. |
 | `could not verify default tenant at boot` | WARN | Boot. The check could not run, usually a brief database problem. Carries `default_tenant_domain` and `err`. Re-check by hand once the service is up. |
 | `default agent credits configured` | INFO | Boot. The welcome credit parsed from `EXCHANGE_DEFAULT_AGENT_CREDIT`, which every first `Register` grants from until the next restart. Appears on every boot, whether or not the default tenant is seeded yet: a tenant created later grants it without a restart. Carries `default_agent_credits`, as `CODE=AMOUNT` pairs at 8 decimal places, or empty when no credit is configured. A malformed value never reaches this line — it stops the boot instead. |
@@ -200,6 +204,7 @@ design, and the internet will try it.
 | One agent denied with `no billing account found for this agent: contact the operator` | The agent's `fora.agents` row carries a `billing_ref` that the registry does not know. The two databases disagree | Escalate. Do not delete the `billing_ref`: the ledger balance is keyed on it. §5. |
 | Exchange will not start | `EXCHANGE_DSN` unset, the catalog database unreachable, or `EXCHANGE_LOG_LEVEL` set to something other than `DEBUG`, `INFO`, `WARN` or `ERROR` | Read the `exchange.exit` line; it names the cause. |
 | Exchange will not start, `err` begins `sor:` | A **different** database. `EXCHANGE_SOR_DSN` is unset, or the account-registry database does not exist or is unreachable | [`DEPLOYMENT.md`](DEPLOYMENT.md) §8 lists each `sor:` message and its fix. This one does not fix itself. |
+| Exchange will not start, `err` begins `EXCHANGE_BOOT_FIXTURE_FILE` | The boot fixture could not be read, uses a key or value the format refuses, names an Ed25519 key this Exchange does not hold, lists a CloudFront RSA site on a seat with no RSA key reference, or contradicts a stored owner. The message names the field or the row | Fix the file and restart; nothing was written. "another seat already holds the domain" and "is registered to publisher …" mean the file declares something another seat or publisher owns, and the boot refuses it on purpose — [`CONFIGURATION.md`](CONFIGURATION.md) §2.1. |
 
 ### 3.2 Diagnostics
 
@@ -385,10 +390,16 @@ SELECT tenant_id, domain, fee_rate_bps, fee_rate_notes,
 
 #### Onboard a publisher
 
-**1. Create the seat, once per deployment.** There is no RPC for this; it is a
-database row. The seat is this Exchange's own selling identity, not a publisher,
-so you create exactly one and every publisher you onboard afterwards is sold
-through it.
+**1. Create the seat, once per deployment.** There is no RPC for this: declare it
+in the boot fixture, or write the database row below. The seat is this Exchange's
+own selling identity, not a publisher, so you create exactly one and every
+publisher you onboard afterwards is sold through it.
+
+**Prefer the boot fixture.** With `EXCHANGE_BOOT_FIXTURE_FILE` set, the Exchange
+creates the seat at its next start, with both of its policies named in the file,
+and writes an audit row for it. The format is in
+[`CONFIGURATION.md`](CONFIGURATION.md) §2.1. The SQL below is for a deployment
+that does not use one.
 
 ```sql
 INSERT INTO fora.tenants (tenant_id, domain, ed25519_key_ref, rsa_key_ref,
@@ -425,12 +436,16 @@ all three are required before a push for that domain is accepted.
 **Prefer the publisher console.** When this deployment runs one (see
 `EXCHANGE_CONSOLE_WELLKNOWN_URL` in [`CONFIGURATION.md`](CONFIGURATION.md)), the
 publisher creates all three themselves: they sign in, register their business,
-save the site, publish the document the console gives them, install the
-package, and press the button that verifies it. Nothing below is needed, nobody
-touches the database, and the listing goes live only once the site itself
-proves it authorized you.
-The SQL that follows is for a deployment with no console, and for recovering one
-publisher whose registration went wrong.
+and save the site and its terms; then they publish the document the console
+gives them and install the package, in either order. The console checks both
+while its page is open and verifies the site once both are in place. Nothing
+below is needed, nobody touches the database, and the listing goes live only
+once the site itself proves it authorized you.
+A deployment with no console can declare all three in the boot fixture instead:
+the publisher, its sites, and each site's listing, which the fixture creates
+`ACTIVE` ([`CONFIGURATION.md`](CONFIGURATION.md) §2.1). The SQL that follows is
+for a deployment with neither, and for recovering one publisher whose
+registration went wrong.
 
 ```sql
 -- The payee. One per publisher, whatever number of sites they run.
@@ -745,7 +760,7 @@ So a page pushed by hand — including one the operator pushes with
 `import_replaces_manual_terms` is `true`. That column is the publisher's
 answer, given with the site's terms, to whether the import may take over the
 pages already in the catalog; it is `false` unless they said yes. The console
-asks it on the last step of adding a domain, as **Replace the terms of pages
+asks it on the terms step of adding a domain, as **Replace the terms of pages
 that are already in the catalog**, and shows the answer on the domain's page.
 Either way the importer never clears a page's title or metadata, and a page
 stored under a content id keeps it, so its URI stays with its row. Pages
@@ -1002,8 +1017,9 @@ it by re-ingesting) and a delivery-witness override.
 A site saved through the console sits at `PENDING_MANIFEST` -- "not verified"
 in the console -- until it is verified: its document proves it is the
 publisher's, its package answers, and its terms are set. The console saves a
-site as soon as the publisher presses the wizard's last button, whether or not
-those are in place yet, and saving holds the hostname. Two states need you:
+site on the domain step of adding a domain, as soon as the publisher presses
+**Next** on it, before any of those are in place, and saving holds the
+hostname. Two states need you:
 
 - **Abandoned.** Somebody saved a site and never finished setting it up. The
   row is harmless but it holds the hostname: nobody else can register it, and

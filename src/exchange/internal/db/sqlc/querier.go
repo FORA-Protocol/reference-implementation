@@ -72,6 +72,14 @@ type Querier interface {
 	// they are sales of nothing, and the count says so. resource_id and domain,
 	// when given, count one resource's or one domain's transactions only.
 	CountPublisherTransactionsByBucket(ctx context.Context, arg CountPublisherTransactionsByBucketParams) ([]CountPublisherTransactionsByBucketRow, error)
+	// Lists a site on a seat ACTIVE, with its terms, because an operator's boot
+	// fixture declares it (ADR-029): the operator vouches for the listing, as the SQL
+	// that seeded deployments before the fixture did. No manifest check ran, so
+	// verified_at stays NULL, and catalog push still checks the site's manifest on
+	// every push. A listing already stored on this seat is left as it is, a
+	// PENDING_MANIFEST one included: the fixture never activates a listing that
+	// registration created. Tenant-scoped.
+	CreateActivePublisherDomainListingIfAbsent(ctx context.Context, arg CreateActivePublisherDomainListingIfAbsentParams) (ForaPublisherDomainListing, error)
 	// Writes the append-once evidence row for a successfully executed transaction
 	// item: the full signed offer + both-party signatures + both verifying public
 	// keys + the delivered URL. Written inside the same transaction as the
@@ -92,9 +100,20 @@ type Querier interface {
 	// and therefore signs with Ed25519, so the scheme no longer tells the three
 	// apart and the generated configuration differs per integration.
 	CreatePublisherDomain(ctx context.Context, arg CreatePublisherDomainParams) (ForaPublisherDomain, error)
+	// Creates a site an operator's boot fixture declares (ADR-029), with its signing
+	// scheme and, for an AWS_CLOUDFRONT_RSA site, its CloudFront key-pair id, unless
+	// the domain is already stored. A stored site is left as it is, whichever payee
+	// owns it; the caller reads it back and refuses a fixture that declares it under
+	// another payee. Registration takes no key-pair id and refuses an existing
+	// domain; an operator provisions the RSA sites registration cannot, and declares
+	// them again on every boot. Deployment-wide for the reason GetPublisherDomain
+	// gives.
+	CreatePublisherDomainIfAbsent(ctx context.Context, arg CreatePublisherDomainIfAbsentParams) (ForaPublisherDomain, error)
 	// Lists a site on a seat. The state is left to the column default,
-	// PENDING_MANIFEST: a listing is never born proven, and taking the state from
-	// the caller would let registration create an ACTIVE listing without a manifest.
+	// PENDING_MANIFEST: a listing registration creates is never born proven, and
+	// taking the state from the caller would let registration create an ACTIVE
+	// listing without a manifest. Only an operator's boot fixture creates a listing
+	// ACTIVE, through CreateActivePublisherDomainListingIfAbsent.
 	// No ON CONFLICT, so listing the same site twice on one seat surfaces the
 	// duplicate instead of silently overwriting the first listing's path scope or
 	// the licensing it agreed.
@@ -105,9 +124,26 @@ type Querier interface {
 	// pair a no-op rather than an error: the grant is a set membership, and adding a
 	// member twice is the same set.
 	CreatePublisherGrant(ctx context.Context, arg CreatePublisherGrantParams) error
+	// Creates a payee an operator's boot fixture declares (ADR-029), unless one is
+	// already stored under this id, which is left as it is. Unlike CreatePublisher,
+	// whose caller mints a fresh id, the fixture names the id itself and every boot
+	// after the first declares it again, so an existing row is the expected case and
+	// returns no row rather than an error. Deployment-wide for the reason
+	// GetPublisher gives.
+	CreatePublisherIfAbsent(ctx context.Context, arg CreatePublisherIfAbsentParams) (ForaPublisher, error)
+	// Creates a seat an operator's boot fixture declares (ADR-029), with both of its
+	// policies, unless a seat already holds this tenant id or this domain. A stored
+	// seat is left exactly as it is, whatever the fixture says now, so a boot after
+	// the first changes nothing that a product surface or an operator set since. A
+	// conflict on either key returns no row; the caller reads the seat back by its
+	// id to tell a seat that is already stored from a domain another seat holds.
+	CreateTenantIfAbsent(ctx context.Context, arg CreateTenantIfAbsentParams) (ForaTenant, error)
 	// Writes the full transaction row. The handler MUST await this commit before
 	// returning the signed URL to the caller (write-before-sign invariant).
 	CreateTransaction(ctx context.Context, arg CreateTransactionParams) (ForaTransactionLog, error)
+	// Marks the record ended. The key list is left as it is on purpose. Keyed by
+	// tenant as well as record id: a record id from another seat updates nothing.
+	EndSubscriptionRecord(ctx context.Context, arg EndSubscriptionRecordParams) (int64, error)
 	FinalizeTransactionRequestClaim(ctx context.Context, arg FinalizeTransactionRequestClaimParams) (int64, error)
 	// Idempotent-retry probe for ReportUsage: returns the obligation row whose
 	// (transaction_id, source_report_id) pair was already recorded AND ACCEPTED.
@@ -172,6 +208,9 @@ type Querier interface {
 	// Returns the per-(tenant, resource_owner) commission override in basis points,
 	// or no row when none is configured (the caller falls back to the tenant default).
 	GetResourceOwnerFeeOverride(ctx context.Context, arg GetResourceOwnerFeeOverrideParams) (int32, error)
+	// The read the delegation verifier makes: the record that owns this scope in
+	// this seat, ended or not. An ended record still answers with its keys.
+	GetSubscriptionRecordByTenantAndScope(ctx context.Context, arg GetSubscriptionRecordByTenantAndScopeParams) (ForaSubscriptionRecord, error)
 	GetTenantByDomain(ctx context.Context, domain string) (ForaTenant, error)
 	GetTenantByID(ctx context.Context, tenantID string) (ForaTenant, error)
 	// Read a transaction by its public transaction_id (the value the resolve /
@@ -191,6 +230,9 @@ type Querier interface {
 	// may this person act for this payee on this seat? Tenant-scoped.
 	HasPublisherGrant(ctx context.Context, arg HasPublisherGrantParams) (bool, error)
 	InsertCatalogEntry(ctx context.Context, arg InsertCatalogEntryParams) (ForaCatalog, error)
+	// Creates the trust record of one subscription scope under one seat. Fixture and
+	// test path; the UNIQUE (tenant_id, scope) refuses a second record for the scope.
+	InsertSubscriptionRecord(ctx context.Context, arg InsertSubscriptionRecordParams) (ForaSubscriptionRecord, error)
 	// Creates one Exchange seat. `domain` is the hostname the seat answers on --
 	// the value EXCHANGE_DOMAIN carries -- not a publisher's site. The signing
 	// scheme and the CloudFront key-pair id are NOT here: those describe one site
@@ -401,6 +443,13 @@ type Querier interface {
 	// Sets the override commission for one resource owner under one tenant. Admin /
 	// fixture path; the CHECK (0 <= fee_rate_bps < 10000) rejects an out-of-range rate.
 	UpsertResourceOwnerFeeOverride(ctx context.Context, arg UpsertResourceOwnerFeeOverrideParams) error
+	// Creates the seat's record for the scope, or replaces the issuer and the trusted
+	// root keys of the one it already holds. The database owns the create-or-replace
+	// decision through the (tenant_id, scope) constraint, so two concurrent writes
+	// cannot both see "no record". A key missing from the new list is an explicit
+	// withdrawal of trust: a chain rooted in it stops verifying at once. ended_at is
+	// left as it is: replacing keys does not reopen an ended record.
+	UpsertSubscriptionRecord(ctx context.Context, arg UpsertSubscriptionRecordParams) (ForaSubscriptionRecord, error)
 }
 
 var _ Querier = (*Queries)(nil)

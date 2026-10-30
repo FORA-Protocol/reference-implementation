@@ -10,9 +10,9 @@
 #
 # Every port is ephemeral and bound to the loopback interface: Docker picks a
 # free host port, and `docker compose port` names it. The harness's host-run path
-# (tests/e2e/harness/conftest.py without FORA_E2E_IN_NETWORK) and
-# tests/e2e/demo_proof.py find each container by its compose labels, in the
-# stack's own project, and read the port from that container's port binding.
+# (tests/e2e/harness/conftest.py without FORA_E2E_IN_NETWORK) finds each
+# container by its compose labels, in the stack's own project, and reads the
+# port from that container's port binding.
 #
 # A host run also writes the Broker's revocation file from the host, so the
 # Broker's revocation directory is bound back to the harness tree here; in the

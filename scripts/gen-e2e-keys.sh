@@ -2,37 +2,30 @@
 # Generate the Ed25519 identities the docker-compose E2E stack needs. The
 # private halves are written under tests/e2e/harness/fixtures/ (gitignored — no
 # private key material is tracked in git) where the runner image and the
-# per-identity well-known hosts (publisher-jwks image) read them.
+# key-directories service (deploy/publisher-jwks image) read them.
 #
 # There is NO shared key registry file: every identity's public key is served
-# ONLY by that identity's own well-known host in docker-compose.e2e.yml (the
-# jwks service aliased to the identity's kid), and the Exchange and Broker
-# learn keys exclusively by fetching those directories — the same path
-# production uses.
+# ONLY under that identity's own host name in docker-compose.e2e.yml (an alias
+# of the key-directories service, equal to the identity's kid), and the
+# Exchange and Broker learn keys exclusively by fetching those directories —
+# the same path production uses.
 #
 # Identities (kid → fixture file):
 #   catalog-contributor-e2e          catalog_contributor_key.json
-#   agent-e2e                        agent_e2e_key.json
 #   agent-nobilling-e2e              agent_nobilling_e2e_key.json
 #   broker.broker-local.v1           broker_relay_key.json   (mounted into broker)
 #   test-signer-e2e.v1               test_signer_key.json
-#   agent-demo-eur                   agent_demo_eur_key.json
-#   lazy-agent-e2e                   agent_lazy_e2e_key.json
-#   ghost-agent-e2e                  agent_ghost_e2e_key.json  (served NOWHERE)
-#   demo.fora-protocol.org           selfpub_philosophy_key.json  (self-publish, kid=domain)
+#   demo.fora-protocol.org          selfpub_philosophy_key.json  (self-publish, kid=domain)
 #   music.demo.fora-protocol.org     selfpub_music_key.json       (self-publish, kid=domain)
 #   sfx.demo.fora-protocol.org       selfpub_sfx_key.json         (self-publish, kid=domain)
 #   archive.demo.fora-protocol.org   selfpub_archive_key.json     (self-publish, kid=domain; no edge)
 #
-# NOTE: the kid values above (agent-e2e, broker.broker-local.v1, etc.) are
+# NOTE: the kid values above (agent-nobilling-e2e, broker.broker-local.v1, etc.) are
 # E2E/demo FIXTURES, not real public DNS domains. In the demo they act as the
 # agent identity (the Signature-Agent value) and are reachable only on the
 # local docker-compose network, via FORA_WELLKNOWN_{SCHEME,PORT}. Do not
 # read them as real registered domains. (The self-publish entries where
 # kid=domain are the exception — those are domain-shaped on purpose.)
-#
-# ghost-agent-e2e is the negative control: it gets a keypair but no well-known
-# host, so a valid signature under it must fail every resolution route.
 #
 # broker.broker-local.v1 is the Broker relay key. The Broker mounts the private
 # fixture and publishes the pubkey in its OWN WBA directory at boot; the
@@ -56,8 +49,8 @@
 # already-booted stack) does NOT rotate keys, which would mismatch the
 # containers' mounted keys.
 #
-# Private fixtures are written 0644 (world-readable). The broker and the jwks
-# hosts mount these keys read-only into distroless / nonroot containers; a 0600
+# Private fixtures are written 0644 (world-readable). The broker and the
+# key-directories service mount these keys read-only into distroless / nonroot containers; a 0600
 # file owned by the generating user (root in CI) is unreadable across that UID
 # boundary, so the container exits(1) at boot with "permission denied". 0644 is
 # how a read-only key is normally provisioned into a container. This does NOT
@@ -98,41 +91,36 @@ from ed25519_keys import (
 fixtures_dir, edge_keys_dir = sys.argv[2:4]
 
 # (kid, private-fixture filename). One Ed25519 keypair per identity. Every
-# identity's pubkey is served solely by its own well-known host (or, for the
-# broker relay key, by the Broker's own WBA directory); ghost-agent-e2e is
-# served nowhere by design.
+# identity's pubkey is served solely under its own host name, or, for the
+# broker relay key, by the Broker's own WBA directory.
 #
-# Adding an identity takes THREE edits:
+# Adding an identity takes FIVE edits:
 #   1. this list (mints the key fixture);
-#   2. a `<kid>-jwks` service in docker-compose.e2e.yml (anchored on
-#      x-jwks-host; mounts the fixture, aliases the kid);
-#   3. that service's entry in a depends_on block in the same file.
+#   2. the key-directories service in docker-compose.e2e.yml: a read-only
+#      mount of the fixture at /keys/<kid>.json and an alias equal to the kid;
+#   3. the kid in STATIC_KEY_HOSTS in tests/e2e/harness/constants.py, the
+#      names the in-network directory test checks;
+#   4. the kid in the x-through-capture-proxy list in docker-compose.e2e.yml,
+#      which sends every service's requests for the host through the capture
+#      proxy, the stack's one https endpoint;
+#   5. the kid in the certificate SAN list in
+#      tests/e2e/capture-proxy/tls-keygen.sh.
 # The guard suite tests/e2e/harness/test_guards_identity_lists.py connects
-# the three: it fails when a minted identity has no serving host, when a
-# jwks host is in nobody's depends_on, or when the ghost negative control
-# gains a host — so a missed edit goes red instead of masquerading as the
-# deliberate resolves-nowhere case.
+# edits 1-3: it fails when a minted identity is not mounted from its own
+# fixture under its own name, when a mount and an alias do not pair up, or
+# when the directory test does not check every served name. In the stack,
+# tests/e2e/harness/test_capture_proxy.py fetches every name in the
+# x-through-capture-proxy list over https with verification on, so a name
+# left out of the certificate fails there. Nothing checks edit 4 statically.
 IDENTITIES = [
     ("catalog-contributor-e2e", "catalog_contributor_key.json"),
-    ("agent-e2e", "agent_e2e_key.json"),
     ("agent-nobilling-e2e", "agent_nobilling_e2e_key.json"),
     ("broker.broker-local.v1", "broker_relay_key.json"),
     ("test-signer-e2e.v1", "test_signer_key.json"),
-    # Phase-2 demo buyer the EUR-priced terms are bought as (the demo catalog
-    # denominates most terms in EUR/GBP). The e2e seed funds it, like agent-e2e,
-    # through its own Register and the welcome credit.
-    ("agent-demo-eur", "agent_demo_eur_key.json"),
-    # The lazy-registration e2e's fresh agent: resolvable only via its own
-    # well-known host, absent from fora.agents, so a transaction registers it
-    # lazily.
-    ("lazy-agent-e2e", "agent_lazy_e2e_key.json"),
-    # Resolvable nowhere at all — the negative control. Valid signature, no
-    # well-known host, so every resolution route must come up empty.
-    ("ghost-agent-e2e", "agent_ghost_e2e_key.json"),
     # The archive publisher's self-publish key (kid == its domain). Listed here
     # rather than in SELF_PUBLISH_IDENTITIES because that site has no edge to
-    # hand an env file to: its directory is served by the archive-jwks host,
-    # which mounts this fixture like any other identity host does.
+    # hand an env file to: its directory is served by the key-directories
+    # service, which mounts this fixture like every other identity's.
     ("archive.demo.fora-protocol.org", "selfpub_archive_key.json"),
 ]
 

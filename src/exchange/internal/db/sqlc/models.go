@@ -748,6 +748,16 @@ type ForaReportingObligation struct {
 	IssuedReportID    pgtype.Text               `json:"issued_report_id"`
 }
 
+type ForaSubscriptionRecord struct {
+	RecordID       string             `json:"record_id"`
+	TenantID       string             `json:"tenant_id"`
+	Scope          string             `json:"scope"`
+	IssuerIdentity string             `json:"issuer_identity"`
+	IssuerKeys     [][]byte           `json:"issuer_keys"`
+	EndedAt        pgtype.Timestamptz `json:"ended_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
 type ForaTenant struct {
 	TenantID                   string             `json:"tenant_id"`
 	Domain                     string             `json:"domain"`

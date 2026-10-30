@@ -22,7 +22,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from fora_sdk import ProtocolVersion
 
 from .broker_purchase import (
     one_group_per_uri,
@@ -86,7 +85,7 @@ def test_every_group_for_a_uri_the_broker_chose_says_search(fresh_agent: FreshAg
         f"needs the Exchange to say {_EXCHANGE}"
     )
 
-    result = fresh_agent.broker.resolve({"ver": ProtocolVersion, "query": _QUERY})
+    result = fresh_agent.broker.resolve(resolve_request(query=_QUERY))
     group = one_group_per_uri(result, [_TITANS], f"Broker search for {_QUERY!r}")[_TITANS]
     assert group.discovery_method == _SEARCH, (
         f"{_TITANS}: discovery_method = {group.discovery_method!r}, want {_SEARCH}: the "

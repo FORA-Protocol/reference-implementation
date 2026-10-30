@@ -22,18 +22,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
+import json
 import uuid
 
 import httpx
-from fora_sdk import ProtocolVersion
+from fora_sdk import ProtocolVersion, to_wire
 from fora_sdk.client import CallError
 from fora_sdk.core import DiscoveryResult, OfferGroupResult, VerifiedOffer
 from fora_sdk.signing_transport import SigningTransport
 from fora_sdk.sync import CatalogClient
 from wire.models import (
+    LicenseTerm,
+    PushResourcesRequest,
     PushResourcesResponse,
+    RefreshCatalogRequest,
     RefreshCatalogResponse,
+    RemoveResourcesRequest,
     RemoveResourcesResponse,
+    ResourceEntry,
+    ResourceRef,
 )
 
 from . import after_signing
@@ -50,6 +57,7 @@ from .exchanges import EXCHANGE_A_DOMAIN, recipient_of
 from .fresh_agent import FreshAgent
 from .httpsig_signer import load_keypair, signing_transport
 from .malformed import Request, patch_body
+from .protocol_documents import parse_document
 from .sdk_client import BeforeSign, sdk_catalog_client
 from .stack_urls import StackURLs
 
@@ -76,8 +84,13 @@ UNKNOWN_CRITICAL_EXTENSION = "CATALOG_REJECTION_REASON_UNKNOWN_CRITICAL_EXTENSIO
 DEFAULT_ENTRY_RATE = 0.05
 
 
-def entry_wire(e: CatalogEntry) -> dict[str, Any]:
-    """One ``ResourceEntry`` under its canonical snake_case wire names."""
+def entry_message(e: CatalogEntry) -> ResourceEntry:
+    """One ``ResourceEntry``, refused unless the protocol's strict check accepts it.
+
+    ``CatalogEntry.fields`` arrive under their wire names, so the entry is checked
+    in its wire form before it is parsed: a member the protocol does not define is
+    refused here rather than dropped by the generated model.
+    """
     terms = e.terms or (
         license_term(
             model=PRICING_MODEL_PER_UNIT,
@@ -90,7 +103,7 @@ def entry_wire(e: CatalogEntry) -> dict[str, Any]:
         "domain": e.domain,
         "path": e.path,
         "content_id": e.content_id,
-        "terms": [dict(t) for t in terms],
+        "terms": [to_wire(t) for t in terms],
     }
     if e.estimated_quantity is not None:
         entry["estimated_quantity"] = e.estimated_quantity
@@ -100,7 +113,12 @@ def entry_wire(e: CatalogEntry) -> dict[str, Any]:
         entry["ext_critical"] = list(e.ext_critical)
     if e.fields:
         entry.update(e.fields)
-    return entry
+    return parse_document(ResourceEntry, json.dumps(entry))
+
+
+def entry_wire(e: CatalogEntry) -> dict[str, Any]:
+    """One ``ResourceEntry`` in its wire form, for a pre-signing patch to edit."""
+    return to_wire(entry_message(e))
 
 
 def keyfile_signer(key_path: Path) -> SigningTransport:
@@ -147,34 +165,32 @@ class Catalog:
         deprecated caller_id, the signer's directory, because the reference
         Exchange refuses a push without it (CATALOG-024 proves the push without it).
         """
-        message: dict[str, Any] = {
-            "ver": ProtocolVersion,
-            "exchange": self.recipient,
-            "tenant_id": tenant_id,
-            "caller_id": self.signer.signature_agent,
-            "entries": [entry_wire(e) for e in entries],
-        }
+        message = PushResourcesRequest(
+            ver=ProtocolVersion,
+            exchange=self.recipient,
+            tenant_id=tenant_id,
+            caller_id=self.signer.signature_agent,
+            entries=[entry_message(e) for e in entries],
+        )
         return Request(client=self.client, verb=lambda c: c.push_resources, message=message)
 
     def remove(
         self, tenant_id: str, entries: list[CatalogEntry]
     ) -> Request[CatalogClient, RemoveResourcesResponse]:
         """RemoveResources of ``entries`` for ``tenant_id``, each named by domain and path."""
-        message: dict[str, Any] = {
-            "ver": ProtocolVersion,
-            "exchange": self.recipient,
-            "tenant_id": tenant_id,
-            "resources": [{"domain": e.domain, "path": e.path} for e in entries],
-        }
+        message = RemoveResourcesRequest(
+            ver=ProtocolVersion,
+            exchange=self.recipient,
+            tenant_id=tenant_id,
+            resources=[ResourceRef(domain=e.domain, path=e.path) for e in entries],
+        )
         return Request(client=self.client, verb=lambda c: c.remove_resources, message=message)
 
     def refresh(self, tenant_id: str) -> Request[CatalogClient, RefreshCatalogResponse]:
         """RefreshCatalog for ``tenant_id``."""
-        message: dict[str, Any] = {
-            "ver": ProtocolVersion,
-            "exchange": self.recipient,
-            "tenant_id": tenant_id,
-        }
+        message = RefreshCatalogRequest(
+            ver=ProtocolVersion, exchange=self.recipient, tenant_id=tenant_id
+        )
         return Request(client=self.client, verb=lambda c: c.refresh_catalog, message=message)
 
 
@@ -217,7 +233,7 @@ def accepted(request: Request[CatalogClient, PushResourcesResponse]) -> PushReso
     """Send a push once and require it stored whole: answered, ``accepted`` its own size."""
     outcome = answer(request)
     assert not isinstance(outcome, CallError), f"the push was refused: {outcome}"
-    sent = len(request.message["entries"])
+    sent = len(request.message.entries or [])
     assert outcome.accepted == sent, f"accepted {outcome.accepted} of {sent}: {outcome!r}"
     return outcome
 
@@ -313,13 +329,13 @@ def assert_push_naming_tenant_refused(stack: StackURLs, agent: FreshAgent, tenan
     assert reason == TENANT_MISMATCH, f"refused with {reason}, want {TENANT_MISMATCH}"
 
 
-def free_term() -> dict[str, Any]:
+def free_term() -> LicenseTerm:
     """A FREE USD term: an offer that needs no account to be discovered."""
     return license_term(model=PRICING_MODEL_FREE, currency="USD")
 
 
 def fresh_entry(
-    domain: str = HOME_DOMAIN, *, terms: tuple[dict[str, Any], ...] = (), **kw: Any
+    domain: str = HOME_DOMAIN, *, terms: tuple[LicenseTerm, ...] = (), **kw: Any
 ) -> CatalogEntry:
     """A resource no other test or pass has pushed: a fresh path and content id."""
     tag = uuid.uuid4().hex

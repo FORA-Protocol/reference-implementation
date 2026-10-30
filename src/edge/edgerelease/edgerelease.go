@@ -92,9 +92,11 @@ func WorkerName(domain string) string {
 // WranglerConfig writes the wrangler.toml of a site's Cloudflare package.
 //
 // main is the worker file beside it. The route covers the whole hostname on
-// purpose. The Worker serves the discovery document itself, so a route over the
-// article paths alone would leave /.well-known answered by the origin. Which
-// paths the Worker gates is a setting (LICENSED_PATHS_JSON), not the route.
+// purpose: the Worker sees every path, so the gate is never bypassed by a path
+// the route left out, and which paths it gates is a setting
+// (LICENSED_PATHS_JSON), not the route. The publisher's discovery document and
+// RSL file are on that hostname too; the Worker passes both through to the
+// origin, so the route takes nothing away from them.
 func WranglerConfig(domain, main string, settings map[string]string) ([]byte, error) {
 	zone, err := publicsuffix.EffectiveTLDPlusOne(domain)
 	if err != nil {
@@ -116,8 +118,8 @@ main = %s
 compatibility_date = %s
 compatibility_flags = %s
 
-# The whole hostname, because the Worker serves your discovery document at
-# /.well-known/fora.json as well as guarding your articles.
+# The whole hostname, so the Worker sees every path it may have to guard. It
+# passes your own /.well-known/fora.json and /rsl.txt through to your site.
 routes = [
   { pattern = %s, zone_name = %s }
 ]

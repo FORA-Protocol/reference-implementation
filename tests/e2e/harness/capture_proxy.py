@@ -45,16 +45,17 @@ names only the compose network resolves.
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
 import httpx
-from fora_sdk import sfv
 from pydantic import BaseModel
 
 from ._compose import project_services
 from .poll import poll_until
+from .signature_fields import declared_signatures
 
 M = TypeVar("M", bound=BaseModel)
 
@@ -106,14 +107,10 @@ class CapturedRequest:
     @property
     def keyids(self) -> list[str]:
         """The keyid of every signature the request carries, in label order."""
-        values = self.header_values("signature-input")
-        if not values:
-            return []
-        try:
-            members = sfv.parse_dictionary(values)
-        except sfv.StructuredFieldError as exc:
-            raise AssertionError(f"request {self.seq} carries a malformed Signature-Input") from exc
-        return [str(member.params.get("keyid", "")) for member in members.values()]
+        declared = declared_signatures(
+            self.header_values("signature-input"), where=f"request {self.seq}"
+        )
+        return [str(signature.params.get("keyid", "")) for signature in declared.values()]
 
     def carries(self, model: type[BaseModel]) -> bool:
         """Whether the body is a ``model`` message, the request of the RPC it was sent to."""
@@ -220,6 +217,19 @@ class Traffic:
             deadline_s,
             failure=_describe_wait(model, caller, target, wanted, lambda: seen[0]),
         )
+
+    @contextmanager
+    def adds_none(self, model: type[BaseModel], *, caller: str, what: str) -> Iterator[None]:
+        """Assert that the block sends no further ``model`` request from ``caller``.
+
+        The baseline is awaited first, so a request on this leg is known to reach the
+        proxy: a check that nothing was sent, made without one, would also pass with
+        the proxy out of the path.
+        """
+        before = len(self.await_carrying(model, caller=caller))
+        yield
+        sent = self.carrying(model, caller=caller)
+        assert len(sent) == before, f"{what}: it sent {sent[before:]}"
 
 
 def _describe_wait(

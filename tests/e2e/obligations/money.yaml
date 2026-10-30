@@ -234,10 +234,13 @@
       side_effect: >-
         no retrieval_endpoint, transaction or billing record
 
-# harness: needs a seat that holds new agents for operator review, so a fresh
-# agent's Register opens an inactive account. Every seat in the e2e stack
-# activates new agents once the seed has run, and no admin RPC switches that per
-# test; it needs an e2e-only control surface (ADR-028 D6) or a dedicated seat.
+# harness: the negative half needs a seat that holds new agents for operator
+# review, so a fresh agent's Register opens an inactive account, and the positive
+# half the operator's approval of that account. The e2e control service sets both
+# (its agent-activation and account-active controls, ADR-028 D6). What is still
+# missing is money: an account that opens inactive is granted no welcome credit,
+# and nothing in the stack funds an account later, so after the approval the same
+# paid purchase is refused for its balance instead of bought.
 - id: MONEY-012
   title: A caller whose account is not yet active is denied ACCOUNT_INACTIVE, not told to register again
   level: MUST
@@ -378,8 +381,10 @@
   source:
     cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
     quote: >-
-      DENIAL_REASON_DELEGATION_INVALID = 10; // Delegation missing, unverifiable, expired,
-      holder binding failed, or scopes/caps do not cover the request
+      DENIAL_REASON_DELEGATION_INVALID = 10;  // On a purchase item: delegation missing,
+      malformed, unverifiable (chain linkage, issuer, signature), expired or not yet
+      valid, addressed to another recipient, holder binding failed, a child widens its
+      parent, or scopes/caps do not cover the request
   positive: >-
     A purchase under a valid delegation whose cnf.jkt is the signing key is bought.
   negative:

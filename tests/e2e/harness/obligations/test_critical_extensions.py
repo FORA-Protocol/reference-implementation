@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -63,6 +64,7 @@ from ..defects import (
 from ..exchanges import EXCHANGE_A_DOMAIN, EXCHANGE_C_DOMAIN, EXCHANGE_D_DOMAIN
 from ..fresh_agent import FreshAgent
 from ..malformed import patch_body
+from ..model_edits import with_members
 from ..money_path import (
     LECTURE_NOTES,
     SCI_FI_DOOR,
@@ -74,7 +76,6 @@ from ..money_path import (
 )
 from ..obligation_registry import Obligation, obligation
 from ..reporting import report_body
-from ..seed import SeededFixture
 from ..seed_accounts import has_account, registration_request
 from ..stack_urls import StackURLs
 
@@ -90,11 +91,17 @@ _REPORT_REFUSED = "USAGE_REPORT_REJECTION_REASON_UNKNOWN_CRITICAL_EXTENSION"
 _REGISTRATION_REFUSED = "REGISTRATION_FAILURE_REASON_UNKNOWN_CRITICAL_EXTENSION"
 
 
+def _copy(fields: dict[str, Any]) -> dict[str, Any]:
+    """A deep copy of ``fields``, so no request shares a nested object with another."""
+    copied: dict[str, Any] = json.loads(json.dumps(fields))
+    return copied
+
+
 def _with(fields: dict[str, Any]) -> Callable[[dict[str, Any]], None]:
     """A body patch that adds a copy of ``fields`` to the request."""
 
     def add(body: dict[str, Any]) -> None:
-        body.update(json.loads(json.dumps(fields)))
+        body.update(_copy(fields))
 
     return add
 
@@ -103,7 +110,6 @@ def _with(fields: dict[str, Any]) -> Callable[[dict[str, Any]], None]:
 @CATALOG_PUSH_IGNORES_EXT_CRITICAL.mark
 def test_a_push_naming_an_unknown_critical_key_is_refused_unknown_critical_extension(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """The push's own ext_critical names acme.must: refused UNKNOWN_CRITICAL_EXTENSION.
@@ -114,15 +120,13 @@ def test_a_push_naming_an_unknown_critical_key_is_refused_unknown_critical_exten
     catalog = contributor(compose_stack)
     control = fresh_entry()
     push = catalog.push(HOME_SEAT, [control])
-    _with(_IGNORABLE)(push.message)
-    outcome = answer(push)
+    outcome = answer(replace(push, message=with_members(push.message, **_copy(_IGNORABLE))))
     assert not isinstance(outcome, CallError), f"the control push was refused: {outcome}"
     assert stored(fresh_agent, HOME_EXCHANGE, control.uri), "the control push was not stored"
 
     entry = fresh_entry()
     push = catalog.push(HOME_SEAT, [entry])
-    _with(_CRITICAL)(push.message)
-    outcome = answer(push)
+    outcome = answer(replace(push, message=with_members(push.message, **_copy(_CRITICAL))))
     # The one check is the obligation itself: refused with this typed reason. A
     # push applied and a push refused without catalog_rejection both fail it, so
     # the test does not also wait on the untyped-refusal defect.
@@ -136,7 +140,6 @@ def test_a_push_naming_an_unknown_critical_key_is_refused_unknown_critical_exten
 @obligation(Obligation.CATALOG_023)
 def test_an_entrys_critical_ext_is_carried_onto_its_offer(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """An entry whose ext_critical names acme.must is stored, and its offer carries both.
@@ -191,7 +194,7 @@ def _report(agent: FreshAgent, fields: dict[str, Any]) -> UsageReport:
         billing_id=item.billing_id,
         idempotency_key=f"report-{uuid.uuid4().hex}",
     )
-    return report.model_copy(update=json.loads(json.dumps(fields)))
+    return with_members(report, **_copy(fields))
 
 
 @obligation(Obligation.MONEY_037, negative=True)
@@ -253,22 +256,23 @@ def test_a_broker_purchase_naming_an_unknown_critical_key_is_denied_and_reaches_
     assert_bought(
         only_item(_broker_buy(fresh_agent, _IGNORABLE), "control"), "the control purchase"
     )
-    relayed = len(traffic.await_carrying(TransactionRequest, caller="broker"))
     before = fresh_agent.balances(EXCHANGE_C_DOMAIN)
 
-    answer = _broker_buy(fresh_agent, _CRITICAL)
-    items = answer.items or []
-    BROKER_PURCHASE_IGNORES_EXT_CRITICAL.check(
-        bool(items)
-        and all(
-            item.denial_reason is not None and item.denial_reason.value == _DENIED for item in items
+    # The defect check runs inside the block, so a purchase the Broker still relays
+    # fails as the defect it is before the no-sub-request check is made.
+    with traffic.adds_none(TransactionRequest, caller="broker", what="the denied purchase"):
+        answer = _broker_buy(fresh_agent, _CRITICAL)
+        items = answer.items or []
+        BROKER_PURCHASE_IGNORES_EXT_CRITICAL.check(
+            bool(items)
+            and all(
+                item.denial_reason is not None and item.denial_reason.value == _DENIED
+                for item in items
+            )
+            and not answer.exchanges
+            and not answer.totals,
+            f"the purchase came back as {answer}",
         )
-        and not answer.exchanges
-        and not answer.totals,
-        f"the purchase came back as {answer}",
-    )
-    sent = traffic.carrying(TransactionRequest, caller="broker")
-    assert len(sent) == relayed, f"the denied purchase reached an Exchange: {sent[relayed:]}"
     assert fresh_agent.balances(EXCHANGE_C_DOMAIN) == before, "a denied purchase moved money"
 
 

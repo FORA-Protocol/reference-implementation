@@ -1,50 +1,64 @@
 #!/bin/sh
-# publisher-jwks entrypoint — render the resource-owner's discovery documents
-# from the Ed25519 private key mounted at $SIGNING_KEY_FILE, then exec nginx.
+# key-directories entrypoint — serve the discovery documents of every fixed e2e
+# identity from one nginx, then exec nginx.
 #
-# After the WBA split there are TWO files:
-#   * /.well-known/fora.json — the KEYLESS commercial overlay manifest
-#     (role=ROLE_PUBLISHER, no identity keys):
-#       {"ver": "1.0", "role": "ROLE_PUBLISHER", "domain": <issuer>,
+# Each identity's Ed25519 private key is mounted as one file, /keys/<host>.json,
+# where <host> is the name the identity is served under (its network alias). For
+# each key this script writes, under that host's own document root, TWO files:
+#   * /.well-known/fora.json — the KEYLESS commercial overlay manifest:
+#       {"ver": "1.0", "role": <ROLE_PUBLISHER or ROLE_AGENT>, "domain": <issuer>,
 #        "catalog_contributors": [...], "exchanges": [...]}
+#     (the last two only for a host PUBLISHER_HOSTS_JSON names);
 #   * /.well-known/http-message-signatures-directory — the Web Bot Auth
 #     directory (a JWK Set; the key carries NO kid, named by RFC 7638 thumbprint):
 #       {"keys": [{"kty": "OKP", "crv": "Ed25519", "use": "sig", "alg": "EdDSA",
 #                  "x": <base64url raw 32-byte pubkey>,
 #                  "not_before": <RFC3339>, "not_after": <RFC3339>}]}
-# The CatalogSignatureMiddleware self-signup path fetches the WBA directory to
-# learn the writer key. Identity is anchored by WHERE the directory is fetched
-# from, not by anything inside it: the directory carries no role and no domain,
-# and no manifest field is compared on either side.
+# and one nginx server block that serves them under that host name and no other.
+# A request for any other name reaches the catch-all server in nginx.conf, which
+# answers the health probe and 404 for everything else, so it never receives an
+# identity's keys.
 #
-# not_before/not_after are wide-open (now-1h .. now+10y) so the
-# fixture is never the reason a self-signup fails in the e2e stack.
+# Identity is anchored by WHERE a directory is fetched from, not by anything
+# inside it: the directory carries no role and no domain. That makes the pairing
+# of a key with its host the one thing that must not slip, so a key whose issuer
+# is not the host it is mounted under stops the container at start, instead of
+# serving one identity's key under another identity's name.
+#
+# not_before/not_after are wide-open (now-1h .. now+10y) so the fixture is never
+# the reason a self-signup fails in the e2e stack.
+#
+# PUBLISHER_HOSTS_JSON maps each publisher host to its manifest fields:
+#   {"<host>": {"exchanges": [...], "catalog_contributors": [...]}}
+# Both members are optional. exchanges defaults to none; catalog_contributors
+# defaults to the harness contributor, and an empty list leaves it out. A host
+# the map does not name is an agent, whose manifest carries only its role and
+# domain.
 
 set -eu
 
-KEY_FILE="${SIGNING_KEY_FILE:-/keys/examplenews-subscription-key.json}"
-KID="${SIGNING_KID_OVERRIDE:-}"
-# MANIFEST_ROLE selects the manifest's role; default ROLE_PUBLISHER preserves the
-# catalog-contributor host behaviour. ROLE_AGENT serves an agent identity's
-# manifest (no catalog_contributors) for the lazy-registration e2e.
-ROLE="${MANIFEST_ROLE:-ROLE_PUBLISHER}"
-# Directory holding the shared ed25519_keys.py (the one WBA entry shape +
-# validity-window helper, copied in by the Dockerfile). Overridable so the
-# harness guard suite can run this heredoc against the in-repo scripts/lib.
-PY_LIB_DIR="${FORA_PY_LIB_DIR:-/opt/fora/lib}"
+KEYS_DIR=/keys
+# The shared ed25519_keys.py (the one WBA entry shape + validity-window helper),
+# copied in by the Dockerfile.
+PY_LIB_DIR=/opt/fora/lib
 WEB_ROOT=/var/www/fora
+# One server block per host; nginx.conf includes /etc/nginx/hosts/*.conf.
+HOSTS_CONF=/etc/nginx/hosts
+# The response-signature headers of each host's directory, included only by that
+# host's directory location. They stay outside the glob above: included at the
+# http level, every host's signature would be sent with every response.
+SIGNATURES=/etc/nginx/signatures
 
-mkdir -p "$WEB_ROOT/.well-known"
-
-if [ ! -s "$KEY_FILE" ]; then
-    echo "publisher-jwks: signing key not readable at $KEY_FILE" >&2
-    exit 1
-fi
-
-EXCHANGES_JSON="${EXCHANGES_JSON:-}" \
-CATALOG_CONTRIBUTORS_JSON="${CATALOG_CONTRIBUTORS_JSON:-}" \
-MANIFEST_DOMAIN_OVERRIDE="${MANIFEST_DOMAIN_OVERRIDE:-}" \
-python3 - "$KEY_FILE" "$WEB_ROOT/.well-known/fora.json" "$KID" "$ROLE" "$PY_LIB_DIR" <<'PY'
+# render_host KEY HOST ROLE EXCHANGES_JSON CATALOG_CONTRIBUTORS_JSON writes HOST's
+# fora.json and Web Bot Auth directory under $WEB_ROOT/HOST/.well-known, from the
+# private key in KEY. The manifest's domain is the key's issuer: the override is
+# cleared, so the check after rendering compares the key's own claim to the host.
+render_host() {
+    mkdir -p "$WEB_ROOT/$2/.well-known"
+    EXCHANGES_JSON="$4" \
+    CATALOG_CONTRIBUTORS_JSON="$5" \
+    MANIFEST_DOMAIN_OVERRIDE="" \
+    python3 - "$1" "$WEB_ROOT/$2/.well-known/fora.json" "" "$3" "$PY_LIB_DIR" <<'PY'
 import base64
 import json
 import os
@@ -98,14 +112,14 @@ kid = kid_override or spec.get("kid") or "publisher-key"
 # Optional exchanges[] (Phase-2 demo): the Broker's publisher-probe reads this
 # to route a resolve to the owning Exchange. Each EXCHANGES_JSON entry carries
 # {domain, endpoint, supported_profiles?}; per-entry supported_profiles are
-# hoisted to a top-level supported_profiles set (the unified AuthorizedExchange
-# has no per-entry slot, matching the edge's publisher-manifest.mjs emitter).
+# hoisted to a top-level supported_profiles set, because the protocol's
+# AuthorizedExchange has no per-entry slot.
 exchanges_env = os.environ.get("EXCHANGES_JSON", "").strip()
 exchanges_in = json.loads(exchanges_env) if exchanges_env else []
-# An entry's ext is carried through as given, as the edge's manifest builder
-# does: it is where a publisher attests ext.resource_owner_id, the payee an
-# Exchange reads before it accepts a catalog push for the site, so a manifest
-# without it lists an Exchange that refuses every entry pushed for this host.
+# An entry's ext is carried through as given: it is where a publisher attests
+# ext.resource_owner_id, the payee an Exchange reads before it accepts a
+# catalog push for the site, so a manifest without it lists an Exchange that
+# refuses every entry pushed for this host.
 exchanges = [
     {
         "domain": e["domain"],
@@ -149,15 +163,16 @@ contributors = (
 # Keyless commercial overlay — identity keys moved to the WBA directory below.
 manifest = {
     "ver": "1.0",
-    # role generalized (v1.1): ROLE_PUBLISHER (default) or ROLE_AGENT for the
-    # lazy-registration e2e. domain keeps the env-override-aware derivation.
+    # role generalized (v1.1): ROLE_PUBLISHER for a host PUBLISHER_HOSTS_JSON
+    # names, ROLE_AGENT for any other. domain keeps the env-override-aware
+    # derivation.
     "role": role,
     "domain": domain,
 }
 # catalog_contributors / exchanges / supported_profiles are publisher-only fields
 # (the self-signup Gate-1 list + the publisher-probe routing); an agent manifest
-# (lazy-registration e2e) omits them. Publisher fields stay env-driven (ours), so
-# the multi-publisher demo can vary contributors/exchanges/profiles per host.
+# omits them. Publisher fields stay env-driven (ours), so the multi-publisher
+# demo can vary contributors/exchanges/profiles per host.
 if role == "ROLE_PUBLISHER":
     if contributors:
         manifest["catalog_contributors"] = contributors
@@ -179,32 +194,120 @@ print(
     f"(kid={kid}, valid_from={valid_from}, valid_until={valid_until})"
 )
 PY
+}
 
-# The Web Bot Auth profile requires the directory's response to be signed by
-# every key it lists, over "@authority";req and content-digest. nginx runs no
-# code per request, so the directory is signed once here, for the one host name
-# it is served under: DIRECTORY_AUTHORITY when set, otherwise the manifest's
-# domain, which is that host. fora-sign-directory (built into the image from
-# src/exchange/cmd/fora-sign-directory) signs through the protocol SDK, and prints the three
-# headers nginx then sends with the file (nginx.conf includes the snippet below).
-AUTHORITY="${DIRECTORY_AUTHORITY:-}"
-if [ -z "$AUTHORITY" ]; then
-    AUTHORITY="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["domain"])' \
-        "$WEB_ROOT/.well-known/fora.json")"
-fi
-SIGNATURE_HEADERS=/etc/nginx/directory-signature.conf
-fora-sign-directory -key "$KEY_FILE" -authority "$AUTHORITY" \
-    -body "$WEB_ROOT/.well-known/http-message-signatures-directory" \
-  | while IFS= read -r line; do
-        name="${line%%: *}"
-        value="${line#*: }"
-        printf "add_header %s '%s' always;\n" "$name" "$value"
-    done >"$SIGNATURE_HEADERS"
-if [ "$(wc -l <"$SIGNATURE_HEADERS")" -ne 3 ]; then
-    echo "publisher-jwks: signing the directory for $AUTHORITY failed" >&2
+# sign_host KEY HOST signs HOST's directory response. The Web Bot Auth profile
+# requires a directory's response to be signed by every key it lists, over
+# "@authority";req and content-digest, so each host's response is signed for that
+# host's own name. nginx runs no code per request, so the response is signed once,
+# here: fora-sign-directory (built into the image from
+# src/exchange/cmd/fora-sign-directory) signs through the protocol SDK and prints
+# the three headers nginx then sends with the file.
+sign_host() {
+    headers="$SIGNATURES/$2.conf"
+    fora-sign-directory -key "$1" -authority "$2" \
+        -body "$WEB_ROOT/$2/.well-known/http-message-signatures-directory" \
+      | while IFS= read -r line; do
+            name="${line%%: *}"
+            value="${line#*: }"
+            printf "add_header %s '%s' always;\n" "$name" "$value"
+        done >"$headers"
+    if [ "$(wc -l <"$headers")" -ne 3 ]; then
+        echo "key-directories: signing the directory for $2 failed" >&2
+        exit 1
+    fi
+}
+
+# write_server HOST writes the server block that serves HOST's two documents. An
+# add_header is inherited from an outer level only when a level sets none of its
+# own, so each location states every header it sends.
+write_server() {
+    cat >"$HOSTS_CONF/$1.conf" <<EOF
+server {
+    listen 80;
+    server_name $1;
+    root $WEB_ROOT/$1;
+
+    location = /.well-known/fora.json {
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        try_files \$uri =404;
+    }
+
+    location = /.well-known/http-message-signatures-directory {
+        default_type application/http-message-signatures-directory+json;
+        add_header Cache-Control "no-store" always;
+        include $SIGNATURES/$1.conf;
+        try_files \$uri =404;
+    }
+
+    location / { return 404; }
+}
+EOF
+}
+
+# A restart renders exactly what is mounted now, never what an earlier start left.
+rm -rf "$WEB_ROOT" "$HOSTS_CONF" "$SIGNATURES"
+mkdir -p "$WEB_ROOT" "$HOSTS_CONF" "$SIGNATURES"
+
+hosts=""
+for key in "$KEYS_DIR"/*.json; do
+    [ -e "$key" ] || continue
+    host="$(basename "$key" .json)"
+    # The name becomes a path and an nginx server_name, so it must be a host name.
+    case "$host" in
+        "" | .* | -* | *[!a-z0-9.-]*)
+            echo "key-directories: refusing $key: '$host' is not a host name" >&2
+            exit 1
+            ;;
+    esac
+    if [ ! -s "$key" ]; then
+        echo "key-directories: signing key not readable at $key" >&2
+        exit 1
+    fi
+    # The host's role and publisher fields: three lines, the role first.
+    settings="$(python3 -c '
+import json, os, sys
+entry = json.loads(os.environ.get("PUBLISHER_HOSTS_JSON") or "{}").get(sys.argv[1])
+if entry is None:
+    print("ROLE_AGENT\n\n")
+else:
+    print("ROLE_PUBLISHER")
+    print(json.dumps(entry["exchanges"]) if "exchanges" in entry else "")
+    print(json.dumps(entry["catalog_contributors"]) if "catalog_contributors" in entry else "")
+' "$host")"
+    role="$(printf '%s\n' "$settings" | sed -n 1p)"
+    exchanges="$(printf '%s\n' "$settings" | sed -n 2p)"
+    contributors="$(printf '%s\n' "$settings" | sed -n 3p)"
+
+    render_host "$key" "$host" "$role" "$exchanges" "$contributors"
+    domain="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["domain"])' \
+        "$WEB_ROOT/$host/.well-known/fora.json")"
+    if [ "$domain" != "$host" ]; then
+        echo "key-directories: $key is $domain's key, not $host's; serving it as $host would" \
+            "publish one identity's key under another identity's name" >&2
+        exit 1
+    fi
+    sign_host "$key" "$host"
+    write_server "$host"
+    hosts="$hosts $host"
+done
+
+if [ -z "$hosts" ]; then
+    echo "key-directories: no key is mounted under $KEYS_DIR" >&2
     exit 1
 fi
-echo "publisher-jwks: signed the directory response for $AUTHORITY"
+# A publisher host the map names but no key serves would be missing from the stack
+# without a word, so it stops the start too. $hosts is unquoted on purpose: one
+# argument per host.
+python3 -c '
+import json, os, sys
+named = set(json.loads(os.environ.get("PUBLISHER_HOSTS_JSON") or "{}"))
+missing = sorted(named - set(sys.argv[1:]))
+if missing:
+    sys.exit(f"key-directories: PUBLISHER_HOSTS_JSON names {missing}, which no mounted key serves")
+' $hosts
 
-echo "publisher-jwks: seeding complete; exec-ing $*"
+nginx -t -q
+echo "key-directories: serving$hosts; exec-ing $*"
 exec "$@"

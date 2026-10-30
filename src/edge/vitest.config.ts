@@ -3,8 +3,9 @@ import { defineConfig } from 'vitest/config';
 
 import { signWbaDirectory } from './scripts/sign-wba-directory.mjs';
 import { WORKERS_COMPAT } from './scripts/workers-compat.mjs';
+import { EARLIER_RELEASE_SETTINGS } from './tests/helpers/earlier-release-settings.js';
 
-// One config, six projects (vitest `test.projects`) — each project's
+// One config, seven projects (vitest `test.projects`) — each project's
 // membership is its test DIRECTORY, so there are no hand-mirrored
 // include/exclude lists to keep in sync:
 //
@@ -20,6 +21,10 @@ import { WORKERS_COMPAT } from './scripts/workers-compat.mjs';
 //                             /article/: the bot gate applies there alone
 //   tests/wellknown-signed/   same runtime, a publisher whose key directory is
 //                             served pre-signed (WBA_SIGNED_DIRECTORY_JSON)
+//   tests/legacy-settings/    same runtime, a Worker deployed from a package an
+//                             earlier release built: it still carries the
+//                             settings that release read to make the discovery
+//                             document and the RSL file itself
 //   tests/node/               plain Node: fs-reading parity/schema guards, the
 //                             console-spy log suites, and the programmatic AWS
 //                             Lambda / Fastly harnesses (no CLI dependencies)
@@ -36,11 +41,6 @@ import { WORKERS_COMPAT } from './scripts/workers-compat.mjs';
 const BASE_BINDINGS = {
   EXCHANGE_URL: 'https://exchange.test',
   EXCHANGE_WBA_URL: 'https://exchange.test/.well-known/http-message-signatures-directory',
-  RSL_BODY: '# test rsl',
-  ACME_TOKENS_JSON: '{"demo":"response-body"}',
-  PROVIDER: 'pub.test',
-  EXCHANGES_JSON:
-    '[{"domain":"exchange.test","endpoint":"https://exchange.test","supported_profiles":["fora-news-v1"]}]',
   ORIGIN_URL: 'https://origin.pub.test',
 };
 
@@ -124,6 +124,10 @@ export default defineConfig(async () => ({
         ...BASE_BINDINGS,
         ...(await signedDirectoryBindings()),
       }),
+      // A Worker whose package was built by an earlier release: it carries the
+      // settings that release made the discovery document and the RSL file
+      // from. It must start, ignore them, and pass both addresses through.
+      workersProject('legacy-settings', { ...BASE_BINDINGS, ...EARLIER_RELEASE_SETTINGS }),
       {
         test: {
           name: 'node',

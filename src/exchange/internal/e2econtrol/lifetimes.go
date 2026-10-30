@@ -2,7 +2,7 @@
 
 // Package e2econtrol is the Exchange's e2e-only control service (ADR-028 D6).
 //
-// It sets state the e2e suite needs and no admin RPC reaches, through the two
+// It sets state the e2e suite needs and no admin RPC reaches, through the four
 // controls ADR-028 D6 names for the Exchange:
 //
 //   - per-tenant offer and delivery-URL lifetimes, so a test can make one seat
@@ -12,7 +12,11 @@
 //     not;
 //   - the tenant relay policy, whether a seat accepts purchases a Broker relays,
 //     set through the tenant repository rather than by a test writing the
-//     database (relay.go).
+//     database (relay.go);
+//   - the tenant agent-activation policy, whether an agent's first Register
+//     opens an active account or one held for review (activation.go);
+//   - an account's active flag in the reference System of Record, the
+//     operator's out-of-band approval of a held account (accounts.go).
 //
 // Every file in this package carries the e2e build constraint, and only the
 // e2e-tagged wiring in cmd/server imports it. A build without the tag that

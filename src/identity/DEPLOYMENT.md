@@ -100,7 +100,7 @@ this is the only place this document names one, and every command below reuses
 it:
 
 ```bash
-VERSION=1.0.0-rc.5
+VERSION=1.0.0
 docker pull ghcr.io/fora-protocol/identity:$VERSION
 ```
 

@@ -41,7 +41,7 @@ modules/                 reusable building blocks (flat, purpose-named)
   route53-dns/           the Route 53 counterpart of cloudflare-dns
   cloudflare-edge/       the edge worker (the publisher handoff module)
   aws-cloudfront-edge/   the CloudFront + Lambda@Edge counterpart of cloudflare-edge
-  publisher-manifest/    renders the publisher-manifest env values both edge modules consume
+  publisher-manifest/    renders the demo publisher's fora.json, which its origin serves
 stacks/                  root configurations you actually apply
   staging-aws/           the all-inclusive staging environment
   demo-aws/              the all-AWS demo environment (Route 53 + CloudFront/Lambda@Edge)

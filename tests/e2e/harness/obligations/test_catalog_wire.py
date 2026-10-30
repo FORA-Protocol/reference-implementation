@@ -31,6 +31,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from fora_sdk import to_wire
 from fora_sdk.client import CallError
 
 from ..catalog_calls import (
@@ -61,7 +62,6 @@ from ..fresh_agent import FreshAgent
 from ..malformed import Alteration, Mutation, malformed, patch_body
 from ..money_path import typed_reasons
 from ..obligation_registry import Obligation, obligation
-from ..seed import SeededFixture
 from ..stack_urls import StackURLs
 
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
@@ -110,7 +110,6 @@ def _set(field: str, value: object) -> Edit:
 @obligation(Obligation.CATALOG_009, negative=True)
 def test_an_empty_push_is_refused(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """A push of no entries is refused, never answered with zero counts.
@@ -131,7 +130,6 @@ def test_an_empty_push_is_refused(
 @obligation(Obligation.CATALOG_009, negative=True)
 def test_a_push_of_257_entries_is_refused_whole(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """257 valid entries, one over the cap: refused by wire validation, none of them stored."""
@@ -157,7 +155,6 @@ def _assert_wire_validation_refusal(error: CallError) -> None:
 @CATALOG_REFUSAL_UNTYPED.mark
 def test_an_entry_with_33_terms_refuses_the_push(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """33 terms on one entry, beside a valid sibling: nothing stored."""
@@ -165,7 +162,7 @@ def test_an_entry_with_33_terms_refuses_the_push(
         compose_stack,
         fresh_agent,
         "an entry carries 33 terms",
-        _set("terms", [free_term()] * 33),
+        _set("terms", [to_wire(free_term())] * 33),
     )
 
 
@@ -173,7 +170,6 @@ def test_an_entry_with_33_terms_refuses_the_push(
 @CATALOG_REFUSAL_UNTYPED.mark
 def test_an_entry_with_a_513_character_title_refuses_the_push(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """A title one character over its 512-character cap: nothing stored."""
@@ -187,7 +183,6 @@ def test_an_entry_with_a_513_character_title_refuses_the_push(
 @pytest.mark.parametrize("shape", ["{host}/evil", "user@{host}"])
 def test_an_entry_whose_domain_is_not_a_bare_host_refuses_the_push(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
     shape: str,
 ) -> None:
@@ -204,7 +199,6 @@ def test_an_entry_whose_domain_is_not_a_bare_host_refuses_the_push(
 @pytest.mark.parametrize("path", ["relative/page", "/page?x=1", "/a b"])
 def test_an_entry_whose_path_breaks_the_path_rule_refuses_the_push(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
     path: str,
 ) -> None:
@@ -215,7 +209,6 @@ def test_an_entry_whose_path_breaks_the_path_rule_refuses_the_push(
 @obligation(Obligation.CATALOG_019)
 def test_an_omitted_mutability_is_offered_static_and_dynamic_as_pushed(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """No resource_mutability: the offer says STATIC. DYNAMIC: the offer says DYNAMIC."""
@@ -235,7 +228,6 @@ def test_an_omitted_mutability_is_offered_static_and_dynamic_as_pushed(
 @CATALOG_REFUSAL_UNTYPED.mark
 def test_an_explicit_unspecified_mutability_refuses_the_push(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """resource_mutability RESOURCE_MUTABILITY_UNSPECIFIED: nothing stored."""
@@ -322,7 +314,6 @@ _TERM_RULES = [
 @pytest.mark.parametrize(("why", "edit"), _TERM_RULES)
 def test_a_term_breaking_a_wire_rule_refuses_the_push(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
     why: str,
     edit: Edit,

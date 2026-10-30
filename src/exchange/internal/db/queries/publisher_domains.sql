@@ -26,6 +26,20 @@ INSERT INTO fora.publisher_domains (domain, publisher_id, signing_scheme, cdn)
 VALUES ($1, $2, $3, $4)
 RETURNING *;
 
+-- name: CreatePublisherDomainIfAbsent :one
+-- Creates a site an operator's boot fixture declares (ADR-029), with its signing
+-- scheme and, for an AWS_CLOUDFRONT_RSA site, its CloudFront key-pair id, unless
+-- the domain is already stored. A stored site is left as it is, whichever payee
+-- owns it; the caller reads it back and refuses a fixture that declares it under
+-- another payee. Registration takes no key-pair id and refuses an existing
+-- domain; an operator provisions the RSA sites registration cannot, and declares
+-- them again on every boot. Deployment-wide for the reason GetPublisherDomain
+-- gives.
+INSERT INTO fora.publisher_domains (domain, publisher_id, signing_scheme, cdn, cloudfront_key_pair_id)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (domain) DO NOTHING
+RETURNING *;
+
 -- name: SetPublisherDomainKeyPairID :execrows
 -- Records the CloudFront key-pair id the publisher got back from AWS.
 --

@@ -16,7 +16,6 @@ from typing import Any, cast
 import pytest
 
 from ..broker_purchase import discover_group
-from ..constants import requester
 from ..exchanges import EXCHANGE_A_DOMAIN
 from ..fresh_agent import FreshAgent
 from ..seed import DEMO_PHILOSOPHY_DOMAIN
@@ -41,7 +40,6 @@ def test_single_uri_browse_returns_offers_with_prices_and_terms(fresh_agent: Fre
         EXCHANGE_A_DOMAIN,
         _RESOURCE_URI,
         "single-URI browse",
-        requester=requester(fresh_agent.agent_id, user_type="individual", geography="US"),
     )
     offers = [verified.offer for verified in group.result.verified]
     # (b)

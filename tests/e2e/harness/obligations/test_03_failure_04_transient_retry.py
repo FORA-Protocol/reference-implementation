@@ -127,7 +127,7 @@ def test_a_discovery_retried_after_the_exchange_gave_no_answer_gets_the_same_ans
         # A Broker health probe that ran while exchange-d was down holds it
         # unroutable until the next pass; a Broker-routed test after this one
         # must find it routed again.
-        wait_until_broker_routes(fresh_agent.stack, fresh_agent.broker)
+        wait_until_broker_routes(fresh_agent.broker)
 
     retried = surfaced[-1]
     assert _answer(retried) == _answer(control), (

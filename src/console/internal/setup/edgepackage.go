@@ -100,7 +100,8 @@ func (p *EdgePackages) For(s Site, settings map[string]string) (File, error) {
 // The worker file is the same for every publisher -- its settings arrive as
 // variables the platform hands it -- so what makes the package theirs is the
 // manifest beside it. Handing over the worker alone would leave them setting
-// six variables by hand, which is the work this is supposed to remove.
+// its variables and writing a route by hand, which is the work this is
+// supposed to remove.
 func (p *EdgePackages) cloudflare(s Site, settings map[string]string) (File, error) {
 	worker, err := p.read(releaseCloudflare)
 	if err != nil {
@@ -124,8 +125,8 @@ func (p *EdgePackages) cloudflare(s Site, settings map[string]string) (File, err
 	}
 	return File{
 		Name: FileCloudflarePackage, ContentType: "application/zip", Body: body,
-		Description: "The Worker and its wrangler.toml, with your settings, your " +
-			"route and nothing left to fill in. Unpack it and deploy.",
+		Description: "The Worker and its wrangler.toml, with your settings and your route. " +
+			"Nothing to fill in.",
 	}, nil
 }
 

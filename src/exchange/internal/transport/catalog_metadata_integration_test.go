@@ -245,6 +245,16 @@ func parityTransact(t *testing.T, h *pushHarness, o *forav1.Offer, scopes []stri
 	}
 }
 
+// parityTransactGated is parityTransact for a subscription-gated offer bought
+// by the gated agent with its chain.
+func parityTransactGated(t *testing.T, h *pushHarness, o *forav1.Offer, g *gatedAccess) {
+	t.Helper()
+	items := parityExecuteGated(t, h, o, g)
+	if len(items) != 1 || items[0].GetTransactionId() == "" {
+		t.Fatalf("gated parity execute: items = %v, want one executed item", items)
+	}
+}
+
 // parityExecute runs the same multisig execute as parityTransact but returns the
 // result items instead of asserting success on them. A per-item denial (a
 // tampered offer, for instance) is an in-body result of a request that succeeds
@@ -265,10 +275,30 @@ func parityExecuteVia(
 	t *testing.T, h *pushHarness, o *forav1.Offer, scopes []string, direct bool,
 ) []*forav1.TransactionResultItem {
 	t.Helper()
+	return parityExecuteAs(t, h, o, scopes, direct, nil)
+}
+
+// parityExecuteGated is parityExecute for a subscription-gated offer: the
+// per-call agent is the gated agent, so the chain on the requester is bound to
+// the key that signs the acceptance.
+func parityExecuteGated(t *testing.T, h *pushHarness, o *forav1.Offer, g *gatedAccess) []*forav1.TransactionResultItem {
+	t.Helper()
+	return parityExecuteAs(t, h, o, nil, false, g)
+}
+
+// parityExecuteAs is the one body behind the parity executes. A nil gated runs
+// as a fresh per-call agent; a gated access runs as that agent with its chain.
+func parityExecuteAs(
+	t *testing.T, h *pushHarness, o *forav1.Offer, scopes []string, direct bool, gated *gatedAccess,
+) []*forav1.TransactionResultItem {
+	t.Helper()
 	agentID := "agent-parity-" + uuid.NewString()
 	agentPub, agentPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("parity agent keygen: %v", err)
+	}
+	if gated != nil {
+		agentPub, agentPriv = gated.agentPub, gated.agentPriv
 	}
 	// httpsig resolver keys by RFC 7638 thumbprint (WBA keyid); agents row by
 	// the directory identity (agentID).
@@ -287,6 +317,9 @@ func parityExecuteVia(
 	}
 	txID := "tx-" + uuid.NewString()
 	requester := newRequester(agentID, "agent.example", scopes...)
+	if gated != nil {
+		requester.Delegation = &forav1.Delegation{Token: gated.token(t)}
+	}
 	// ITEMS-ONLY spine: the offer + its detached agent acceptance ride
 	// in items[]; single-offer mode is gone. The acceptance is signed by the
 	// per-call agent key over the GENUINE presented offer bytes, requester, and

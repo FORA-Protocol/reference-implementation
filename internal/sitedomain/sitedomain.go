@@ -6,8 +6,8 @@
 // produces a row whose key does not match what the fetch resolves. The console
 // applies it because it asks a publisher to type that value, and it makes a DNS
 // query and a request to whatever they typed -- a rule that lived only in the
-// Exchange would let a typo become an outbound request first and a refusal
-// three steps later.
+// Exchange would let a typo become an outbound request before anything
+// refused it.
 //
 // The sentences are here rather than at either caller, so a publisher reading
 // "that is not a hostname" reads the same sentence wherever it was refused.

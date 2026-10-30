@@ -8,7 +8,6 @@ import { describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app.js';
 import { classifyClient } from '../../src/bot-classification.js';
 import { cfBotSignal } from '../../src/entries/cloudflare.js';
-import type { AppDeps } from '../../src/types.js';
 
 describe('classifyClient', () => {
   it.each([
@@ -165,7 +164,6 @@ describe('classifyClient', () => {
 describe('bot signal at the app surface', () => {
   it('403s a verified AI crawler even when it presents a browser UA', async () => {
     const app = createApp({
-      manifest: { ver: '1.0', role: 'ROLE_PUBLISHER', domain: 'pub.test' } as AppDeps['manifest'],
       resolveKey: async () => undefined,
       sameZoneOrigin: true,
       botSignal: () => ({ verifiedAiCrawler: true }),

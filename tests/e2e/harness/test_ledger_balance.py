@@ -1,8 +1,9 @@
 """E2E: a purchase moves the buyer's money on the Exchange's ledger, and a refusal does not.
 
-Every Exchange in this stack bills on its own TigerBeetle ledger, one ledger per
-currency. This suite observes that ledger only through public surfaces, all of
-them driven by the SDK's own client and signed with the buyer's own key:
+Every Exchange in this stack bills on the stack's one TigerBeetle cluster, under
+its own id namespace, with one ledger per currency. This suite observes the
+ledger only through public surfaces, all of them driven by the SDK's own client
+and signed with the buyer's own key:
 
 * ``GetAccountStatus`` reports the buyer's available balance in every currency
   the Exchange bills in, read live from the ledger;
@@ -14,8 +15,8 @@ Nothing here reads the ledger, the database or the Exchange's process.
 
 The paying buyer is the test's own agent (``fresh_agent``), whose account its own
 signed Register opened with the welcome credit in both currencies. The refused
-buyer is the seed's credit-less buyer, a fixed identity because its account has
-to be opened while the seats hold new agents for review; see ``seed_accounts``.
+buyer is the seed's credit-less buyer, from its fixture, because its account has
+to be opened while the seats hold new agents for review; see ``seed_agents``.
 Every claim here is about the CHANGE around one purchase, never about an
 absolute balance.
 
@@ -40,6 +41,7 @@ from .fresh_agent import FreshAgent
 from .ledger import BILLED_CURRENCIES, balances
 from .sdk_client import offer_verifier, sdk_exchange_client
 from .seed import SeededFixture
+from .seed_accounts import SeededBuyer
 
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
@@ -105,7 +107,10 @@ def test_a_paid_purchase_lowers_the_balance_in_its_currency_by_its_cost(
 
 
 def test_a_refused_purchase_moves_no_money(
-    compose_stack: StackURLs, verifier: Verifier, seeded: SeededFixture
+    compose_stack: StackURLs,
+    verifier: Verifier,
+    seeded: SeededFixture,
+    credit_less_buyer: SeededBuyer,
 ) -> None:
     """The credit-less buyer is refused for its balance, and its balances stay where they were.
 
@@ -119,8 +124,8 @@ def test_a_refused_purchase_moves_no_money(
             compose_stack,
             EXCHANGE_C_DOMAIN,
             verifier,
-            agent_id=seeded.nobilling_agent_id,
-            key_path=seeded.nobilling_agent_key_path,
+            agent_id=credit_less_buyer.agent_id,
+            key_path=credit_less_buyer.key_path,
         )
     ) as client:
         before = balances(client, EXCHANGE_C_DOMAIN)

@@ -70,7 +70,7 @@ this is the only place this document names one, and every command below reuses
 it:
 
 ```bash
-VERSION=1.0.0-rc.5
+VERSION=1.0.0
 docker pull ghcr.io/fora-protocol/exchange:$VERSION
 ```
 
@@ -330,7 +330,15 @@ One more line may appear, between `rsa signing key loaded` and
 
 That is expected on a first boot, before you have created the seat. It is
 **not** expected afterwards: while it appears, no agent can register and
-therefore no agent can buy. Create the seat (`RUNBOOK.md` §4.2) and restart.
+therefore no agent can buy. Create the seat and restart: declare it in the boot
+fixture ([`CONFIGURATION.md`](CONFIGURATION.md) §2.1), or write it by SQL
+(`RUNBOOK.md` §4.2).
+
+With `EXCHANGE_BOOT_FIXTURE_FILE` set, two more lines appear. `boot fixture
+loaded` comes first of all, before the first `migrations applied`, and `boot
+fixture applied` comes after `sor adapter: postgres`, naming each row it created.
+A seat the fixture declares is created before the default-tenant check, so the
+warning above does not appear for it.
 
 Read the rest of the list as a checklist, because several of the lines are
 absent rather than wrong when a setting is missing:

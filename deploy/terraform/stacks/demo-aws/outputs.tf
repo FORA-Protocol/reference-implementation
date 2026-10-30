@@ -156,13 +156,22 @@ output "postgres_password" {
 
 output "lambda_edge_config" {
   # The single source of truth for the baked Lambda config. Write it to a
-  # file and feed it to the build script:
+  # file and feed it to the build script with the publisher hostname:
   #   terraform output -raw lambda_edge_config > lambda-edge-config.json
-  #   ../../scripts/build-lambda-edge.sh lambda-edge-config.json
+  #   ../../scripts/build-lambda-edge.sh lambda-edge-config.json "$(terraform output -raw lambda_edge_domain)"
   # Derived only from variables, so it is available from the very first
   # apply — including the bootstrap apply with deploy_edge = false.
   description = "Per-deployment config JSON for build-lambda-edge.sh — the values baked into the Lambda bundle. Re-render, rebuild, and re-apply after changing any hostname variable, fora_enforce_binding or licensed_paths."
   value       = jsonencode(local.lambda_edge_config)
+}
+
+output "lambda_edge_domain" {
+  # The publisher hostname build-lambda-edge.sh names the bundle's index.mjs
+  # for. The same value as publisher_hostname, but derived only from
+  # variables and so available from the bootstrap apply with
+  # deploy_edge = false, when publisher_hostname is still null.
+  description = "Publisher hostname to pass build-lambda-edge.sh beside the lambda_edge_config output. Available from the first apply."
+  value       = local.publisher_fqdn
 }
 
 output "cloudfront_distribution_id" {

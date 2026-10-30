@@ -7,20 +7,11 @@ package transport_test
 // integration_helper_test.go to keep both files inside the 800-line test cap.
 //
 // Agents are seeded through the production repository surface (repo.AgentRepo),
-// and publisher sites through repotest, which drives the registration write
-// ports, so the fixture and the code under test agree on their encoding by
-// construction.
-//
-// Seats are not, and this is the file that says so. Every write that creates a
-// tenant here calls the generated sqlc querier directly, because the repository
-// has no tenant-creation port (the relay opt-in has a port of its own,
-// repo.TenantRelayPolicyRepo, and goes through it): repo.TenantWriteRepo carries setters on a row that
-// already exists and no way to make one. The Testing Doctrine's fallback tier
-// is the repository interface; a raw querier is the tier below that, which it
-// does not sanction at all. This is that tier, taken because the surface a test
-// should reach does not exist. Adding the port and moving these arranges onto
-// it is tracked as its own work — the call sites across this package predate
-// this file.
+// publisher sites through repotest, which drives the registration write ports,
+// and seats through repotest.SeedSeat, which drives repo.SeatProvisionRepo: the
+// port a deployment's boot fixture creates its seats through, since nothing that
+// serves a request creates one. The fixture and the code under test therefore
+// agree on their encoding by construction.
 
 import (
 	"context"
@@ -32,7 +23,6 @@ import (
 	connect "connectrpc.com/connect"
 	foraconnect "github.com/FORA-Protocol/protocol/gen/go/fora/v1/forav1connect"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	rwtestutil "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown/testutil"
@@ -103,7 +93,7 @@ func (h *testHarness) addCallerWithKey(
 	return foraconnect.NewExchangeServiceClient(client, h.server.URL, connect.WithGRPC()), priv
 }
 
-// addTenant inserts a SECOND seat row + signing key, and registers a caller for
+// addTenant creates a SECOND seat + signing key, and registers a caller for
 // it via addCaller. Returns the new tenant_id + the new caller's
 // ExchangeService client.
 //
@@ -121,17 +111,8 @@ func (h *testHarness) addTenant(t *testing.T, tenantSlug, agentID string) (tenan
 	if err != nil {
 		t.Fatalf("addTenant ed25519: %v", err)
 	}
-	keyRef := repotest.SeatEd25519KeyRef(tenantID)
-	h.keystore.PutEd25519(keyRef, pub, priv)
-	if _, err := h.queries.InsertTenant(h.ctx, sqlc.InsertTenantParams{
-		TenantID:        tenantID,
-		Domain:          "seat-" + tenantSlug + ".example",
-		Ed25519KeyRef:   keyRef,
-		ReportingPolicy: []byte(`{}`),
-		RsaKeyRef:       pgtype.Text{},
-	}); err != nil {
-		t.Fatalf("insert seat %q: %v", tenantID, err)
-	}
+	h.keystore.PutEd25519(repotest.SeatEd25519KeyRef(tenantID), pub, priv)
+	repotest.SeedSeat(t, h.ctx, h.pool, repotest.Seat{ID: tenantID, Domain: "seat-" + tenantSlug + ".example"})
 	client = h.addCaller(t, agentID, "AGENT")
 	return tenantID, client
 }
@@ -174,33 +155,6 @@ func wireBound(t *testing.T, message, field protoreflect.Name) int {
 	return bound
 }
 
-// insertTenantRow writes one seat row under a generated id and key ref, and
-// returns both. `domain` is the hostname the seat answers on, never a
-// publisher's site.
-//
-// It is the writer for the generated-id path, not for every seat this file
-// seeds: addTenant above writes its own InsertTenantParams literal for the
-// scenarios that need a caller-chosen id and key ref. Two literals, and a change
-// to the tenants table has to reach both.
-//
-// It calls the InsertTenant query directly, for the reason the file header
-// gives: there is no repository port that creates a tenant.
-func insertTenantRow(t *testing.T, ctx context.Context, q *sqlc.Queries, domain string) (tenantID, keyRef string) {
-	t.Helper()
-	tenantID = "t_" + uuid.NewString()
-	keyRef = repotest.SeatEd25519KeyRef(tenantID)
-	if _, err := q.InsertTenant(ctx, sqlc.InsertTenantParams{
-		TenantID:        tenantID,
-		Domain:          domain,
-		Ed25519KeyRef:   keyRef,
-		ReportingPolicy: []byte(`{}`),
-		RsaKeyRef:       pgtype.Text{},
-	}); err != nil {
-		t.Fatalf("insert seat for %s: %v", domain, err)
-	}
-	return tenantID, keyRef
-}
-
 // seedSiteForDomain registers one publisher site and lists it ACTIVE on the
 // harness's seat, which is what a push for that domain needs. It returns the
 // SEAT's tenant id: every entry a push accepts is stored under the seat, so that
@@ -230,12 +184,11 @@ func seedSite(t *testing.T, h *pushHarness) (tenantID, domain string) {
 	return seedSiteForDomain(t, h, domain), domain
 }
 
-// seedForeignSeat inserts a SECOND seat row, one this deployment does not sell
+// seedForeignSeat creates a SECOND seat, one this deployment does not sell
 // as. Nothing can push under it — the push path resolves the seat from
 // EXCHANGE_DOMAIN — which is exactly what the tests that name it on the wire
 // are proving.
 func seedForeignSeat(t *testing.T, h *pushHarness) string {
 	t.Helper()
-	tenantID, _ := insertTenantRow(t, h.ctx, h.queries, "seat-"+uuid.NewString()+".example")
-	return tenantID
+	return repotest.SeedSeat(t, h.ctx, h.pool, repotest.Seat{Domain: "seat-" + uuid.NewString() + ".example"})
 }

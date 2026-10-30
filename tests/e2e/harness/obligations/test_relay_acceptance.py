@@ -28,7 +28,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from fora_sdk.wire import to_wire
 from wire.models import BrokerTransactionResponse
 
 from ..defects import RELAYED_ACCEPTANCE_REFUSES_WHOLE_SUBREQUEST
@@ -94,6 +93,6 @@ def test_an_item_whose_relayed_acceptance_does_not_verify_is_denied_and_the_rest
     assert_charged(
         after_control[EXCHANGE_A_DOMAIN],
         buyer.balances(EXCHANGE_A_DOMAIN)[EXCHANGE_A_DOMAIN],
-        to_wire(kept.cost) if kept.cost else None,
+        kept.cost,
         "the altered purchase charges only the item whose acceptance verifies",
     )

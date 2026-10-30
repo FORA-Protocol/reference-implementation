@@ -41,7 +41,6 @@ so one publisher action is one thread across both services.
 |---|---|---|
 | `console.auth_failed` | ERROR | A sign-in could not be completed. The cause is on the line; the person saw a sentence, not the cause. |
 | `console.exchange_call_failed` | ERROR | A call to the Exchange did not succeed. Check the status on the line before anything else. |
-| `console.form_refused` | WARN | A form was refused. Ordinary when a publisher mistypes a domain; a burst of them is not. |
 | `console.bundle_failed` | ERROR | A publisher's files could not be produced. Their registration is unaffected. |
 | `console.render_failed` | ERROR | A page failed part-way through writing. The person saw a truncated page. |
 | `console.read_not_found` | INFO | A dashboard page named a transaction or resource the signed-in person's publisher does not hold, and they saw the not-found page. The line carries who asked, as `oidc_issuer` and `oidc_subject`. Ordinary after a mistyped or shared address; a burst with one subject is someone trying ids. |
@@ -55,8 +54,8 @@ Worth waking someone for:
 - Any `console.auth_failed` rate above a trickle. A provider outage, or a
   secret that was rotated on one side only.
 
-Not worth waking someone for: `console.form_refused` or `console.read_not_found`.
-Those are publishers mistyping domains and addresses.
+Not worth waking someone for: `console.read_not_found`. Those are publishers
+following mistyped or shared addresses.
 
 ---
 
@@ -72,8 +71,9 @@ Those are publishers mistyping domains and addresses.
 | Sign-in fails at the provider, before reaching us | The redirect address does not match what is registered | Compare all three spellings; they must be identical |
 | A publisher's check never passes | Their file does not match | The page names the reason. Each one is one edit to the file they downloaded |
 | A publisher is told they already have 10 domains that are not verified | They hold the most domains one publisher may hold saved and not verified | They finish setting one up, or the operator releases one they do not want (the Exchange's runbook has the procedure) |
-| A domain stays "Not verified" | Its file is not served, its package does not answer yet, or the Exchange failed while verifying it | The domain page says what verifying needs. Once it is in place, the publisher presses **Finish setup** on the domain: the wizard reopens at the first step that does not pass yet, and its last button verifies the domain |
+| A domain stays "Not verified" | It has no terms yet, its file is not served, its package does not answer yet, or the Exchange failed while verifying it | The domain page says what verifying needs. The publisher presses **Finish setup** on the domain: the wizard reopens on its terms if none were chosen, and on **Connect your site** otherwise. That step checks the file and the package every 15 seconds while it is open, and verifies the domain once both pass |
 | Everyone is stuck on "confirm your email" | The provider is not reporting the address as verified | Check the provider's own settings; the console reads what it is told |
+| A publisher who already has domains is shown the wizard's **Your business** step | The Exchange lists no publisher for the account they signed in with: they signed in with another account at the provider, or their grant was removed | Do not have them press **Next** on it: it registers a second publisher, with none of their domains. The step has no other way out, so have them sign out instead. Find their grant on the Exchange (its runbook has the queries) and repair the sign-in or the grant first |
 | The sign-in page says "FORA Developers", or a developer's account signs in here | `CONSOLE_OIDC_ISSUER` names the developers' Zitadel instance | Point it at the publishers' instance and restart. Publishers' accounts live there, not in the developers' instance |
 | The console exits at boot: its client id or secret file is missing | The publishers' instance has not been provisioned on this machine | Run `deploy/terraform/scripts/bootstrap-identity.sh` on a stack with the `console_login_url` output; it creates the instance and writes the two files |
 | Every publisher was signed out at once, and signing in works | The console now trusts another issuer, and ends every session sealed under the old one | Expected once after the issuer changes. If it keeps happening, two consoles are running with different `CONSOLE_OIDC_ISSUER` values |
@@ -87,8 +87,9 @@ Which state the console is in:
 curl -s -o /dev/null -w '%{http_code}\n' https://console.example/healthz
 
 # Does the Exchange accept this console's signature? Sign in and open any page;
-# a 502 with "could not reach the exchange" is a network problem, a page that
-# renders with no sites when a publisher has some is an identity problem.
+# a 502 with "could not reach the exchange" is a network problem, and the
+# wizard's business step shown to a publisher who has domains is an identity
+# problem (see the table above).
 ```
 
 The accounts table answers who has signed in. `oidc_issuer` says through which
@@ -130,24 +131,29 @@ Doing step 3 first refuses every in-flight call.
 Deleting the row here signs that person out and removes nothing else. Their
 grants live in the Exchange, so they can sign in again and be exactly where
 they were. To actually remove someone's access, remove their grant at the
-Exchange.
+Exchange. That does not stop them signing in: their next sign-in opens the
+add-a-domain wizard on its business step, where **Next** registers a new
+publisher, with none of the old one's domains.
 
 ### 4.4 A publisher who cannot finish
 
 The common ones, in the order they occur:
 
 - **Their domain stays not verified.** It is saved, and nothing on it is sold
-  until it is verified. A publisher who pressed **Skip for now** on the file,
-  package or licensing step ends up here too: the last step saves the domain
-  either way, and skipping the licensing step saves it with no terms.
-  **Finish setup**, on the domain list and the domain's page, reopens the
-  wizard at the first step that does not pass, or on the licensing step when
-  both checks pass. The file step names what is wrong with the file: almost
-  always it is published at the wrong path, or edited. The package step names
-  what the site answered.
-- **They have no domain at all.** Skip for now on the domain step ends
-  registration that way, with nothing saved about a domain. It is an ordinary
-  state: My domains asks for their first one.
+  until it is verified. The wizard saves the domain on its domain step and the
+  terms on the step after it, so a publisher who pressed **Finish later**, or
+  closed the tab, ends up here too, with everything they entered kept. **Finish
+  setup**, on the domain list and the domain's page, reopens the wizard on the
+  terms if none were chosen, and on **Connect your site** otherwise. That step
+  names what is wrong with the file: almost always it is published at the
+  wrong path, or edited. It also says what the site answered when asked as an
+  AI agent.
+- **They have no domain at all.** Leaving the wizard before the domain step's
+  **Next** saves nothing about the domain. It is an ordinary state: the console
+  opens with nothing in it, and My domains has the button that adds the first
+  domain. A publisher who closed the tab before naming the business is taken
+  back to the wizard's business step from the home page, My domains and every
+  dashboard section.
 - **Their site is behind a network we do not support.** There is nothing to
   configure; this is a conversation.
 - **They saved a hostname they do not control.** They cannot verify it, ever,

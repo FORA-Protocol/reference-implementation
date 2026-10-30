@@ -11,20 +11,46 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/web"
 )
 
+// postBody is what one POST is sent with.
+type postBody struct {
+	contentType string
+	body        string
+}
+
+var (
+	// wizardCall is a placeholder body for the wizard's calls. What it holds
+	// matters to neither half of the test: a call from another site is refused
+	// before any route reads it, and a call from the console's own page only
+	// has to reach its route.
+	wizardCall = postBody{contentType: "application/json", body: "{}"}
+	// businessCall carries a real name, so a forged business step that got
+	// through would register a publisher, and the test looks for one
+	// afterwards.
+	businessCall = postBody{contentType: "application/json", body: `{"display_name":"Stoa Press"}`}
+	// signOutForm is what the sign-out button's form sends: a form with no
+	// fields.
+	signOutForm = postBody{contentType: "application/x-www-form-urlencoded", body: ""}
+)
+
 // stateChangingRoutes is every POST the console serves: the wizard's calls and
-// the sign-out. A route added to the console without being added here is a
-// route this test does not prove is protected.
-var stateChangingRoutes = []string{
-	web.APIPublisherPath,
-	web.APILookupPath,
-	web.APIFilesPath,
-	web.APICheckManifestPath,
-	web.APICheckEdgePath,
-	web.APIPagePath,
-	web.APITermsPreviewPath,
-	web.APIRegisterPath,
-	web.APIProgressPath,
-	auth.LogoutPath,
+// the sign-out. The sign-out is sent the way its form sends it, the business
+// step's call with a name in it, and the other calls carry the placeholder.
+// A route added to the console without being added here is a route this test
+// does not prove is protected. The sign-out is last, because it ends the
+// session the others run under.
+var stateChangingRoutes = []struct {
+	path string
+	postBody
+}{
+	{web.APIPublisherPath, businessCall},
+	{web.APILookupPath, wizardCall},
+	{web.APIRegisterPath, wizardCall},
+	{web.APITermsPath, wizardCall},
+	{web.APIFilesPath, wizardCall},
+	{web.APICheckPath, wizardCall},
+	{web.APIPagePath, wizardCall},
+	{web.APITermsPreviewPath, wizardCall},
+	{auth.LogoutPath, signOutForm},
 }
 
 // foreignSite is the page a forgery would be submitted from.
@@ -52,15 +78,15 @@ func TestConsole_RefusesStateChangesFromAnotherSite(t *testing.T) {
 		"sec-fetch-site cross-site": {"Sec-Fetch-Site": {"cross-site"}, "Origin": {foreignSite}},
 		"origin only":               {"Origin": {foreignSite}},
 	}
-	for _, path := range stateChangingRoutes {
+	for _, route := range stateChangingRoutes {
 		for name, hdr := range foreign {
-			t.Run(path+"/"+name, func(t *testing.T) {
-				status, body := f.post(t, path, hdr)
+			t.Run(route.path+"/"+name, func(t *testing.T) {
+				status, body := f.post(t, route.path, route.postBody, hdr)
 				if status != http.StatusForbidden {
-					t.Fatalf("a cross-origin POST %s = %d, want %d", path, status, http.StatusForbidden)
+					t.Fatalf("a cross-origin POST %s = %d, want %d", route.path, status, http.StatusForbidden)
 				}
 				if !strings.Contains(body, crossOriginRefusal) {
-					t.Fatalf("the refusal of POST %s does not say why: %s", path, head(body))
+					t.Fatalf("the refusal of POST %s does not say why: %s", route.path, head(body))
 				}
 			})
 		}
@@ -75,10 +101,10 @@ func TestConsole_RefusesStateChangesFromAnotherSite(t *testing.T) {
 	// The same requests from the console's own page reach their routes. The
 	// sign-out is last, since it ends the session the others run under.
 	same := http.Header{"Sec-Fetch-Site": {"same-origin"}, "Origin": {f.server.URL}}
-	for _, path := range stateChangingRoutes {
-		status, body := f.post(t, path, same)
+	for _, route := range stateChangingRoutes {
+		status, body := f.post(t, route.path, route.postBody, same)
 		if status == http.StatusForbidden || strings.Contains(body, crossOriginRefusal) {
-			t.Fatalf("a same-origin POST %s was refused: %d %s", path, status, head(body))
+			t.Fatalf("a same-origin POST %s was refused: %d %s", route.path, status, head(body))
 		}
 	}
 	if f.signedIn(t) {
@@ -86,16 +112,16 @@ func TestConsole_RefusesStateChangesFromAnotherSite(t *testing.T) {
 	}
 }
 
-// post sends one POST carrying hdr and the session cookie, without following a
-// redirect, so a route's own answer is what the test reads.
-func (f *consoleFixture) post(t *testing.T, path string, hdr http.Header) (int, string) {
+// post sends one POST with body, carrying hdr and the session cookie, without
+// following a redirect, so a route's own answer is what the test reads.
+func (f *consoleFixture) post(t *testing.T, path string, body postBody, hdr http.Header) (int, string) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, f.server.URL+path,
-		strings.NewReader("{}"))
+		strings.NewReader(body.body))
 	if err != nil {
 		t.Fatalf("build POST %s: %v", path, err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", body.contentType)
 	for k, v := range hdr {
 		req.Header[http.CanonicalHeaderKey(k)] = v
 	}
@@ -107,21 +133,19 @@ func (f *consoleFixture) post(t *testing.T, path string, hdr http.Header) (int, 
 	return resp.StatusCode, readAll(t, resp)
 }
 
-// signedIn reports whether this browser's session still opens the home page.
-// A visitor without one is redirected to sign in, and that redirect is not
-// followed here: the provider stub would sign the person straight back in.
+// signedIn reports whether this browser's session still opens the console: the
+// home page is answered without sending the browser to sign in. A visitor
+// without a session is redirected to sign in, and that redirect is not
+// followed here: the provider stub would sign the person straight back in. An
+// account that has not named its business is redirected too, to the
+// add-a-domain wizard, and is signed in.
 func (f *consoleFixture) signedIn(t *testing.T) bool {
 	t.Helper()
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, f.server.URL+web.HomePath, nil)
-	if err != nil {
-		t.Fatalf("build GET %s: %v", web.HomePath, err)
+	a := f.step(t, f.home(t))
+	if a.location != nil && a.status >= 300 && a.status <= 399 {
+		return a.location.Path != auth.LoginPath
 	}
-	resp, err := f.noRedirect().Do(req)
-	if err != nil {
-		t.Fatalf("GET %s: %v", web.HomePath, err)
-	}
-	_ = resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	return a.status == http.StatusOK
 }
 
 // noRedirect is this browser's cookies on a client that stops at the first

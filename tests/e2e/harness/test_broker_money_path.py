@@ -208,7 +208,9 @@ def test_a_provider_that_refuses_relays_has_only_its_items_denied(
     ``denial_reason`` RELAY_NOT_ACCEPTED and no ``refusal``, exchange-c's item is
     bought, and exchange-d's ledger does not move.
     """
-    assert EXCHANGE_D_DOMAIN in RELAY_REFUSING_EXCHANGES, "the seed no longer opts exchange-d out"
+    assert EXCHANGE_D_DOMAIN in RELAY_REFUSING_EXCHANGES, (
+        "exchange-d's seat no longer refuses the relay"
+    )
     fresh_agent.fund(EXCHANGE_D_DOMAIN, EXCHANGE_C_DOMAIN)
     uris = [LECTURE_NOTES, SCI_FI_DOOR]
     offers = resolve_offers(fresh_agent, uris)

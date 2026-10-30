@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/termspreset"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/web"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/exchangetest"
 )
 
@@ -24,11 +25,12 @@ func TestConsole_PricesInTheExchangesDenomination(t *testing.T) {
 		o.TermsDefaults = termspreset.Defaults{Currency: "USD", Unit: "fetches"}
 	})
 	f.signIn(t)
+	f.registerBusiness(t)
 	boot := f.openWizard(t)
-	if boot.Currency != "USD" || boot.Unit != "fetches" {
-		t.Fatalf("the wizard opens on %q per %q, want the Exchange's USD per fetches", boot.Currency, boot.Unit)
+	// The unit is the Exchange's token, said the way a price reads it.
+	if boot.Currency != "USD" || boot.Unit != "fetch" {
+		t.Fatalf("the wizard opens on %q per %q, want the Exchange's USD per fetch", boot.Currency, boot.Unit)
 	}
-	f.walkToDocument(t, "stoa.example")
 
 	out := f.ok(t, "/api/domain/terms-preview", map[string]any{
 		"terms": map[string]any{
@@ -37,8 +39,8 @@ func TestConsole_PricesInTheExchangesDenomination(t *testing.T) {
 		},
 	})
 	offer := offerText(t, out)
-	if !strings.Contains(offer, "0.05 USD per fetches") {
-		t.Fatalf("the preview is not priced in the Exchange's denomination: %s", offer)
+	if !strings.Contains(offer, "0.05 USD per fetch") || strings.Contains(offer, "per fetches") {
+		t.Fatalf("the preview is not priced per fetch in the Exchange's denomination: %s", offer)
 	}
 	if strings.Contains(offer, "EUR") {
 		t.Fatalf("the preview carries a currency the Exchange does not price in: %s", offer)
@@ -52,8 +54,8 @@ func TestConsole_PricesInTheExchangesDenomination(t *testing.T) {
 func TestConsole_TakesTheBlameWhenTheExchangeHasNoSeat(t *testing.T) {
 	f := startConsoleOver(t, verifiedClaims(), func(o *exchangetest.Options) { o.WithoutSeat = true })
 
-	// Signing in lands on the home page, which lists the person's
-	// registrations: the first call that needs the seat.
+	// Signing in lands on the home page, whose read of the person's
+	// registrations is the first call that needs the seat.
 	status, body := f.get(t, "/login")
 	if status != http.StatusInternalServerError {
 		t.Fatalf("the home page with no seat = %d, want %d", status, http.StatusInternalServerError)
@@ -63,7 +65,8 @@ func TestConsole_TakesTheBlameWhenTheExchangeHasNoSeat(t *testing.T) {
 	}
 	assertNoOperatorText(t, body)
 
-	// The wizard opens on the same read, so it cannot hand out a form either.
+	// The wizard's page sits behind the same read, so it cannot hand out a
+	// form either.
 	status, body = f.get(t, "/domains/new")
 	if status != http.StatusInternalServerError {
 		t.Fatalf("the wizard with no seat = %d, want %d", status, http.StatusInternalServerError)
@@ -72,13 +75,14 @@ func TestConsole_TakesTheBlameWhenTheExchangeHasNoSeat(t *testing.T) {
 }
 
 // TestConsole_ShowsTermsRefusalsWithoutInternalText covers a price that is not
-// a number. The publisher reads what is wrong with the price they typed, and
-// nothing of the shared terms package's own error text: no kind token, no
-// package prefix.
+// a number, on the licensing step of a saved domain. The publisher reads what
+// is wrong with the price they typed, in the preview and when they press Next,
+// and nothing of the shared terms package's own error text: no kind token, no
+// package prefix. The terms are not saved.
 func TestConsole_ShowsTermsRefusalsWithoutInternalText(t *testing.T) {
 	f := startConsole(t, verifiedClaims())
 	f.signIn(t)
-	f.walkToDocument(t, "stoa.example")
+	f.walkToTerms(t, "stoa.example")
 	terms := map[string]any{
 		"pricing_model": "per_unit", "rate": "a lot",
 		"permitted_functions": []string{"search"},
@@ -86,15 +90,12 @@ func TestConsole_ShowsTermsRefusalsWithoutInternalText(t *testing.T) {
 
 	preview := f.ok(t, "/api/domain/terms-preview", map[string]any{"terms": terms})
 	warning, _ := preview["warning"].(string)
-	status, out := f.api(t, "/api/domain", map[string]any{
-		"domain": "stoa.example", "cdn": "cloudflare", "content_paths": "",
-		"sitemap_url": "", "terms": terms,
-	})
+	status, out := f.api(t, web.APITermsPath, map[string]any{"domain": "stoa.example", "terms": terms})
 	if status != http.StatusBadRequest {
-		t.Fatalf("finishing on a price that is not a number = %d", status)
+		t.Fatalf("saving a price that is not a number = %d", status)
 	}
 	refusal, _ := out["error"].(string)
-	for where, text := range map[string]string{"preview": warning, "register": refusal} {
+	for where, text := range map[string]string{"preview": warning, "save": refusal} {
 		if !strings.Contains(text, `rate "a lot" is not a decimal amount`) {
 			t.Fatalf("the %s does not say what is wrong with the price: %q", where, text)
 		}
@@ -104,7 +105,12 @@ func TestConsole_ShowsTermsRefusalsWithoutInternalText(t *testing.T) {
 			}
 		}
 	}
-	f.assertNoDomains(t, "a price that is not a number")
+	if sites := f.mine(t).Sites; len(sites) != 1 || sites[0].Terms != nil {
+		t.Fatalf("the Exchange holds %+v; want stoa.example saved with no terms", sites)
+	}
+	if n := f.exchange.CountAuditActions(t, "SetDomainTerms"); n != 0 {
+		t.Fatalf("the Exchange recorded %d terms saves for a refused one", n)
+	}
 }
 
 // assertNoOperatorText fails when a publisher-facing text carries what the

@@ -60,19 +60,6 @@ export function makeLogTestApp(
   overrides: Partial<AppDeps> = {},
 ): App {
   const deps: AppDeps = {
-    manifest: {
-      ver: '1.0',
-      role: 'ROLE_PUBLISHER',
-      domain: 'pub.example.com',
-      exchanges: [
-        {
-          domain: 'exchange.test',
-          endpoint: 'https://exchange.test',
-          relationship: 'PROVIDER_RELATIONSHIP_DIRECT',
-        },
-      ],
-      supported_profiles: ['fora-news-v1'],
-    },
     exchangeUrl: 'https://exchange.test',
     resolveKey: async (kid) => (kid === exchangeKid ? rawPublicKey(keypair) : undefined),
     enforceBinding: true,

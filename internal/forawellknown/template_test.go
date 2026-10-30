@@ -15,15 +15,24 @@ import (
 )
 
 // The two files under deploy/publisher-wellknown/ are the reference copies of
-// the discovery documents the Edge Worker serves. The edge suite pins them to
-// the PRODUCER — it drives template-env.json, the checked-in variable values that
-// sit beside them, through parseEnv and buildDeps, requests both addresses
-// through the Worker's own routes, and
-// asserts each response body is deep-equal to the file on disk. This file pins
-// the same templates to the CONSUMER, which is a different check: the Exchange
-// does not run Ajv, it runs ParseManifest / ParseWBA, and those schema-validate
-// AND protojson-decode into the proto messages. A template can satisfy the JSON
-// Schema and still fail the decode the Exchange actually performs.
+// the two discovery documents: fora.json.example is the file a publisher serves
+// from its own origin (the Edge Worker passes that address through to it), and
+// the key directory is the one the Worker serves itself. Each is held to what
+// produces it elsewhere. The Worker builds the key directory: the edge suite
+// drives template-env.json, the checked-in variable values that sit beside
+// them, through parseEnv and buildDeps, and asserts the directory the Worker
+// serves is deep-equal to the file on disk. The Worker only passes the
+// fora.json address through, so the edge suite can show only that the origin's
+// bytes come back unchanged. The producer the document is held to is the
+// publisher-manifest Terraform module: its test
+// document_is_the_reference_copy_a_publisher_serves
+// (deploy/terraform/modules/publisher-manifest/tests/manifest_unit_test.tftest.hcl)
+// holds the document the module renders from the template's own placeholder
+// values JSON-equal to fora.json.example. This file pins the same templates to
+// the CONSUMER, which is a different check: the Exchange does not run Ajv, it
+// runs ParseManifest / ParseWBA, and those schema-validate AND protojson-decode
+// into the proto messages. A template can satisfy the JSON Schema and still fail
+// the decode the Exchange actually performs.
 //
 // The exchange domain the template's own exchanges[] entry names. The payee
 // lookup matches on this string exactly, so a template that renamed it would
@@ -113,8 +122,8 @@ func TestTemplateManifestAuthorizesThePublisherAndItsContributor(t *testing.T) {
 	// template's hosts are checked under the same folding an operator's deployment
 	// will apply to them. A rule that folded nothing would reduce these three
 	// assertions to string comparison and pass for a template value the Exchange
-	// refuses — every push rejected as not_in_contributors while the Worker starts
-	// cleanly and serves the document.
+	// refuses — every push rejected as not_in_contributors while the publisher's
+	// site serves the document without complaint.
 	m, err := forawellknown.ParseManifest(readTemplate(t, "fora.json.example"), forawellknown.RolePublisher)
 	if err != nil {
 		t.Fatalf("ParseManifest: %v", err)
@@ -209,10 +218,11 @@ func TestTemplateDirectoryKeyCannotBeSignedAgainst(t *testing.T) {
 
 func TestTemplateDirectoryAdvertisesNoRevocationURL(t *testing.T) {
 	t.Parallel()
-	// The Worker serves four addresses and the revocation list is not one of them,
-	// so a revocation_url here would send verifiers to an address that answers
-	// nothing. The README explains that and names key rotation as the lever
-	// instead.
+	// The Worker answers its health check and the key directory itself, and
+	// passes the publisher's discovery document and RSL file through to the
+	// origin; the revocation list is none of them, so a revocation_url here would
+	// send verifiers to an address that answers nothing. The README explains
+	// that and names key rotation as the lever instead.
 	f, err := forawellknown.ParseWBA(readTemplate(t, "http-message-signatures-directory.example"))
 	if err != nil {
 		t.Fatalf("ParseWBA: %v", err)

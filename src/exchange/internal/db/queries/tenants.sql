@@ -15,6 +15,20 @@ INSERT INTO fora.tenants (
 ) VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
+-- name: CreateTenantIfAbsent :one
+-- Creates a seat an operator's boot fixture declares (ADR-029), with both of its
+-- policies, unless a seat already holds this tenant id or this domain. A stored
+-- seat is left exactly as it is, whatever the fixture says now, so a boot after
+-- the first changes nothing that a product surface or an operator set since. A
+-- conflict on either key returns no row; the caller reads the seat back by its
+-- id to tell a seat that is already stored from a domain another seat holds.
+INSERT INTO fora.tenants (
+    tenant_id, domain, ed25519_key_ref, rsa_key_ref,
+    allow_broker_relay, activate_new_agents_by_default
+) VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT DO NOTHING
+RETURNING *;
+
 -- name: SetTenantAllowBrokerRelay :execrows
 -- Flips the broker-relay opt-in for a tenant. Admin / fixture path; the
 -- column defaults to FALSE on insert so this is only needed when a tenant

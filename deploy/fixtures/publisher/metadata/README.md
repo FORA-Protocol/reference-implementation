@@ -123,7 +123,7 @@ carry this proof:
    `offer.pricing` is equal and the selected term is proto-equal across the two.
 
 2. **`multiterm_scope_projection.jsonl`** — the SAME line discovered by a
-   `premium` requester (selects the 9.99 premium term) and a `default` requester
+   `premium` requester (holding a verified delegation for the subscription scope; selects the 9.99 premium term) and a `default` requester
    (selects the 4.99 public term). The `pairwise_assertion`
    (`multiterm_metadata_invariant_across_scope`) asserts the metadata block is
    proto-equal across both offers while `selected_price_rate` differs — selection

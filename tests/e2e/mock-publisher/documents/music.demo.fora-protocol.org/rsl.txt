@@ -1,0 +1,8 @@
+<rsl xmlns="https://rslstandard.org/rsl">
+  <content url="/lyrics/*">
+    <license>
+      <permits type="usage">search</permits>
+      <payment type="attribution"/>
+    </license>
+  </content>
+</rsl>

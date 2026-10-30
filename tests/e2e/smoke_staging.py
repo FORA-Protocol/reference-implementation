@@ -33,8 +33,8 @@ DNS, the deployed edge worker):
    on the same article as item 2, so a failure isolates the UA handling:
    - a BROWSER User-Agent with no signature gets the article (200 + canary
      marker) — the bot gate only sends AI bots to negotiate, never people;
-   - an AI-BOT User-Agent with no signature is refused (403) WITH the
-     negotiation payload: the {error, reason: "ai_bot"} JSON body, the
+   - an AI-BOT User-Agent with no signature is refused (403) by the edge
+     itself, with no redirect followed, WITH the negotiation payload: the {error, reason: "ai_bot"} JSON body, the
      X-Content-Rules header pointing at this publisher's
      /.well-known/fora.json, and the X-FORA-Exchange header naming the
      exchange to negotiate with. (The retired demo also announced MCP
@@ -43,9 +43,10 @@ DNS, the deployed edge worker):
    - the site root serves the human-facing landing page to a browser
      User-Agent (200 HTML naming the demo catalog) — a stakeholder demo
      starts in a browser, so the first impression must be the catalog index,
-     not an error page. An AI-bot User-Agent is refused there (403) when the
-     edge licenses the whole site, and reads the page (200) when the edge's
-     licensed paths (FORA_STAGING_LICENSED_PATHS_JSON) leave the root out;
+     not an error page. An AI-bot User-Agent, following no redirect, is
+     refused there (403) when the edge licenses the whole site, and reads the
+     page itself (200) when the edge's licensed paths
+     (FORA_STAGING_LICENSED_PATHS_JSON) leave the root out;
    - /.well-known/fora.json answers any User-Agent with no signature (200,
      domain matching this publisher) — the guard against a bot being locked
      out of the very document that tells it how to negotiate.
@@ -64,19 +65,19 @@ from __future__ import annotations
 import json
 import os
 import sys
+from http import HTTPStatus
 from pathlib import Path
-
-import httpx
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tests" / "e2e"))
 
 from fora_sdk.client import CallError  # noqa: E402
 from fora_sdk.hosts import host_of  # noqa: E402
+from fora_sdk.resolvers import ResolverError, guarded_client, read_manifest  # noqa: E402
 
 from harness.broker_purchase import AI_INPUT, only_verified_offer, resolve_request  # noqa: E402
 from harness.constants import AI_BOT_UA, BROWSER_UA  # noqa: E402
-from harness.edge_fetch import fetch_signed  # noqa: E402
+from harness.edge_fetch import browse, fetch_signed, fetch_without_proof, present  # noqa: E402
 from harness.sdk_client import offer_verifier, sdk_broker_client  # noqa: E402
 from harness.stack_urls import StackURLs  # noqa: E402
 
@@ -89,20 +90,6 @@ def _require_env(name: str) -> str:
         msg = f"missing required env var: {name}"
         raise SystemExit(msg)
     return value
-
-
-def _payload_of(resp: httpx.Response, leg: str) -> object:
-    """Parse a response, failing with a readable diagnostic on non-200.
-
-    During bring-up a down service answers with an HTML/text error page;
-    parsing that as JSON would crash with a raw traceback instead of telling
-    the operator which leg failed and what came back.
-    """
-    if resp.status_code != httpx.codes.OK:
-        print(f"  {leg}: status={resp.status_code} body={resp.text[:500]}")
-        msg = f"{leg} returned status {resp.status_code}"
-        raise SystemExit(msg)
-    return resp.json()
 
 
 def _bare_fetch_binding_leg(signed: str, *, enforce: bool) -> None:
@@ -124,16 +111,16 @@ def _bare_fetch_binding_leg(signed: str, *, enforce: bool) -> None:
         print(f"  retrievalEndpoint={signed}")
         msg = "signed URL carries no agent binding — staging must mint agent-bound URLs"
         raise SystemExit(msg)
-    bare = httpx.get(signed, follow_redirects=True, timeout=30.0)
+    bare = fetch_without_proof(signed)
     if enforce:
-        if bare.status_code != httpx.codes.FORBIDDEN:
-            print(f"  bare fetch: status={bare.status_code} body={bare.text[:200]}")
+        if bare.status != HTTPStatus.FORBIDDEN:
+            print(f"  bare fetch: status={bare.status} body={bare.text[:200]}")
             msg = "edge accepted an agent-bound URL without proof of possession"
             raise SystemExit(msg)
         print("  bare fetch refused (403) — agent binding enforced")
         return
-    if bare.status_code != httpx.codes.OK or CANARY_MARKER not in bare.text:
-        print(f"  bare fetch: status={bare.status_code} body={bare.text[:200]}")
+    if bare.status != HTTPStatus.OK or CANARY_MARKER not in bare.text:
+        print(f"  bare fetch: status={bare.status} body={bare.text[:200]}")
         msg = "edge did not deliver the signed URL with binding enforcement off"
         raise SystemExit(msg)
     print("  bare fetch delivered (200) — agent binding not enforced")
@@ -141,11 +128,9 @@ def _bare_fetch_binding_leg(signed: str, *, enforce: bool) -> None:
 
 def _browser_leg(article: str) -> None:
     """A browser User-Agent with no signature must get the article (200)."""
-    resp = httpx.get(
-        article, follow_redirects=True, timeout=30.0, headers={"User-Agent": BROWSER_UA}
-    )
-    if resp.status_code != httpx.codes.OK or CANARY_MARKER not in resp.text:
-        print(f"  browser fetch: status={resp.status_code} body={resp.text[:200]}")
+    resp = browse(article, user_agent=BROWSER_UA)
+    if resp.status != HTTPStatus.OK or CANARY_MARKER not in resp.text:
+        print(f"  browser fetch: status={resp.status} body={resp.text[:200]}")
         msg = "edge did not serve the article to a browser User-Agent"
         raise SystemExit(msg)
     print("  browser fetch delivered (200 + canary) — people read without a license")
@@ -157,25 +142,25 @@ def _bot_negotiation_leg(article: str, publisher: str, exchange_url: str) -> Non
     The refusal alone is not enough: the bot must be TOLD where to go. The
     payload under test is the JSON {error, reason: "ai_bot"} body, the
     X-Content-Rules header (this publisher's fora.json), and the
-    X-FORA-Exchange header (the exchange to negotiate with).
+    X-FORA-Exchange header (the exchange to negotiate with). No redirect is
+    followed: the edge itself must refuse the bot.
     """
-    resp = httpx.get(article, timeout=30.0, headers={"User-Agent": AI_BOT_UA})
-    if resp.status_code != httpx.codes.FORBIDDEN:
-        print(f"  bot fetch: status={resp.status_code} body={resp.text[:200]}")
+    resp = present(article, headers={"User-Agent": AI_BOT_UA})
+    if resp.status != HTTPStatus.FORBIDDEN:
+        print(f"  bot fetch: status={resp.status} body={resp.text[:200]}")
         msg = "edge did not refuse an AI-bot User-Agent without a signed URL"
         raise SystemExit(msg)
-    body = resp.json()
-    if not isinstance(body, dict) or body.get("reason") != "ai_bot":
-        print(f"  bot fetch body={resp.text[:200]}")
+    if resp.reason != "ai_bot":
+        print(f"  bot fetch reason={resp.reason}")
         msg = 'bot refusal body did not carry reason "ai_bot"'
         raise SystemExit(msg)
-    rules = resp.headers.get("X-Content-Rules", "")
+    rules = resp.header("X-Content-Rules") or ""
     expected_rules = f"https://{publisher}/.well-known/fora.json"
     if rules != expected_rules:
         print(f"  X-Content-Rules={rules!r} expected={expected_rules!r}")
         msg = "bot refusal did not point at this publisher's fora.json"
         raise SystemExit(msg)
-    exchange_header = resp.headers.get("X-FORA-Exchange", "")
+    exchange_header = resp.header("X-FORA-Exchange") or ""
     if exchange_header != exchange_url:
         print(f"  X-FORA-Exchange={exchange_header!r} expected={exchange_url!r}")
         msg = "bot refusal did not name the exchange to negotiate with"
@@ -191,30 +176,30 @@ def _landing_page_leg(publisher: str, licensed_paths: list[str]) -> None:
     URL is asserted too, and it follows the edge's licensed scope. With no
     scope the whole site is licensed, so the landing page must not open a
     hole in the bot gate at the root. With a scope that leaves the root out,
-    the page is public and a bot reads it like a browser does.
+    the page is public and the bot reads the page itself (200). The bot's
+    request follows no redirect, so either answer is the edge's own.
     """
     url = f"https://{publisher}/"
-    resp = httpx.get(url, follow_redirects=True, timeout=30.0, headers={"User-Agent": BROWSER_UA})
-    content_type = resp.headers.get("content-type", "")
-    if resp.status_code != httpx.codes.OK or not content_type.startswith("text/html"):
-        print(f"  landing page: status={resp.status_code} content-type={content_type!r}")
+    resp = browse(url, user_agent=BROWSER_UA)
+    if resp.status != HTTPStatus.OK or resp.media_type != "text/html":
+        print(f"  landing page: status={resp.status} media type={resp.media_type!r}")
         msg = "site root did not serve the landing page to a browser User-Agent"
         raise SystemExit(msg)
     if "Stoa Press" not in resp.text:
         print(f"  landing page body={resp.text[:300]}")
         msg = "landing page does not name the demo catalog"
         raise SystemExit(msg)
-    bot = httpx.get(url, timeout=30.0, headers={"User-Agent": AI_BOT_UA})
+    bot = present(url, headers={"User-Agent": AI_BOT_UA})
     root_licensed = not licensed_paths or any(p.lower() == "/" for p in licensed_paths)
     if not root_licensed:
-        if bot.status_code != httpx.codes.OK:
-            print(f"  bot at root: status={bot.status_code} body={bot.text[:200]}")
+        if bot.status != HTTPStatus.OK:
+            print(f"  bot at root: status={bot.status} body={bot.text[:200]}")
             msg = "site root is outside the licensed paths but refused an AI-bot User-Agent"
             raise SystemExit(msg)
         print("  landing page served to a browser and, outside the licensed paths, to a bot")
         return
-    if bot.status_code != httpx.codes.FORBIDDEN:
-        print(f"  bot at root: status={bot.status_code} body={bot.text[:200]}")
+    if bot.status != HTTPStatus.FORBIDDEN:
+        print(f"  bot at root: status={bot.status} body={bot.text[:200]}")
         msg = "site root did not refuse an AI-bot User-Agent"
         raise SystemExit(msg)
     print("  landing page served to a browser (200 HTML); bot still refused at root")
@@ -226,11 +211,17 @@ def _well_known_leg(publisher: str) -> None:
     This is the guard against a lockout loop: the refusal above points bots
     at this document, so the bot gate must never apply to it.
     """
-    url = f"https://{publisher}/.well-known/fora.json"
-    resp = httpx.get(url, timeout=30.0, headers={"User-Agent": AI_BOT_UA})
-    payload = _payload_of(resp, "fora.json fetch (bot User-Agent)")
-    if not isinstance(payload, dict) or payload.get("domain") != publisher:
-        print(f"  fora.json body={resp.text[:300]}")
+    try:
+        with guarded_client(headers={"User-Agent": AI_BOT_UA}) as http:
+            manifest = read_manifest(publisher, http=http).message
+    except (ResolverError, ValueError) as err:
+        # ValueError covers a body the protocol's strict schema refuses.
+        msg = f"fora.json fetch (bot User-Agent) was refused: {err}"
+        raise SystemExit(msg) from err
+    # The SDK reader does not compare the document's domain with the one it
+    # fetched, so this leg still does.
+    if manifest.domain != publisher:
+        print(f"  fora.json domain={manifest.domain!r}")
         msg = "fora.json did not carry this publisher's domain"
         raise SystemExit(msg)
     print("  fora.json served unsigned to a bot User-Agent, domain matches")

@@ -11,7 +11,7 @@
 # The Lambda bundle comes LAST, because its config is rendered by this stack:
 #   3. terraform apply            # first time: set deploy_edge = false below
 #   4. terraform output -raw lambda_edge_config > lambda-edge-config.json
-#   5. ../../scripts/build-lambda-edge.sh lambda-edge-config.json
+#   5. ../../scripts/build-lambda-edge.sh lambda-edge-config.json "$(terraform output -raw lambda_edge_domain)"
 #   6. terraform apply            # with deploy_edge back to true (the default)
 
 # AWS — the credentials must be able to create EC2/VPC/EIP resources, plus

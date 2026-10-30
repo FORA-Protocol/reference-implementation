@@ -1,25 +1,28 @@
-"""Meta-guard — the three e2e identity lists must agree.
+"""Meta-guard — the e2e identity lists and the key-directories service must agree.
 
-An e2e identity exists in three places no tool connects: the ``IDENTITIES``
-list in ``scripts/gen-e2e-keys.sh`` (mints the private fixture), a per-kid
-jwks service in ``docker-compose.e2e.yml`` (mounts the fixture, aliases the
-kid), and that service's entry in a ``depends_on`` block so the stack waits
-for it. One direction of a mismatch fails quietly: a fixture minted with no
-jwks host resolves nowhere, which is exactly the shape of the deliberate
-ghost-agent negative control — so an accidental omission reads as the
-intended case and no test goes red.
+An e2e identity exists in two places no tool connects: the ``IDENTITIES`` list
+in ``scripts/gen-e2e-keys.sh`` (mints the private fixture), and the
+``key-directories`` service in ``docker-compose.e2e.yml``, which mounts the
+fixture at ``/keys/<kid>.json`` and answers to the kid as a network alias. One
+direction of a mismatch fails quietly: a fixture minted with no host resolves
+nowhere, so every call signed as it is refused unauthenticated, in whichever test
+first signs as it, far from the missing line.
 
-This suite is the tool that connects the lists. It parses ``IDENTITIES`` out
-of the real script (failing loudly if the extraction breaks) and the real
-compose file with a YAML parser, then asserts:
+This suite is the tool that connects them. It parses ``IDENTITIES`` out of the
+real script (failing loudly if the extraction breaks) and the real compose file
+with a YAML parser, then asserts:
 
-* every minted identity is served by a service that mounts ITS fixture and
-  aliases ITS kid — except the two documented exceptions (the ghost agent,
-  served nowhere by design; the broker relay key, published by the Broker's
-  own directory);
-* the ghost agent stays hostless — no alias, no mount, anywhere;
-* every jwks service is named in some service's ``depends_on``, so the stack
-  actually waits for the directory hosts it relies on.
+* the service mounts each key as one read-only file at ``/keys/<host>.json``
+  and answers to exactly the hosts it holds keys for. A key with no alias, an
+  alias with no key, and any other mount are each reported: a directory mount
+  would carry every private key in it into the container;
+* every minted identity is mounted from ITS fixture under ITS kid — except the
+  broker relay key, which the Broker's own directory publishes;
+* every publisher host ``PUBLISHER_HOSTS_JSON`` configures has a key;
+* the hosts the in-network directory test checks are exactly the hosts the
+  service answers to, so a host added to the service is checked there too;
+* the four Exchanges, which fetch these directories, and the runner, whose
+  tests sign as these identities, wait for the service to be healthy.
 
 The per-test agents (``fresh_agent.py``, ADR-028 D7) are in none of these lists,
 by design: each is minted at run time under a random host, so there is nothing
@@ -39,11 +42,16 @@ Pure file reading: no stack, no Docker, no database.
 
 from __future__ import annotations
 
+import copy
+import json
 import re
+from collections.abc import Callable
 
+import pytest
 import yaml
 
 from .conftest import REPO_ROOT
+from .constants import KEY_DIRECTORIES_SERVICE, STATIC_KEY_HOSTS
 from .fresh_agent import AGENT_ZONE
 from .guard_harness import guard_marks
 
@@ -52,12 +60,17 @@ _COMPOSE = REPO_ROOT / "docker-compose.e2e.yml"
 
 pytestmark = guard_marks(skip_when=not (_KEYGEN.is_file() and _COMPOSE.is_file()))
 
-# Served nowhere by design — the negative control every resolution route must
-# come up empty for.
-_GHOST_KID = "ghost-agent-e2e"
 # Published by the Broker's OWN WBA directory (the broker service mounts the
 # fixture); it has no standalone jwks host on purpose.
 _BROKER_RELAY_KID = "broker.broker-local.v1"
+
+# The one service that serves every fixed identity's key directory, and the
+# services that must not start before it answers: the four Exchanges fetch those
+# directories to verify signers, and the runner's tests sign as those identities.
+_KEY_DIRECTORIES = KEY_DIRECTORIES_SERVICE
+_DIRECTORY_WAITERS = ("exchange", "exchange-b", "exchange-c", "exchange-d", "runner")
+# Where a key is mounted: one file per host, named after the host.
+_KEY_TARGET = re.compile(r"/keys/(?P<host>[^/]+)\.json")
 
 
 def _identities() -> list[tuple[str, str]]:
@@ -103,22 +116,198 @@ def _mounted_fixtures(svc: dict) -> set[str]:
     return out
 
 
-def test_every_minted_identity_is_served_and_depended_on() -> None:
-    services = _compose_services()
-    for kid, filename in _identities():
-        if kid in (_GHOST_KID, _BROKER_RELAY_KID):
-            continue
-        serving = [
-            name
-            for name, svc in services.items()
-            if kid in _service_aliases(svc) and filename in _mounted_fixtures(svc)
-        ]
-        assert serving, (
-            f"identity {kid!r} is minted by gen-e2e-keys.sh but no compose "
-            f"service both aliases it and mounts {filename!r} — its key would "
-            "resolve nowhere, which is indistinguishable from the ghost-agent "
-            "negative control"
+def _key_mounts(svc: dict) -> tuple[dict[str, str], list[str]]:
+    """The fixture each host's key is mounted from, and every other mount as written.
+
+    A key mount is one read-only file mounted at ``/keys/<host>.json``; the first
+    mapping takes each such host to its fixture's basename. Anything else, a
+    directory or a writable mount included, lands in the second list.
+    """
+    keys: dict[str, str] = {}
+    others: list[str] = []
+    for vol in svc.get("volumes") or []:
+        parts = vol.split(":") if isinstance(vol, str) else []
+        target = _KEY_TARGET.fullmatch(parts[1]) if len(parts) == 3 else None
+        if target and parts[2] == "ro" and parts[0].endswith(".json"):
+            keys[target.group("host")] = parts[0].rsplit("/", 1)[-1]
+        else:
+            others.append(str(vol))
+    return keys, others
+
+
+def _key_directory_problems(services: dict, identities: list[tuple[str, str]]) -> list[str]:
+    """Every way the key-directories service fails to serve the minted identities."""
+    svc = services.get(_KEY_DIRECTORIES)
+    if svc is None:
+        return [f"no {_KEY_DIRECTORIES} service serves the fixed identities' key directories"]
+    keys, others = _key_mounts(svc)
+    aliases = _service_aliases(svc)
+    problems = [
+        f"{_KEY_DIRECTORIES} mounts {vol!r}, not one key file, read-only, at /keys/<host>.json"
+        for vol in others
+    ]
+    problems += [
+        f"{_KEY_DIRECTORIES} holds a key for {host} but does not answer to {host}"
+        for host in sorted(set(keys) - aliases)
+    ]
+    problems += [
+        f"{_KEY_DIRECTORIES} answers to {host} but holds no key for it"
+        for host in sorted(aliases - set(keys))
+    ]
+    for kid, filename in identities:
+        if kid != _BROKER_RELAY_KID and keys.get(kid) != filename:
+            problems.append(
+                f"{kid} is served from {keys.get(kid)!r}, not its own fixture {filename!r}"
+            )
+    publishers = json.loads(str((svc.get("environment") or {}).get("PUBLISHER_HOSTS_JSON") or "{}"))
+    problems += [
+        f"PUBLISHER_HOSTS_JSON configures {host}, which has no key"
+        for host in sorted(set(publishers) - set(keys))
+    ]
+    for waiter in _DIRECTORY_WAITERS:
+        deps = (services.get(waiter) or {}).get("depends_on") or {}
+        wait = (
+            (deps.get(_KEY_DIRECTORIES) or {}).get("condition") if isinstance(deps, dict) else None
         )
+        if wait != "service_healthy":
+            problems.append(
+                f"{waiter} waits for {_KEY_DIRECTORIES} with {wait!r}, not service_healthy"
+            )
+    return problems
+
+
+def test_the_key_directories_serve_every_minted_identity() -> None:
+    assert _key_directory_problems(_compose_services(), _identities()) == []
+
+
+def test_the_directory_test_checks_every_host_the_service_answers_to() -> None:
+    """STATIC_KEY_HOSTS, which the in-network directory test checks, names every alias."""
+    aliases = _service_aliases(_compose_services().get(_KEY_DIRECTORIES) or {})
+    assert set(STATIC_KEY_HOSTS) == aliases, (
+        f"the directory test checks {sorted(STATIC_KEY_HOSTS)}, but {_KEY_DIRECTORIES} "
+        f"answers to {sorted(aliases)}; a host only one of them names is either never "
+        "checked or checked without being served"
+    )
+
+
+def _volume_edit(old: str, new: str | None) -> Callable[[dict], None]:
+    """An edit that replaces the key-directories mount ``old`` with ``new``, or drops it."""
+
+    def edit(services: dict) -> None:
+        volumes = services[_KEY_DIRECTORIES]["volumes"]
+        index = volumes.index(old)
+        if new is None:
+            del volumes[index]
+        else:
+            volumes[index] = new
+
+    return edit
+
+
+def _drop_alias(services: dict) -> None:
+    services[_KEY_DIRECTORIES]["networks"]["default"]["aliases"].remove("agent-nobilling-e2e")
+
+
+_CONTRIBUTOR_KEY = "./tests/e2e/harness/fixtures/catalog_contributor_key.json:/keys/catalog-contributor-e2e.json:ro"
+_NOBILLING_KEY = (
+    "./tests/e2e/harness/fixtures/agent_nobilling_e2e_key.json:/keys/agent-nobilling-e2e.json:ro"
+)
+
+
+def _swap_two_keys(services: dict) -> None:
+    volumes = services[_KEY_DIRECTORIES]["volumes"]
+    first = volumes.index(_CONTRIBUTOR_KEY)
+    second = volumes.index(_NOBILLING_KEY)
+    volumes[first] = (
+        "./tests/e2e/harness/fixtures/agent_nobilling_e2e_key.json:/keys/catalog-contributor-e2e.json:ro"
+    )
+    volumes[second] = (
+        "./tests/e2e/harness/fixtures/catalog_contributor_key.json:/keys/agent-nobilling-e2e.json:ro"
+    )
+
+
+def _mount_the_fixtures_directory(services: dict) -> None:
+    services[_KEY_DIRECTORIES]["volumes"].append("./tests/e2e/harness/fixtures:/keys:ro")
+
+
+def _publisher_without_a_key(services: dict) -> None:
+    env = services[_KEY_DIRECTORIES]["environment"]
+    publishers = json.loads(env["PUBLISHER_HOSTS_JSON"])
+    publishers["stoa.example"] = {"exchanges": []}
+    env["PUBLISHER_HOSTS_JSON"] = json.dumps(publishers)
+
+
+def _runner_does_not_wait(services: dict) -> None:
+    services["runner"]["depends_on"][_KEY_DIRECTORIES]["condition"] = "service_started"
+
+
+@pytest.mark.parametrize(
+    ("edit", "problems"),
+    [
+        pytest.param(
+            _swap_two_keys,
+            [
+                "catalog-contributor-e2e is served from 'agent_nobilling_e2e_key.json', not its "
+                "own fixture 'catalog_contributor_key.json'",
+                "agent-nobilling-e2e is served from 'catalog_contributor_key.json', not its own "
+                "fixture 'agent_nobilling_e2e_key.json'",
+            ],
+            id="two-keys-swapped",
+        ),
+        pytest.param(
+            _drop_alias,
+            [
+                "key-directories holds a key for agent-nobilling-e2e but does not answer to agent-nobilling-e2e"
+            ],
+            id="alias-dropped",
+        ),
+        pytest.param(
+            _volume_edit(_NOBILLING_KEY, None),
+            [
+                "key-directories answers to agent-nobilling-e2e but holds no key for it",
+                "agent-nobilling-e2e is served from None, not its own fixture "
+                "'agent_nobilling_e2e_key.json'",
+            ],
+            id="key-dropped",
+        ),
+        pytest.param(
+            _volume_edit(_NOBILLING_KEY, _NOBILLING_KEY.removesuffix(":ro")),
+            [
+                "key-directories mounts './tests/e2e/harness/fixtures/agent_nobilling_e2e_key.json:"
+                "/keys/agent-nobilling-e2e.json', not one key file, read-only, at /keys/<host>.json",
+                "key-directories answers to agent-nobilling-e2e but holds no key for it",
+                "agent-nobilling-e2e is served from None, not its own fixture "
+                "'agent_nobilling_e2e_key.json'",
+            ],
+            id="key-writable",
+        ),
+        pytest.param(
+            _mount_the_fixtures_directory,
+            [
+                "key-directories mounts './tests/e2e/harness/fixtures:/keys:ro', not one key "
+                "file, read-only, at /keys/<host>.json"
+            ],
+            id="directory-mounted",
+        ),
+        pytest.param(
+            _publisher_without_a_key,
+            ["PUBLISHER_HOSTS_JSON configures stoa.example, which has no key"],
+            id="publisher-without-a-key",
+        ),
+        pytest.param(
+            _runner_does_not_wait,
+            ["runner waits for key-directories with 'service_started', not service_healthy"],
+            id="runner-does-not-wait",
+        ),
+    ],
+)
+def test_the_key_directory_check_refuses_each_mistake(
+    edit: Callable[[dict], None], problems: list[str]
+) -> None:
+    """Each mistake the check exists to catch makes it report exactly that mistake."""
+    services = copy.deepcopy(_compose_services())
+    edit(services)
+    assert _key_directory_problems(services, _identities()) == problems
 
 
 def test_broker_relay_fixture_is_mounted_into_the_broker() -> None:
@@ -130,36 +319,6 @@ def test_broker_relay_fixture_is_mounted_into_the_broker() -> None:
         f"the broker service no longer mounts {relay_file!r} — the relay key "
         "would be published nowhere (the Broker's own directory is its only "
         "publication path)"
-    )
-
-
-def test_ghost_agent_stays_hostless() -> None:
-    services = _compose_services()
-    ghost_file = dict(_identities())[_GHOST_KID]
-    offenders = [
-        name
-        for name, svc in services.items()
-        if _GHOST_KID in _service_aliases(svc) or ghost_file in _mounted_fixtures(svc)
-    ]
-    assert not offenders, (
-        f"services {offenders} serve the ghost agent's identity — the negative "
-        "control depends on that key being served NOWHERE"
-    )
-
-
-def test_every_jwks_service_is_depended_on() -> None:
-    services = _compose_services()
-    jwks = {name for name in services if name.endswith("-jwks") or name == "publisher-jwks"}
-    assert jwks, "no jwks services found — the compose file changed shape"
-    depended: set[str] = set()
-    for svc in services.values():
-        deps = svc.get("depends_on") or {}
-        depended.update(deps.keys() if isinstance(deps, dict) else deps)
-    orphans = sorted(jwks - depended)
-    assert not orphans, (
-        f"jwks services {orphans} appear in nobody's depends_on — the stack "
-        "does not wait for them, so their identities resolve only by luck of "
-        "startup order"
     )
 
 

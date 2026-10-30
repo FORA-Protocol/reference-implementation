@@ -47,6 +47,7 @@ _NOQA = "  # noqa: TID251"
 #: One sample violation per ban, keyed by the name the configuration bans.
 _SAMPLES = {
     "httpx": "import httpx",
+    "fora_sdk.testing": "from fora_sdk.testing import sign_offer_acceptance_any_requester",
     "fora_sdk.sign_request": "from fora_sdk import sign_request",
     "fora_sdk.httpsig.sign_request": "from fora_sdk.httpsig import sign_request",
     "fora_sdk.append_signature": "from fora_sdk import append_signature",
@@ -97,7 +98,7 @@ _SAMPLES = {
     "sqlite3": "import sqlite3",
     "redis": "import redis",
     # Relative, the way a test module in the harness package imports it.
-    "harness.operator_writes": "from .operator_writes import provision_seat",
+    "harness.seed_agents": "from .seed_agents import CREDIT_LESS_BUYER",
 }
 
 
@@ -216,9 +217,42 @@ def test_the_bans_do_not_reach_harness_infrastructure(tmp_path: Path) -> None:
         {
             **_PACKAGE,
             "harness/poll.py": every_sample,
+            "harness/conftest.py": every_sample,
             "harness/obligations/flow.py": every_sample,
         },
     )
+    assert _fired(project) == []
+
+
+@pytest.mark.parametrize(
+    ("path", "form", "banned"),
+    [
+        ("harness/test_sample.py", "from . import seed_agents", "harness.seed_agents"),
+        ("harness/test_sample.py", "import harness.seed_agents as agents", "harness.seed_agents"),
+        (
+            "harness/obligations/test_sample.py",
+            "from ..seed_agents import CREDIT_LESS_BUYER",
+            "harness.seed_agents",
+        ),
+        ("harness/obligations/test_sample.py", "from .. import seed_agents", "harness.seed_agents"),
+    ],
+)
+def test_the_harness_module_bans_refuse_every_import_form(
+    path: str, form: str, banned: str, tmp_path: Path
+) -> None:
+    """A banned harness module is refused however a test module imports it, from either level.
+
+    The obligation tests sit one package down and import harness modules with two
+    dots, so the ban has to resolve that form as well as the one-dot form.
+    """
+    project = _project(tmp_path, {**_PACKAGE, path: _with_noqa(form)})
+    assert (path, banned) in _fired(project), f"{form!r} in {path} is not refused as {banned}"
+
+
+def test_the_seed_agents_ban_spares_the_modules_beside_it(tmp_path: Path) -> None:
+    """A test still imports the seed's catalog and the buyer type; only the agents are banned."""
+    source = _with_noqa("from .seed import SeededFixture\nfrom .seed_accounts import SeededBuyer")
+    project = _project(tmp_path, {**_PACKAGE, "harness/test_sample.py": source})
     assert _fired(project) == []
 
 

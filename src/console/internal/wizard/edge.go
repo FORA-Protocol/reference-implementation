@@ -14,10 +14,6 @@ import (
 type EdgeState string
 
 const (
-	// EdgeNotChecked means nobody has asked yet. It is the state a page opens
-	// in, because asking costs a request against the publisher's own site and
-	// they have a button for it.
-	EdgeNotChecked EdgeState = "not_checked"
 	// EdgeUnknown means we asked and the site did not answer.
 	EdgeUnknown EdgeState = "unknown"
 	// EdgeDeployed means the package answered: it refused an agent with its
@@ -62,13 +58,16 @@ const browserUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
 // wellKnownPath is where a publisher's discovery document is served.
 const wellKnownPath = "/.well-known/fora.json"
 
-// agentUserAgent is what this check calls itself.
+// agentUserAgent is what the agent check and the document check call
+// themselves.
 //
-// It has to be a name the package refuses, because that refusal IS the
-// evidence. GPTBot is in the package's own default deny list and is the one
+// The agent check needs a name the package refuses, because that refusal IS
+// the evidence. GPTBot is in the package's own default deny list and is the one
 // the written instructions tell a publisher to test with, so a site that
 // answers this differently from the instructions is a site where the
-// instructions were followed differently.
+// instructions were followed differently. The document check needs the same
+// name because the package sends every agent it refuses to the discovery
+// document, and what matters there is what such an agent gets.
 const agentUserAgent = "GPTBot/1.0 (+https://openai.com/gptbot)"
 
 // AgentProber makes one request as an agent would and reports the answer.
@@ -104,45 +103,28 @@ type EdgeCheck struct {
 	Detail  string  `json:"detail"`
 }
 
-// EdgeReport is everything one press of the button found out about the site.
+// EdgeReport is everything one check found out about the site.
 //
-// State drives the deployment step's heading and badge, and carries the same
-// meaning it always has: what asking as an agent found. Checks is the full
-// list, including the two questions the state does not answer.
+// State is what asking as an agent found, and drives the package task's badge
+// and sentence. Checks are the two questions asked at the licensed path: as an
+// agent, and as an ordinary visitor. Document is what an agent got at the
+// site's discovery document. It is asked only once the package answers,
+// because the package is what sends agents there, and is empty before that.
 type EdgeReport struct {
-	State  EdgeState
-	Checks []EdgeCheck
-	// Message says what State means and what to do next, in the publisher's
-	// terms.
-	Message string
+	State    EdgeState
+	Checks   []EdgeCheck
+	Document Outcome
 }
 
-// AllPassed reports whether every question asked came back clean.
+// PackageAnswers reports whether the package is in front of the site and doing
+// its job: it refused us as an agent and named this exchange, and no question
+// came back failed.
 //
-// An unclear answer does not count as a pass. The setup-is-finished message
-// tells a publisher they can stop looking at this page, and saying that on the
-// strength of an answer we could not read would send them away from a site that
-// may still be refusing their readers.
-func (r EdgeReport) AllPassed() bool {
-	if len(r.Checks) == 0 {
-		return false
-	}
-	for _, c := range r.Checks {
-		if c.Outcome != OutcomePassed {
-			return false
-		}
-	}
-	return true
-}
-
-// CanAdvance reports whether the wizard may move past the package step.
-//
-// It is looser than AllPassed in one way only: an unclear answer is let
-// through, and a failed one never is. The package has proved itself once it
-// refused us as an agent and named this exchange. An unclear browser answer is
-// the origin or a bot filter refusing a server, which the publisher is told to
-// confirm by hand. Holding them on this step would not change that answer.
-func (r EdgeReport) CanAdvance() bool {
+// An unclear answer is let through, and a failed one never is. An unclear
+// visitor answer is the origin or a bot filter refusing a server, which the
+// publisher is told to confirm by hand. Holding them on the step would not
+// change that answer.
+func (r EdgeReport) PackageAnswers() bool {
 	if r.State != EdgeDeployed {
 		return false
 	}
@@ -158,33 +140,35 @@ func (r EdgeReport) CanAdvance() bool {
 // used to ask them to ask it themselves.
 //
 // Three requests at most, all to public addresses on their own site: what an
-// agent gets, what a visitor gets, and whether the discovery document is still
-// served. The wizard asks only once the site is confirmed -- before that, the
-// Exchange has just fetched and validated the document, and a second fetch
-// would be a worse answer to a question already answered.
+// agent gets at the licensed path, what a visitor gets there, and, once the
+// package answers, what an agent gets at the site's discovery document. That
+// last read and the Exchange's own answer different questions: the Exchange's
+// says the document is right, and this one says the agents the package refuses
+// can read it.
 func (s *Service) inspectEdge(ctx context.Context, domain string, paths []string) EdgeReport {
 	if s.pages == nil {
 		return EdgeReport{State: EdgeUnknown}
 	}
 	target := s.pages.SiteURL(domain, licensedProbePath(paths))
 	state := s.checkEdge(ctx, target, domain)
-	checks := []EdgeCheck{
-		agentCheck(state), s.browserCheck(ctx, target, domain), s.documentCheck(ctx, domain),
+	report := EdgeReport{State: state, Checks: []EdgeCheck{agentCheck(state), s.browserCheck(ctx, target, domain)}}
+	if state == EdgeDeployed {
+		report.Document = s.documentOutcome(ctx, domain)
 	}
-	return EdgeReport{State: state, Checks: checks}
+	return report
 }
 
 // agentCheck says what the agent probe found, as one line.
 //
-// It repeats the deployment step's own sentence in fewer words on purpose: the
+// It repeats the package task's own sentence in fewer words on purpose: the
 // list of checks is the record of what was asked, and a record with one row
 // missing reads as a check that did not run.
 func agentCheck(state EdgeState) EdgeCheck {
-	c := EdgeCheck{Label: "Agents without a licence are refused"}
+	c := EdgeCheck{Label: "Agents without a licence are refused and sent to buy access"}
 	switch state {
 	case EdgeDeployed:
 		c.Outcome, c.Detail = OutcomePassed,
-			"Your package refused us and named your discovery document."
+			"Your package refused us and named your discovery file."
 	case EdgeAbsent:
 		c.Outcome, c.Detail = OutcomeFailed,
 			"The page was served as usual, so nothing is guarding this path."
@@ -236,35 +220,36 @@ func (s *Service) browserCheck(ctx context.Context, target, domain string) EdgeC
 	return c
 }
 
-// documentCheck asks whether the discovery document is still served.
+// documentOutcome asks, as an AI agent, whether the site's discovery document
+// answers through the package. What the answer means is the file task's to say.
 //
-// It runs after the package is deployed because that is when the answer can
-// change: the package sits in front of the whole hostname, so a deployment
-// whose routes do not cover the well-known paths takes the document away from
-// the address every agent reads it at. Nothing about the earlier confirmation
-// would notice, since it happened before the package existed.
-func (s *Service) documentCheck(ctx context.Context, domain string) EdgeCheck {
-	c := EdgeCheck{Label: "Your discovery document is served"}
+// The document is the publisher's own file on its origin, and the package
+// passes its address through to it for every client, so the answer is the
+// site's own. It is asked under the agent's name because the package sends
+// every agent it refuses to this address. Asked as a browser, a site that
+// refuses AI agents here would read as serving its document.
+//
+// It is asked only once the package answers, from the same server and under
+// the same name the package has just answered at the licensed path. So a
+// missing file or a refusal here is a failure, where a refusal of the visitor
+// check is only unclear (see Outcome): every agent the package refuses is sent
+// to this address, from wherever it asks.
+func (s *Service) documentOutcome(ctx context.Context, domain string) Outcome {
 	target := s.pages.SiteURL(domain, wellKnownPath)
-	probe, err := s.pages.ProbeAs(ctx, target, browserUserAgent)
+	probe, err := s.pages.ProbeAs(ctx, target, agentUserAgent)
 	if err != nil {
 		reqctx.FromContext(ctx).InfoContext(ctx, "console.document_probe_unavailable",
 			"domain", domain, "url", target, "err", err)
-		c.Outcome, c.Detail = OutcomeUnclear, "The site did not answer."
-		return c
+		return OutcomeUnclear
 	}
 	switch probe.Status {
 	case http.StatusOK:
-		c.Outcome, c.Detail = OutcomePassed, "It answers at "+wellKnownPath+"."
-	case http.StatusNotFound:
-		c.Outcome, c.Detail = OutcomeFailed,
-			"Nothing answers at "+wellKnownPath+" any more. If you have just deployed the "+
-				"package, its routes have to cover the well-known paths as well."
+		return OutcomePassed
+	case http.StatusNotFound, http.StatusForbidden:
+		return OutcomeFailed
 	default:
-		c.Outcome, c.Detail = OutcomeUnclear,
-			"The address answered, but not with the document."
+		return OutcomeUnclear
 	}
-	return c
 }
 
 // checkEdge asks the site what an agent gets, and reads the answer.
@@ -339,25 +324,22 @@ func licensedProbePath(paths []string) string {
 // edgeMessage says what the state means, in the publisher's terms.
 //
 // Each sentence names the next thing to do, because each state has a different
-// one: deploy it, look at what is in front of the site, or try again.
-func edgeMessage(state EdgeState, domain string) string {
+// one: deploy it, look at what is in front of the site, or wait for the next
+// check.
+func edgeMessage(state EdgeState) string {
 	switch state {
-	case EdgeNotChecked:
-		return "We can tell whether the package is live by asking " + domain +
-			" the way an agent would. Use the button at the bottom of the page."
 	case EdgeDeployed:
-		return "We asked " + domain + " as an AI agent would and your package answered. " +
-			"Agents without a licence are refused and sent to buy one."
+		return "We asked your site as an AI agent would and your package answered."
 	case EdgeAbsent:
-		return "We asked " + domain + " as an AI agent would and it served the page. " +
-			"The package is not in front of this path yet."
+		return "We asked your site as an AI agent would and it served the page. " +
+			"The package is not in front of it yet."
 	case EdgeOtherExchange:
-		return "Your package at " + domain + " answered, but it sends agents to a " +
-			"different exchange than this one. Rebuild it with the settings below."
+		return "Your package answered, but it sends agents to a different exchange than this one. " +
+			"Deploy the package from this page again."
 	case EdgeBlockedByOther:
-		return "Something at " + domain + " refused us, but it was not your package. " +
+		return "Something at your site refused us, but it was not your package. " +
 			"A bot firewall in front of the site does this, and it blocks paying agents too."
 	default:
-		return "We could not reach " + domain + " to check just now."
+		return "We could not reach your site to check just now."
 	}
 }

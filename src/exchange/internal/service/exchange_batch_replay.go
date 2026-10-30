@@ -263,7 +263,20 @@ func (s *ExchangeService) relayPolicyGate(
 	// claim/finalize a denial response; agent-direct requests keep per-item
 	// signature failures as in-body denials. Every item here is checked against
 	// the SAME key snapshot the complete-set proof was checked against.
+	//
+	// A subscription-gated item that carries NO acceptance is the one exception:
+	// the protocol answers it with a per-item DELEGATION_INVALID denial, so it is
+	// let through to that denial and its tenant is attributed from the offer's
+	// own Exchange signature and canonical_url below, like every other item. The
+	// complete-set proof does not cover per-item acceptances, so the Exchange
+	// cannot tell a Broker that stripped one from an agent that omitted it; the
+	// worst a Broker can force this way is a stored per-item denial that
+	// produces no transaction, no signed URL and no charge, the same effect as
+	// not forwarding the item. That residual risk is accepted here.
 	for _, item := range req.GetItems() {
+		if item.GetAgentAcceptance().GetSignature() == "" && gatedItem(item) {
+			continue
+		}
 		if _, err := verifyAgentAcceptance(itemRequest(req, item), agent.key); err != nil {
 			return err
 		}

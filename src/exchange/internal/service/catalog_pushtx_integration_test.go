@@ -85,21 +85,11 @@ func TestPushResources_AtomicRollbackOnMidBatchFailure(t *testing.T) {
 	ctx := context.Background()
 	pool := servicetest.AcquireTestDB(t, ctx)
 
-	// The seat row's domain is this Exchange's own domain: the push resolves the
-	// seat from EXCHANGE_DOMAIN, not from the entry's domain.
-	//
-	// Documented corner: no public seat-provisioning RPC exists yet, and
-	// TenantReadRepo exposes only ByID/ByDomain (no insert) — so this test arranges
-	// its seat prerequisite through the sqlc InsertTenant query, the same
-	// surface every sibling Exchange test uses, rather than a raw SQL string.
-	if _, err := sqlc.New(pool).InsertTenant(ctx, sqlc.InsertTenantParams{
-		TenantID:        "t1",
-		Domain:          pushTestExchangeDomain,
-		Ed25519KeyRef:   "k",
-		ReportingPolicy: []byte(`{}`),
-	}); err != nil {
-		t.Fatalf("seed seat: %v", err)
-	}
+	// The seat's domain is this Exchange's own domain: the push resolves the
+	// seat from EXCHANGE_DOMAIN, not from the entry's domain. No public RPC
+	// creates a seat, so it is arranged through repo.SeatProvisionRepo, the port
+	// a deployment's boot fixture provisions its seats through.
+	repotest.SeedSeat(t, ctx, pool, repotest.Seat{ID: "t1", Domain: pushTestExchangeDomain, Ed25519KeyRef: "k"})
 	// The site both entries are pushed for, under the payee its manifest
 	// attests, listed active on the seat. Without all three the push is refused
 	// before any upsert runs and the rollback under test never happens.

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 import pytest
@@ -24,9 +24,12 @@ import pytest
 # that reads them, and re-exported from here under the names every suite already
 # imports.
 from ._compose import COMPOSE_FILE, REPO_ROOT, host_project, resolve_host_port
+from .admin_plane import require_admin_plane
+from . import seed_agents
 from .e2e_catalog import SeededFixture
 from .fresh_agent import AgentFactory, FreshAgent
 from .publisher_accounts import PublisherFactory
+from .seed_accounts import SeededBuyer
 from .exchanges import (
     EXCHANGE_A_INTERNAL_URL,
     EXCHANGE_B_INTERNAL_URL,
@@ -148,31 +151,57 @@ def _compose(*args: str) -> None:
 
 
 @pytest.fixture(scope="session")
-def seeded(compose_stack: StackURLs):
+def seeded(compose_stack: StackURLs, tmp_path_factory: pytest.TempPathFactory) -> SeededFixture:
     """Seed the demo catalog once per session and expose its resources.
 
-    Runs the production ``fora-ingest`` binary over the three demo feeds
-    (one signed PushResources RPC per feed) after provisioning each exchange's
-    seat and demo sites and registering the buyers. Shared session-wide so the
-    ingest runs once; every suite consumes the same demo-catalog resources.
+    Runs the production ``fora-ingest`` binary over the demo feeds (one signed
+    PushResources RPC per feed), after opening the seed's credit-less buyer's
+    accounts. Each exchange's seat and demo sites already exist, from its boot
+    fixture. Shared session-wide so the ingest runs once; every suite consumes the
+    same demo-catalog resources.
+
+    The wait for the Broker to route to every Exchange resolves as an agent minted
+    for it, the way a test's own agent is minted (``fresh_agent.py``).
     """
     from .seed import seed_stack, wait_until_broker_routes
 
     fixture: SeededFixture = seed_stack(
-        str(COMPOSE_FILE),
         compose_stack.exchange,
         exchange_b_host_url=compose_stack.exchange_b,
         exchange_c_host_url=compose_stack.exchange_c,
         exchange_d_host_url=compose_stack.exchange_d,
     )
-    wait_until_broker_routes(compose_stack)
+    readiness = AgentFactory(compose_stack, tmp_path_factory.mktemp("broker-readiness"))
+    try:
+        wait_until_broker_routes(readiness().broker)
+    finally:
+        readiness.close()
     return fixture
+
+
+@pytest.fixture(scope="session")
+def credit_less_buyer(
+    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed opens and approves its account
+) -> SeededBuyer:
+    """The seed's credit-less buyer: registered, with an active account that holds nothing.
+
+    Its account can only be opened while every seat holds new agents for review,
+    which only the seed does, so it stays a fixed identity, and a test reaches it
+    only through this fixture (ADR-028 D7: a fixed identity only in a fixture that
+    needs a party set up before the run). See ``seed_agents``.
+
+    The seed holds the seats and approves the account through controls that admit
+    only the runner inside the compose network. Anywhere else the seed opens no
+    account for it, and this fixture skips.
+    """
+    require_admin_plane()
+    return seed_agents.CREDIT_LESS_BUYER
 
 
 @pytest.fixture
 def fresh_agent_factory(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed opens the seats a fresh agent funds itself at
+    seeded: SeededFixture,  # noqa: ARG001 — ordering: an agent buys what the seed ingests
     tmp_path: Path,
 ) -> Iterator[AgentFactory]:
     """Mints agents of this test's own: ``agent = fresh_agent_factory()``, once per agent needed.
@@ -181,6 +210,10 @@ def fresh_agent_factory(
     a new key under a new host, known to no Exchange before its first call, so
     nothing a previous test or a previous run did reaches it (ADR-028 D7). See
     ``fresh_agent.py``.
+
+    The agents come after the seed. They buy the demo catalog it ingests, and an
+    agent that registered while the seed held the seats for review would open its
+    accounts inactive and unfunded.
     """
     factory = AgentFactory(compose_stack, tmp_path)
     yield factory
@@ -265,13 +298,15 @@ def compose_stack() -> Iterator[StackURLs]:
         wait_healthy(f"{urls.edge}/healthz")
         wait_healthy(f"{urls.aws_edge}/healthz")
         wait_healthy(f"{urls.console}/healthz")
-        # Fastly Compute (Viceroy) has no /healthz; its readiness probe is the
-        # well-known manifest. Docker reports the container healthy once its
-        # internal 127.0.0.1 probe passes, but Viceroy may not yet be bound on
-        # the bridge interface — so PushResources-driven manifest fetches from
-        # the Exchange to fastly-edge race connection-refused for the first few
-        # seconds on a cold stack. Wait on the bridge-reachable URL too.
-        wait_healthy(f"{urls.fastly_edge}/.well-known/fora.json")
+        # The seed mints an agent for its readiness wait, and every test's own agent
+        # publishes its directory here.
+        wait_healthy(f"{urls.agent_directory}/healthz")
+        # Docker reports Fastly Compute (Viceroy) healthy once its internal
+        # 127.0.0.1 probe passes, but Viceroy may not yet be bound on the bridge
+        # interface — so PushResources-driven manifest fetches from the Exchange
+        # to fastly-edge race connection-refused for the first few seconds on a
+        # cold stack. Wait on the bridge-reachable URL too.
+        wait_healthy(f"{urls.fastly_edge}/healthz")
         # The Lambda runtime emulator serves no GET route at all — readiness is
         # an actual function invocation, so it needs its own poller.
         wait_lambda_ready(urls.lambda_edge)
@@ -310,14 +345,11 @@ def compose_stack() -> Iterator[StackURLs]:
 # window (the money-report, reporting-overdue, admin-plane and tenant-isolation
 # suites) buy as their own fresh agent while it is short and restore the
 # default however they end, and each obligation keeps the window it was minted
-# with. So on a stack brought up for the run no obligation of the fixed demo
-# buyers comes due, and a purge would restore nothing a test reads. A stack kept up for more than a day
-# is different: the fixed demo buyers then carry due, unreported
-# obligations and are refused REPORTING_OVERDUE. The remedy for that is a
-# buyer per test (ADR-028 D7), not a truncate of the Exchange's table: a
-# test arranges state only through the public surfaces, never by writing a
-# datastore. The ``fresh_agent`` fixture below is that buyer; the money-path,
-# ledger, idempotency and reporting suites buy as one.
+# with. And every test buys as its own agent (ADR-028 D7), the ``fresh_agent``
+# fixture below, so an obligation one test leaves behind belongs to an agent no
+# other test or later pass signs as, on a stack of any age. A purge would
+# restore nothing a test reads, and a test arranges state only through the
+# public surfaces, never by writing a datastore.
 # ---------------------------------------------------------------------------
 from collections.abc import Callable  # noqa: E402
 
@@ -325,18 +357,21 @@ SHARED_CLEAN_FIXTURES: list[Callable[[], object]] = []
 
 
 # ---------------------------------------------------------------------------
-# ADR-008 D5 — `stack_isolation` marker contract.
+# ADR-008 D5 — `stack_isolation` marker contract, which ADR-028 D7 extends to
+# every e2e test.
 #
-# Every test under tests/e2e/harness/obligations/ MUST declare a
-# `stack_isolation` marker with one of three modes:
+# Every test under tests/e2e/harness/ declares a `stack_isolation` marker with
+# one of three modes:
 #
-#   * "isolated"                — the orchestration tears down and rebuilds
-#                                 shared infra between this test and the
-#                                 next. Reserved for tests that mutate
-#                                 persistent state irrecoverably.
-#   * "shared-clean-fixtures"   — DEFAULT for the bulk of the suite. The
+#   * "isolated"                — the test owns its environment exclusively.
+#                                 This harness has no orchestration that
+#                                 rebuilds the stack between tests, so no test
+#                                 that uses the stack declares it; the host-side
+#                                 guards and offline checks, which use no stack
+#                                 at all, do.
+#   * "shared-clean-fixtures"   — the mode for the bulk of the suite. The
 #                                 `SHARED_CLEAN_FIXTURES` chain runs before
-#                                 each such test.
+#                                 each such test; the chain is empty today.
 #   * "shared-without-cleanup"  — no setup/teardown. Reserved for tests
 #                                 that observe stable cross-test invariants
 #                                 (service-health probes, version sentinels)
@@ -344,15 +379,18 @@ SHARED_CLEAN_FIXTURES: list[Callable[[], object]] = []
 #
 # The `--strict-markers` flag in tests/e2e/pyproject.toml makes any
 # unknown marker fail the collection. The `pytest_collection_modifyitems`
-# hook below additionally requires that every test in the obligations
-# tree DECLARE a mode — silence is not a default, it is a collection
-# error.
+# hook below additionally requires that every test in the harness DECLARE a
+# mode: silence is not a default, it is a collection error. No linter can
+# require a marker, so this is a custom check (ADR-028 D8).
+# harness/test_guards_stack_isolation.py shows it refusing each kind of
+# violation, and harness/test_guards_harness_collection.py runs it over the
+# real tree in `make quality`.
 # ---------------------------------------------------------------------------
 
 _STACK_ISOLATION_MODES = frozenset(
     {"isolated", "shared-clean-fixtures", "shared-without-cleanup"},
 )
-_OBLIGATIONS_DIR_PART = "obligations"
+_HARNESS_DIR = Path(__file__).resolve().parent
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -364,39 +402,43 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
+def stack_isolation_violations(items: Iterable[pytest.Item]) -> list[str]:
+    """Every harness test that declares no valid `stack_isolation` mode, one line each.
+
+    An item outside the harness directory is not this contract's to judge: a
+    conftest's collection hook sees every item of the session, including a tree
+    collected beside this one.
+    """
+    errors: list[str] = []
+    for item in items:
+        if not Path(item.path).resolve().is_relative_to(_HARNESS_DIR):
+            continue
+        marker = item.get_closest_marker("stack_isolation")
+        if marker is None:
+            errors.append(f"{item.nodeid}: missing @pytest.mark.stack_isolation(...)")
+        elif not marker.args or marker.args[0] not in _STACK_ISOLATION_MODES:
+            mode = marker.args[0] if marker.args else "<missing>"
+            valid = ", ".join(sorted(_STACK_ISOLATION_MODES))
+            errors.append(f"{item.nodeid}: stack_isolation mode {mode!r} not in {{{valid}}}")
+    return errors
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config,  # noqa: ARG001 — required hook signature
     items: list[pytest.Item],
 ) -> None:
-    """Fail collection when an obligation test omits `stack_isolation`.
+    """Fail collection when a harness test declares no valid `stack_isolation` mode.
 
-    Per ADR-008 D5: every test in the obligations tree MUST declare its
-    isolation contract. The default ("shared-clean-fixtures") still
-    applies once declared, but silence is treated as a forgotten obligation
-    and collection refuses it.
+    Per ADR-008 D5, which ADR-028 D7 extends to every e2e test: each test
+    declares its isolation contract, and silence is treated as a forgotten
+    declaration that collection refuses.
     """
-    errors: list[str] = []
-    for item in items:
-        path = str(getattr(item, "path", "") or item.fspath)
-        if f"/{_OBLIGATIONS_DIR_PART}/" not in path and not path.endswith(
-            f"/{_OBLIGATIONS_DIR_PART}"
-        ):
-            continue
-        marker = item.get_closest_marker("stack_isolation")
-        if marker is None:
-            errors.append(
-                f"{item.nodeid}: missing @pytest.mark.stack_isolation(...) "
-                "(ADR-008 D5 — required for tests under tests/e2e/harness/obligations/)"
-            )
-            continue
-        if not marker.args or marker.args[0] not in _STACK_ISOLATION_MODES:
-            valid = ", ".join(sorted(_STACK_ISOLATION_MODES))
-            errors.append(
-                f"{item.nodeid}: stack_isolation mode "
-                f"{marker.args[0] if marker.args else '<missing>'!r} not in {{{valid}}}"
-            )
+    errors = stack_isolation_violations(items)
     if errors:
-        msg = "ADR-008 D5 stack_isolation contract violations:\n  - " + "\n  - ".join(errors)
+        msg = (
+            "ADR-008 D5 stack_isolation contract violations (every harness test "
+            "declares its mode, ADR-028 D7):\n  - " + "\n  - ".join(errors)
+        )
         raise pytest.UsageError(msg)
 
 
@@ -404,18 +446,13 @@ def pytest_collection_modifyitems(
 def _stack_isolation_dispatch(request: pytest.FixtureRequest) -> Iterator[None]:
     """Per-test hook that reads the declared mode and runs the right chain.
 
-    `shared-clean-fixtures` (default for declared tests) runs every callable
-    in `SHARED_CLEAN_FIXTURES` before the test, in list order. `isolated` and `shared-without-cleanup`
-    are no-ops at the per-test boundary; `isolated` relies on the
-    orchestration layer to rebuild the stack between tests.
-
-    Tests outside the obligations tree without the marker fall through
-    silently — the marker is mandatory only inside the obligations tree
-    (enforced by the collection hook above).
+    The collection hook above guarantees every harness test declares a mode.
+    `shared-clean-fixtures` runs every callable in `SHARED_CLEAN_FIXTURES` before
+    the test, in list order. `isolated` and `shared-without-cleanup` run nothing
+    at the per-test boundary, and nothing rebuilds the stack for `isolated`.
     """
     marker = request.node.get_closest_marker("stack_isolation")
-    mode = marker.args[0] if marker is not None and marker.args else "shared-clean-fixtures"
-    if mode == "shared-clean-fixtures":
+    if marker is not None and marker.args[0] == "shared-clean-fixtures":
         for cleanup in SHARED_CLEAN_FIXTURES:
             cleanup()
     yield

@@ -70,6 +70,7 @@ called out in §3 and §5.
 | `EXCHANGE_SOR_CACHE_TTL` | Optional | How long the Exchange reuses an account's on/off status before re-reading it. Default `30s`. A value it cannot parse stops the boot. | `30s` |
 | `EXCHANGE_DEFAULT_TENANT` | Optional | The seat whose "activate new agents automatically" policy applies when an agent registers. A tenant row is this Exchange's seat, so the value is this Exchange's own hostname — the same string as `EXCHANGE_DOMAIN`, which is what it falls back to when unset. Leaving it unset is therefore normally right. A publisher's hostname is not a tenant, and **if no tenant row matches this name, every agent registration fails** — the Exchange warns about it at boot (§2.6). | `exchange.example` |
 | `EXCHANGE_DEFAULT_AGENT_CREDIT` | Optional | One-time credit granted to each newly registered agent, **per currency**, written as comma-separated `CODE=AMOUNT` pairs. Amounts are in **whole units** — `EUR=100` grants €100.00 per agent, not 100 cents. A currency you bill in but do not list gets no grant; a currency you do **not** bill in stops the boot. This variable is the **only** place the welcome credit is set: the Exchange reads it once at boot and grants from it at every agent's first `Register`, so dropping a currency from the list removes its grant and unset (or empty) disables the grant everywhere, each from the next restart. Nothing is stored in the database and there is no admin RPC; a default tenant created after the Exchange started grants the credit without a restart. Each amount is a plain decimal only — digits with an optional fraction, at most 8 decimal places. **Anything else stops the boot, including a bare number** (the single-currency format this variable used to take): there is no longer a currency to infer. | `EUR=100,USD=100` |
+| `EXCHANGE_BOOT_FIXTURE_FILE` | Optional | A YAML file declaring the seats, publishers, sites and listings this deployment starts with. At every boot the Exchange creates the rows it declares that are not stored yet, and changes nothing that is. A file it cannot read or apply **stops the boot**. Unset, nothing is created at boot. See below. | `/etc/fora/boot-fixture.yml` |
 | `EXCHANGE_ADDR` | Optional | Address the public listener binds to. Default `:8081`. The image publishes 8081, so change the published port too if you change this. | `:8081` |
 | `EXCHANGE_LOG_LEVEL` | Optional | The lowest level of log record the Exchange writes: `DEBUG`, `INFO`, `WARN` or `ERROR`, in any case. Default `INFO`. **Any other value stops the boot**, with an `exchange.exit` line naming the variable. Read the section below before raising it. | `INFO` |
 | `ADMIN_ADDR` | Optional | Address the internal admin listener binds to. Default `:8082`. Bind it to an internal interface — see [`DEPLOYMENT.md`](DEPLOYMENT.md) §7. | `127.0.0.1:8082` |
@@ -84,6 +85,85 @@ called out in §3 and §5.
 | `EXCHANGE_TERMS_CURRENCY` | Optional | The currency every arrangement a publisher registers through the console is priced in. The console reads it from the Exchange and previews terms in it, so the console never sets it. The catalog importer (`fora-import`) reads the same variable and prices every imported entry in it on each run, so it must carry the same value on both; a change re-prices every imported page at the next run. Default `EUR`. | `EUR` |
 | `EXCHANGE_TERMS_UNIT` | Optional | What a charging arrangement counts. Read by the console and the catalog importer the same way, and it must match on both for the same reason. Default `fetches`. | `fetches` |
 | `EXCHANGE_CATALOG_CONTRIBUTOR_HOST` | **Required** with a console | The hostname of the catalog contributor you operate: the party that submits every publisher's catalog on this deployment. A publisher's own document has to authorize it, and a domain check does not pass until it does. It must equal the `kid` of the key the catalog importer (`fora-import`) signs with, or every push the importer makes is refused. **Boot fails if the console is on and this is unset** — see below. | `catalog-contributor.exchange.example` |
+
+#### `EXCHANGE_BOOT_FIXTURE_FILE` — the rows a deployment starts with
+
+Nothing that serves a request creates a seat, and a deployment that runs no
+publisher console has no surface that registers a publisher's site either. The
+boot fixture declares those rows in a file, so a deployment is built from its
+configuration rather than from SQL run by hand. The design is in
+[ADR-029](../../docs/architecture/adr-029-exchange-boot-fixture.md).
+
+The Exchange reads and checks the file first, before it connects to anything,
+and applies it after the migrations and before the listeners open. It **creates
+each declared row that is not stored yet, and never changes or deletes a stored
+one**:
+
+- A row already stored is left as it is, even when the file now says something
+  else. The boot log names every setting that differs (`boot fixture: a stored
+  row differs from the fixture; the stored values are kept`), so you can see when
+  the file no longer describes the deployment. Change a stored setting through
+  its own surface, such as the admin RPCs or the console, not through the file.
+- The whole file applies in one transaction: all of its new rows, or none.
+- The boot **stops**, and nothing is written, when the file cannot be read, uses a
+  key the format does not name, declares something console registration would
+  refuse, lists a CloudFront RSA site on a seat with no RSA key reference, or
+  contradicts a stored owner: a seat whose id is stored with another
+  domain, a seat domain another seat holds, or a site registered to another
+  publisher. A file cannot move a domain from one owner to another.
+- Each seat must name an Ed25519 key reference this Exchange holds (§2.2), or the
+  boot stops. An RSA key reference is not resolved at boot, for the reason §2.2
+  gives; the file only has to name one on every seat that lists a CloudFront RSA
+  site.
+
+A listing the file declares is created **`ACTIVE`**, without the manifest check
+the console runs, because the operator vouches for it. Catalog push still checks
+every push against the site's `/.well-known/fora.json`: the manifest must still
+name this Exchange with the declared publisher id and list the pushing
+contributor.
+Every seat and listing the file creates writes a row to `fora.audit_log` naming
+the file and its sha256. A listing's row also records the terms it was created
+with, which that sha256 does not cover, and the stored site's signing scheme and
+CDN.
+
+The format, version 1:
+
+```yaml
+version: 1
+seats:
+  - tenant_id: seat
+    domain: exchange.example              # your EXCHANGE_DOMAIN, exactly
+    ed25519_key_ref: exchange-primary     # a key this Exchange holds
+    rsa_key_ref: cf-rsa-primary           # required to list an AWS_CLOUDFRONT_RSA site
+    allow_broker_relay: true              # required
+    activate_new_agents_by_default: true  # required
+publishers:
+  - publisher_id: pub-stoa
+    display_name: Stoa Press
+    sites:                                # at least one
+      - domain: www.publisher.example     # lower case, no port, no trailing dot
+        signing_scheme: ED25519           # or AWS_CLOUDFRONT_RSA
+        cdn: cloudflare                   # optional: cloudflare, fastly or cloudfront
+        listings:                         # at least one
+          - tenant_id: seat               # a seat this file declares
+            terms_file: free-terms.json   # inside this file's directory
+            content_path_scope: []        # optional; empty offers the whole site
+```
+
+An `AWS_CLOUDFRONT_RSA` site also carries `cloudfront_key_pair_id`, which no
+other site may carry, and every seat that lists it must name an `rsa_key_ref`. A listing's terms file must sit inside the fixture's
+directory; the Exchange will not read a file outside it, by name or through a
+link. It holds the licensing in the shape the console stores it:
+
+```json
+{"pricing_model":"free","permitted_functions":["search","ai-input"],"attribution_required":false}
+```
+
+The terms must build into license terms in this deployment's denomination
+(`EXCHANGE_TERMS_CURRENCY`, `EXCHANGE_TERMS_UNIT`), exactly as a console
+registration's must. The fixture may be up to 1 MiB and each terms file up to
+64 KiB. The fee rate and the reporting policy are not in the file: set them
+through the admin RPCs once the seat exists ([`RUNBOOK.md`](RUNBOOK.md) §4.2).
 
 #### The publisher console, and why the contributor host is required with it
 
@@ -436,6 +516,7 @@ settings all live under the `EXCHANGE_BILLING_` prefix.
 | `EXCHANGE_BILLING_TB_CLUSTER_ID` | Optional | TigerBeetle cluster id. Default `0`. A non-numeric value is a boot failure. | `0` |
 | `EXCHANGE_BILLING_HOLD_GRACE` | Optional | How long a reservation outlives the delivery URL. Default `1m`, giving a 6-minute hold against the 5-minute URL. A malformed value is a boot failure. | `1m` |
 | `EXCHANGE_BILLING_TB_OP_TIMEOUT` | Optional | Deadline for a single ledger call. Unset leaves the built-in 5s. A malformed value is a boot failure. | `5s` |
+| `EXCHANGE_BILLING_TB_ID_NAMESPACE` | **Never set it in production** | A label that salts every ledger id the Exchange derives, so several Exchanges can bill on one TigerBeetle cluster. Only the e2e build of the Exchange reads it, and requires it there; that build also logs the namespace at boot, as a warning. **A production build refuses to start when it is set**, because production ids are unsalted: they are the ids the operator funding and balance scripts compute. | *(leave unset)* |
 
 ### The order of `EXCHANGE_BILLING_LEDGER` decides `base_currency`
 
@@ -521,7 +602,9 @@ on, because the seat may be created after the process starts:
 ```
 
 Take the warning seriously. Until that tenant row exists, **every** agent
-registration is refused, so no agent can buy anything.
+registration is refused, so no agent can buy anything. When
+`EXCHANGE_BOOT_FIXTURE_FILE` is set (§2.1), the Exchange applies it before this
+check, so a seat the fixture declares is already there.
 
 ---
 

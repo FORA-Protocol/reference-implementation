@@ -47,7 +47,7 @@ func TestConsoleRegistration_ImportTakeOverAnswerRoundTrip(t *testing.T) {
 	registerSiteWith(t, f, site("stoa.example", map[string]any{takeOverAnswer: false}))
 	registerSiteWith(t, f, site("harmonia.example", map[string]any{takeOverAnswer: true}))
 	assertTakeOverAnswers(t, f, actor, want)
-	if n := countActions(t, f, "RegisterDomain"); n != len(want) {
+	if n := f.exchange.CountAuditActions(t, "RegisterDomain"); n != len(want) {
 		t.Fatalf("%d RegisterDomain audit rows after registering two sites twice, want %d", n, len(want))
 	}
 }

@@ -176,6 +176,7 @@ func tradingServices(d TradingDeps) (*service.CatalogService, *service.ExchangeS
 		Evidence:      repo.NewEvidenceRepo(d.Queries),
 		Events:        repo.NewTransactionEventRepo(journalQueries(d)),
 		FeeOverrides:  repo.NewFeeOverrideRepo(d.Queries),
+		Subscriptions: repo.NewSubscriptionTrustRepo(d.Queries),
 		Billing:       d.Billing,
 		OfferSigner:   d.Signer,
 		KeyStore:      d.KeyStore,

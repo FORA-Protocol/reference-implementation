@@ -7,41 +7,40 @@ at what your deployment is serving and tell whether it is right.
 Audience: the DevOps engineer deploying the Edge Worker. Words that may be new
 are explained the first time they appear.
 
-| Address | File here | What it is |
-|---|---|---|
-| `/.well-known/fora.json` | [`fora.json.example`](fora.json.example) | The commercial document. An AI bot that gets a `403` reads it to learn who sells access to this content and where to negotiate. The Exchange reads it to learn which account gets paid, and who is allowed to add content on the publisher's behalf. |
-| `/.well-known/http-message-signatures-directory` | [`http-message-signatures-directory.example`](http-message-signatures-directory.example) | The publisher's key directory: its own public signing keys (a JSON list of public keys, RFC 7517), served as a Web Bot Auth key directory. |
+| Address | File here | Who serves it | What it is |
+|---|---|---|---|
+| `/.well-known/fora.json` | [`fora.json.example`](fora.json.example) | **The publisher's own origin** | The commercial document. An AI bot that gets a `403` reads it to learn who sells access to this content and where to negotiate. The Exchange reads it to learn which account gets paid, and who is allowed to add content on the publisher's behalf. |
+| `/.well-known/http-message-signatures-directory` | [`http-message-signatures-directory.example`](http-message-signatures-directory.example) | The Worker | The publisher's key directory: its own public signing keys (a JSON list of public keys, RFC 7517), served as a Web Bot Auth key directory. |
 
 ---
 
-## These are reference copies, not files to upload
+## The discovery document is a file on the origin; the key directory is the Worker's
 
-**Nothing here is deployed.** The Worker builds both documents in memory on the
-first request it receives, from its environment variables, and serves that same
-pair to every later request. There is no file to place on the origin web server
-and no file to keep in sync.
+**`fora.json` is a file you serve.** Place it on the publisher's origin at
+`/.well-known/fora.json`: the publisher console hands over the exact file, and
+`fora.json.example` shows what one looks like. The Worker does not build or
+answer this document. It passes the address through to the origin for every
+client, an AI bot included, and returns the origin's answer unchanged — and the
+same for `/rsl.txt` if the publisher publishes an RSL document. To add an
+Exchange or change who may add content, edit the file; nothing in the Worker's
+settings describes it, so there is nothing there to keep in sync. If the origin
+has no file at that address, a bot sent there by a `403` finds the origin's
+`404`.
 
-The Worker answers both addresses **itself**, even when the origin already
-publishes its own copies at the same addresses — the Worker replies and the
-origin is never asked. That makes the Worker's configuration the only thing that
-decides what the world sees, and it makes one route setting load-bearing: **the
-Worker's routes must cover `/.well-known/*`.** A route that misses those paths
-breaks bot negotiation quietly — the bot receives a `403` telling it where to
-look, follows the pointer, and finds whatever the origin happens to serve, or
-nothing. See [`../../src/edge/DEPLOYMENT.md`](../../src/edge/DEPLOYMENT.md) §6.1.
+**The key directory is the Worker's.** It builds it from its environment
+variables on the first request it receives and serves that same document to
+every later request. There is no file to place on the origin for it.
+[`template-env.json`](template-env.json) holds the exact values that produce
+`http-message-signatures-directory.example`, so you can compare input against
+input as well as output against output. After you deploy, `curl` both addresses
+and compare — see "Check what you are serving" below.
 
-Use these files two ways. Before you deploy, read them next to your own variable
-values — [`template-env.json`](template-env.json) holds the exact values that
-produce the two files here, so you can compare input against input as well as
-output against output. After you deploy, `curl` both addresses and compare — see
-"Check what you are serving" below.
-
-Three of the variables in `template-env.json` reach neither document.
-`EXCHANGE_URL` only supplies a header on a bot denial, `EXCHANGE_WBA_URL` is the
-address the Worker fetches the *Exchange's* keys from, and `ORIGIN_URL` is the
-address of the backend the Worker forwards verified requests to. They are in the
-file because the Worker will not serve without them, not because they are
-published.
+Two of the variables in `template-env.json` reach neither document.
+`EXCHANGE_URL` only supplies a header on a bot denial, and `EXCHANGE_WBA_URL` is
+the address the Worker fetches the *Exchange's* keys from. `ORIGIN_URL` is the
+address of the backend the Worker forwards verified requests to — and the
+discovery document. They are in the file because the Worker will not serve
+without them, not because they are published.
 
 `ORIGIN_URL` is one of a pair: a deployment sets either it or `SAME_ZONE_ORIGIN`.
 Set neither and the Worker answers an error to every request, article traffic
@@ -52,92 +51,74 @@ explained in
 the exception is described in
 [`../../src/edge/README.md`](../../src/edge/README.md).
 
-So the file holds every setting the Worker itself requires, plus the two optional
-ones that fill in the documents in this folder, and you can read it as the
-minimum list. Two further things are needed before traffic is served and neither
-is a variable: the routes above, and the publisher's tenant set up on the
+So the file holds every setting the Worker itself requires, plus the one
+optional one that fills in the key directory in this folder, and you can read it
+as the minimum list. Two further things are needed before traffic is served and
+neither is a variable: the routes, and the publisher's tenant set up on the
 Exchange ([`../../src/edge/CONFIGURATION.md`](../../src/edge/CONFIGURATION.md)
 §5).
 
 Both files are validated against the canonical schemas in
 [`../../internal/forawellknown/schema/`](../../internal/forawellknown/schema/)
-on every test run. The same run also requests both addresses through the
-Worker's own routes, using the values in `template-env.json`, and compares each
-response body against the file here — so they cannot drift away from what the
-code serves. The wire shapes come from the FORA protocol module
+on every test run, and `fora.json.example` is also read through the Exchange's
+own parser. The same run requests the key directory through the Worker's own
+routes, using the values in `template-env.json`, and compares the response body
+against the file here, and checks that the discovery document comes back from
+the origin byte for byte — so neither can drift away from what is served. The
+wire shapes come from the FORA protocol module
 `github.com/FORA-Protocol/protocol`.
 
 ---
 
-## Where each field comes from
-
-Every field is produced by an environment variable. If you deploy with the
-Terraform module in [`../terraform/modules/cloudflare-edge/`](../terraform/modules/cloudflare-edge/),
-the third column is the input name to set. Full variable reference:
-[`../../src/edge/CONFIGURATION.md`](../../src/edge/CONFIGURATION.md) §2.
+## What each field is
 
 ### `fora.json`
 
-| Field | Worker variable | Terraform input |
-|---|---|---|
-| `ver` | none — the Worker writes the manifest document version (major 1), a namespace separate from the RPC envelope `ver` | — |
-| `role` | none — always `ROLE_PUBLISHER` for a publisher deployment | — |
-| `domain` | `PROVIDER` | `provider_domain` |
-| `exchanges[].domain` | `EXCHANGES_JSON` | `exchanges_json` |
-| `exchanges[].endpoint` | `EXCHANGES_JSON` | `exchanges_json` |
-| `exchanges[].relationship` | none — always `PROVIDER_RELATIONSHIP_DIRECT` | — |
-| `exchanges[].ext.resource_owner_id` | `EXCHANGES_JSON` | `exchanges_json` |
-| `supported_profiles` | `EXCHANGES_JSON` — see the note below | `exchanges_json` |
-| `catalog_contributors` | `CATALOG_CONTRIBUTORS_JSON` | `catalog_contributors_json` |
+The publisher's own file. The publisher console writes all of it; a publisher
+writing it by hand takes each value from the Exchange operator.
 
-The Terraform input name is the lowercase form of the variable name in every row
-but one: `PROVIDER` is set by `provider_domain`, because `provider` is a reserved
-word in Terraform's language.
-
-**`supported_profiles` moves.** You write it inside each entry of
-`EXCHANGES_JSON`, and it comes out at the **top level** of the document, as the
-combined list from every entry with duplicates removed. It does not appear on the
-`exchanges[]` entries in the served document. The example file shows the result,
-not the input. If no entry names a profile, the field is left out of the document
-entirely rather than served as an empty list.
+| Field | What it holds |
+|---|---|
+| `ver` | The manifest document version (major 1), a namespace separate from the RPC envelope `ver`. |
+| `role` | Always `ROLE_PUBLISHER` for a publisher. |
+| `domain` | The publisher's own hostname, the one the content is served at. |
+| `exchanges[].domain` | The Exchange's own name — an exact string match, see below. |
+| `exchanges[].endpoint` | The Exchange's address. |
+| `exchanges[].relationship` | `PROVIDER_RELATIONSHIP_DIRECT`. |
+| `exchanges[].ext.resource_owner_id` | The account that gets paid. |
+| `supported_profiles` | The extension profiles the Exchange supports, at the top level of the document. |
+| `catalog_contributors` | Other parties allowed to add content on the publisher's behalf. |
 
 **`ext.resource_owner_id` is the account that gets paid, and it has no default.**
-The Exchange reads it out of the document this Worker serves, looking at the
-entry whose `domain` equals the Exchange's own name — an exact string match, with
-no cleanup of spelling.
+The Exchange reads it out of the document the publisher's origin serves, looking
+at the entry whose `domain` equals the Exchange's own name — an exact string
+match, with no cleanup of spelling.
 
-Confirm two values with your Exchange operator before you deploy: the exact name
-the Exchange calls itself, and the payee id to declare. **Getting them wrong
-fails in two different ways, and only one of them is visible.**
+**Getting either value wrong is refused, in two different ways.**
 
 - **A wrong exchange name, or a missing `ext`, is refused.** No entry matches the
   Exchange's own name, so every attempt to add this publisher's content comes
   back with the reason `missing_resource_owner_id`. The content never enters the
   catalog and nothing about it can ever be sold, while the Worker starts cleanly
-  and serves this document without complaint. You see it in the push rejections.
-- **A wrong payee id is accepted.** The Exchange checks only that the value is
-  not empty. It never checks the id against anything, so a typo is stored on the
-  catalog entry and used as the payee when the content settles. The content
-  enters the catalog, the content sells, and the money is attributed to an
-  account your Exchange operator does not recognise. Nothing rejects it and
-  nothing warns.
+  and passes this document through without complaint. You see it in the push
+  rejections.
+- **A payee id other than the one the site was registered under is refused**, for
+  a site registered on this Exchange, with the reason
+  `resource_owner_id_mismatch`.
 
 That is why the example file leaves the field reading
 `<the payee id the Exchange operator assigns — fill in>` rather than something
-that looks like a real id. **Deploy it unchanged and you sell content under that
-literal string.** Replace it with the value your Exchange operator gives you, and
-read it back once with the `curl` check below. See
+that looks like a real id. Replace it with the value your Exchange operator gives
+you, and read it back once with the `curl` check below. See
 [`../../src/edge/CONFIGURATION.md`](../../src/edge/CONFIGURATION.md) §3.5.
 
 **`catalog_contributors` names other parties, not the publisher.** The publisher
 is already allowed to add its own content: the Exchange first compares the caller
 against this document's own `domain` field, and only then looks through
 `catalog_contributors`. So a publisher that adds its own content needs no entry
-here, and may leave `CATALOG_CONTRIBUTORS_JSON` unset. With the variable unset the
-field is absent from the served document, not served as an empty list. List a
-party here when it is someone else — an ingestion partner, a verification vendor,
-an Exchange that enriches entries. The `relationship` value is free text
-describing the arrangement.
+here. List a party here when it is someone else — an ingestion partner, a
+verification vendor, an Exchange that enriches entries. The `relationship` value
+is free text describing the arrangement.
 
 One trap: the comparison is between **hosts**. Spelling differences are cleaned
 up — a scheme prefix, capital letters, a trailing dot, an explicit `:443` all
@@ -146,6 +127,11 @@ different hosts, not two spellings of one. If content is added from a host other
 than the one in `domain`, that other host needs an entry here.
 
 ### `http-message-signatures-directory`
+
+Every field is produced by an environment variable. If you deploy with the
+Terraform module in [`../terraform/modules/cloudflare-edge/`](../terraform/modules/cloudflare-edge/),
+the third column is the input name to set. Full variable reference:
+[`../../src/edge/CONFIGURATION.md`](../../src/edge/CONFIGURATION.md) §2.
 
 | Field | Worker variable | Terraform input |
 |---|---|---|
@@ -157,11 +143,11 @@ and all seven are required. **There is no `kid` field**, and adding one is a
 defect: a key is named by its RFC 7638 thumbprint, computed from the key itself,
 so a hand-written name has nothing to attach to.
 
-If you use the module in
-[`../terraform/modules/publisher-manifest/`](../terraform/modules/publisher-manifest/),
-you do not write `exchanges_json` or `catalog_contributors_json` by hand — that
-module builds both strings from an Exchange hostname, a payee id and a
-contributor id.
+The module in
+[`../terraform/modules/publisher-manifest/`](../terraform/modules/publisher-manifest/)
+renders a whole `fora.json` from an Exchange hostname, a payee id and a
+contributor id, for a deployment that serves the document from an origin it
+runs; its test holds the rendering to `fora.json.example`.
 
 ---
 
@@ -261,10 +247,9 @@ and the Exchange learns that key by fetching this directory. The directory must
 carry the key, so `WBA_KEYS_JSON` is set. No `catalog_contributors` entry is
 needed, because the document's own `domain` field already authorizes the
 publisher. *Drop from the example:* the `catalog_contributors` array in
-`fora.json.example`, and leave `CATALOG_CONTRIBUTORS_JSON` unset. Note that the
-`publisher-manifest` Terraform module below cannot produce this shape: it requires
-a contributor id and always renders one entry, so a deployment in this setup sets
-`CATALOG_CONTRIBUTORS_JSON` by hand or not at all.
+`fora.json.example`. Note that the `publisher-manifest` Terraform module below
+cannot produce this shape: it requires a contributor id and always renders one
+entry, so a deployment in this setup writes its `fora.json` by hand.
 
 **Someone else adds content on the publisher's behalf.** That party is named in
 `catalog_contributors`, and its key lives in **its own** directory on **its own**
@@ -355,20 +340,20 @@ Replace `<host>` with the publisher hostname the Worker runs on.
 **The commercial document.**
 
 ```bash
-curl -s https://<host>/.well-known/fora.json
-# Expect: 200, and JSON with "role":"ROLE_PUBLISHER", your PROVIDER value as
-#         "domain", and an "exchanges" entry carrying
-#         "ext":{"resource_owner_id":"…"}.
+curl -s -A "GPTBot/1.0" https://<host>/.well-known/fora.json
+# Expect: 200, and the file on your origin: JSON with "role":"ROLE_PUBLISHER",
+#         the publisher's hostname as "domain", and an "exchanges" entry
+#         carrying "ext":{"resource_owner_id":"…"}. The AI-bot User-Agent is
+#         deliberate: the Worker passes this address through for every client.
 ```
 
 Compare the whole document field by field against
 [`fora.json.example`](fora.json.example). Two things to look at first:
 
 - If `ext` is missing, this publisher's content cannot enter the catalog. Fix
-  `EXCHANGES_JSON` before going further.
-- If `resource_owner_id` is present but is not the exact value your Exchange
-  operator gave you, nothing will complain and the content will sell under the
-  wrong account. This `curl` is the only place that mistake is visible.
+  the file on the origin before going further.
+- If `resource_owner_id` is not the exact value your Exchange operator gave
+  you, every catalog push for the site is refused. Fix the file on the origin.
 
 **The key directory.**
 
@@ -389,8 +374,8 @@ curl -s -D - https://<host>/.well-known/http-message-signatures-directory
 **Read the `x` value in that output and check it against the one you put in
 `WBA_KEYS_JSON`.** Do not decide from the status and the content type alone. Your
 own web server may already publish a key document at this same address, and if
-the Worker's routes do not cover `/.well-known/*` it is that document the world
-receives — served with the same status and quite possibly the same content type,
+the Worker's routes do not cover `/.well-known/http-message-signatures-directory`
+it is that document the world receives — served with the same status and quite possibly the same content type,
 so the response looks correct while the keys the world uses to authenticate this
 publisher are not yours. The `x` value is the one part of the answer another
 server cannot produce by accident. If it does not match, the routes are the first

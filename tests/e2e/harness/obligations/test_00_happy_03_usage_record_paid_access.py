@@ -138,7 +138,7 @@ def test_paid_usage_record_shows_uri_price_currency_and_timestamp(
     assert recorded.requester_id == fresh_agent.agent_id, (
         f"the access is recorded for {recorded.requester_id!r}, not the buyer: {recorded}"
     )
-    recorded_uri = (recorded.offer.get("identity") or {}).get("canonical_url")
+    recorded_uri = recorded.offer.identity.canonical_url if recorded.offer.identity else None
     assert recorded_uri == _RESOURCE_URI, (
         f"the recorded access must name {_RESOURCE_URI!r}; got {recorded_uri!r}"
     )

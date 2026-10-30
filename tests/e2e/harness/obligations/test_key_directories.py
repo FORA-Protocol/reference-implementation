@@ -1,4 +1,4 @@
-"""Obligations KEYS-002, -003, -010 and -011: every participant's key directory.
+"""Obligations KEYS-001, -002, -003, -010 and -011: every participant's key directory.
 
 The contract is the key directory and revocation channel of the pinned module
 ``github.com/FORA-Protocol/protocol``: ``JsonWebKey`` and ``KeyRevocationList`` in
@@ -27,10 +27,13 @@ The Broker's revocation list is shared state another suite writes, so it is only
 read here. The agent lives on the identity service, which is reachable only
 inside the compose network, and so is every advertised ``revocation_url``.
 
-The Web Bot Auth wire profile of these directories (the draft's media type, its
-response signature, the import into an independent verifier) is checked by the
-Web Bot Auth conformance suites, not here. KEYS-002 is driven because what it
-adds is FORA's: ``use`` and ``alg`` required, and no ``kid`` at all.
+The reader also refuses a directory whose response its listed keys did not sign.
+So the key-shape test drives KEYS-001 for these participants, and a test of its
+own reads each publishing edge's directory the same way, at the edge's https
+origin. The import into an independent verifier, and the Lambda@Edge directory,
+which answers only through the function's invoke endpoint, are checked by the
+Web Bot Auth conformance suites. KEYS-002 is driven because what it adds is
+FORA's: ``use`` and ``alg`` required, and no ``kid`` at all.
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ from ..defects import (
     IDENTITY_REVOCATION_LIST_CACHED_TOO_LONG,
     Defect,
 )
+from ..e2e_catalog import DEMO_MUSIC_DOMAIN, DEMO_PHILOSOPHY_DOMAIN, DEMO_SFX_DOMAIN
 from ..exchanges import (
     EXCHANGE_A_DOMAIN,
     EXCHANGE_B_DOMAIN,
@@ -72,6 +76,9 @@ _EXCHANGES = {
 #: Every participant whose directory this module reads. "agent" is an agent the
 #: identity service signed up for this session; its host is known only at run time.
 _PARTICIPANTS = [*_EXCHANGES, "broker", "console", "agent"]
+
+#: The publishing edges, each read at the https origin a verifier reads it from.
+_PUBLISHING_EDGES = [DEMO_PHILOSOPHY_DOMAIN, DEMO_MUSIC_DOMAIN, DEMO_SFX_DOMAIN]
 
 #: The longest freshness lifetime a revocation list may be served with, in seconds.
 _SHORT_LIFETIME_S = 60
@@ -130,7 +137,7 @@ def _valid_at(key: JsonWebKey, now: datetime) -> bool:
     return not_before <= now < not_after
 
 
-@obligation(Obligation.KEYS_002)
+@obligation(Obligation.KEYS_001, Obligation.KEYS_002)
 @pytest.mark.parametrize("participant", _PARTICIPANTS)
 def test_every_directory_key_is_an_ed25519_signing_key(
     participant: str, request: pytest.FixtureRequest
@@ -148,6 +155,15 @@ def test_every_directory_key_is_an_ed25519_signing_key(
         assert len(b64url_decode_strict(key.x or "")) == _ED25519_KEY_BYTES, (
             f"{participant} publishes an x that is not a 32-byte Ed25519 key: {key}"
         )
+
+
+@obligation(Obligation.KEYS_001)
+@pytest.mark.parametrize("host", _PUBLISHING_EDGES)
+def test_every_publishing_edge_serves_its_key_directory(host: str) -> None:
+    """The SDK's reader accepts the key directory each publishing edge serves."""
+    if os.environ.get("FORA_E2E_IN_NETWORK") != "1":
+        pytest.skip("an edge's https origin is served by the capture proxy, inside the network")
+    assert wba_directory_at(f"https://{host}").message.keys, f"{host} serves no key"
 
 
 @obligation(Obligation.KEYS_003)

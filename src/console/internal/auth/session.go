@@ -66,7 +66,6 @@ type Session struct {
 	Subject       string `json:"sub"`
 	Email         string `json:"email"`
 	EmailVerified bool   `json:"email_verified"`
-	DisplayName   string `json:"name"`
 }
 
 // cookieWriter seals a value into a cookie and reads it back. It is also the

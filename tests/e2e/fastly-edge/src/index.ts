@@ -7,8 +7,9 @@
 // (src/edge/src/ed25519-noble.ts). It is injected once, as
 // AppDeps.verifyEd25519 and into the key cache.
 //
-// The rest of the stack (origin proxy, fora.json, bot-redirect, ACME, etc.)
-// is the runtime-agnostic Hono app from @fora/edge.
+// The rest of the stack (origin proxy, the publisher's documents passed through
+// to the origin, bot-redirect, etc.) is the runtime-agnostic Hono app from
+// @fora/edge.
 
 /// <reference types="@fastly/js-compute" />
 
@@ -19,7 +20,6 @@ import { createKeyCache } from '@fora/edge/src/keys-cache.js';
 import {
   type App,
   type AppDeps,
-  buildPublisherManifest,
   buildPublisherWba,
   signedDirectoryFrom,
 } from '@fora/edge/src/types.js';
@@ -53,12 +53,6 @@ function resolveKeyFrom(wbaUrl: string): AppDeps['resolveKey'] {
 // App wiring — lazy, so Wizer's build-time module init doesn't read env.
 // ---------------------------------------------------------------------------
 
-interface RawExchange {
-  domain: string;
-  endpoint: string;
-  supported_profiles?: string[];
-}
-
 let cachedApp: App | undefined;
 
 function getApp(): App {
@@ -67,12 +61,6 @@ function getApp(): App {
   const exchangeUrl = requireEnv('EXCHANGE_URL');
   const wbaUrl = requireEnv('EXCHANGE_WBA_URL');
   const originUrl = requireEnv('ORIGIN_URL');
-  const provider = requireEnv('PROVIDER');
-  const rawExchanges: RawExchange[] = JSON.parse(requireEnv('EXCHANGES_JSON'));
-  // Authorized third-party catalog pushers (optional). Consumed by the
-  // Exchange's contributor-authorization gate.
-  const rawContributors = readEnv('CATALOG_CONTRIBUTORS_JSON');
-  const catalogContributors = rawContributors ? JSON.parse(rawContributors) : undefined;
 
   // This publisher's self-publish signing key(s), served in the WBA directory's
   // keys[] (no kid) so the Exchange learns them via the well-known fetch (Gate-1
@@ -83,7 +71,6 @@ function getApp(): App {
   const wbaRevocationUrl = readEnv('WBA_REVOCATION_URL') || undefined;
 
   // Shared with production (src/edge/src/types.ts) so the shim cannot drift.
-  const manifest = buildPublisherManifest(provider, rawExchanges, catalogContributors);
   const wba = wbaKeys ? buildPublisherWba(wbaKeys, wbaRevocationUrl) : undefined;
   // The same directory pre-signed offline for this host, served verbatim in its
   // place when set (the edge holds no private key to sign it with).
@@ -97,7 +84,6 @@ function getApp(): App {
   };
 
   const deps: AppDeps = {
-    manifest,
     exchangeUrl,
     resolveKey: resolveKeyFrom(wbaUrl),
     // The signed-URL check and the delivery-proof check run through this. Left
@@ -112,7 +98,6 @@ function getApp(): App {
     enforceBinding: readEnv('FORA_ENFORCE_BINDING') !== 'false',
     originUrl,
     fetcher: fastlyFetcher,
-    rslBody: readEnv('RSL_BODY'),
     ...(wba !== undefined ? { wba } : {}),
     ...(wbaSigned !== undefined ? { wbaSigned } : {}),
   };

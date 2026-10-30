@@ -29,9 +29,9 @@ from pathlib import Path
 
 import pytest
 
-# Pure fixture-data test — no compose stack, no DB. Declare `isolated` so the
-# autouse `_stack_isolation_dispatch` per-test cleanup chain (which needs a live
-# Postgres DSN) is a no-op for this module.
+# Pure fixture-data test — no compose stack, no DB, so it owns its environment and
+# declares `isolated`; the autouse `_stack_isolation_dispatch` runs nothing for
+# it.
 pytestmark = pytest.mark.stack_isolation("isolated")
 
 CATALOG_DIR = Path(__file__).resolve().parent / "fixtures" / "catalog"

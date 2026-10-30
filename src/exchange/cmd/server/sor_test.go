@@ -64,7 +64,7 @@ func TestSelectSoRAdapter_Mapping(t *testing.T) {
 				t.Cleanup(cleanup)
 			}
 			if err == nil {
-				t.Fatalf("want error containing %q, got adapter %T", tc.wantErr, got)
+				t.Fatalf("want error containing %q, got adapter %T", tc.wantErr, got.adapter)
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("error = %q, want substring %q", err, tc.wantErr)

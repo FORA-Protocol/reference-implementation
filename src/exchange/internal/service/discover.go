@@ -41,6 +41,7 @@ func (s *ExchangeService) groupFor(
 	entry repo.CatalogEntry,
 	verdict LookupVerdict,
 	requester *forav1.Requester,
+	gate *discoveryGate,
 	profiles []string,
 ) (*forav1.OfferGroup, []*forav1.Offer, error) {
 	switch verdict {
@@ -49,7 +50,7 @@ func (s *ExchangeService) groupFor(
 		group.AbsenceReason = forav1.OfferAbsenceReason_OFFER_ABSENCE_REASON_NOT_IN_CATALOG.Enum()
 		return group, nil, nil
 	case LookupHitPublic:
-		offers, err := s.offersFor(entry, requester, profiles)
+		offers, err := s.offersFor(entry, requester, gate, profiles)
 		if err != nil {
 			return nil, nil, exchange.Wrap(exchange.KindInternal, err, "build offer")
 		}
@@ -82,11 +83,10 @@ func (s *ExchangeService) groupFor(
 // yields two independently signed offers, each priced from its own term, and
 // the agent picks the one it wants.
 //
-// When requester is non-nil the persisted terms are first filtered through
-// selectTerms, so only terms this requester is entitled to become offers
-// (selectTerms is the single source of term-eligibility; this is its only
-// caller on the discovery path). A nil requester projects all stored terms
-// (defensive only — DiscoverResources validates the requester upstream).
+// The persisted terms are first filtered through selectTerms, so only terms
+// this requester may be offered become offers (selectTerms is the single source
+// of term-eligibility; this is its only caller on the discovery path). The gate
+// carries what the request proved for subscription-gated terms.
 //
 // Terms are read from the snapshot's rebuild-time decode cache — NOT decoded
 // per call. The stored JSONB stays untrusted: a row that failed to decode at
@@ -95,16 +95,14 @@ func (s *ExchangeService) groupFor(
 // group with no offers rather than a stub-priced one. The two cases are
 // deliberately not told apart: the caller answers both with no reason.
 func (s *ExchangeService) offersFor(
-	entry repo.CatalogEntry, requester *forav1.Requester, profiles []string,
+	entry repo.CatalogEntry, requester *forav1.Requester, gate *discoveryGate, profiles []string,
 ) ([]*forav1.Offer, error) {
 	snap := s.catalog.Snapshot()
 	stored := snap.DecodedTerms(entry.ResourceID)
-	eligible := stored
-	if requester != nil {
-		eligible = selectTerms(stored, requester)
-	}
+	eligible := selectTerms(stored, requester, entry.TenantID, gate)
 	offers := make([]*forav1.Offer, 0, len(eligible))
-	for _, term := range eligible {
+	for _, sel := range eligible {
+		term := sel.term
 		offer, err := s.buildOffer(snap, entry, term, storedIndex(stored, term), profiles)
 		if err != nil {
 			return nil, err

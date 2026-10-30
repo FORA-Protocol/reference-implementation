@@ -21,7 +21,7 @@
   },
   "requester_profiles": {
     "default": "no scopes (public). Used for every case unless the case names `requester`.",
-    "premium": "scopes:[\"subscription:premium\"]. Used by the scope-projection premium cases."
+    "premium": "a requester holding a VERIFIED delegation chain for the scope subscription:premium (Requester.delegation; stating the scope in requester.scopes presents nothing). Used by the scope-projection premium cases."
   },
   "files": [
     {
@@ -304,7 +304,7 @@
         {
           "line_number": 1,
           "case_id": "multiterm_meta_premium_requester",
-          "description": "premium requester -> premium term selected (9.99); full metadata present.",
+          "description": "premium requester (verified delegation for subscription:premium) -> premium term selected (9.99); full metadata present.",
           "requester": "premium",
           "expected": {"parse": "ok", "push": "accepted", "offer": {
             "identity_content_hash": "sha256:def4560000000000000000000000000000000000000000000000000000000000",

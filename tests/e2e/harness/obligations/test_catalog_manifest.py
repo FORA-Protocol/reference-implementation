@@ -20,11 +20,11 @@ document on the next push.
 from __future__ import annotations
 
 import json
-from typing import Any
 
 import pytest
 from fora_sdk import to_wire
 from fora_sdk.client import CallError
+from wire.models import WellKnownManifest
 
 from ..catalog_calls import (
     EXCHANGE_NOT_LISTED,
@@ -41,6 +41,7 @@ from ..catalog_calls import (
 from ..defects import CATALOG_REFUSAL_UNTYPED
 from ..exchanges import EXCHANGE_B_DOMAIN
 from ..fresh_agent import FreshAgent
+from ..model_edits import with_members
 from ..obligation_registry import Obligation, obligation
 from ..publisher_accounts import PublisherFactory
 from ..publisher_journey import onboard
@@ -50,22 +51,16 @@ from ..stack_urls import StackURLs
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
 
-def _onboarded(stack: StackURLs, factory: PublisherFactory) -> tuple[Site, dict[str, Any]]:
-    """A fresh publisher's registered site, and the manifest it serves, as its wire dict."""
+def _onboarded(stack: StackURLs, factory: PublisherFactory) -> tuple[Site, WellKnownManifest]:
+    """A fresh publisher's registered site, and the manifest it serves."""
     site = mint_site()
     registration = onboard(stack, factory(), site)
-    assert registration.registered.verified, registration.registered
-    return site, to_wire(registration.manifest)
+    assert registration.connected.verified, registration.connected
+    return site, registration.manifest
 
 
-def _republish(stack: StackURLs, site: Site, manifest: dict[str, Any]) -> None:
-    publish(stack, site, manifest=json.dumps(manifest))
-
-
-def _with(manifest: dict[str, Any], **changes: Any) -> dict[str, Any]:
-    edited = json.loads(json.dumps(manifest))
-    edited.update(changes)
-    return edited
+def _republish(stack: StackURLs, site: Site, manifest: WellKnownManifest) -> None:
+    publish(stack, site, manifest=json.dumps(to_wire(manifest)))
 
 
 @obligation(Obligation.CATALOG_006, Obligation.CATALOG_008)
@@ -81,14 +76,14 @@ def test_a_registered_publishers_page_is_pushed_and_a_new_minor_version_is_read(
         "the registered publisher's page was not stored"
     )
 
-    _republish(compose_stack, site, _with(manifest, ver="1.7"))
+    _republish(compose_stack, site, with_members(manifest, ver="1.7"))
     second = fresh_entry(site.domain)
     accepted(catalog.push(HOME_SEAT, [second]))
     assert stored(fresh_agent, HOME_EXCHANGE, second.uri), "a 1.7 manifest refused the push"
 
 
 def _refused(
-    stack: StackURLs, site: Site, served: dict[str, Any], why: str, agent: FreshAgent
+    stack: StackURLs, site: Site, served: WellKnownManifest, why: str, agent: FreshAgent
 ) -> tuple[CallError, str]:
     """Serve ``served`` as the site's manifest, push one page, require it refused and unstored."""
     _republish(stack, site, served)
@@ -109,14 +104,15 @@ def test_a_manifest_naming_another_resource_owner_refuses_the_push_not_catalog_c
     the push is refused NOT_CATALOG_CONTRIBUTOR, naming the page.
     """
     site, manifest = _onboarded(compose_stack, fresh_publisher)
-    other_owner = json.loads(json.dumps(manifest.get("exchanges") or []))
-    assert other_owner, f"the console's manifest lists no Exchange: {manifest}"
-    for listed in other_owner:
-        listed.setdefault("ext", {})["resource_owner_id"] = "pub_someone_else"
+    assert manifest.exchanges, f"the console's manifest lists no Exchange: {manifest}"
+    other_owner = [
+        with_members(listed, ext={**(listed.ext or {}), "resource_owner_id": "pub_someone_else"})
+        for listed in manifest.exchanges
+    ]
     error, path = _refused(
         compose_stack,
         site,
-        _with(manifest, exchanges=other_owner),
+        with_members(manifest, exchanges=other_owner),
         "another publisher id as resource owner",
         fresh_agent,
     )
@@ -130,14 +126,12 @@ def test_a_manifest_that_does_not_list_this_exchange_refuses_the_push_exchange_n
 ) -> None:
     """The manifest lists only another Exchange: refused EXCHANGE_NOT_LISTED, naming the page."""
     site, manifest = _onboarded(compose_stack, fresh_publisher)
-    elsewhere = json.loads(json.dumps(manifest.get("exchanges") or []))
-    assert elsewhere, f"the console's manifest lists no Exchange: {manifest}"
-    for listed in elsewhere:
-        listed["domain"] = EXCHANGE_B_DOMAIN
+    assert manifest.exchanges, f"the console's manifest lists no Exchange: {manifest}"
+    elsewhere = [with_members(listed, domain=EXCHANGE_B_DOMAIN) for listed in manifest.exchanges]
     error, path = _refused(
         compose_stack,
         site,
-        _with(manifest, exchanges=elsewhere),
+        with_members(manifest, exchanges=elsewhere),
         "only another Exchange listed",
         fresh_agent,
     )
@@ -157,6 +151,6 @@ def test_a_manifest_of_an_unknown_major_version_refuses_the_push_not_catalog_con
     """
     site, manifest = _onboarded(compose_stack, fresh_publisher)
     error, path = _refused(
-        compose_stack, site, _with(manifest, ver="2.0"), "manifest version 2.0", fresh_agent
+        compose_stack, site, with_members(manifest, ver="2.0"), "manifest version 2.0", fresh_agent
     )
     assert_typed_refusal(error, NOT_CATALOG_CONTRIBUTOR, [path])

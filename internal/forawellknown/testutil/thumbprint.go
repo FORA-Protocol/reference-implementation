@@ -9,12 +9,12 @@ import (
 )
 
 // MustThumbprint returns the RFC 7638 thumbprint (the RFC 9421 keyid after the
-// WBA split) of pub, failing the test on error.
-func MustThumbprint(t *testing.T, pub ed25519.PublicKey) string {
-	t.Helper()
+// WBA split, and the form cnf.jkt takes) of pub, failing the test on error.
+func MustThumbprint(tb testing.TB, pub ed25519.PublicKey) string {
+	tb.Helper()
 	tp, err := helpers.Thumbprint(pub)
 	if err != nil {
-		t.Fatalf("thumbprint: %v", err)
+		tb.Fatalf("thumbprint: %v", err)
 	}
 	return tp
 }

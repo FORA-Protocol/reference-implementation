@@ -2,10 +2,11 @@
 // sent to negotiate when it comes from an AI bot; everything else on the site
 // passes as it would with no Worker in front of it. No scope is the whole site.
 //
-// The route stays over the whole hostname either way, because the discovery
-// documents (/.well-known/fora.json and the rest) are served by the Worker and
-// have their own routes, ahead of the gate. So a scope can never make them
-// unreachable.
+// The route stays over the whole hostname either way, so the Worker sees every
+// path a scope could name. The discovery addresses (the publisher's
+// /.well-known/fora.json and /rsl.txt, which pass through to its origin, and
+// the key directory) have their own routes, ahead of the gate, so a scope can
+// never make them unreachable.
 //
 // A scope entry is a path prefix, compared against the request path. The
 // comparison is made to fail closed: a request is treated as OUTSIDE the scope

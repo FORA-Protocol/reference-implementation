@@ -87,25 +87,6 @@ variable "exchange_wba_url" {
   nullable    = false
 }
 
-variable "provider_domain" {
-  description = "PROVIDER binding: publisher identifier advertised as the `domain` field of the served /.well-known/fora.json."
-  type        = string
-  nullable    = false
-}
-
-variable "exchanges_json" {
-  description = "EXCHANGES_JSON binding: JSON array of exchange entries ({domain, endpoint, supported_profiles, ext}) advertised in fora.json. The Broker reads this to route resolves for the publisher."
-  type        = string
-  nullable    = false
-
-  # Malformed JSON in a binding only surfaces as a worker boot failure —
-  # catch it at plan time instead. concat() rejects any non-array decode.
-  validation {
-    condition     = can(concat(jsondecode(var.exchanges_json), []))
-    error_message = "exchanges_json must be a JSON array of exchange entries ({domain, endpoint, ...})."
-  }
-}
-
 # ── Worker environment: optional bindings (unset = binding not created) ──────
 
 variable "fora_verify_keys" {
@@ -177,34 +158,6 @@ variable "licensed_paths_json" {
   validation {
     condition     = var.licensed_paths_json == null || can(concat(jsondecode(coalesce(var.licensed_paths_json, "[]")), []))
     error_message = "licensed_paths_json must be a JSON array of path prefixes (or null)."
-  }
-}
-
-variable "rsl_body" {
-  description = "RSL_BODY binding: optional RSL document body served by the worker."
-  type        = string
-  default     = null
-}
-
-variable "acme_tokens_json" {
-  description = "ACME_TOKENS_JSON binding: optional JSON object of ACME HTTP-01 tokens the worker answers for the publisher hostname."
-  type        = string
-  default     = null
-
-  validation {
-    condition     = var.acme_tokens_json == null || can(keys(jsondecode(coalesce(var.acme_tokens_json, "{}"))))
-    error_message = "acme_tokens_json must be a JSON object of token -> keyAuthorization pairs (or null)."
-  }
-}
-
-variable "catalog_contributors_json" {
-  description = "CATALOG_CONTRIBUTORS_JSON binding: optional JSON array of {domain, relationship} entries authorizing third parties to push catalog resources for this publisher."
-  type        = string
-  default     = null
-
-  validation {
-    condition     = var.catalog_contributors_json == null || can(concat(jsondecode(coalesce(var.catalog_contributors_json, "[]")), []))
-    error_message = "catalog_contributors_json must be a JSON array of {domain, relationship} entries (or null)."
   }
 }
 

@@ -9,19 +9,25 @@ import (
 	"testing"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/pagefetch"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/web"
 )
 
-// The wizard's last step and the button that ends it. Up to here nothing about
-// the domain has been written; this is where that changes, and only if the
-// Exchange reads the published document one more time and still agrees.
+// The wizard's licensing step: what the publisher's site already says about its
+// terms, the offer an agent would be shown under the answers on screen, and the
+// step's Next, which saves the terms on the domain the first step saved.
+//
+// What the Exchange holds is read back through its signed registrations route
+// with the console's own client; whether a terms save was recorded is read one
+// tier lower, through the Exchange's audit repository, because the Exchange
+// publishes no read surface for its audit log (exchangetest.AuditActions says
+// so on itself).
 
 // TestConsole_ShowsTheOfferBeforeAnythingIsRegistered is the step the licensing
 // page exists for: a publisher sees what an agent would be offered, at the
 // price they set, before they commit to anything.
 //
 // Two properties matter. The offer follows the controls, and asking for it
-// registers nothing -- a preview that registered would make every experiment
-// permanent.
+// saves nothing -- a preview that saved would make every experiment permanent.
 func TestConsole_ShowsTheOfferBeforeAnythingIsRegistered(t *testing.T) {
 	f := startConsole(t, verifiedClaims(), withPages(stubPageReader{
 		page: pagefetch.Page{
@@ -29,7 +35,7 @@ func TestConsole_ShowsTheOfferBeforeAnythingIsRegistered(t *testing.T) {
 		},
 	}))
 	f.signIn(t)
-	f.walkToDocument(t, "stoa.example")
+	f.walkToTerms(t, "stoa.example")
 	page := f.ok(t, "/api/domain/page", map[string]any{"domain": "stoa.example"})
 
 	out := f.ok(t, "/api/domain/terms-preview", map[string]any{
@@ -54,16 +60,16 @@ func TestConsole_ShowsTheOfferBeforeAnythingIsRegistered(t *testing.T) {
 	if !strings.Contains(offer, "On rivers") {
 		t.Fatalf("the offer is not about the publisher's own page: %s", offer)
 	}
-	f.assertNoDomains(t, "previewing the offer")
+	f.requireNoTerms(t, "previewing the offer")
 }
 
 // TestConsole_RefusesTermsItCannotOffer covers the answer that produces
-// nothing: charging with no price. The publisher is told where they set it, and
-// nothing is registered.
+// nothing: charging with no price. The publisher is told where they set it, on
+// the step they set it on, and the domain keeps no terms.
 func TestConsole_RefusesTermsItCannotOffer(t *testing.T) {
 	f := startConsole(t, verifiedClaims())
 	f.signIn(t)
-	f.walkToDocument(t, "stoa.example")
+	f.walkToTerms(t, "stoa.example")
 
 	preview := f.ok(t, "/api/domain/terms-preview", map[string]any{
 		"terms": map[string]any{
@@ -75,21 +81,145 @@ func TestConsole_RefusesTermsItCannotOffer(t *testing.T) {
 		t.Fatalf("the preview did not refuse charging with no price: %v", preview)
 	}
 
-	status, out := f.api(t, "/api/domain", map[string]any{
-		"domain": "stoa.example", "cdn": "cloudflare", "content_paths": "",
-		"sitemap_url": "",
+	status, out := f.api(t, web.APITermsPath, map[string]any{
+		"domain": "stoa.example",
 		"terms": map[string]any{
 			"pricing_model": "per_unit", "rate": "",
 			"permitted_functions": []string{"search"},
 		},
 	})
 	if status != http.StatusBadRequest {
-		t.Fatalf("finishing on terms that cannot be offered = %d", status)
+		t.Fatalf("saving terms that cannot be offered = %d", status)
 	}
 	if msg, _ := out["error"].(string); !strings.Contains(msg, "cannot be offered") {
 		t.Fatalf("the refusal does not name what is wrong: %v", out)
 	}
-	f.assertNoDomains(t, "terms that cannot be offered")
+	f.requireNoTerms(t, "terms that cannot be offered")
+}
+
+// TestConsole_TheTermsStepRefusesNoTerms: a save that sends no terms, or leaves
+// them out, is refused rather than read as terms chosen -- a missing answer
+// would otherwise build a free term that permits every use.
+func TestConsole_TheTermsStepRefusesNoTerms(t *testing.T) {
+	f := startConsole(t, verifiedClaims())
+	f.signIn(t)
+	f.walkToTerms(t, "stoa.example")
+
+	for name, body := range map[string]map[string]any{
+		"terms sent as null": {"domain": "stoa.example", "terms": nil},
+		"terms left out":     {"domain": "stoa.example"},
+	} {
+		status, out := f.api(t, web.APITermsPath, body)
+		if msg, _ := out["error"].(string); status != http.StatusBadRequest || !strings.Contains(msg, "Choose your terms") {
+			t.Fatalf("%s = %d %v, want 400 asking for the terms", name, status, out)
+		}
+	}
+	f.requireNoTerms(t, "a save with no terms")
+}
+
+// TestConsole_TheTermsStepShowsTheExchangesRefusal: terms the console's own
+// check accepts and the Exchange refuses are refused on the step they were set
+// on, in the Exchange's own words, and nothing is saved. The sitemap is such an
+// answer: the console's term builder does not look at it, the console passes
+// the one the request names on as it is, and the Exchange keeps only a sitemap
+// on the domain or one of its subdomains.
+func TestConsole_TheTermsStepShowsTheExchangesRefusal(t *testing.T) {
+	f := startConsole(t, verifiedClaims())
+	f.signIn(t)
+	f.walkToTerms(t, "stoa.example")
+
+	status, out := f.api(t, web.APITermsPath, map[string]any{
+		"domain": "stoa.example", "terms": addDomainTerms(),
+		"sitemap_url": "https://elsewhere.example/sitemap.xml",
+	})
+	if status != http.StatusBadRequest {
+		t.Fatalf("saving terms the Exchange refuses = %d %v, want %d", status, out, http.StatusBadRequest)
+	}
+	if msg, _ := out["error"].(string); msg != "the sitemap address must be on stoa.example, not elsewhere.example" {
+		t.Fatalf("the step does not show the Exchange's own refusal: %q", msg)
+	}
+	f.requireNoTerms(t, "terms the Exchange refused")
+	if n := f.exchange.CountAuditActions(t, "SetDomainTerms"); n != 0 {
+		t.Fatalf("the Exchange recorded %d terms saves; it refused the only one asked for", n)
+	}
+}
+
+// TestConsole_TheTermsStepSavesSoClosingTheTabLosesNothing covers the step's
+// Next, and a publisher who closes the tab right after it: the terms are saved
+// on the domain with the catalog question's answer, the domain is still not
+// verified, and its setup reopens on the last step with what was saved.
+func TestConsole_TheTermsStepSavesSoClosingTheTabLosesNothing(t *testing.T) {
+	f := startConsole(t, verifiedClaims())
+	f.signIn(t)
+	f.walkToTerms(t, "stoa.example")
+
+	out := f.setTerms(t, "stoa.example", map[string]any{
+		"terms": addDomainTerms(), "import_replaces_manual_terms": true,
+	})
+	if out["domain"] != "stoa.example" || out["verified"] != false {
+		t.Fatalf("the licensing step's Next answered %v; want stoa.example, not verified", out)
+	}
+	sites := f.mine(t).Sites
+	if len(sites) != 1 || sites[0].Active() || sites[0].Terms == nil || sites[0].Terms.Rate != "0.02" ||
+		!sites[0].ImportReplacesManualTerms {
+		t.Fatalf("the Exchange holds %+v; want stoa.example with the terms and the answer just saved", sites)
+	}
+	if n := f.exchange.CountAuditActions(t, "SetDomainTerms"); n != 1 {
+		t.Fatalf("the Exchange recorded %d terms saves, want 1", n)
+	}
+	boot := f.bootOn(t, "/domains/stoa.example/setup")
+	if boot.Resume == nil || boot.Resume.Step != "connect" || !boot.Resume.TermsSet ||
+		!boot.Resume.ImportReplacesManualTerms || boot.Terms["rate"] != "0.02" {
+		t.Fatalf("the setup page reopens with %+v and terms %v; want the last step, on what was saved",
+			boot.Resume, boot.Terms)
+	}
+}
+
+// TestConsole_TheTermsStepKeepsASavedSitemap: saving the terms again changes
+// them to the ones chosen now and keeps the domain otherwise as it was saved.
+// A sitemap the licensing step did not find this time leaves the saved one.
+func TestConsole_TheTermsStepKeepsASavedSitemap(t *testing.T) {
+	f := startConsole(t, verifiedClaims())
+	f.signIn(t)
+	f.walkToTerms(t, "stoa.example")
+	f.setTerms(t, "stoa.example", map[string]any{"terms": addDomainTerms(), "sitemap_url": stoaSitemap})
+
+	f.ok(t, web.APITermsPath, map[string]any{
+		"domain": "stoa.example", "sitemap_url": "",
+		"terms": map[string]any{"pricing_model": "free", "permitted_functions": []string{"search"}},
+	})
+	sites := f.mine(t).Sites
+	if len(sites) != 1 || sites[0].Terms == nil || sites[0].Terms.PricingModel != "free" {
+		t.Fatalf("the Exchange holds %+v; want stoa.example with the free terms chosen last", sites)
+	}
+	if sites[0].SitemapURL != stoaSitemap || !slices.Equal(sites[0].ContentPathScope, []string{"/articles/"}) {
+		t.Fatalf("the Exchange holds %+v; want the saved sitemap and paths kept", sites[0])
+	}
+}
+
+// TestConsole_TheTermsOfAVerifiedDomainAreNotChanged: a verified domain is sold
+// under its terms, so the licensing step's Next on it changes none of them,
+// writes nothing, and answers that it is verified.
+func TestConsole_TheTermsOfAVerifiedDomainAreNotChanged(t *testing.T) {
+	f := startConsole(t, verifiedClaims(), withPages(deployedPackage()))
+	f.signIn(t)
+	requireVerified(t, addDomain(t, f))
+	saved := f.exchange.CountAuditActions(t, "SetDomainTerms")
+
+	out := f.ok(t, web.APITermsPath, map[string]any{
+		"domain": "stoa.example",
+		"terms":  map[string]any{"pricing_model": "free", "permitted_functions": []string{"search"}},
+	})
+	if out["verified"] != true {
+		t.Fatalf("the terms step on a verified domain answered %v; want it verified", out)
+	}
+	sites := f.mine(t).Sites
+	if len(sites) != 1 || !sites[0].Active() || sites[0].Terms == nil || sites[0].Terms.PricingModel != "per_unit" {
+		t.Fatalf("the Exchange holds %+v; want stoa.example verified under the terms it was sold under", sites)
+	}
+	if n := f.exchange.CountAuditActions(t, "SetDomainTerms") - saved; n != 0 {
+		t.Fatalf("the Exchange recorded %d terms saves on a verified domain", n)
+	}
 }
 
 // TestConsole_FindsTheSitemapRatherThanAskingForIt pins that the publisher is
@@ -149,14 +279,14 @@ func TestConsole_AFreeAnswerCarriesNoPrice(t *testing.T) {
 	}
 	f := startConsole(t, verifiedClaims())
 	f.signIn(t)
-	f.walkToDocument(t, "stoa.example")
+	f.walkToTerms(t, "stoa.example")
 
 	preview := f.ok(t, "/api/domain/terms-preview", map[string]any{"terms": free})
 	if warning, _ := preview["warning"].(string); warning != "" {
 		t.Fatalf("the preview refused a free answer: %q", warning)
 	}
 
-	addDomainWith(t, f, "stoa.example", free)
+	f.setTerms(t, "stoa.example", map[string]any{"terms": free})
 	sites := f.mine(t).Sites
 	if len(sites) != 1 {
 		t.Fatalf("the Exchange holds %d domains, want 1", len(sites))
@@ -188,7 +318,7 @@ func TestConsole_FillsTheTermsFromTheSitesOwnLicence(t *testing.T) {
 		license: licence,
 	}))
 	f.signIn(t)
-	f.walkToDocument(t, "stoa.example")
+	f.walkToTerms(t, "stoa.example")
 
 	out := f.ok(t, "/api/domain/page", map[string]any{"domain": "stoa.example"})
 	terms, _ := out["terms"].(map[string]any)
@@ -228,7 +358,7 @@ func TestConsole_SaysWhenALicenceSaysMoreThanThisPageCanSet(t *testing.T) {
 		license: licence,
 	}))
 	f.signIn(t)
-	f.walkToDocument(t, "stoa.example")
+	f.walkToTerms(t, "stoa.example")
 
 	out := f.ok(t, "/api/domain/page", map[string]any{"domain": "stoa.example"})
 	if out["terms"] != nil {
@@ -240,45 +370,17 @@ func TestConsole_SaysWhenALicenceSaysMoreThanThisPageCanSet(t *testing.T) {
 	}
 }
 
-// TestConsole_SavesAWithdrawnFileAsNotVerified: the last button saves the
-// domain whatever its checks say, and verifies it only if they pass then.
-//
-// Every check before the last button is advice. The Exchange reads the
-// published document again when it is asked to verify the domain, so a domain
-// whose document passed at the file step and was taken down since is saved and
-// listed as not verified -- nothing the publisher entered is lost -- and it is
-// not verified. The package answers, so the console does ask; the Exchange's
-// own read of the site is what refuses, and it records that it looked.
-func TestConsole_SavesAWithdrawnFileAsNotVerified(t *testing.T) {
-	f := startConsole(t, verifiedClaims(), withPages(deployedPackage()))
-	f.signIn(t)
-	f.walkToDocument(t, "stoa.example")
-	f.publish(t)
-	if out := f.ok(t, "/api/domain/check-manifest", map[string]any{"domain": "stoa.example"}); out["passed"] != true {
-		t.Fatalf("the wizard's own check did not pass: %v", out)
+// requireNoTerms fails the test unless the fixture's one domain is saved with
+// no terms and the Exchange recorded no terms save: after names what should
+// have saved none.
+func (f *consoleFixture) requireNoTerms(t *testing.T, after string) {
+	t.Helper()
+	if sites := f.mine(t).Sites; len(sites) != 1 || sites[0].Terms != nil {
+		t.Fatalf("after %s the Exchange holds %+v; want one domain with no terms", after, sites)
 	}
-	// The document passed the wizard's check and is gone by the last button.
-	f.exchange.Manifests.Withdraw("stoa.example")
-
-	out := f.ok(t, "/api/domain", map[string]any{
-		"domain": "stoa.example", "cdn": "cloudflare", "content_paths": "",
-		"sitemap_url": "",
-		"terms": map[string]any{
-			"pricing_model": "free", "permitted_functions": []string{"search"},
-		},
-	})
-	if out["domain"] != "stoa.example" || out["verified"] != false {
-		t.Fatalf("the last button on a withdrawn file answered %v; want stoa.example saved, not verified", out)
+	if n := f.exchange.CountAuditActions(t, "SetDomainTerms"); n != 0 {
+		t.Fatalf("after %s the Exchange recorded %d terms saves", after, n)
 	}
-	sites := f.mine(t).Sites
-	if len(sites) != 1 || sites[0].Active() || sites[0].LastCheckedAt == nil {
-		t.Fatalf("the Exchange holds %+v; want stoa.example saved, checked once and not verified", sites)
-	}
-	status, list := f.get(t, "/domains")
-	if status != http.StatusOK {
-		t.Fatalf("the domains list = %d", status)
-	}
-	mustContain(t, "the domains list", list, "stoa.example", "Not verified")
 }
 
 // offerText flattens the offer preview into something a test can read.

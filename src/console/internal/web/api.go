@@ -1,7 +1,8 @@
 // The JSON routes the add-a-domain wizard calls, and the plumbing they share.
 // The pages themselves are still ordinary server-rendered HTML; what moved to
-// JSON is the wizard, because it holds the publisher's answers in the browser
-// until the last step, and only that step's buttons save anything.
+// JSON is the wizard, because it is one page whose steps each ask the console
+// something -- register the business, look a domain up, save it, save its
+// terms, check its site -- without leaving it.
 
 package web
 
@@ -21,16 +22,14 @@ import (
 const (
 	APIPrefix = "/api/"
 
-	APIPublisherPath     = "/api/publisher"
-	APILookupPath        = "/api/domain/lookup"
-	APIFilesPath         = "/api/domain/files"
-	APIFilePath          = "/api/domain/file"
-	APICheckManifestPath = "/api/domain/check-manifest"
-	APICheckEdgePath     = "/api/domain/check-edge"
-	APIPagePath          = "/api/domain/page"
-	APITermsPreviewPath  = "/api/domain/terms-preview"
-	APIRegisterPath      = "/api/domain"
-	APIProgressPath      = "/api/domain/progress"
+	APIPublisherPath    = "/api/publisher"
+	APILookupPath       = "/api/domain/lookup"
+	APIRegisterPath     = "/api/domain"
+	APITermsPath        = "/api/domain/terms"
+	APIFilesPath        = "/api/domain/files"
+	APICheckPath        = "/api/domain/check"
+	APIPagePath         = "/api/domain/page"
+	APITermsPreviewPath = "/api/domain/terms-preview"
 )
 
 // WizardAPI answers the wizard's JSON routes. Each method decodes one request,
@@ -41,8 +40,8 @@ type WizardAPI struct {
 	resumer *wizard.Resumer
 }
 
-// NewWizardAPI builds the wizard's JSON routes over the wizard and the
-// reopening of saved domains.
+// NewWizardAPI builds the wizard's JSON routes over the wizard and the work on
+// saved domains.
 func NewWizardAPI(svc *wizard.Service, resumer *wizard.Resumer) (*WizardAPI, error) {
 	switch {
 	case svc == nil:
@@ -53,10 +52,12 @@ func NewWizardAPI(svc *wizard.Service, resumer *wizard.Resumer) (*WizardAPI, err
 	return &WizardAPI{wizard: svc, resumer: resumer}, nil
 }
 
-// maxAPIBodyBytes bounds what one wizard call can make the console read. The
-// largest of these bodies is a hostname, a network, a handful of paths and the
-// licensing answers.
-const maxAPIBodyBytes = 16 * 1024
+// maxBodyBytes bounds what one wizard call can make the console read. The
+// largest of these bodies is a hostname and the licensing answers.
+const maxBodyBytes = 16 * 1024
+
+// unreadableBody is the answer to a wizard call whose body could not be read.
+const unreadableBody = "That request could not be read."
 
 // apiError is what every refusal looks like, so the wizard has one place to
 // read the sentence it shows the publisher.
@@ -72,10 +73,10 @@ type apiError struct {
 // ship together, so a field neither side expects is a bug in one of them, and
 // the version where it is silently dropped is the one that is hard to find.
 func readAPI(w http.ResponseWriter, r *http.Request, dst any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAPIBodyBytes))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "That request could not be read.")
+		writeAPIError(w, http.StatusBadRequest, unreadableBody)
 		return false
 	}
 	return true
@@ -107,7 +108,8 @@ func mustJSON(v any) []byte {
 }
 
 // apiFailure answers a call that did not succeed, with the status and words a
-// page would show for the same failure (see renderFailure).
+// page would show for the same failure (see renderFailure). A failure the
+// Exchange reported is logged, because the person is shown none of its cause.
 func apiFailure(w http.ResponseWriter, r *http.Request, err error) {
 	if re, ok := errors.AsType[*refusal.Error](err); ok {
 		writeAPIError(w, refusalStatus(re.Kind), re.Message)

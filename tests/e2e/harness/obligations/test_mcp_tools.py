@@ -211,9 +211,12 @@ async def test_identical_concurrent_calls_from_one_agent_all_succeed(
     """Ten identical fora_status calls, and ten fora_execute calls on one free offer, all succeed.
 
     Sent at once from one agent, so the outbound requests share a second and a
-    key: without a nonce in each signature, every one after the first would be
-    refused as a replay. Each fora_status reaches exchange-a; each fora_execute
-    reaches the Broker, the Exchange and the edge, with its own idempotency key.
+    key. The fora_status calls are identical requests to exchange-a: without a
+    nonce in each signature, every one after the first would be refused as a
+    replay. Each fora_execute reaches the Broker, the Exchange and the edge with
+    its own idempotency key, so those requests differ anyway: they show that one
+    agent's concurrent purchases each complete. Identical purchase retries are
+    burst in ``test_same_second_signatures.py``.
     """
     agent = fresh_mcp_agent_factory()
 

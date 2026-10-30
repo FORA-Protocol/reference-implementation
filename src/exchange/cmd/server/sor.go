@@ -13,6 +13,15 @@ import (
 	sordb "gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/exchange/internal/sor/db"
 )
 
+// sorBackend is the SoR the Exchange reads through, and the reference store
+// beneath it. Every production path uses adapter, the cached port. store is the
+// uncached Postgres backend, which only the e2e build's control service reaches,
+// to model the operator's out-of-band switch (sor.PostgresAdapter.SetActive).
+type sorBackend struct {
+	adapter sor.Adapter
+	store   *sor.PostgresAdapter
+}
+
 // newPostgresSoRAdapter builds the Postgres-backed SoR adapter from the
 // environment, wrapped in the short-TTL IsActive read cache. Mirroring the
 // billing constructor, every env var is validated BEFORE the pool opens, so a
@@ -29,16 +38,16 @@ import (
 //   - EXCHANGE_SOR_DSN: the SoR database DSN (required; empty fails boot).
 //   - EXCHANGE_SOR_CACHE_TTL: IsActive read-cache lifetime (Go duration,
 //     default 30s via sor.DefaultCacheTTL); an unparseable value fails boot.
-func newPostgresSoRAdapter(ctx context.Context, logger *slog.Logger) (sor.Adapter, func(), error) {
+func newPostgresSoRAdapter(ctx context.Context, logger *slog.Logger) (sorBackend, func(), error) {
 	dsn := runhttp.EnvOr("EXCHANGE_SOR_DSN", "")
 	if dsn == "" {
-		return nil, nil, fmt.Errorf("sor: EXCHANGE_SOR_DSN is required for FORA_SOR_ADAPTER=postgres")
+		return sorBackend{}, nil, fmt.Errorf("sor: EXCHANGE_SOR_DSN is required for FORA_SOR_ADAPTER=postgres")
 	}
 	ttl := sor.DefaultCacheTTL
 	if raw := runhttp.EnvOr("EXCHANGE_SOR_CACHE_TTL", ""); raw != "" {
 		parsed, err := time.ParseDuration(raw)
 		if err != nil {
-			return nil, nil, fmt.Errorf("sor: invalid EXCHANGE_SOR_CACHE_TTL: %w", err)
+			return sorBackend{}, nil, fmt.Errorf("sor: invalid EXCHANGE_SOR_CACHE_TTL: %w", err)
 		}
 		ttl = parsed
 	}
@@ -55,10 +64,11 @@ func newPostgresSoRAdapter(ctx context.Context, logger *slog.Logger) (sor.Adapte
 		MigrationsTable: sordb.MigrationsTable,
 	}, logger)
 	if err != nil {
-		return nil, nil, fmt.Errorf("sor: setup database: %w", err)
+		return sorBackend{}, nil, fmt.Errorf("sor: setup database: %w", err)
 	}
 
-	adapter := sor.NewCachingAdapter(sor.NewPostgresAdapter(db.PoolRunner{Pool: pool}), ttl, clock.System{})
+	store := sor.NewPostgresAdapter(db.PoolRunner{Pool: pool})
+	adapter := sor.NewCachingAdapter(store, ttl, clock.System{})
 	logger.Info("sor adapter: postgres", "cache_ttl", ttl)
-	return adapter, pool.Close, nil
+	return sorBackend{adapter: adapter, store: store}, pool.Close, nil
 }

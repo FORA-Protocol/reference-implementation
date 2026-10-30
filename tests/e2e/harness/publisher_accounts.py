@@ -38,7 +38,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .console_dashboard import parse_html
-from .console_login import ConsoleBrowser, attempt_sign_in, landed_home
+from .console_login import ConsoleBrowser, attempt_sign_in, landed_in_console
 from .stack_urls import StackURLs
 
 #: The admin token of the provider's developers' instance, which its first start
@@ -126,8 +126,9 @@ def import_login(zitadel: str, token_file: Path, *, verified: bool) -> Login:
 class PublisherSession:
     """One fresh publisher's browser, after its sign-in.
 
-    ``signed_in`` is True when the sign-in ended on the console's home page,
-    which needs a session whose address the provider verified. ``landed`` is the
+    ``signed_in`` is True when the sign-in ended in the console: on its
+    add-a-domain wizard, for a publisher that has not named its business yet, or
+    on its home page. Both need a session whose address the provider verified. ``landed`` is the
     address of the last request the sign-in made, and ``page`` the page it was
     answered with. ``form_actions`` are the paths the forms on that page submit
     to: a sign-in the provider stopped short of the console ends on one of its
@@ -147,8 +148,8 @@ class PublisherFactory:
     """Mints publishers for one test (``factory(verified=...)``) and closes their browsers.
 
     The ``fresh_publisher`` fixture is one of these. A verified publisher whose
-    sign-in does not reach the console's home page fails the call, so a test that
-    asks for one gets a working session or a failure naming where it stopped.
+    sign-in does not reach the console fails the call, so a test that asks for
+    one gets a working session or a failure naming where it stopped.
     """
 
     stack: StackURLs
@@ -164,7 +165,7 @@ class PublisherFactory:
         session = PublisherSession(
             login=login,
             browser=browser,
-            signed_in=landed_home(self.stack.console, page),
+            signed_in=landed_in_console(self.stack.console, page),
             landed=str(page.request.url),
             page=page.text,
             form_actions=[
@@ -174,7 +175,7 @@ class PublisherFactory:
         )
         self._sessions.append(session)
         assert session.signed_in or not verified, (
-            f"the verified publisher {login.name} did not reach the console's home page: "
+            f"the verified publisher {login.name} did not reach the console: "
             f"the sign-in ended at {session.landed}: {session.page[:400]}"
         )
         return session

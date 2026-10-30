@@ -139,9 +139,16 @@ ALLOW_SCRIPTS=(
   # Makefile calls it on the reader's very first stack-up. Without it that
   # target dies on a missing script instead of building.
   scripts/check-buildx.sh
+  # compose-check is the next prerequisite of `make e2e-up`, shipped for the same
+  # reason.
+  scripts/check-compose-version.sh
   # Every e2e make target and the harness's own host-run path drive the stack
   # through it: it creates the stack's network and hands compose its address.
   scripts/e2e-stack.sh
+  # Records the host's load during an e2e run and prints the peaks. The guard
+  # that checks its summary ships with the harness, so the script it runs has to
+  # ship too; it also records a local run next to `make test-e2e`.
+  scripts/host-load.sh
   scripts/devstack.sh
   scripts/gen-broker-relay-key.sh
   scripts/gen-buyer-delegation-key.sh

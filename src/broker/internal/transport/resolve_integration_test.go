@@ -358,6 +358,8 @@ type reqOpts struct {
 	maxHops     *int32
 	// scopes, when set, is sent as requester.scopes.
 	scopes []string
+	// delegation, when set, is sent as requester.delegation.
+	delegation *forav1.Delegation
 }
 
 // buildDiscoveryRequest maps budgetMinor from minor to major currency units.
@@ -370,9 +372,10 @@ func buildDiscoveryRequest(agentID string, o reqOpts) *forav1.DiscoveryRequest {
 			// host on the wire and an empty one is refused, so every request needs
 			// one; the identity-gate tests vary the ID and would otherwise be
 			// refused for the shape of a field they are not testing.
-			Domain: requesterDomain,
-			Type:   forav1.RequesterType_REQUESTER_TYPE_AGENT,
-			Scopes: o.scopes,
+			Domain:     requesterDomain,
+			Type:       forav1.RequesterType_REQUESTER_TYPE_AGENT,
+			Scopes:     o.scopes,
+			Delegation: o.delegation,
 		},
 	}
 	if o.query != "" {

@@ -12,15 +12,24 @@
 # (the identity service's MCP surface). What a verifier may connect to, the SSRF
 # guard, is outside the e2e harness.
 #
-# The Web Bot Auth wire profile (the Signature-Agent spellings, the tag parameter,
-# the covered-component minimum and the directory media type) is decided by the
-# IETF draft the WebBotAuth working group adopted, and its conformance tests carry
-# their own claims.
+# The Web Bot Auth wire profile's own form (how the Signature-Agent member is
+# spelled, and the tag parameter) is decided by the IETF draft the WebBotAuth
+# working group adopted, and has no entries here. The conformance suites
+# (test_wba_inbound.py, test_wba_outbound.py and test_wba_directories.py) check it
+# through the WBA oracles, which import no FORA code and sign and verify with
+# libraries FORA did not write. The rules the protocol states for FORA's own
+# participants are entries here, whether FORA adds them to the draft (the four FORA
+# components a signature covers) or restates the draft's (the directory's media
+# type), and the tests written to prove them claim them, the conformance suites
+# included.
 # Registry entries (ADR-028 D1); the tests that prove them say so on themselves.
 #
-# An "# untested:" comment above an entry says why no test claims it. The comment
-# is not part of the entry: the registry schema is strict, so the note lives
-# beside it.
+# A comment above an entry says what no test drives yet: "# untested:" why no test
+# claims the entry, "# harness:" what the harness cannot drive through a public
+# surface yet and what it would need, "# blocked:" the decision or the e2e control
+# the entry waits on. A "# harness:" note can also sit above a claimed entry, for
+# the part of it no test drives yet. The comment is not part of the entry: the
+# registry schema is strict, so the note lives beside it.
 #
 # A "negative:" case is a refusal with a typed error response (ADR-028 D1). What
 # an answer that refuses nothing must leave out is a "must not" in "positive:".
@@ -342,7 +351,7 @@
     - code: unauthenticated
       reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_STALE
       side_effect: >-
-        no offers are returned for a signature created ten minutes ahead of the
+        no offers are returned for a signature created 400 seconds ahead of the
         Exchange's clock
 
 - id: IDENTITY-025
@@ -358,14 +367,14 @@
       Sending the same signed bytes again is still a replay, and the verifier refuses
       it.
   positive: >-
-    A discovery signed with a ten-minute window, the SDK's own default, is answered the
-    first time it is sent.
+    A discovery signed with the SDK's default window, the five minutes the Web Bot
+    Auth profile allows, is answered the first time it is sent.
   negative:
     - code: unauthenticated
       reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_STALE
       side_effect: >-
-        the same signed bytes, sent again more than five minutes later and before the
-        signature expires, return no offers
+        the same signed bytes, sent again at any time before the signature expires,
+        return no offers
 
 - id: IDENTITY-017
   title: A requester.domain that carries a scheme, path or query is refused as malformed, and nothing is fetched for it
@@ -1384,7 +1393,9 @@
       signature
   positive: >-
     Ten concurrent fora_status calls, and ten concurrent fora_execute calls on a free
-    offer with distinct idempotency keys, all succeed for one agent.
+    offer with distinct idempotency keys, all succeed for one agent. So do a burst of
+    identical fora_discover calls, and a burst of identical fora_execute retries that
+    carry one idempotency key, each retry answered with the original transaction.
   negative: []
 
 - id: MCP-019

@@ -1,7 +1,7 @@
 // Package sor is the Exchange's System of Record for agent accounts: the
 // single source of truth for whether a registered agent's account is active.
 // It mirrors the billing adapter pattern one-for-one — a narrow port with a
-// reference in-memory implementation today and a Postgres backend to come —
+// reference in-memory implementation and a Postgres backend —
 // so the backend can change (a plain database now, a CRM such as HubSpot
 // later) without touching the rest of the Exchange.
 //
@@ -20,8 +20,10 @@
 // existing subdomain harmless.
 //
 // Status. The SoR owns the active flag; the Exchange is a read-through cache
-// (a short-TTL decorator, added by a later slice). The only status path is the
-// pull: IsActive(billing_ref) at transaction time.
+// (CachingAdapter, a short-TTL decorator). The only status path is the pull:
+// IsActive(billing_ref) at transaction time. The operator changes the flag
+// inside the SoR, out of band; each backend offers that switch as SetActive,
+// deliberately off the port, so the Exchange itself never changes it.
 package sor
 
 import (

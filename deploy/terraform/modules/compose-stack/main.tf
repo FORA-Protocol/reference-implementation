@@ -29,6 +29,14 @@ resource "random_password" "postgres" {
       error_message = "origin_hostname and publisher_image must be set together (or both left null)."
     }
 
+    # And the origin's discovery document with it: without one, the image's
+    # own tree would answer /.well-known/fora.json with the e2e stack's mock
+    # document, which names an Exchange this deployment does not run.
+    precondition {
+      condition     = (var.origin_hostname == null) == (var.origin_discovery_document == null)
+      error_message = "origin_hostname and origin_discovery_document must be set together (or both left null)."
+    }
+
     # Same pairing rule for the onboarding preview service, and the same
     # failure otherwise: an empty `image:` at first boot.
     precondition {
@@ -254,7 +262,12 @@ locals {
 
   tigerbeetle_enabled = var.billing_adapter == "tigerbeetle"
   publisher_enabled   = var.origin_hostname != null
-  onboarding_enabled  = var.onboarding_hostname != null
+  # The origin's discovery document, by its path under /opt/fora, which
+  # cloud-init writes and Caddy serves on the origin hostname.
+  origin_document_files = var.origin_discovery_document == null ? {} : {
+    "origin/fora.json" = var.origin_discovery_document
+  }
+  onboarding_enabled = var.onboarding_hostname != null
   # The previewed offer names this bundle's own Exchange unless told otherwise.
   onboarding_exchange_domain = coalesce(var.onboarding_exchange_domain, var.exchange_hostname)
   terms_enabled              = length(var.exchange_terms_documents) > 0
@@ -318,6 +331,7 @@ locals {
     identity_image    = var.identity_image
     publisher_image   = var.publisher_image
     publisher_enabled = local.publisher_enabled
+    origin_documents  = length(local.origin_document_files) > 0
     postgres_password = random_password.postgres.result
     external_database = local.external_database
     database_host     = local.database_host
@@ -408,6 +422,7 @@ locals {
     mcp_split           = local.mcp_split
     zitadel_hostname    = var.zitadel_hostname
     origin_hostname     = var.origin_hostname
+    origin_documents    = length(local.origin_document_files) > 0
     onboarding_hostname = var.onboarding_hostname
     console_hostname    = var.console_hostname
     acme_email          = var.acme_email
@@ -457,6 +472,7 @@ locals {
     broker_relay_key_json   = var.broker_relay_key_json
     broker_identity_key_pem = var.broker_identity_key_pem
     static_wba_files        = local.static_wba_files
+    origin_document_files   = local.origin_document_files
     query_discovery         = var.query_discovery
     terms_documents         = var.exchange_terms_documents
     importer_key_json       = var.importer_key_json

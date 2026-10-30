@@ -107,6 +107,10 @@ tf_vars=(-var="image_registry=${REGISTRY}" -var="image_prefix=${PREFIX}" -var="i
 # has not built the bundle yet. The apply below keeps the configured value.
 tf_eval() { echo "$1" | terraform -chdir="${STACK_DIR}" console -no-color "${tf_vars[@]}" -var=deploy_edge=false | tail -n 1; }
 tf_eval 'base64encode(jsonencode(local.lambda_edge_config))' | tr -d '"' | base64 -d > "${STACK_DIR}/lambda-edge-config.json"
+# The publisher hostname the function fronts, which the bundle's index.mjs
+# names; read the same way, because the publisher_hostname output is null
+# while deploy_edge is off.
+publisher_domain="$(tf_eval 'base64encode(local.publisher_fqdn)' | tr -d '"' | base64 -d)"
 
 # The path the stack deploys the bundle from: the default, or lambda_zip_path
 # from tfvars. A relative path is relative to the stack directory.
@@ -132,7 +136,7 @@ echo "== 3. build and push ${services[*]} as ${TAG} =="
 "${SRC_SCRIPTS}/build-push-images.sh" --tag="${TAG}" "${services[@]}"
 
 echo "== 4. build the Lambda@Edge bundle =="
-"${SRC_SCRIPTS}/build-lambda-edge.sh" "${STACK_DIR}/lambda-edge-config.json"
+"${SRC_SCRIPTS}/build-lambda-edge.sh" "${STACK_DIR}/lambda-edge-config.json" "${publisher_domain}"
 mkdir -p "$(dirname "${zip_path}")"
 cp "${src}/${LAMBDA_ZIP}" "${zip_path}"
 

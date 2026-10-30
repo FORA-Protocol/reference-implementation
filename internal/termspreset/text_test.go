@@ -4,9 +4,69 @@ import (
 	"testing"
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
+	"github.com/FORA-Protocol/protocol/gen/go/vocab/pricingunits"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/termspreset"
 )
+
+// TestSingularUnit holds the rule to the cases the protocol website's offer
+// preview pins for the same rule, so the console and that page say a unit the
+// same way.
+func TestSingularUnit(t *testing.T) {
+	t.Parallel()
+	for token, want := range map[string]string{
+		"accesses":           "access",
+		"fetches":            "fetch",
+		"tokens":             "token",
+		"pages":              "page",
+		"seconds":            "second",
+		"bytes":              "byte",
+		"sq-km":              "sq km",
+		"units-manufactured": "units manufactured",
+		"":                   "",
+	} {
+		if got := termspreset.SingularUnit(token); got != want {
+			t.Errorf("SingularUnit(%q) = %q, want %q", token, got, want)
+		}
+	}
+}
+
+// TestSingularUnit_SaysEveryRegisteredUnitInWords holds how the price of every
+// unit the pinned protocol registers reads. A unit the protocol registers later
+// has no row here, so this test fails until somebody writes down how its price
+// reads. A unit it drops breaks the build, because the rows name the protocol's
+// own constants.
+func TestSingularUnit_SaysEveryRegisteredUnitInWords(t *testing.T) {
+	t.Parallel()
+	wording := map[string]string{
+		pricingunits.Fetches:           "fetch",
+		pricingunits.Accesses:          "access",
+		pricingunits.Tokens:            "token",
+		pricingunits.Calls:             "call",
+		pricingunits.Pages:             "page",
+		pricingunits.Seconds:           "second",
+		pricingunits.Minutes:           "minute",
+		pricingunits.Records:           "record",
+		pricingunits.Streams:           "stream",
+		pricingunits.Images:            "image",
+		pricingunits.Seats:             "seat",
+		pricingunits.UnitsManufactured: "units manufactured",
+		pricingunits.Characters:        "character",
+		pricingunits.Bytes:             "byte",
+		pricingunits.Items:             "item",
+		pricingunits.SqKm:              "sq km",
+	}
+	for _, token := range pricingunits.All {
+		want, ok := wording[token]
+		if !ok {
+			t.Errorf("%q is registered and has no wording here; write down how its price reads", token)
+			continue
+		}
+		if got := termspreset.SingularUnit(token); got != want {
+			t.Errorf("SingularUnit(%q) = %q, want %q", token, got, want)
+		}
+	}
+}
 
 func TestPriceText(t *testing.T) {
 	t.Parallel()
@@ -19,7 +79,7 @@ func TestPriceText(t *testing.T) {
 		{"free", &forav1.Pricing{Model: forav1.PricingModel_PRICING_MODEL_FREE, Currency: "EUR"}, "free"},
 		{"per unit", &forav1.Pricing{
 			Model: forav1.PricingModel_PRICING_MODEL_PER_UNIT, Rate: "0.05", Currency: "EUR", Unit: &unit,
-		}, "0.05 EUR per fetches"},
+		}, "0.05 EUR per fetch"},
 		{"flat", &forav1.Pricing{
 			Model: forav1.PricingModel_PRICING_MODEL_FLAT, Rate: "12", Currency: "EUR",
 		}, "12 EUR once"},
@@ -54,7 +114,7 @@ func TestDescribeTerm(t *testing.T) {
 		},
 		Obligations: []*forav1.Obligation{{Kind: forav1.ObligationKind_OBLIGATION_KIND_ATTRIBUTION}},
 	}
-	want := "0.02 EUR per fetches · allowed only: search, ai input · not allowed: ai training · " +
+	want := "0.02 EUR per fetch · allowed only: search, ai input · not allowed: ai training · " +
 		"attribution required · and 1 more condition"
 	if got := termspreset.DescribeTerm(term); got != want {
 		t.Fatalf("DescribeTerm =\n %q\nwant\n %q", got, want)

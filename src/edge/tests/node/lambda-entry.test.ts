@@ -39,8 +39,8 @@ describe('lambdaEntrySource', () => {
   });
 
   it('writes a value that looks like a placeholder as it is', () => {
-    const entry = lambdaEntrySource('a.example', { PROVIDER: '{{BUNDLE}}' });
-    expect(entry).toContain('"PROVIDER": "{{BUNDLE}}"');
+    const entry = lambdaEntrySource('a.example', { EXCHANGE_URL: '{{BUNDLE}}' });
+    expect(entry).toContain('"EXCHANGE_URL": "{{BUNDLE}}"');
   });
 
   it('refuses a domain that could end the comment it is written in', () => {

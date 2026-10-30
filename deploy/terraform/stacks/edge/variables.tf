@@ -69,13 +69,7 @@ variable "exchange_wba_url" {
 }
 
 variable "provider_domain" {
-  description = "Publisher domain advertised in fora.json."
-  type        = string
-  nullable    = false
-}
-
-variable "exchanges_json" {
-  description = "JSON array of exchange entries advertised in fora.json."
+  description = "The publisher hostname the worker fronts, where the licensed content lives (the host its own fora.json names as domain). The default route is <provider_domain>/*."
   type        = string
   nullable    = false
 }
@@ -118,24 +112,6 @@ variable "bot_ua_deny_json" {
 
 variable "licensed_paths_json" {
   description = "Optional JSON array of the path prefixes the publisher licenses. Unset = the whole site."
-  type        = string
-  default     = null
-}
-
-variable "rsl_body" {
-  description = "Optional RSL document body."
-  type        = string
-  default     = null
-}
-
-variable "acme_tokens_json" {
-  description = "Optional JSON object of ACME HTTP-01 tokens."
-  type        = string
-  default     = null
-}
-
-variable "catalog_contributors_json" {
-  description = "Optional JSON array of authorized catalog contributors."
   type        = string
   default     = null
 }

@@ -1,5 +1,5 @@
 # The harness bans of ADR-028 D8: what a TEST MODULE of the e2e harness may not
-# call. `make lint` in this directory runs it as
+# import or call. `make lint` in this directory runs it as
 #
 #     ruff check --config ruff-harness.toml --ignore-noqa .
 #
@@ -35,19 +35,20 @@ select = ["TID251"]
 # HTTP response. The readers are the SDK's verbs, the SDK's document readers
 # (manifest, Web Bot Auth directory, revocation list, license document, in
 # fora_sdk.resolvers) and, for the surfaces the SDK has no reader for, the harness
-# infrastructure modules: edge_fetch.py (delivered content, proof-free probes,
-# browser reads),
-# console_client.py, console_dashboard.py, identity_vault.py, mcp_session.py,
-# mcp_transport.py (the MCP endpoint's transport rules, below any MCP client),
-# admin_plane.py and lambda_edge.py, and the reader of any service's own plain JSON
-# API. Those modules may use httpx; a test module may not import it.
+# infrastructure modules, which read their surface into typed values: for example
+# edge_fetch.py (delivered content, proof-free probes, browser reads),
+# lambda_edge.py, console_client.py, admin_plane.py, mcp_transport.py (the MCP
+# endpoint's transport rules, below any MCP client) and the reader of any
+# service's own plain JSON API. Any infrastructure module may use httpx; a test
+# module may not import it.
 "httpx".msg = "ADR-028 D8 H3: read through an SDK verb or a typed harness reader, never a raw response"
 # H5: signing happens only inside the SDK. A test never calls the SDK's
 # low-level signing functions: it signs through an SDK client, and alters a
 # signature through malformed(). The harness has no signing function of its own
-# to ban: every signer in harness/httpsig_signer.py is the SDK's SigningTransport.
-# Each function is listed under every module that exports it, because ruff
-# matches the name the test imported.
+# to ban: every signer in harness/httpsig_signer.py is the SDK's SigningTransport,
+# and harness/requester_alteration.py re-signs an altered purchase's acceptances
+# with the SDK's own signers. Each function is listed under every module that
+# exports it, because ruff matches the name the test imported.
 "fora_sdk.sign_request".msg = "ADR-028 D8 H5: sign through an SDK client; alter a signature through malformed()"
 "fora_sdk.httpsig.sign_request".msg = "ADR-028 D8 H5: sign through an SDK client; alter a signature through malformed()"
 "fora_sdk.append_signature".msg = "ADR-028 D8 H5: sign through an SDK client; alter a signature through malformed()"
@@ -66,6 +67,10 @@ select = ["TID251"]
 "fora_sdk.signedurl.sign_ed25519_signed_url".msg = "ADR-028 D8 H5: delivery URLs are minted by an Exchange; the Lambda@Edge suite mints through harness/lambda_edge.py"
 "fora_sdk.client.proof_headers".msg = "ADR-028 D8 H5: fetch through the SDK, which mints the proof inside fetch(); see harness/edge_fetch.py"
 "fora_sdk.client.content.proof_headers".msg = "ADR-028 D8 H5: fetch through the SDK, which mints the proof inside fetch(); see harness/edge_fetch.py"
+# The SDK's test-only acceptance signers, which admit an empty requester, are the
+# whole module: a test alters an acceptance through malformed() and
+# harness.requester_alteration, never by signing one itself.
+"fora_sdk.testing".msg = "ADR-028 D8 H5: alter an acceptance through malformed() and harness.requester_alteration"
 # Raw Ed25519: a test may not mint a private key, build one from raw bytes, or
 # call the unbound `Ed25519PrivateKey.sign`. A signing identity comes from the
 # SDK's identity helpers, through fresh_agent() or
@@ -92,9 +97,9 @@ select = ["TID251"]
 
 # H10 and Testing Doctrine point 9: a test arranges and observes state only
 # through the public and admin surfaces, never through a database or a cache.
-# Every database and cache driver is banned. So is the one harness module that
-# still writes a database (harness/operator_writes.py, the seed's writes that no
-# product surface can make yet), so a test cannot reach the database through it.
+# The harness declares no database or cache driver among its dependencies, and
+# every driver is banned here as well, sqlite3 from the standard library
+# included, so a test module cannot bring one back.
 "psycopg".msg = "ADR-028 H10: arrange and read state through a public or admin surface, never a database"
 "psycopg2".msg = "ADR-028 H10: arrange and read state through a public or admin surface, never a database"
 "asyncpg".msg = "ADR-028 H10: arrange and read state through a public or admin surface, never a database"
@@ -102,4 +107,13 @@ select = ["TID251"]
 "sqlalchemy".msg = "ADR-028 H10: arrange and read state through a public or admin surface, never a database"
 "sqlite3".msg = "ADR-028 H10: arrange and read state through a public or admin surface, never a database"
 "redis".msg = "ADR-028 H10: arrange and read state through a public or admin surface, never a cache"
-"harness.operator_writes".msg = "ADR-028 H10: the seed's operator writes are not a test surface; read through a public or admin surface"
+
+# H11: a test owns its identities. Its agents come from fresh_agent() and the
+# other per-test factories; an agent the seed set up before the run reaches it
+# only through that agent's fixture (credit_less_buyer). harness/seed_agents.py
+# holds the seed's agents, and only the seed and the conftest import it, each as
+# a module, so no module a test can reach binds one under a name of its own.
+# This ban has a known blind spot: ruff matches the names a test imports, not
+# the attributes it reads, so an identity reached as an attribute of a module
+# that imported seed_agents (seed.seed_agents.CREDIT_LESS_BUYER) is not caught.
+"harness.seed_agents".msg = "ADR-028 H11: mint the test's own agent with fresh_agent(); the credit-less buyer comes from the credit_less_buyer fixture"

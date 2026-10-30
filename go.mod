@@ -10,7 +10,7 @@ ignore node_modules
 require (
 	connectrpc.com/connect v1.19.1
 	filippo.io/edwards25519 v1.2.0
-	github.com/FORA-Protocol/protocol v1.1.0
+	github.com/FORA-Protocol/protocol v1.2.0
 	github.com/armon/go-radix v1.0.0
 	github.com/aws/aws-sdk-go-v2 v1.47.1
 	github.com/aws/aws-sdk-go-v2/config v1.33.6

@@ -12,11 +12,15 @@ and never an agent's.
 
 from __future__ import annotations
 
+import pytest
 from fora_sdk.resolvers import read_revocation_list
 
 from .conftest import StackURLs
 from .constants import REVOCATION_PATH
 from .protocol_documents import wba_directory_at
+
+# ADR-008 D5 — declare stack-isolation contract.
+pytestmark = pytest.mark.stack_isolation("shared-without-cleanup")
 
 #: BROKER_REVOCATION_URL in docker-compose.e2e.yml: the list at the Broker's https
 #: origin, where the capture proxy answers for it.

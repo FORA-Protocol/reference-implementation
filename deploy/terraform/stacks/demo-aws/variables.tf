@@ -113,7 +113,7 @@ variable "smoke_agent_subdomain" {
 }
 
 variable "catalog_contributor_subdomain" {
-  description = "Label for the catalog contributor's Web Bot Auth directory hostname, under the publisher label. The full hostname <label>.<publisher_subdomain>.<domain> IS the identity that pushes the demo catalog (seed-staging.sh signs ingest with its key; the edge manifest authorizes it), and Caddy serves its public key directory at it. The default matches the label scripts/lib/staging-env.sh derives ids with; seeding and smoke verify the two agree before running."
+  description = "Label for the catalog contributor's Web Bot Auth directory hostname, under the publisher label. The full hostname <label>.<publisher_subdomain>.<domain> IS the identity that pushes the demo catalog (seed-staging.sh signs ingest with its key; the publisher's discovery document, which the origin serves, authorizes it), and Caddy serves its public key directory at it. The default matches the label scripts/lib/staging-env.sh derives ids with; seeding and smoke verify the two agree before running."
   type        = string
   default     = "catalog-contributor"
   nullable    = false
@@ -271,13 +271,13 @@ variable "resource_owner_id" {
 }
 
 variable "lambda_zip_path" {
-  description = "Path to the pre-built Lambda@Edge bundle zip. Default resolves to src/edge/dist/lambda-edge.zip in this repo checkout; build it with deploy/terraform/scripts/build-lambda-edge.sh from the config this stack renders (see the lambda_edge_config output)."
+  description = "Path to the pre-built Lambda@Edge bundle zip. Default resolves to src/edge/dist/lambda-edge.zip in this repo checkout; build it with deploy/terraform/scripts/build-lambda-edge.sh from the config this stack renders and its publisher hostname (see the lambda_edge_config and lambda_edge_domain outputs)."
   type        = string
   default     = null
 }
 
 variable "deploy_edge" {
-  description = "Deploy the CloudFront distribution + Lambda@Edge function fronting <publisher_subdomain>.<domain>. Set false for the FIRST apply on a fresh checkout: the Lambda bundle does not exist yet, and its config comes out of this very stack (the lambda_edge_config output). Bootstrap order: apply with false → terraform output -raw lambda_edge_config > lambda-edge-config.json → build-lambda-edge.sh lambda-edge-config.json → apply with true."
+  description = "Deploy the CloudFront distribution + Lambda@Edge function fronting <publisher_subdomain>.<domain>. Set false for the FIRST apply on a fresh checkout: the Lambda bundle does not exist yet, and its config comes out of this very stack (the lambda_edge_config output). Bootstrap order: apply with false → terraform output -raw lambda_edge_config > lambda-edge-config.json → build-lambda-edge.sh lambda-edge-config.json $(terraform output -raw lambda_edge_domain) → apply with true."
   type        = bool
   default     = true
   nullable    = false

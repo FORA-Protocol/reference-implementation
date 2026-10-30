@@ -92,7 +92,7 @@ Edge onboarding uses the protocol's existing Provider Domain Verification flow u
 
 1. Operator generates an Ed25519 keypair.
 2. Operator calls `RequestDomainVerification` with `domain={publisher-domain}`; Exchange returns a challenge token.
-3. Edge serves `/.well-known/fora-verify/{token}` from its `acmeTokens` map ([`src/edge/src/app.ts`](../../src/edge/src/app.ts) already implements this).
+3. The publisher's domain serves the challenge token at the challenge's `verification_url`.
 4. Operator calls `ConfirmDomainVerification` with `domain`, `token`, `signing_key=<pubkey>`, `cdn_type="edge-ed25519"` (distinct from `cloudfront`/`akamai`/`fastly`/`hmac` URL-signing types).
 5. Exchange fetches the token from the publisher's domain; on success it records the key against the verified domain, returning its identifier in `DomainVerificationResult.key_id`.
 
@@ -232,8 +232,8 @@ correction, so this amendment names it and leaves it open.
 - ADR-009 — identity boundary; per-Edge Ed25519 key onboarding.
 - ADR-010 — publisher payout / inverse-posting policy.
 - ADR-011 — three-way reconciliation procedure.
-- `fora.proto` (module `github.com/FORA-Protocol/protocol`) — `ResourceIdentity.content_hash` and `ResourceIdentity.resource_mutability` (reached through `Offer.identity`), `DomainVerificationRequest/Confirmation/Result`, and `WBAFile.keys` / `JsonWebKey` (the sole message carrying inline JWKs).
-- [`src/edge/src/app.ts`](../../src/edge/src/app.ts) — current Edge implementation; its `/.well-known/fora-verify/:token` handler is the primitive D3 reuses. Signed-URL verification comes from `@fora-protocol/sdk/verify`, which the edge imports rather than implementing.
+- `fora.proto` (module `github.com/FORA-Protocol/protocol`) — `ResourceIdentity.content_hash` and `ResourceIdentity.resource_mutability` (reached through `Offer.identity`), `DomainVerificationRequest/Challenge/Confirmation/Result`, and `WBAFile.keys` / `JsonWebKey` (the sole message carrying inline JWKs).
+- [`src/edge/src/app.ts`](../../src/edge/src/app.ts) — current Edge implementation. It serves no challenge token, so step 3 of D3 has no edge primitive to reuse. Signed-URL verification comes from `@fora-protocol/sdk/verify`, which the edge imports rather than implementing.
 - [`src/exchange/internal/signing/signed_url.go`](../../src/exchange/internal/signing/signed_url.go) — URL signers; distinct from record signing per D2.
 - Crosby & Wallach, "Efficient Data Structures for Tamper-Evident Logging", USENIX Security 2009 — Merkle-linked log reference.
 - Sigstore Rekor; Trillian-Tessera — transparency-log alternatives for the Merkle upgrade path.

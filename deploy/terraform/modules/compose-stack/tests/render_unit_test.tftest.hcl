@@ -440,8 +440,9 @@ run "publisher_origin_renders_when_configured" {
   command = apply
 
   variables {
-    origin_hostname = "origin.staging.example"
-    publisher_image = "registry.example.com/group/proj/publisher:test"
+    origin_hostname           = "origin.staging.example"
+    publisher_image           = "registry.example.com/group/proj/publisher:test"
+    origin_discovery_document = "{\"ver\":\"1.0\",\"role\":\"ROLE_PUBLISHER\",\"domain\":\"demo.staging.example\",\"note\":\"a brace } and a backtick ` stay out of the Caddyfile\"}"
   }
 
   assert {
@@ -453,6 +454,51 @@ run "publisher_origin_renders_when_configured" {
     condition     = strcontains(output.user_data, "origin.staging.example")
     error_message = "Caddy must get a site block for the origin hostname"
   }
+
+  # The document is a file Caddy serves, never interpolated into its
+  # configuration: cloud-init writes it, the Caddy container mounts the
+  # directory, and the origin's site block answers the address from it.
+  assert {
+    condition     = strcontains(output.user_data, "path: /opt/fora/origin/fora.json") && strcontains(output.user_data, base64encode(var.origin_discovery_document))
+    error_message = "cloud-init must write the discovery document, base64-delivered, to /opt/fora/origin/fora.json"
+  }
+
+  assert {
+    condition     = strcontains(output.compose_yaml, "/opt/fora/origin:/srv/origin:ro")
+    error_message = "the Caddy container must mount the origin's document directory"
+  }
+
+  assert {
+    condition     = strcontains(output.caddyfile, "handle /.well-known/fora.json {") && strcontains(output.caddyfile, "root * /srv/origin") && !strcontains(output.caddyfile, "a brace }")
+    error_message = "the origin's site block must serve the document as a file, and no byte of the document may reach the Caddyfile"
+  }
+}
+
+run "origin_without_discovery_document_is_rejected" {
+  command = plan
+
+  variables {
+    origin_hostname = "origin.staging.example"
+    publisher_image = "registry.example.com/group/proj/publisher:test"
+  }
+
+  expect_failures = [
+    random_password.postgres,
+  ]
+}
+
+run "discovery_document_must_be_a_publishers" {
+  command = plan
+
+  variables {
+    origin_hostname           = "origin.staging.example"
+    publisher_image           = "registry.example.com/group/proj/publisher:test"
+    origin_discovery_document = "{\"role\":\"ROLE_EXCHANGE\"}"
+  }
+
+  expect_failures = [
+    var.origin_discovery_document,
+  ]
 }
 
 run "registry_login_only_with_credentials" {

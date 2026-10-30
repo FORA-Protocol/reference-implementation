@@ -20,7 +20,6 @@ answer or typed refusal. No leg reads the deployment's datastore.
 from __future__ import annotations
 
 import pytest
-from fora_sdk import ProtocolVersion
 from fora_sdk.client import CallError
 from wire.models import GetAccountStatusResponse
 
@@ -28,7 +27,7 @@ from ..exchanges import EXCHANGE_A_DOMAIN
 from ..fresh_agent import FreshAgent
 from ..identity_requests import answered_with_offer, probe_query
 from ..obligation_registry import Obligation, obligation
-from ..seed_accounts import open_active_account
+from ..seed_accounts import account_status_request, open_active_account
 
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
@@ -36,7 +35,7 @@ pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 def _status(agent: FreshAgent) -> GetAccountStatusResponse:
     """The agent's own GetAccountStatus at exchange-a."""
     return agent.exchange(EXCHANGE_A_DOMAIN).get_account_status(
-        {"ver": ProtocolVersion, "exchange": EXCHANGE_A_DOMAIN}
+        account_status_request(EXCHANGE_A_DOMAIN)
     )
 
 

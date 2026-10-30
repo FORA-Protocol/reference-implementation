@@ -481,8 +481,9 @@ deploy/terraform/scripts/smoke.sh
 Checks `healthz` on the Exchange, Broker, and Identity Service, checks that
 the MCP endpoint answers 401 (mounted, and its bearer gate active — a 200
 there would mean anyone could drive the tools that sign with a developer's
-custodied key) and that its discovery document is served, checks the edge
-worker's fora.json, then runs the full proof: agent-signed licensed discovery →
+custodied key) and that its discovery document is served, checks the
+publisher's fora.json through the edge worker (served by the origin, passed
+through to any User-Agent), then runs the full proof: agent-signed licensed discovery →
 relay-execute of the winning offer (the Exchange mints the agent-bound signed
 URL) → a fetch WITHOUT proof of possession that the edge must refuse → the
 proof-of-possession fetch through the Cloudflare edge → canary marker from

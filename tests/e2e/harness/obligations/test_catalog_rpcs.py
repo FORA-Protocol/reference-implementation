@@ -34,7 +34,7 @@ from ..catalog_calls import (
 from ..defects import REFRESH_CATALOG_UNIMPLEMENTED, REMOVE_RESOURCES_UNIMPLEMENTED, Defect
 from ..fresh_agent import FreshAgent
 from ..obligation_registry import Obligation, obligation
-from ..seed import SELFPUB_SFX_KEY_PATH, SeededFixture
+from ..seed import SELFPUB_SFX_KEY_PATH
 from ..stack_urls import StackURLs
 
 pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
@@ -51,7 +51,6 @@ def _implemented(defect: Defect, outcome: object) -> None:
 @REMOVE_RESOURCES_UNIMPLEMENTED.mark
 def test_remove_resources_takes_a_pushed_entry_out_of_the_catalog(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """The contributor removes an entry it pushed, named by domain and path: removed = 1.
@@ -74,7 +73,6 @@ def test_remove_resources_takes_a_pushed_entry_out_of_the_catalog(
 @REMOVE_RESOURCES_UNIMPLEMENTED.mark
 def test_a_caller_the_manifest_does_not_list_cannot_remove_entries(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
     fresh_agent: FreshAgent,
 ) -> None:
     """The sfx publisher asks exchange-a to remove the philosophy publisher's page: refused.
@@ -104,7 +102,6 @@ def test_a_caller_the_manifest_does_not_list_cannot_remove_entries(
 @REFRESH_CATALOG_UNIMPLEMENTED.mark
 def test_refresh_catalog_is_answered(
     compose_stack: StackURLs,
-    seeded: SeededFixture,  # noqa: ARG001 — ordering: the seed lists the contributor's publisher
 ) -> None:
     """A signed RefreshCatalog for exchange-a's own seat is answered with a RefreshCatalogResponse."""
     outcome = answer(contributor(compose_stack).refresh(HOME_SEAT))

@@ -17,6 +17,11 @@ type Querier interface {
 	// rows, so the caller sees pgx.ErrNoRows — the repo maps that to the
 	// "already exists" success signal, not an error.
 	InsertAgentAccountIfAbsent(ctx context.Context, arg InsertAgentAccountIfAbsentParams) (SorAgentAccount, error)
+	// Sets the SoR-owned active flag of one account: the operator's out-of-band
+	// approval, or switching an account off. No production path of the Exchange
+	// runs it; the operator's switch lives in the SoR itself. The row count lets the
+	// caller tell an unknown billing_ref (0) from an update (1).
+	SetAgentAccountActive(ctx context.Context, arg SetAgentAccountActiveParams) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)

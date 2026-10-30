@@ -197,7 +197,7 @@ variable "smoke_agent_subdomain" {
 }
 
 variable "catalog_contributor_subdomain" {
-  description = "Label for the catalog contributor's Web Bot Auth directory hostname. The full hostname <label>.<domain> IS the identity that pushes the demo catalog (seed-staging.sh signs ingest with its key; the edge manifest authorizes it), and Caddy serves its public key directory at it. The default matches the label scripts/lib/staging-env.sh derives ids with; seeding and smoke verify the two agree before running."
+  description = "Label for the catalog contributor's Web Bot Auth directory hostname. The full hostname <label>.<domain> IS the identity that pushes the demo catalog (seed-staging.sh signs ingest with its key; the publisher's discovery document, which the origin serves, authorizes it), and Caddy serves its public key directory at it. The default matches the label scripts/lib/staging-env.sh derives ids with; seeding and smoke verify the two agree before running."
   type        = string
   default     = "catalog-contributor"
   nullable    = false

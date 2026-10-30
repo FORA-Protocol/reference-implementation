@@ -14,6 +14,10 @@ EDGE_DIR="${REPO_ROOT}/src/edge"
 edge_npm_ci() {
     command -v node >/dev/null 2>&1 || { echo "missing: node" >&2; exit 2; }
     command -v npm >/dev/null 2>&1 || { echo "missing: npm" >&2; exit 2; }
+    # @fora-protocol/sdk is a git dependency pinned to a protocol commit between
+    # releases. npm fetches its codeload tarball and clones with git only when
+    # that fetch fails, so git is required for the fallback path.
+    command -v git >/dev/null 2>&1 || { echo "missing: git" >&2; exit 2; }
     cd "${EDGE_DIR}"
     echo "==> npm ci (src/edge)"
     npm ci

@@ -53,12 +53,16 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 WORKDIR /runner
 
-# No git layer. This image used to install one, because fora-protocol and
-# fora-protocol-sdk resolved from the protocol repository over git and uv had to
-# clone them. Both are PyPI releases now, so nothing in this image resolves a git
-# dependency. The harness suites that DO shell out to git — the structural-guard
-# ones that build scratch repositories — all skip in this image, because the
-# scripts they drive are not COPYed into it.
+# git, because fora-protocol and fora-protocol-sdk resolve from the protocol
+# repository over git between protocol releases: tests/e2e/pyproject.toml then pins
+# both to one commit of the protocol's integration branch through
+# [tool.uv.sources], and uv clones it. At a release they come from PyPI again and
+# this layer is unused. The harness suites that shell out to git themselves — the
+# structural-guard ones that build scratch repositories — still skip in this
+# image, because the scripts they drive are not COPYed into it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 
 # The production ingest binary, copied from the Go builder stage. The seed
 # (tests/e2e/harness/seed.py) shells out to this path once per demo feed.
@@ -71,8 +75,10 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 # Harness pyproject and its lock. There is no in-tree Python shim to mirror in:
 # the MCP surface is the Go adapter, driven over the MCP protocol by
-# test_mcp_endpoint.py. fora-protocol and fora-protocol-sdk install from PyPI at
-# the version this file pins, so no sibling checkout is mirrored in either.
+# test_mcp_endpoint.py. fora-protocol and fora-protocol-sdk install either from
+# PyPI at the version this file pins, or, between protocol releases, from the one
+# protocol commit its [tool.uv.sources] table names; no sibling checkout is
+# mirrored in either case.
 #
 # The lock is copied because `==<version>` pins a name and a number, and the lock is
 # the only file in this tree carrying the sha256 of the sdist and the wheel. A
@@ -80,7 +86,8 @@ ENV UV_COMPILE_BYTECODE=1 \
 # exact, and an index that serves a package of that name and version serves
 # different bytes. The host-side pin guard enforces that the lock resolves both
 # distributions from https://pypi.org/simple and nowhere else, precisely for that
-# reason -- and a build that never reads the lock sits outside that check,
+# reason (and, in the pre-release form, from exactly the pinned git commit) -- and a
+# build that never reads the lock sits outside that check,
 # inheriting whatever index the build environment points uv at. This harness signs
 # the RFC 9421 requests the Go services verify and the delivery proof the edge
 # worker verifies, which is why its revision is tied to the other three.

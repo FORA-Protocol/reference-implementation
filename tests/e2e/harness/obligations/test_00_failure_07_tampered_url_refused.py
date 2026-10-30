@@ -2,7 +2,8 @@
 
 Drives the scenario against the demo ``paper-satellites`` resource (FLAT USD, no
 user-type restriction so it resolves via the facet-less canonical
-DiscoveryRequest) as the USD demo buyer:
+DiscoveryRequest), which exchange-b sells, as the test's own agent (``fresh_agent``,
+with an account at exchange-b):
 
 1. Acceptance — the Broker purchase returns a signed URL
    pointing at the music demo domain (→ Fastly edge).
@@ -23,15 +24,13 @@ writes as a small JSON body in place of the publisher's bytes.
 from __future__ import annotations
 
 import re
-from contextlib import closing
 
 import pytest
 from fora_sdk.client import CallError
 
-from ..broker_purchase import buy_through_broker
-from ..conftest import StackURLs
-from ..exchanges import EXCHANGE_A_DOMAIN
-from ..sdk_client import sdk_exchange_client, stack_offer_verifier
+from ..broker_purchase import resolve_and_buy
+from ..exchanges import EXCHANGE_A_DOMAIN, EXCHANGE_B_DOMAIN
+from ..fresh_agent import FreshAgent
 from ..seed import SeededFixture
 from ..obligation_registry import Obligation, obligation
 
@@ -57,23 +56,17 @@ def _tamper_sig(signed_url: str) -> tuple[str, str]:
 
 @obligation(Obligation.PAID_008, negative=True)
 def test_tampered_signed_url_refused_no_content_served(
-    compose_stack: StackURLs,
-    seeded: SeededFixture,
-    monkeypatch: pytest.MonkeyPatch,
+    seeded: SeededFixture, fresh_agent: FreshAgent
 ) -> None:
     """Tampered ed25519-signed URL is refused; the publisher payload never leaks."""
     res = seeded.fastly  # paper-satellites: FLAT USD, no user-type restriction
-
-    monkeypatch.setenv("FORA_AGENT_ID", res.buyer_agent_id)
-    monkeypatch.setenv("FORA_AGENT_KEY_FILE", str(res.buyer_key_path))
+    fresh_agent.fund(EXCHANGE_B_DOMAIN)
 
     # (1) Acceptance — resolve at the Broker, then buy the winning offer through
     # the Broker. The signed URL the purchase hands back is the delivery surface
     # the obligation refers to. intended_use ``ai-input`` is the real function
     # paper-satellites permits.
-    _, item = buy_through_broker(
-        compose_stack, res.uri, agent_id=res.buyer_agent_id, key_path=res.buyer_key_path
-    )
+    item = resolve_and_buy(fresh_agent, res.uri)
     signed_url = item.retrieval_endpoint
     assert signed_url, (
         f"prerequisite — the agent must first receive a delivered URL — failed: {item}"
@@ -84,15 +77,8 @@ def test_tampered_signed_url_refused_no_content_served(
     tampered_url, original_sig = _tamper_sig(signed_url)
     # A content fetch dials the URL it is given, so the Exchange this client is
     # addressed at plays no part; it is the buyer's own signer that matters.
-    buyer = sdk_exchange_client(
-        compose_stack,
-        EXCHANGE_A_DOMAIN,
-        stack_offer_verifier(),
-        agent_id=res.buyer_agent_id,
-        key_path=res.buyer_key_path,
-    )
-    with closing(buyer), pytest.raises(CallError) as caught:
-        buyer.fetch(tampered_url)
+    with pytest.raises(CallError) as caught:
+        fresh_agent.exchange(EXCHANGE_A_DOMAIN).fetch(tampered_url)
 
     refusal = caught.value
     assert refusal.status == 403, (

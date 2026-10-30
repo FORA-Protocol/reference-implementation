@@ -44,8 +44,8 @@ from .obligation_builders import (
 
 pytest_plugins = ["pytester"]
 
-# No compose stack and no database. Declaring `isolated` keeps the autouse
-# cleanup chain, which needs a live Postgres, a no-op.
+# No compose stack and no database, so the module owns its environment and
+# declares `isolated`; the autouse dispatch runs nothing for it.
 pytestmark = pytest.mark.stack_isolation("isolated")
 
 _IMPORT = "import pytest\nfrom harness.obligation_registry import Obligation, obligation\n"
@@ -195,7 +195,20 @@ def _five_state_registry() -> list[dict[str, object]]:
     return entries
 
 
-def test_report_derives_every_state_from_the_claiming_tests(pytester: pytest.Pytester) -> None:
+# The e2e pyproject runs the suite under pytest-xdist, where the controller
+# process collects nothing and every test runs in a worker. The report must read
+# the same in-process, with one worker and with several.
+_WORKERS = pytest.mark.parametrize(
+    "workers",
+    [(), ("-n", "1"), ("-n", "2")],
+    ids=["in-process", "one-worker", "two-workers"],
+)
+
+
+@_WORKERS
+def test_report_derives_every_state_from_the_claiming_tests(
+    pytester: pytest.Pytester, workers: tuple[str, ...]
+) -> None:
     plant_session(
         pytester,
         _five_state_registry(),
@@ -206,7 +219,7 @@ def test_report_derives_every_state_from_the_claiming_tests(pytester: pytest.Pyt
         },
     )
 
-    result = run_session(pytester)
+    result = run_session(pytester, *workers)
 
     # Exit 0 although GAP-001 is untested: the report never fails the run.
     assert result.ret == pytest.ExitCode.OK, result.stdout.str() + result.stderr.str()
@@ -402,14 +415,17 @@ _SKIP_REPORT: dict[str, dict[str, Any]] = {
 }
 
 
-def test_a_runtime_skip_is_reported_skipped_with_its_reason(pytester: pytest.Pytester) -> None:
+@_WORKERS
+def test_a_runtime_skip_is_reported_skipped_with_its_reason(
+    pytester: pytest.Pytester, workers: tuple[str, ...]
+) -> None:
     plant_session(
         pytester,
         [entry_fields(oid, negative=[]) for oid in _SKIP_REPORT],
         {"test_skips.py": _SKIPS},
     )
 
-    result = run_session(pytester)
+    result = run_session(pytester, *workers)
 
     assert result.ret == pytest.ExitCode.OK, result.stdout.str() + result.stderr.str()
     result.assert_outcomes(passed=2, skipped=6, xfailed=2)

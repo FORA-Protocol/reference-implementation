@@ -119,3 +119,24 @@ func (q *Queries) InsertAgentAccountIfAbsent(ctx context.Context, arg InsertAgen
 	)
 	return i, err
 }
+
+const setAgentAccountActive = `-- name: SetAgentAccountActive :execrows
+UPDATE sor.agent_accounts SET active = $2 WHERE billing_ref = $1
+`
+
+type SetAgentAccountActiveParams struct {
+	BillingRef string `json:"billing_ref"`
+	Active     bool   `json:"active"`
+}
+
+// Sets the SoR-owned active flag of one account: the operator's out-of-band
+// approval, or switching an account off. No production path of the Exchange
+// runs it; the operator's switch lives in the SoR itself. The row count lets the
+// caller tell an unknown billing_ref (0) from an update (1).
+func (q *Queries) SetAgentAccountActive(ctx context.Context, arg SetAgentAccountActiveParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setAgentAccountActive, arg.BillingRef, arg.Active)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}

@@ -20,7 +20,16 @@ type Manifests struct {
 	mu        sync.Mutex
 	manifests map[string]*forawellknown.Manifest
 	errs      map[string]error
-	calls     int
+	// failing is a host whose reads fail once it has answered a number more.
+	failing map[string]laterFailure
+	calls   int
+}
+
+// laterFailure is how many more reads of a host answer before they fail, and
+// what they fail with then.
+type laterFailure struct {
+	reads int
+	err   error
 }
 
 // NewManifests returns a source where no site serves anything.
@@ -28,6 +37,7 @@ func NewManifests() *Manifests {
 	return &Manifests{
 		manifests: map[string]*forawellknown.Manifest{},
 		errs:      map[string]error{},
+		failing:   map[string]laterFailure{},
 	}
 }
 
@@ -36,6 +46,13 @@ func (s *Manifests) Get(_ context.Context, host string) (*forawellknown.Manifest
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
+	if f, ok := s.failing[host]; ok {
+		if f.reads == 0 {
+			return nil, f.err
+		}
+		f.reads--
+		s.failing[host] = f
+	}
 	if err, ok := s.errs[host]; ok {
 		return nil, err
 	}
@@ -57,6 +74,7 @@ func (s *Manifests) Serve(host string, m *forawellknown.Manifest) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.errs, host)
+	delete(s.failing, host)
 	s.manifests[host] = m
 }
 
@@ -68,6 +86,7 @@ func (s *Manifests) Withdraw(host string) {
 	defer s.mu.Unlock()
 	delete(s.manifests, host)
 	delete(s.errs, host)
+	delete(s.failing, host)
 }
 
 // Fail makes a fetch of host fail with err, the way the production fetcher
@@ -76,7 +95,19 @@ func (s *Manifests) Fail(host string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.manifests, host)
+	delete(s.failing, host)
 	s.errs[host] = err
+}
+
+// FailAfter keeps host serving what it serves for its next reads reads, and
+// makes every read after them fail with err. A test that needs the Exchange
+// to read a site's document once and fail on the read after -- the read it
+// makes to verify the site, right after the one that said it would pass --
+// arranges it this way.
+func (s *Manifests) FailAfter(host string, reads int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failing[host] = laterFailure{reads: reads, err: err}
 }
 
 // Calls is how many times the Exchange has read any site's document. A suite

@@ -49,22 +49,21 @@ import pytest
 from fora_sdk.client import NOT_CANONICAL_WIRE_NAMING, CallError, CallErrorKind
 from fora_sdk.core import Verifier
 from fora_sdk.errordetail import error_detail_from
-from fora_sdk import sfv
 from fora_sdk.sync import BrokerClient, Client
 
 from ._multi_exchange_common import _MUSIC_URI, _PHILOSOPHY_URI, _SFX_URI
-from .broker_purchase import one_group_per_uri, only_verified_offer
+from .broker_purchase import one_group_per_uri, only_verified_offer, resolve_request
 from .conftest import StackURLs
 from .exchanges import EXCHANGE_A_DOMAIN, EXCHANGE_B_DOMAIN, EXCHANGE_C_DOMAIN
-from .httpsig_signer import load_keypair, signing_transport
+from .fresh_agent import FreshAgent
+from .httpsig_signer import unpublished_signer
 from .reporting import assert_report_recorded_only_at, report_body
 from .sdk_client import offer_verifier, sdk_broker_client, sdk_exchange_client
 from .seed import (
     DEMO_PHILOSOPHY_DOMAIN,
-    USD_AGENT_ID,
     SeededFixture,
 )
-from .e2e_catalog import USD_AGENT_KEY_PATH
+from .signature_fields import declared_signatures
 
 # epicurus: PER_UNIT 0.0001/characters USD — a PAID resource, deliberately. The
 # report path needs an obligation to record, and the philosophy URI the
@@ -137,8 +136,8 @@ def verifier(compose_stack: StackURLs) -> Verifier:  # noqa: ARG001 — the stac
 class _ClientFactory:
     """Builds this suite's SDK clients and closes every one it hands out.
 
-    Every client here wants the same agent identity, key and verifier, and the
-    only thing that varies is which Exchange it addresses. Written out per test
+    Every client here wants the same agent identity (the test's own agent), key and
+    verifier, and the only thing that varies is which Exchange it addresses. Written out per test
     that was four near-identical constructions and four try/finally blocks — one
     of which opened AFTER a second client was built, so a failure to build the
     second leaked the first for the rest of the session.
@@ -146,13 +145,17 @@ class _ClientFactory:
 
     stack: StackURLs
     verifier: Verifier
+    agent: FreshAgent
     closing: ExitStack
 
     def broker(self) -> BrokerClient:
         """The Broker's discovery client."""
         return self._owned(
             sdk_broker_client(
-                self.stack, self.verifier, agent_id=USD_AGENT_ID, key_path=USD_AGENT_KEY_PATH
+                self.stack,
+                self.verifier,
+                agent_id=self.agent.agent_id,
+                key_path=self.agent.key_path,
             )
         )
 
@@ -163,8 +166,8 @@ class _ClientFactory:
                 self.stack,
                 domain,
                 self.verifier,
-                agent_id=USD_AGENT_ID,
-                key_path=USD_AGENT_KEY_PATH,
+                agent_id=self.agent.agent_id,
+                key_path=self.agent.key_path,
             )
         )
 
@@ -175,14 +178,18 @@ class _ClientFactory:
 
 
 @pytest.fixture
-def clients(compose_stack: StackURLs, verifier: Verifier) -> Iterator[_ClientFactory]:
+def clients(
+    compose_stack: StackURLs, verifier: Verifier, fresh_agent: FreshAgent
+) -> Iterator[_ClientFactory]:
     """A client factory whose teardown closes everything it built.
 
     The ExitStack registers each close at construction, so a client is owned from
     the moment it exists rather than from the moment a try block opens.
     """
     with ExitStack() as closing:
-        yield _ClientFactory(stack=compose_stack, verifier=verifier, closing=closing)
+        yield _ClientFactory(
+            stack=compose_stack, verifier=verifier, agent=fresh_agent, closing=closing
+        )
 
 
 def test_broker_resolve_verifies_an_offer_from_every_exchange(
@@ -207,7 +214,7 @@ def test_broker_resolve_verifies_an_offer_from_every_exchange(
     Exchange signs every offer it issues, priced or not, so each one is verified
     against the issuer's published key exactly as a paid one would be.
     """
-    result = _call(clients.broker().resolve, {"uris": list(_URI_OWNERS)})
+    result = _call(clients.broker().resolve, resolve_request(list(_URI_OWNERS)))
     by_uri = one_group_per_uri(result, _URI_OWNERS, "broker resolve")
     for uri, owner in _URI_OWNERS.items():
         offer = only_verified_offer(by_uri[uri], f"broker resolve for {uri}")
@@ -240,11 +247,13 @@ def test_sdk_client_walks_the_paid_path(
     transaction it holds has that id. Both are protocol round-trips: the report
     goes in through ReportUsage and the evidence comes back out of it.
     """
-    discovered = _call(clients.broker().resolve, {"uris": [_RESOURCE_URI]})
+    discovered = _call(clients.broker().resolve, resolve_request([_RESOURCE_URI]))
     by_uri = one_group_per_uri(discovered, [_RESOURCE_URI], "broker resolve")
     offer = only_verified_offer(by_uri[_RESOURCE_URI], "broker resolve")
     issuer = offer.offer.get("exchange")
     assert issuer, f"the verified offer names no exchange: {offer.offer}"
+    # The item is paid, so the agent opens an account at the Exchange that sells it.
+    clients.agent.fund(issuer)
 
     # Execute addresses the Exchange directly, so this client MUST be the issuer.
     buyer = clients.exchange(issuer)
@@ -287,7 +296,13 @@ def test_sdk_client_walks_the_paid_path(
     )
 
     # Property 2, the observable half: the ISSUER recorded it, and nobody else.
-    assert_report_recorded_only_at(clients.stack, report, reported.report_id)
+    assert_report_recorded_only_at(
+        clients.stack,
+        report,
+        reported.report_id,
+        agent_id=clients.agent.agent_id,
+        key_path=clients.agent.key_path,
+    )
 
 
 def test_a_refusal_carries_its_decoded_error_detail(
@@ -414,19 +429,17 @@ def test_the_signer_sends_every_covered_header() -> None:
     ``@``-prefixed covered names are derived components (the method, the target
     URI) rather than header fields, and are excluded.
     """
-    _, priv = load_keypair(USD_AGENT_KEY_PATH)
-    signed = signing_transport("https://agent.example", priv).sign_outbound(
+    signed = unpublished_signer("https://agent.example").sign_outbound(
         method="POST",
         url="http://exchange.example/fora.v1.ExchangeService/DiscoverResources",
         body=b"{}",
         authorization="",
     )
 
-    members = list(sfv.parse_dictionary(signed.headers["signature-input"]).values())
-    assert members, f"Signature-Input did not parse: {signed.headers['signature-input']!r}"
-    first = members[0]
-    assert isinstance(first, sfv.InnerList), first
-    covered = {str(item.value) for item in first.items if not str(item.value).startswith("@")}
+    signatures = declared_signatures([signed.headers["signature-input"]])
+    assert signatures, f"Signature-Input did not parse: {signed.headers['signature-input']!r}"
+    first = next(iter(signatures.values()))
+    covered = {name for name in first.names if not name.startswith("@")}
     assert "authorization" in covered, (
         "the covered set no longer binds authorization. Dropping it is not a fix for "
         "the header never being sent -- it removes the binding that stops a bearer "

@@ -16,6 +16,7 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/forawellknown"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/app"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/auth"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/web"
 )
 
 // WHAT THESE TESTS COVER.
@@ -31,22 +32,6 @@ import (
 // Exchange's own registrations/list route with the console's own client (see
 // registrationsOf), never from a table.
 
-// TestConsole_SignInReachesThePublisherPages walks the ordinary path: a first
-// visit redirects to the provider, the callback establishes a session, and the
-// pages behind it are reachable.
-func TestConsole_SignInReachesThePublisherPages(t *testing.T) {
-	f := startConsole(t, verifiedClaims())
-	f.signIn(t)
-
-	status, body := f.get(t, "/")
-	if status != http.StatusOK {
-		t.Fatalf("home status = %d after sign-in", status)
-	}
-	if !strings.Contains(body, "editor@publisher.example") {
-		t.Fatalf("the page does not show who is signed in: %s", head(body))
-	}
-}
-
 // TestConsole_RefusesAnUnsignedVisitor is the gate on every publisher page and
 // wizard route, walked from the console's own route table. A visitor with no
 // session is sent to sign in from a page, and refused in JSON by a wizard
@@ -58,8 +43,7 @@ func TestConsole_RefusesAnUnsignedVisitor(t *testing.T) {
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
-	pages := append(app.PublisherPagePatterns(), "GET /verify-email")
-	for _, pattern := range pages {
+	for _, pattern := range append(app.PublisherPagePatterns(), "GET /verify-email") {
 		status, header := sendPattern(t, client, f.server.URL, pattern)
 		if status != http.StatusFound {
 			t.Fatalf("%s unsigned = %d, want a redirect", pattern, status)
@@ -78,7 +62,8 @@ func TestConsole_RefusesAnUnsignedVisitor(t *testing.T) {
 // TestConsole_RefusesAnUnverifiedAddress covers the publisher gate, walked from
 // the console's own route table. The person can sign in -- they have an
 // account -- but every page and wizard route that reads or writes a
-// registration is closed until their provider confirms the address.
+// registration, the business step's call among them, is closed until their
+// provider confirms the address.
 func TestConsole_RefusesAnUnverifiedAddress(t *testing.T) {
 	claims := verifiedClaims()
 	claims.EmailVerified = false
@@ -128,32 +113,26 @@ func sendPattern(t *testing.T, client *http.Client, base, pattern string) (int, 
 var reWildcard = regexp.MustCompile(`\{[a-z]+\}`)
 
 // TestConsole_RegistersThePublisherAndAssertsTheSignedInPerson is the console's
-// half of a registration: the wizard's first step calls, and the call carries
-// the person the session names rather than anything the browser sent.
+// half of a registration: the wizard's business step calls, the call carries
+// the person the session names rather than anything the browser sent, and the
+// home page then opens the console, with nothing in it yet.
 //
 // What proves it is where the Exchange filed the grant. The payee is listed for
 // the signed-in person's issuer and subject and for nobody else, and the
 // Exchange refuses an actor whose address is not verified, so the call
-// succeeding also proves it carried the verified-address answer.
+// succeeding also proves it carried the verified-address answer. The Exchange
+// recorded the registration once in its audit log.
 func TestConsole_RegistersThePublisherAndAssertsTheSignedInPerson(t *testing.T) {
 	f := startConsole(t, verifiedClaims())
 	f.signIn(t)
-	boot := f.openWizard(t)
-	if boot.Registered {
-		t.Fatal("a person who has registered nothing is shown as registered")
-	}
-	if len(boot.Steps) != 5 || boot.Steps[0].Key != "name" {
-		t.Fatalf("the wizard starts with %d steps, %+v", len(boot.Steps), boot.Steps)
-	}
 
-	out := f.ok(t, "/api/publisher", map[string]any{"display_name": "Stoa Press"})
-	id, _ := out["publisher_id"].(string)
-	if id == "" {
-		t.Fatalf("registering answered no payee id: %v", out)
-	}
+	out := f.ok(t, web.APIPublisherPath, map[string]any{"display_name": "Stoa Press"})
+	mustContain(t, "the home page once the business is named", f.get2(t, web.HomePath),
+		`aria-label="Sections"`, "No domains yet.")
 	regs := f.mine(t)
-	if !regs.Registered || regs.PublisherID != id {
-		t.Fatalf("the Exchange holds %+v for the signed-in person, want payee %q", regs, id)
+	if !regs.Registered || !strings.HasPrefix(regs.PublisherID, "pub_") || out["publisher_id"] != regs.PublisherID {
+		t.Fatalf("the business step answered %v and the Exchange holds %+v for the signed-in person, want one payee",
+			out, regs)
 	}
 	if regs.DisplayName != "Stoa Press" {
 		t.Fatalf("the Exchange holds the business name %q", regs.DisplayName)
@@ -163,44 +142,8 @@ func TestConsole_RegistersThePublisherAndAssertsTheSignedInPerson(t *testing.T) 
 	if f.registrationsOf(t, someoneElse).Registered {
 		t.Fatal("the payee was granted to a person other than the one signed in")
 	}
-}
-
-// TestConsole_SkipsTheBusinessStepOnceItIsAnswered is the other half of the
-// resume: the name cannot be changed here, so a publisher who has one is not
-// shown a field that could not do anything -- and the steps they do see are
-// numbered from one, not from two.
-func TestConsole_SkipsTheBusinessStepOnceItIsAnswered(t *testing.T) {
-	f := startConsole(t, verifiedClaims())
-	f.signIn(t)
-	f.openWizard(t)
-	f.ok(t, "/api/publisher", map[string]any{"display_name": "Stoa Press"})
-
-	boot := f.openWizard(t)
-	if !boot.Registered {
-		t.Fatal("a registered publisher is shown as unregistered")
-	}
-	if len(boot.Steps) != 4 || boot.Steps[0].Key != "domain" {
-		t.Fatalf("the wizard still asks for the name: %+v", boot.Steps)
-	}
-	if boot.HasDomains {
-		t.Fatal("a publisher with a name and no domain is offered a way out of the wizard")
-	}
-}
-
-// TestConsole_OffersCancelOnlyPastTheFirstDomain is the wizard's way out. A
-// person onboarding has nowhere to go back to -- every other page sends them
-// here -- so the wizard offers no cancel. Once they have a domain, adding
-// another is a choice they can back out of, and the page offers it.
-func TestConsole_OffersCancelOnlyPastTheFirstDomain(t *testing.T) {
-	f := startConsole(t, verifiedClaims())
-	f.signIn(t)
-	if boot := f.openWizard(t); boot.HasDomains {
-		t.Fatal("a first-time publisher is offered a way out of the wizard")
-	}
-
-	addDomain(t, f)
-	if boot := f.openWizard(t); !boot.HasDomains {
-		t.Fatal("a publisher with a domain is not offered a way out of the wizard")
+	if n := f.exchange.CountAuditActions(t, "RegisterPublisher"); n != 1 {
+		t.Fatalf("the business step wrote %d RegisterPublisher audit rows, want 1", n)
 	}
 }
 
@@ -208,21 +151,30 @@ func TestConsole_OffersCancelOnlyPastTheFirstDomain(t *testing.T) {
 // surface opens. The pages redirect such a person to an explanation; a call
 // cannot be redirected usefully, because fetch follows the redirect and hands
 // the script the explanation page as its answer.
+//
+// The person named their business from a sign-in whose address was verified,
+// so a lookup from this sign-in would otherwise go on to have the Exchange read
+// the domain's document. Two checks stand in the way: the console's address
+// gate, which answers the script 403, and the Exchange, which refuses an actor
+// whose address is not verified. The status shows that the console's gate
+// answered; the document would be read only if both checks were gone.
 func TestConsole_RefusesAWizardCallFromAnUnverifiedAddress(t *testing.T) {
+	f := startConsole(t, verifiedClaims())
+	f.signIn(t)
+	f.registerBusiness(t)
 	claims := verifiedClaims()
 	claims.EmailVerified = false
-	f := startConsole(t, claims)
-	f.signIn(t)
+	unverified := f.otherPerson(t, claims)
 
-	status, out := f.api(t, "/api/publisher", map[string]any{"display_name": "Stoa Press"})
+	status, out := unverified.api(t, web.APILookupPath, map[string]any{"domain": "stoa.example"})
 	if status != http.StatusForbidden {
 		t.Fatalf("an unverified address = %d, want %d", status, http.StatusForbidden)
 	}
 	if msg, _ := out["error"].(string); !strings.Contains(msg, "email") {
 		t.Fatalf("the refusal does not say why: %v", out)
 	}
-	if f.mine(t).Registered {
-		t.Fatal("an unverified address still registered a publisher")
+	if n := f.exchange.Manifests.Calls(); n != 0 {
+		t.Fatalf("a refused call made the Exchange read a document %d times", n)
 	}
 }
 
@@ -232,7 +184,7 @@ func TestConsole_RefusesAWizardCallFromAnUnverifiedAddress(t *testing.T) {
 func TestConsole_RefusesAWizardCallWithoutASession(t *testing.T) {
 	f := startConsole(t, verifiedClaims())
 	// No sign-in at all, so no session cookie.
-	status, out := f.api(t, "/api/publisher", map[string]any{"display_name": "Stoa Press"})
+	status, out := f.api(t, web.APILookupPath, map[string]any{"domain": "stoa.example"})
 	if status != http.StatusUnauthorized {
 		t.Fatalf("no session = %d, want %d", status, http.StatusUnauthorized)
 	}
@@ -296,6 +248,7 @@ func TestConsole_PublishesItsOwnKeyDirectory(t *testing.T) {
 func TestConsole_RefusesADomainThatIsNotYours(t *testing.T) {
 	f := startConsole(t, verifiedClaims())
 	f.signIn(t)
+	f.registerBusiness(t)
 
 	status, body := f.get(t, "/domains/someone-elses.example")
 	if status != http.StatusNotFound {

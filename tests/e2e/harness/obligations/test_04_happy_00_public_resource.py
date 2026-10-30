@@ -30,13 +30,10 @@ datastore.
 from __future__ import annotations
 
 import pytest
-from fora_sdk import ProtocolVersion
 from fora_sdk.client import CallError
-from wire.models import ResourceQuery
 
 from ..after_signing import Capture
-from ..broker_purchase import one_group_per_uri
-from ..constants import requester
+from ..broker_purchase import one_group_per_uri, resource_query
 from ..defects import FOREIGN_REPORT_NOT_HIDDEN
 from ..exchanges import EXCHANGE_A_DOMAIN
 from ..fresh_agent import AgentFactory
@@ -74,14 +71,7 @@ def test_agent_as_own_principal_lists_accepts_and_fetches_free_resource(
     capture = Capture()
     client = agent.exchange_client(EXCHANGE_A_DOMAIN, http=capture.client())
 
-    result = client.discover(
-        ResourceQuery(
-            ver=ProtocolVersion,
-            exchange=EXCHANGE_A_DOMAIN,
-            uris=[_RESOURCE_URI],
-            requester=requester(agent.agent_id, user_type="academic", geography="EU"),
-        )
-    )
+    result = client.discover(resource_query(EXCHANGE_A_DOMAIN, [_RESOURCE_URI]))
     group = one_group_per_uri(result, [_RESOURCE_URI], "free-URI discovery")[_RESOURCE_URI]
     rejected = [(r.offer.get("offer_id"), r.reason) for r in group.result.rejected]
     assert not rejected, f"offers for the free URI failed verification: {rejected}"

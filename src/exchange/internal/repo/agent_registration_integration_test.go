@@ -236,23 +236,14 @@ func TestSetBillingRefUnknownAgent(t *testing.T) {
 // write port is the highest surface that reaches this column — no admin RPC
 // writes it — and the missing public surface is filed as its own task.
 //
-// The tenant seed still uses sqlc InsertTenant. That is a raw-sqlc arrange the
-// Testing Doctrine forbids, held open here rather than fixed: no production
-// code inserts tenants (they are provisioned by operator SQL), so a repository
-// insert port would exist only for tests, and many arrange sites across the
-// tree share this shape. Converting them behind a real tenant-provisioning
-// surface is filed as its own task.
+// The seat is arranged through repo.SeatProvisionRepo, the port a deployment's
+// boot fixture provisions its seats through, with the schema's default policy.
 func TestTenantActivateNewAgentsByDefault(t *testing.T) {
 	ctx := context.Background()
 	pool := newTestPool(t, ctx)
 	q := sqlc.New(pool)
 	const tenantID = "t-activation"
-	if _, err := q.InsertTenant(ctx, sqlc.InsertTenantParams{
-		TenantID: tenantID, Domain: "activation.example.com", Ed25519KeyRef: "k",
-		ReportingPolicy: []byte(`{}`),
-	}); err != nil {
-		t.Fatalf("seed tenant: %v", err)
-	}
+	seedTenantRow(t, ctx, pool, tenantID, "activation.example.com")
 	tenants := repo.NewTenantReadRepo(q)
 
 	fresh, err := tenants.ByID(ctx, tenantID)

@@ -65,7 +65,9 @@
   negative: []
 
 - id: RELAY-004
-  title: The Broker refuses a purchase whose agent signature does not verify, and buys nothing
+  title: >-
+    The Broker refuses a purchase whose agent signature does not verify or was already
+    used, and buys nothing
   level: MUST
   actor: broker
   surface: sdk
@@ -80,6 +82,10 @@
       reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_INVALID
       side_effect: >-
         no sub-request is sent: no balance moves at any Exchange the items name
+    - code: unauthenticated
+      reason: REQUEST_AUTH_FAILURE_REASON_SIGNATURE_STALE
+      side_effect: >-
+        the same signed purchase sent again sends no sub-request to any Exchange
 
 - id: RELAY-005
   title: The Broker refuses a purchase whose requester.domain is not the agent's signing directory
@@ -386,8 +392,10 @@
   source:
     cite: github.com/FORA-Protocol/protocol/proto/fora/v1/fora.proto
     quote: >-
-      A relayed purchase that carries a delegation therefore needs an AgentAcceptance on
-      every item; an item without one fails the binding (DENIAL_REASON_DELEGATION_INVALID).
+      If a delegation rides a projected request, the wire signer is the Broker, so the
+      Exchange checks the delegation's holder binding (cnf.jkt) against the key each
+      item's AgentAcceptance verifies under, not against the wire signer (see
+      Delegation).
   positive: >-
     A Broker purchase under a delegation whose cnf.jkt is the agent's key, with an
     acceptance on every item, is bought.
@@ -462,6 +470,7 @@
       reason: OFFER_ABSENCE_REASON_BUDGET_EXCEEDED
       side_effect: no offer is returned
 
+# harness: needs subscription fixtures, as MONEY-019.
 - id: RELAY-026
   title: The Broker prefers a subscription offer when one is available
   level: SHOULD

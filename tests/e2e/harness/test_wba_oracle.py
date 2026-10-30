@@ -42,8 +42,9 @@ from .wba_oracle import (
     verify,
 )
 
-# Pure parser/crypto tests of test infrastructure: no compose stack, no DB.
-# `isolated` keeps the autouse per-test cleanup chain, which needs Postgres, off.
+# Pure parser/crypto tests of test infrastructure: no compose stack, no DB, so the
+# module owns its environment and declares `isolated`; the autouse dispatch runs
+# nothing for it.
 pytestmark = pytest.mark.stack_isolation("isolated")
 
 URL = "https://publisher.example/articles/1?view=full"
@@ -253,6 +254,7 @@ _NEGATIVE_CASES: list[tuple[str, dict[str, Any], Mutation, dict[str, Any], Check
     ("short nonce", {"nonce": "AAAA"}, _keep, {"require": Require(nonce_bytes=64)}, Check.NONCE),
     ("no @authority", {"target": "@method"}, _keep, {}, Check.TARGET),
     ("legacy form", {"legacy": True}, _keep, {}, Check.SIGNATURE_AGENT),
+    ("agent member uncovered", {"cover_agent": False}, _keep, {}, Check.SIGNATURE_AGENT),
     ("no agent header", {}, _drop("Signature-Agent"), {}, Check.SIGNATURE_AGENT),
     (
         "agent has path",

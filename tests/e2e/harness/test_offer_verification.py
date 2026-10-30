@@ -53,13 +53,10 @@ asserted through that same public surface — no DB or internal-state read.
 
 from __future__ import annotations
 
-from contextlib import closing
-
 import pytest
 
 from .broker_purchase import resolve_offer
-from .conftest import StackURLs
-from .sdk_client import sdk_broker_client
+from .fresh_agent import FreshAgent
 from .seed import SeededFixture
 
 # ADR-008 D5 — declare stack-isolation contract.
@@ -67,8 +64,8 @@ pytestmark = pytest.mark.stack_isolation("shared-clean-fixtures")
 
 
 def test_broker_admits_real_exchange_signed_offer_into_offer_groups(
-    compose_stack: StackURLs,
     seeded: SeededFixture,
+    fresh_agent: FreshAgent,
 ) -> None:
     """A licensed resolve returns a genuinely Exchange-signed offer in offer_groups.
 
@@ -78,14 +75,10 @@ def test_broker_admits_real_exchange_signed_offer_into_offer_groups(
     offer again, fail-closed, against the key it reads from the same directory,
     and ``resolve_offer`` refuses a group carrying any offer it rejected. Driven on
     the FREE demo resource (socrates) so no billing gate can pre-empt discovery;
-    the currency-matched demo buyer signs the Resolve.
+    the test's own agent signs the Resolve.
     """
     res = seeded.free
-    buyer = sdk_broker_client(
-        compose_stack, agent_id=res.buyer_agent_id, key_path=res.buyer_key_path
-    )
-    with closing(buyer) as client:
-        winner = resolve_offer(client, res.uri)
+    winner = resolve_offer(fresh_agent.broker, res.uri)
 
     # The admitted offer carries the Exchange's genuine signature. Its PRESENCE
     # past both fail-closed Verifiers is the proof that verification succeeded;
