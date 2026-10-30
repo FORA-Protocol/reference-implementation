@@ -15,17 +15,24 @@ Agent ── MCP ──► Identity ──► Broker ──► Exchange ──�
    `fora_status`), which sign each call with the agent's stored key, or it can
    use the protocol SDK directly and sign its own requests.
 2. **Discover.** The Broker finds the exchange that licenses the content. It
-   reads the publisher's `/.well-known/fora.json`, and falls back to the plain
-   URL when there is no such file.
+   reads the publisher's `/.well-known/fora.json`, which names the exchanges
+   that sell the site. Every publisher serves that file from its own site;
+   there is no fallback to the plain URL.
 3. **Buy.** The agent accepts an offer. The Exchange verifies the signatures,
    charges the agent's prepaid balance, records the transaction, and returns a
    signed URL.
 4. **Download.** The agent fetches the signed URL. The Edge verifies the
-   signature and passes the request to the publisher's own origin.
+   signature, and that the request comes from the agent the offer was sold to,
+   then passes the request to the publisher's own origin.
 5. **Report.** The agent reports its usage back to the Exchange that sold it.
 
 The agent never sees the underlying delivery URL, and no secret is shared
 between tenants: every signature is asymmetric.
+
+Publishers join through the publisher console. They name their business once,
+then set up each site: its domain, its terms, and the two things that connect
+it — the discovery file they serve from their own site, and the edge package
+they install on their CDN.
 
 ## Components
 
@@ -33,8 +40,9 @@ between tenants: every signature is asymmetric.
 |------|----------|------|
 | [`src/identity/`](src/identity/) | Go (Connect-Go, Postgres, Vault) | Agent registry and Web Bot Auth directory. Developer sign-up, per-agent signing keys, and the MCP endpoint that turns each tool call into a key-signed FORA request. |
 | [`src/broker/`](src/broker/) | Go (Connect-Go, Postgres + Redis) | Discovery and routing. Resolves a URL to the exchange that licenses it, applies per-agent spending limits, and relays the signed request. |
-| [`src/exchange/`](src/exchange/) | Go (Connect-Go, Postgres, TigerBeetle) | Catalog, offer signing, transaction execution, signed-URL minting (Ed25519 or CloudFront RSA, chosen per tenant), and usage reporting. |
-| [`src/edge/`](src/edge/) | TypeScript (Hono, multi-runtime) | Signed-URL verification at the CDN. One runtime-agnostic core with adapters for Cloudflare Workers, Fastly Compute, and AWS Lambda@Edge. |
+| [`src/exchange/`](src/exchange/) | Go (Connect-Go, Postgres, TigerBeetle) | Catalog, offer signing, transaction execution, signed-URL minting (Ed25519, or CloudFront RSA for a site set up that way by hand; chosen per publisher site), and usage reporting. |
+| [`src/console/`](src/console/) | Go (`html/template`, Postgres) | Publisher console. Publishers sign in, register their business and their sites through the Exchange's signed registration routes, and download the discovery file and the edge package made for each site. |
+| [`src/edge/`](src/edge/) | TypeScript (Hono, multi-runtime) | Signed-URL verification at the CDN. One runtime-agnostic core with adapters for Cloudflare Workers, Fastly Compute, and AWS Lambda@Edge. It passes the publisher's own `/.well-known/fora.json` and `/rsl.txt` through to the origin. |
 | [`internal/`](internal/) | Go | Shared packages: database setup, HTTP server harness, HTTP message signatures, cost arithmetic, structural guards. |
 | [`tests/e2e/`](tests/e2e/) | Python (pytest, `uv`) | End-to-end suite driving the full docker-compose stack. |
 
@@ -78,12 +86,13 @@ actually recorded, so tampering at any single party shows up as a mismatch.
 
 ## Container images
 
-Each release publishes three images to the GitHub Container Registry:
+Each release publishes four images to the GitHub Container Registry:
 
 ```
 ghcr.io/fora-protocol/exchange
 ghcr.io/fora-protocol/broker
 ghcr.io/fora-protocol/identity
+ghcr.io/fora-protocol/console
 ```
 
 Every build gets exactly one immutable tag — the version, with no leading `v`.
@@ -104,14 +113,16 @@ The Edge worker is not a container. It deploys to the CDN — see
   this yourself: what the platform is made of, what to prepare, how the network
   must be laid out, and where each component's own guide lives.
 - [`docs/architecture/`](docs/architecture/) — the architecture decision
-  records. They carry the reasoning behind the auth layers, the two-Biscuit
-  model, key rotation, the licensing vocabulary, and the testing rules.
+  records: request signing and key rotation, the licensing vocabulary,
+  publisher registration, the transaction journal, and the testing rules.
+  A record that was replaced stays in place, marked superseded.
 - Per service, under `src/<service>/`: `CONFIGURATION.md` (every setting),
   `DEPLOYMENT.md` (how to run it), and `RUNBOOK.md` (what to do when it breaks).
 - Backing services are documented the same way under
   [`deploy/storage/`](deploy/storage/) and [`deploy/zitadel/`](deploy/zitadel/).
-- [`deploy/terraform/`](deploy/terraform/) — modules for a staging deployment on
-  AWS.
+- [`deploy/terraform/`](deploy/terraform/) — modules and stacks for a staging
+  or demo deployment on AWS, and for a publisher's edge on Cloudflare or AWS
+  CloudFront.
 
 ## License
 
