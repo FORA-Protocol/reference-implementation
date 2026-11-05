@@ -620,6 +620,15 @@ docker compose start tigerbeetle
 Keep the copy on different hardware. A backup on the same disk protects you
 against nothing that is likely to happen.
 
+**A block snapshot of the disk is a different operation.** A `cp` of the running
+file reads its parts one after another, at different moments, so the copy can mix
+old and new parts. A point-in-time snapshot of the whole volume, such as an EBS
+snapshot, holds every block as it was at one moment. Restoring it is the same event
+for the ledger as a power loss at that moment: TigerBeetle writes with `O_DIRECT`
+and replays its write-ahead log at startup, which is how it recovers from a power
+loss. So the cluster does not need to stop for such a snapshot. A restored snapshot
+still needs the check in §5.2 that it opens and holds a balance you know.
+
 ### 5.2 Verifying a backup
 
 A copy you have never opened is not a backup. Check both of these — the first is

@@ -36,6 +36,11 @@ CREATE DATABASE fora_sor_d;
 -- IDENTITY_DSN, so its database is created here alongside the exchange/SoR ones.
 CREATE DATABASE identity;
 
+-- The Broker on the elasticsearch provider. The other Broker uses the default
+-- POSTGRES_DB (fora) with exchange-a, and the migrations of two Brokers cannot share
+-- one database.
+CREATE DATABASE fora_broker_es;
+
 -- The publisher console's own database. It holds one table -- who has signed in
 -- -- and nothing a publisher owns, which all lives in the Exchange. It is a
 -- separate database rather than a schema inside fora because the two services

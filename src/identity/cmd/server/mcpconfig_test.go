@@ -1,8 +1,12 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/app"
 )
 
 // The MCP adapter's start-up rules are documented with their exact error text,
@@ -29,11 +33,11 @@ func TestBuildMCPConfig_RequiresTheBroker(t *testing.T) {
 // TestBuildMCPConfig_ReadsAWhitespaceBrokerAsUnset is the "one answer per
 // deployment" rule, applied to the required variable.
 //
-// The allowlist eighteen lines below is read through EnvTrimmed, so a value of
-// spaces reads as unset there. The Broker URL was read through EnvOr, so the same
-// operator mistake passed the required check and the service came up with a
-// whitespace Broker URL — one error, two behaviours, and nothing in the
-// configuration file to show the difference.
+// The allowlist is read through EnvTrimmed, so a value of spaces reads as unset
+// there. The Broker URL was read through EnvOr, so the same operator mistake
+// passed the required check and the service came up with a whitespace Broker
+// URL — one error, two behaviours, and nothing in the configuration file to show
+// the difference.
 func TestBuildMCPConfig_ReadsAWhitespaceBrokerAsUnset(t *testing.T) {
 	t.Setenv("IDENTITY_MCP_BROKER_URL", "   ")
 
@@ -88,4 +92,62 @@ func TestBuildMCPConfig_ReadsTheExchangePolicy(t *testing.T) {
 	if strings.HasPrefix(cfg.ExchangeAllowlist, " ") || strings.HasSuffix(cfg.ExchangeAllowlist, " ") {
 		t.Errorf("allowlist = %q, want the surrounding whitespace trimmed", cfg.ExchangeAllowlist)
 	}
+}
+
+// TestBuildMCPConfig_ReadsTheSearchFiltersSchema pins the plumbing of the
+// optional filter schema: inline, from a file, and unset. The document is loaded,
+// and refused when it is not a filter schema, later, at app.Build; what this
+// covers is that the value reaches that load at all, and that a file the operator
+// named but the service cannot read stops the boot instead of reading as unset.
+func TestBuildMCPConfig_ReadsTheSearchFiltersSchema(t *testing.T) {
+	const doc = `{"type":"object","additionalProperties":false,"properties":{"news.language":{"type":"string"}}}`
+	t.Setenv("IDENTITY_MCP_BROKER_URL", "https://broker.example")
+
+	t.Run("inline", func(t *testing.T) {
+		t.Setenv("IDENTITY_MCP_SEARCH_FILTERS_SCHEMA", doc)
+		t.Setenv("IDENTITY_MCP_SEARCH_FILTERS_SCHEMA_FILE", "")
+		if got := mustBuildMCPConfig(t).SearchFiltersSchema; got != doc {
+			t.Errorf("schema = %q, want the inline document", got)
+		}
+	})
+	t.Run("file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "search-filters.json")
+		if err := os.WriteFile(path, []byte(doc+"\n"), 0o600); err != nil {
+			t.Fatalf("write the schema file: %v", err)
+		}
+		t.Setenv("IDENTITY_MCP_SEARCH_FILTERS_SCHEMA", "")
+		t.Setenv("IDENTITY_MCP_SEARCH_FILTERS_SCHEMA_FILE", path)
+		if got := mustBuildMCPConfig(t).SearchFiltersSchema; got != doc {
+			t.Errorf("schema = %q, want the file's document", got)
+		}
+	})
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv("IDENTITY_MCP_SEARCH_FILTERS_SCHEMA", "")
+		t.Setenv("IDENTITY_MCP_SEARCH_FILTERS_SCHEMA_FILE", "")
+		if got := mustBuildMCPConfig(t).SearchFiltersSchema; got != "" {
+			t.Errorf("schema = %q, want none", got)
+		}
+	})
+	t.Run("unreadable file", func(t *testing.T) {
+		t.Setenv("IDENTITY_MCP_SEARCH_FILTERS_SCHEMA", "")
+		t.Setenv("IDENTITY_MCP_SEARCH_FILTERS_SCHEMA_FILE", filepath.Join(t.TempDir(), "absent.json"))
+		_, err := buildMCPConfig()
+		if err == nil {
+			t.Fatal("the adapter was configured from a schema file it could not read")
+		}
+		// The setting comes first, so the identity.exit line names what to fix.
+		if !strings.HasPrefix(err.Error(), "IDENTITY_MCP_SEARCH_FILTERS_SCHEMA_FILE: ") {
+			t.Errorf("error = %q, want it to begin with the setting that names the file", err)
+		}
+	})
+}
+
+// mustBuildMCPConfig is buildMCPConfig for a case whose settings are valid.
+func mustBuildMCPConfig(t *testing.T) *app.MCPConfig {
+	t.Helper()
+	cfg, err := buildMCPConfig()
+	if err != nil {
+		t.Fatalf("buildMCPConfig: %v", err)
+	}
+	return cfg
 }

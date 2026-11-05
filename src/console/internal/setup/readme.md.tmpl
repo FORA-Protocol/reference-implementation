@@ -1,0 +1,60 @@
+{{- /* command draws one deploy step or check, numbered in its section. A check's answer is labelled as the one to expect. */ -}}
+{{define "command"}}
+### {{.Number}}. {{.Label}}
+{{if .Run}}
+```sh
+{{.Run}}
+```
+{{end}}{{if .Expect}}
+{{if .Answer}}**Expected:** {{end}}{{.Expect}}
+{{end}}{{end -}}
+{{- /* item draws one line of a list: its key in bold, then what it says. */ -}}
+{{define "item"}}
+- **{{.Key}}**: {{.Text}}
+{{- end -}}
+# {{.Title}}
+
+This package is built for {{.Domain}}. Your settings are already inside it, so there is nothing to fill in.
+
+{{.Summary}}
+
+## What is in this package
+{{range .Files}}{{template "item" .}}{{end}}
+
+## Your values
+{{range .Values}}{{template "item" .}}{{end}}
+
+## Useful links
+{{range .Links}}{{template "item" .}}{{end}}
+
+## Deploy
+
+{{.BeforeDeploy}}
+{{range .Deploy}}{{template "command" .}}{{end}}
+## Check that it works
+
+Run these checks from any computer once the package is deployed. In each command, replace `your-article-path` with the path of one of your licensed pages. The console runs the same checks for you on its **Connect your site** step.
+
+In the first check, a 403 is the expected result, not an error: it means the package refuses AI agents that have no licence.
+
+GPTBot, which the checks use, is one of many AI agents. OpenAI alone runs several: https://developers.openai.com/api/docs/bots. You do not need to list them: the package recognises AI agents by the names they send.{{with .BotVerification}} {{.}}{{end}}
+{{range .Checks}}{{template "command" .}}{{end}}{{if .Note}}
+{{.Note}}
+{{end}}
+## When your domain is verified
+
+Your domain is verified when all three of these are in place:
+
+- The domain's terms are set on the console's **Your terms** step.
+- This package is deployed, refuses AI agents (check 1) and lets people through (check 2).
+- Your discovery file is served at https://{{.Domain}}/.well-known/fora.json, and AI agents can read it (check 3). It is the fora.json you downloaded beside this package; serve it as it is.
+
+The console verifies the domain on its **Connect your site** step, when it checks your site and finds all of this in place. To open that step, press **Finish setup** on the domain's page in the console. While the terms are not set, **Finish setup** opens the **Your terms** step first.
+
+## Help
+
+The console you downloaded this package from checks your site and says what is missing.
+{{- if .SupportEmail}}
+
+Write to us at {{.SupportEmail}} if a check keeps failing or a step is not clear.
+{{- end}}

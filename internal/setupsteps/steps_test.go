@@ -2,6 +2,8 @@ package setupsteps_test
 
 import (
 	"encoding/json"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -73,8 +75,95 @@ func TestEdgeStepNamesTheDetectedNetwork(t *testing.T) {
 	}
 }
 
-// The data file is the one place that says which networks have a package, so
-// every variant has to declare its path, a variant with commands to run has to
+// A caller that reads only the edge step reads the step the whole path shows,
+// so the wizard, the preview and anything else built on the step cannot
+// disagree about what a network's publisher is told to do.
+func TestEdgeStepIsTheEdgeStepOfThePath(t *testing.T) {
+	t.Parallel()
+	for _, provider := range slices.Concat(allProviders, []cdn.Provider{"someothercdn"}) {
+		t.Run(string(provider), func(t *testing.T) {
+			t.Parallel()
+			got := setupsteps.EdgeStep(provider, "news.publisher.example")
+			want := edgeStep(t, setupsteps.For(provider, "news.publisher.example", nil))
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("EdgeStep = %+v,\nwant the path's edge step %+v", got, want)
+			}
+		})
+	}
+}
+
+// Every command of a step is either one a person runs or one that checks the
+// step worked, never both and never neither, and each list keeps the data
+// file's order. A command in the wrong list is a check shown as work to do, or
+// a deployment step hidden from the person who has to do it.
+func TestByHandAndChecksSplitEveryCommandOnce(t *testing.T) {
+	t.Parallel()
+	sawBoth := false
+	for _, provider := range allProviders {
+		step := setupsteps.EdgeStep(provider, "publisher.example")
+		byHand, checks := step.ByHand(), step.Checks()
+		if len(byHand)+len(checks) != len(step.Commands) {
+			t.Fatalf("%s: %d by hand + %d checks, want the step's %d commands",
+				provider, len(byHand), len(checks), len(step.Commands))
+		}
+		var hand, checked int
+		for _, c := range step.Commands {
+			switch {
+			case c.Checked && checked < len(checks) && checks[checked] == c:
+				checked++
+			case !c.Checked && hand < len(byHand) && byHand[hand] == c:
+				hand++
+			default:
+				t.Fatalf("%s: %q is not where its flag puts it, in the data file's order", provider, c.Label)
+			}
+		}
+		sawBoth = sawBoth || (len(byHand) > 0 && len(checks) > 0)
+	}
+	if !sawBoth {
+		t.Fatal("no network has both kinds of command, so this proved nothing")
+	}
+}
+
+// The console asks every site the same questions, whatever network serves it,
+// so every network that gets a package is handed the same checks, after the
+// commands that deploy it. A check written for one network only would be one
+// the console does not ask, and a check placed before the deployment would
+// read as work to do first wherever the whole step is shown.
+func TestEveryPackageNetworkEndsWithTheSameChecks(t *testing.T) {
+	t.Parallel()
+	var first []setupsteps.Command
+	packages := 0
+	for _, provider := range allProviders {
+		step := setupsteps.EdgeStep(provider, "publisher.example")
+		if step.Integration != setupsteps.IntegrationEdgePackage {
+			continue
+		}
+		packages++
+		checks := step.Checks()
+		if len(checks) == 0 {
+			t.Fatalf("%s: a package with no checks", provider)
+		}
+		if first == nil {
+			first = checks
+		} else if !slices.Equal(checks, first) {
+			t.Fatalf("%s: the checks are %+v, want the ones every package network gets %+v; "+
+				"they are written once, under package_checks", provider, checks, first)
+		}
+		checked := false
+		for _, c := range step.Commands {
+			if c.Checked {
+				checked = true
+			} else if checked {
+				t.Fatalf("%s: %q comes after a check", provider, c.Label)
+			}
+		}
+	}
+	if packages < 2 {
+		t.Fatalf("%d package network(s), so this compared nothing", packages)
+	}
+}
+
+// Every variant has to declare its path, a variant with commands to run has to
 // be a package, and every recognised network has to have a variant of its own
 // rather than falling through to the "we could not tell" text.
 func TestEveryNetworkDeclaresItsPath(t *testing.T) {
@@ -274,8 +363,10 @@ func assertNoPlaceholder(t *testing.T, text string) {
 // naming what used to be there, and a publisher following a step that points
 // at nothing.
 //
-// The names come from the setup package, which is what produces the files, so
-// this fails the moment a download is renamed without its instruction.
+// The names are written out here: the setup package produces the files, and
+// Go's internal rule keeps this package from importing it. So this catches an
+// instruction renamed away from a download, not a download renamed away from
+// its instruction.
 func TestCommandsNameFilesTheConsoleHandsOver(t *testing.T) {
 	t.Parallel()
 	handedOver := map[string]bool{
@@ -412,4 +503,30 @@ func TestCloudflareDeployLogsInFirst(t *testing.T) {
 		return
 	}
 	t.Fatalf("the Cloudflare steps a publisher runs have no npx wrangler deploy: %+v", step.Commands)
+}
+
+// TestStepTextIsPlainText: the wizard draws this text with x-text and the
+// public preview returns it as it is, so both show it as plain text. Markdown
+// in it would reach them as source: bold marks, a link's brackets, an
+// autolink's angle brackets, a code span's backticks. The README inside each
+// package adds its own formatting and links in its own template instead. A
+// command's run line is exempt: it is shown as a command, never as prose.
+func TestStepTextIsPlainText(t *testing.T) {
+	t.Parallel()
+	for _, provider := range allProviders {
+		for _, step := range setupsteps.For(provider, "publisher.example", nil) {
+			texts := []string{step.Title, step.Summary, step.Note}
+			for _, c := range step.Commands {
+				texts = append(texts, c.Label, c.Expect)
+			}
+			for _, text := range texts {
+				for _, mark := range []string{"**", "](", "<http", "`"} {
+					if strings.Contains(text, mark) {
+						t.Fatalf("%s, step %s: %q carries %q, which the wizard and the preview show as it is",
+							provider, step.ID, text, mark)
+					}
+				}
+			}
+		}
+	}
 }

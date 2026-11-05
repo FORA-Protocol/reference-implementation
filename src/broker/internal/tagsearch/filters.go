@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/catalogsearch"
 )
 
 // Filters are the fora-music-v1 search filters of a request: required
@@ -27,17 +29,6 @@ func (f Filters) Empty() bool {
 	return len(f.AnyOf) == 0 && f.MinBPM == nil && f.MaxBPM == nil && f.MinDuration == nil && f.MaxDuration == nil
 }
 
-// FilterError is a defined filter key whose value does not have the key's
-// format.
-type FilterError struct {
-	Key    string
-	Reason string
-}
-
-func (e *FilterError) Error() string {
-	return fmt.Sprintf("search_filters %s: %s", e.Key, e.Reason)
-}
-
 // labelKeys maps each label filter key to the facet it constrains.
 var labelKeys = map[string]string{
 	"music.genre":        facetGenre,
@@ -49,8 +40,9 @@ var labelKeys = map[string]string{
 
 // ParseFilters reads the fora-music-v1 keys of a search_filters object, as
 // decoded from JSON. Keys the profile does not define are ignored. A defined
-// key with a malformed value is a *FilterError. Values are not checked against
-// the catalog: a well-formed value no track has matches nothing.
+// key with a malformed value is a *catalogsearch.FilterError, and its Reason
+// may quote the value. Values are not checked against the catalog: a
+// well-formed value no track has matches nothing.
 func ParseFilters(raw map[string]any) (Filters, error) {
 	keys := make([]string, 0, len(raw))
 	for k := range raw {
@@ -60,7 +52,7 @@ func ParseFilters(raw map[string]any) (Filters, error) {
 	var f Filters
 	for _, key := range keys {
 		if err := f.add(key, raw[key]); err != nil {
-			return Filters{}, &FilterError{Key: key, Reason: err.Error()}
+			return Filters{}, &catalogsearch.FilterError{Key: key, Reason: err.Error()}
 		}
 	}
 	return f, nil

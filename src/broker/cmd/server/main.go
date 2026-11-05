@@ -42,6 +42,7 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/repo"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/resolve"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/signing"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/tagsearch"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/transport"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/xclient"
 )
@@ -125,12 +126,17 @@ func run(logger *slog.Logger) error {
 			Log:       logRepo,
 			Discovery: buildDiscoveryClient(logger),
 			Query:     querySearcher,
-			Prober:    fetchWiring.prober,
-			Exchange:  identity.relay,
-			Budget:    budget.Select(redisCli, 0, clock.System{}),
-			Endpoints: fetchWiring.endpoints,
-			Clk:       clock.System{},
-			Verifier:  fetchWiring.verifier,
+			// With no catalog search, fora-music-v1 values are still validated, so a
+			// malformed one is INVALID_ARGUMENT before the filters are refused for
+			// want of a search. A configured search replaces it with its own
+			// vocabulary (resolve.NewService).
+			Vocabulary: tagsearch.MusicVocabulary{},
+			Prober:     fetchWiring.prober,
+			Exchange:   identity.relay,
+			Budget:     budget.Select(redisCli, 0, clock.System{}),
+			Endpoints:  fetchWiring.endpoints,
+			Clk:        clock.System{},
+			Verifier:   fetchWiring.verifier,
 		},
 		signer:        signer,
 		brokerID:      brokerID,

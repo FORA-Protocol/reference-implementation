@@ -84,10 +84,11 @@ module "compose_stack" {
   registry_username = var.registry_username
   registry_password = var.registry_password
 
-  billing_adapter = var.billing_adapter
-  acme_email      = var.acme_email
-  acme_staging    = var.acme_staging
-  exa_api_key     = var.exa_api_key
+  billing_adapter      = var.billing_adapter
+  acme_email           = var.acme_email
+  acme_staging         = var.acme_staging
+  exa_api_key          = var.exa_api_key
+  elasticsearch_search = var.elasticsearch_search
 
   default_tenant_domain = local.default_tenant_domain
   default_agent_credit  = var.default_agent_credit
@@ -134,7 +135,12 @@ module "vm" {
   name_prefix   = var.name_prefix
   instance_type = var.instance_type
   ssh_operators = var.ssh_operators
-  user_data     = module.compose_stack.user_data
+  # The commented user data this stack ships does not fit EC2's 16 KB limit
+  # once the Elasticsearch catalog search is on with a filter schema
+  # (compose-stack's size test measures it), so with the search on the stack
+  # ships the comment-free copy. Turning the search on changes the user data
+  # and replaces the VM either way; while it is off, the bytes are unchanged.
+  user_data = var.elasticsearch_search == null ? module.compose_stack.user_data : module.compose_stack.user_data_without_comments
 }
 
 module "dns" {

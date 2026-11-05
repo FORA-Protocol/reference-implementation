@@ -302,6 +302,7 @@ class FreshAgent:
         before_sign: BeforeSign | None = None,
         http: httpx.Client | None = None,
         request_id: RequestID | None = None,
+        broker_url: str | None = None,
     ) -> BrokerClient:
         """A further Broker client signed as this agent.
 
@@ -311,7 +312,8 @@ class FreshAgent:
         URL, say); the key is still this agent's. ``signer``, ``before_sign`` and
         ``http`` are the seams :func:`harness.malformed.malformed` alters a request
         through; an explicit ``signer`` wins over ``directory``. ``request_id``
-        mints the X-Request-ID each call carries.
+        mints the X-Request-ID each call carries. ``broker_url`` addresses another
+        Broker of the stack.
         """
         client = sdk_broker_client(
             self.stack,
@@ -321,6 +323,7 @@ class FreshAgent:
             before_sign=before_sign,
             http=http,
             request_id=request_id,
+            broker_url=broker_url,
         )
         self._own(client, http)
         return client

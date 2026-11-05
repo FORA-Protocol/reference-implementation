@@ -35,7 +35,7 @@ SYSTEM_BUNDLE="${SYSTEM_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}"
 # points at the proxy. tests/e2e/harness/test_capture_proxy.py fetches over
 # https, with verification on, from every name in that list, so a name added
 # there and not here fails that test rather than a later one.
-SAN="DNS:broker,DNS:exchange,DNS:exchange-b,DNS:exchange-c,DNS:exchange-d,DNS:console"
+SAN="DNS:broker,DNS:broker-es,DNS:exchange,DNS:exchange-b,DNS:exchange-c,DNS:exchange-d,DNS:console"
 SAN="$SAN,DNS:misbehaving-exchange,DNS:unapproved-exchange,DNS:unlisted-exchange"
 SAN="$SAN,DNS:foramcp.org,DNS:*.foramcp.org"
 SAN="$SAN,DNS:agents.example,DNS:*.agents.example,DNS:sites.example,DNS:*.sites.example"

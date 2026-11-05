@@ -17,6 +17,7 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/reqctx"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/broker"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/budget"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/catalogsearch"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/exa"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/probe"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/repo"
@@ -50,11 +51,19 @@ type Deps struct {
 	// may be queried, never WHERE they live. Discovery and execute therefore share
 	// one endpoint-resolution mechanism — no backfilled registry endpoints.
 	Endpoints endpointResolver
-	// Query resolves a free-text query to catalog URIs before any
-	// candidate-domain probing. Nil when query discovery is not enabled: the
-	// query then goes to Discovery, as before.
-	Query QuerySearcher
-	Clk   clock.Clock
+	// Query resolves a free-text query and the parsed search filters to
+	// catalog URIs before any candidate-domain probing. Nil when no catalog
+	// search provider is configured: a query then goes to Discovery, as before,
+	// and a filter the vocabulary applies is refused; a key it ignores is no
+	// filter (admitSearch).
+	Query catalogsearch.Searcher
+	// Vocabulary parses search_filters when no catalog search is configured,
+	// so a malformed value is still the caller's fault there. NewService
+	// replaces it with Query when one is set, because a search is handed only
+	// the filters its own vocabulary parsed; nil defaults to a vocabulary that
+	// refuses every key.
+	Vocabulary catalogsearch.Vocabulary
+	Clk        clock.Clock
 	// Verifier sorts every discovered offer into {verified, rejected} BEFORE it
 	// can reach selection (sdk/go/core.Verifier under Strict in production; the
 	// seam is an interface so tests inject mode/keys). Fail-closed: nil is
@@ -105,6 +114,12 @@ func NewService(d Deps) *Service {
 	if d.Verifier == nil {
 		d.Verifier = unwiredVerifier{}
 	}
+	if d.Query != nil {
+		d.Vocabulary = d.Query
+	}
+	if d.Vocabulary == nil {
+		d.Vocabulary = unsupportedVocabulary{}
+	}
 	return &Service{deps: d}
 }
 
@@ -112,9 +127,10 @@ func NewService(d Deps) *Service {
 // offer verification/selection → budget pre-flight → audit, returning the
 // internal Response the transport adapter maps to the wire
 // DiscoveryResponse. The caller (transport.BrokerConnectHandler) has already
-// validated the request and authorized the caller before this runs.
+// checked the wire shape and authenticated the caller before this runs; the
+// search inputs are admitted here, first (admitSearch).
 func (h *Service) Resolve(ctx context.Context, requestID string, req Request) (*Response, error) {
-	if err := h.requireCatalogSearch(req); err != nil {
+	if err := h.admitSearch(&req); err != nil {
 		return nil, err
 	}
 	if refusal := h.searchQuery(ctx, &req); refusal != nil {

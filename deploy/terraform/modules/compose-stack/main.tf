@@ -64,6 +64,14 @@ resource "random_password" "postgres" {
       error_message = "onboarding_contact_recipients and onboarding_contact_from must be set together, and only alongside onboarding_hostname and the smtp_* relay inputs."
     }
 
+    # The Broker runs one catalog search, so the two inputs that select one
+    # exclude each other. Each validates on its own, and neither can see the
+    # other from a validation block.
+    precondition {
+      condition     = var.query_discovery == null || var.elasticsearch_search == null
+      error_message = "query_discovery and elasticsearch_search both select the Broker's catalog search: set one of them, or neither."
+    }
+
     # docker login needs all three registry settings. A server without
     # credentials would fail the template render with an opaque null-value
     # error; credentials without a server would silently skip the login and
@@ -386,6 +394,7 @@ locals {
     default_agent_credit  = var.default_agent_credit
     exa_api_key           = var.exa_api_key
     query_discovery       = var.query_discovery
+    elasticsearch_search  = var.elasticsearch_search
     rsa_enabled           = var.rsa_private_pem != null
     wba_enabled           = length(var.static_wba_directories) > 0
     terms_enabled         = local.terms_enabled
@@ -474,6 +483,7 @@ locals {
     static_wba_files        = local.static_wba_files
     origin_document_files   = local.origin_document_files
     query_discovery         = var.query_discovery
+    elasticsearch_search    = var.elasticsearch_search
     terms_documents         = var.exchange_terms_documents
     importer_key_json       = var.importer_key_json
     importer_units          = local.importer_units

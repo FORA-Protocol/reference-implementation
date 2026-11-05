@@ -351,7 +351,7 @@ variable "exa_api_key" {
 }
 
 variable "query_discovery" {
-  description = "Optional catalog search for the Broker: a free-text query is matched against catalog_feed (the JSONL feed ingested into the Exchange, as text) through the Bedrock model, in aws_region. The access key pair must be allowed to invoke that model and nothing else: it is written to the Broker's own key directory and read by the Broker alone. Null (the default) leaves the setting off, and a query goes to the search provider as before."
+  description = "Optional catalog search for the Broker: a free-text query is matched against catalog_feed (the JSONL feed ingested into the Exchange, as text) through the Bedrock model, in aws_region. The access key pair must be allowed to invoke that model and nothing else: it is written to the Broker's own key directory and read by the Broker alone. Null (the default) leaves the setting off, and a query goes to the search provider as before. Excludes elasticsearch_search: a Broker runs one catalog search."
   type = object({
     catalog_feed          = string
     model                 = string
@@ -367,6 +367,85 @@ variable "query_discovery" {
       for v in values(var.query_discovery) : trimspace(v) != ""
     ])
     error_message = "query_discovery needs a non-empty catalog_feed, model, aws_region and access key pair; the Broker refuses to start without them."
+  }
+}
+
+variable "elasticsearch_search" {
+  description = "Optional catalog search for the Broker through an Elasticsearch index someone else populates and maintains. The index owner's search template turns each search into the query and decides what a hit returns: template_id names a template stored in the cluster, or template holds the template's text, which the Broker sends with every search; set exactly one. hit_url_path is where each hit carries its URL (\"_source.url\"), and that URL must equal the Exchange's catalog URI byte for byte. result_limit has no default on purpose. api_key is the base64 \"encoded\" value of a read-only key; it is written to the Broker's own key directory and read by the Broker alone. ca_pem, when set, is the only root trusted for this connection; null means the system roots. filters_schema, when set, is the JSON Schema of the search_filters keys the template applies, with additionalProperties false: the Broker refuses a key the schema does not declare, and the Identity Service publishes the schema in its fora_discover tool. Without it the Broker refuses every filter. The template and the schema are written to the Broker's key directory as files, never into the compose file. Null (the default) leaves the setting off. Excludes query_discovery: a Broker runs one catalog search."
+  type = object({
+    url            = string
+    index          = string
+    template_id    = optional(string)
+    template       = optional(string)
+    hit_url_path   = string
+    result_limit   = number
+    timeout        = optional(string, "3s")
+    api_key        = string
+    ca_pem         = optional(string)
+    filters_schema = optional(string)
+  })
+  default   = null
+  sensitive = true
+
+  validation {
+    condition = var.elasticsearch_search == null ? true : alltrue([
+      for v in [
+        var.elasticsearch_search.index,
+        var.elasticsearch_search.hit_url_path,
+        var.elasticsearch_search.timeout,
+        var.elasticsearch_search.api_key,
+      ] : trimspace(v) != ""
+    ])
+    error_message = "elasticsearch_search needs a non-empty index, hit_url_path, timeout and api_key; the Broker refuses to start without them."
+  }
+
+  # One search template: the Broker refuses to start with both forms, or with
+  # neither.
+  validation {
+    condition = var.elasticsearch_search == null ? true : (
+      (var.elasticsearch_search.template_id == null) != (var.elasticsearch_search.template == null)
+    )
+    error_message = "elasticsearch_search needs exactly one of template_id (a template stored in the cluster) and template (the template's text, which the Broker sends with every search)."
+  }
+
+  validation {
+    condition = var.elasticsearch_search == null ? true : alltrue([
+      for v in [var.elasticsearch_search.template_id, var.elasticsearch_search.template] : v == null ? true : trimspace(v) != ""
+    ])
+    error_message = "elasticsearch_search.template_id or elasticsearch_search.template is blank; the Broker refuses to start with an empty template."
+  }
+
+  validation {
+    condition     = var.elasticsearch_search == null ? true : startswith(var.elasticsearch_search.url, "https://")
+    error_message = "elasticsearch_search.url must be an https URL: every search carries the API key, and this module never sets BROKER_ES_ALLOW_HTTP, the Broker's opt-in for plain http."
+  }
+
+  validation {
+    condition = var.elasticsearch_search == null ? true : (
+      var.elasticsearch_search.result_limit >= 1 &&
+      var.elasticsearch_search.result_limit <= 256 &&
+      floor(var.elasticsearch_search.result_limit) == var.elasticsearch_search.result_limit
+    )
+    error_message = "elasticsearch_search.result_limit must be a whole number from 1 to 256, the protocol's cap on the URIs of one query."
+  }
+
+  validation {
+    condition = var.elasticsearch_search == null ? true : (
+      var.elasticsearch_search.ca_pem == null ? true : strcontains(var.elasticsearch_search.ca_pem, "BEGIN CERTIFICATE")
+    )
+    error_message = "elasticsearch_search.ca_pem must hold a PEM certificate, or be left unset for the system roots."
+  }
+
+  # The Broker and the Identity Service refuse to start on a schema that lets an
+  # undeclared key through, because the Broker would then ignore a filter the
+  # agent asked for instead of refusing it. This one rule is checked here, at
+  # plan time, so the mistake does not wait for the first boot; the two
+  # services check the schema's other rules when they start.
+  validation {
+    condition = var.elasticsearch_search == null ? true : (
+      var.elasticsearch_search.filters_schema == null ? true : try(jsondecode(var.elasticsearch_search.filters_schema).additionalProperties == false, false)
+    )
+    error_message = "elasticsearch_search.filters_schema must be a JSON object whose additionalProperties is false, so that a filter key the schema does not declare is refused rather than ignored."
   }
 }
 

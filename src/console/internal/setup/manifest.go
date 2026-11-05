@@ -37,6 +37,11 @@ type Deployment struct {
 	ContributorHost string
 	// SupportedProfiles are the extension profiles the Exchange advertises.
 	SupportedProfiles []string
+	// SupportEmail is the address a publisher writes to for help. The wizard
+	// shows it to a publisher whose network it cannot set up, and every edge
+	// package's README gives it as where to ask when a check keeps failing.
+	// Empty leaves both without an address.
+	SupportEmail string
 	// EdgeReleaseRef names the version of the edge packages the instructions
 	// tell a publisher to build from.
 	EdgeReleaseRef string

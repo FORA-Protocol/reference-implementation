@@ -24,6 +24,10 @@ func foraRequestToInput(rr *forav1.DiscoveryRequest) resolve.Request {
 		Scopes:       rr.GetRequester().GetScopes(),
 		Delegation:   rr.GetRequester().GetDelegation(),
 		Query:        rr.GetQuery(),
+		// The decoded object as the agent sent it; the configured vocabulary
+		// parses it (resolve.Service.admitSearch). AsMap of an absent Struct is
+		// empty.
+		RawFilters: rr.GetSearchFilters().AsMap(),
 	}
 	if uris := rr.GetUris(); len(uris) > 0 {
 		// Carry the WHOLE requested batch (batch fan-out): candidateDomains maps every

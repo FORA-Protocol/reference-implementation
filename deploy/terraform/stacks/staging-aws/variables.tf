@@ -189,6 +189,24 @@ variable "exa_api_key" {
   sensitive   = true
 }
 
+variable "elasticsearch_search" {
+  description = "Optional catalog search through an Elasticsearch index someone else maintains, run through the index owner's search template, with an optional filter schema the MCP endpoint publishes too: the shape, the rules and what each field means are compose-stack's variable of the same name. Null leaves it off."
+  type = object({
+    url            = string
+    index          = string
+    template_id    = optional(string)
+    template       = optional(string)
+    hit_url_path   = string
+    result_limit   = number
+    timeout        = optional(string)
+    api_key        = string
+    ca_pem         = optional(string)
+    filters_schema = optional(string)
+  })
+  default   = null
+  sensitive = true
+}
+
 variable "smoke_agent_subdomain" {
   description = "Label for the smoke agent's Web Bot Auth directory hostname. The full hostname <label>.<domain> IS the smoke agent's identity: gen-keys.sh mints the agent key with that kid, seed-staging.sh registers it, and Caddy serves the public key directory at it so the services can verify the smoke signatures. The default matches the label scripts/lib/staging-env.sh derives ids with; seeding and smoke verify the two agree before running."
   type        = string

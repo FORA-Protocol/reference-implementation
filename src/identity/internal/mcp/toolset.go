@@ -80,7 +80,12 @@ func (t *toolset) agentDirectory(subdomain string) string {
 
 // register mounts every tool on srv. Adding a tool here is the ONLY way it
 // becomes reachable, so this list is the endpoint's surface.
-func (t *toolset) register(srv *mcpsdk.Server) {
+//
+// discover is fora_discover's definition. It is the one tool whose definition
+// depends on the deployment, through the search-filter schema, so New builds it
+// with discoverTool and passes it in: a schema the MCP SDK could not use is then
+// a start-up error from New instead of a panic inside AddTool here.
+func (t *toolset) register(srv *mcpsdk.Server, discover *mcpsdk.Tool) {
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name: "fora_register",
 		Description: "Open this agent's account at one FORA Exchange, or return the existing one. " +
@@ -115,31 +120,7 @@ func (t *toolset) register(srv *mcpsdk.Server) {
 			"own /.well-known/fora.json.",
 	}, t.handleStatus)
 
-	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name: "fora_discover",
-		Description: "Find licensable offers for one or more URLs, or by a free-form query, search " +
-			"filters or both. " +
-			"Returns one group per requested URL, each carrying that URL's offers. A query returns " +
-			"one group per resource it matched, best match first; whether a query can match " +
-			"anything depends on how the Broker is configured, and a query that matches nothing " +
-			"comes back with a reason. A URL with nothing licensable comes back as an empty group " +
-			"with a reason, never silently dropped. When URLs are given, the URLs are used and " +
-			"the query and search_filters are not. Pass an offer back unchanged to license it. " +
-			"search_filters narrows a search with required constraints, with or without a query. " +
-			"fora-music-v1 keys: music.isrc (a 12-character upper-case ISRC without hyphens, " +
-			"or an array of them); music.genre, music.mood, music.instruments, music.suitable_for " +
-			"(a lower-case label or an array of labels); music.energy (low, medium or high, or an " +
-			"array of them); music.vocals (true or false); music.bpm_range and " +
-			"music.duration_seconds_range (a string \"MIN-MAX\", \"MIN-\" or \"-MAX\", " +
-			"inclusive, e.g. \"90-120\"). An array means any of its values; every key must " +
-			"match. A malformed value is an error naming the key; keys the profile does not " +
-			"define are ignored. A well-formed filter that no track matches comes back with the reason " +
-			"NOT_IN_CATALOG, not as an error. With a query: BPM and duration ranges in the query " +
-			"are intersected with the filter ranges, and tracks the query excludes are removed. " +
-			"If some filtered tracks match the query's wanted tags, only those matching the most " +
-			"of them are returned; otherwise every track that passes the filters and the " +
-			"query's exclusions and ranges is returned.",
-	}, t.handleDiscover)
+	mcpsdk.AddTool(srv, discover, t.handleDiscover)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name: "fora_execute",

@@ -71,6 +71,8 @@ than replaced by the default.
 | `IDENTITY_OIDC_CLIENT_SECRET_FILE` | Alternative to the inline form | As above. | `/secrets/oidc_client_secret` |
 | `IDENTITY_MCP_BROKER_URL` | **Required** | The Broker that agent discovery and purchases are relayed to. | `https://broker.example` |
 | `IDENTITY_MCP_EXCHANGE_ALLOWLIST` | Optional | The Exchanges this deployment will speak to, as a comma-separated list of bare domains. Empty means every Exchange, which is how the service behaves with it unset. What it does and does not cover is below. | `exchange.example,exchange-b.example:8081` |
+| `IDENTITY_MCP_SEARCH_FILTERS_SCHEMA` | Optional (or the `_FILE` form) | The search-filter schema: a JSON Schema naming the `search_filters` keys the Broker's catalog search applies, and the format of each value. Set it only in front of a Broker whose catalog search runs on Elasticsearch, to the same document that Broker's `BROKER_ES_FILTERS_SCHEMA_FILE` holds. `fora_discover` then shows it to agents and checks each call against it. Unset, `fora_discover` describes the music profile's keys and checks no filter itself. A document that breaks the filter-schema rules **stops start-up**, here and in the Broker alike. Details are below. | *(use the `_FILE` form)* |
+| `IDENTITY_MCP_SEARCH_FILTERS_SCHEMA_FILE` | Alternative to the inline form | Path to a file holding the same document. Only read when the inline variable is empty. A file that is set but unreadable stops start-up — it is not treated as "not configured". | `/config/search-filters.json` |
 | `VAULT_ADDR` | Optional, **set it** | The address of Vault. Read by the Vault client library, not by this service, so an unset value silently defaults to `https://127.0.0.1:8200` — see §4. | `https://vault.internal:8200` |
 | `VAULT_TOKEN` | Optional, **set it** | The Vault token this service authenticates with. A token is the only authentication method implemented. | `<token>` |
 | `IDENTITY_KV_MOUNT` | Optional | Which Vault secrets engine holds the keys. Default `secret`. | `fora-agents` |
@@ -207,6 +209,47 @@ others, and neither is something an allowlist could decide:
 - Verifying an offer means fetching the issuing Exchange's published key. That reads
   a public document rather than sending anything the agent signed, and refusing to
   verify would not stop the offer — only stop this service noticing a forged one.
+
+### The search-filter schema shows agents the Broker's filter keys
+
+A Broker whose catalog search runs on Elasticsearch applies only the `search_filters`
+keys its deployment declares. It reads them from a JSON Schema file named by its
+`BROKER_ES_FILTERS_SCHEMA_FILE` ([`src/broker/CONFIGURATION.md`](../broker/CONFIGURATION.md)).
+Give this service the same file, through `IDENTITY_MCP_SEARCH_FILTERS_SCHEMA_FILE`.
+[`deploy/broker/search-filters.example.json`](../../deploy/broker/search-filters.example.json)
+is the example the repository ships for both services.
+
+With the file set, three things change:
+
+- `fora_discover` lists the file as the input schema of its `search_filters`
+  argument, so agent software can show the keys and the format of each value before
+  it calls. The tool's description says where the keys are, and no longer lists the
+  music profile's keys.
+- This service checks every `fora_discover` call against the file before it sends
+  anything to the Broker, including a call that names URLs, whose filters the Broker
+  would not read. A key the file does not list, or a value that breaks its key's
+  rule, is refused. The agent gets an error that starts with `validating "arguments"`
+  and names the key.
+- The Broker still checks every request itself. It is the only check for software
+  that calls the Broker directly, and it decides what a well-formed filter that
+  matches nothing returns.
+
+Leave the setting unset in front of a Broker on the tag-based search, or one with
+no catalog search. The file would refuse the music keys such a Broker reads.
+
+Both services read the file with the same rules, so a file that breaks one of them
+stops both at start-up, for the same reason. Here the refusal looks like this:
+
+```
+{"level":"ERROR","msg":"identity.exit","err":"build server: app: mcp: search filters schema: additionalProperties must be false, so a key outside the schema is refused rather than ignored"}
+```
+
+One of those rules matters most here: **no key may have a `default`**, not even a
+valid one. The MCP library this service is built on adds a key's default to every
+`fora_discover` call that does not carry the key, so every search would carry that
+filter whether or not the agent asked for it, while the Broker applies no default
+to a request it receives directly. A file with a default stops both services at
+start-up, here with `uses default` in the message.
 
 ### `IDENTITY_AUTH_ISSUER` decides more than its name suggests
 

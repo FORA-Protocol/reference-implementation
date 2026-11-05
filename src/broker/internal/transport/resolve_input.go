@@ -2,14 +2,11 @@ package transport
 
 import (
 	"context"
-	"errors"
 
 	"github.com/FORA-Protocol/protocol/sdk/go/helpers"
-	"google.golang.org/protobuf/types/known/structpb"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/broker"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/resolve"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/tagsearch"
 )
 
 // validateResolveRequest and authenticatedAgentID are the transport adapter's
@@ -18,8 +15,14 @@ import (
 // service) because both are boundary concerns — validation shapes the wire input,
 // and identity derivation reads the httpsig verification context the broker
 // middleware populated on the inbound request (helpers.FromContext). The resolve
-// core receives an already-validated request whose AgentID is the authenticated
-// identity.
+// core receives a request whose AgentID is the authenticated identity.
+//
+// The search inputs are not admitted here. Which search_filters keys a request
+// may carry, and whether each value is well formed, is the vocabulary of the
+// configured catalog search provider, a dependency of the resolve service; so the
+// service parses them, together with the one-of rule over query, uri and
+// search_filters (resolve.Service.admitSearch). Transport hands them over as
+// decoded (foraRequestToInput) and maps the domain error to its Connect code.
 
 // authenticatedAgentID returns the caller's identity: the canonical host of the
 // verified Signature-Agent directory. After the WBA split the RFC 9421 keyid is
@@ -61,32 +64,12 @@ func authenticatedAgentID(ctx context.Context) (string, *broker.Error) {
 	return broker.CallerHost(v.SignatureAgent)
 }
 
-// validateResolveRequest shapes the wire input and parses the fora-music-v1
-// search filters into req. requester.id is required but is otherwise
-// free-form: any protocol-valid label passes, host or not.
-//
-// Explicit URIs take precedence: when the request names any, its filters are
-// neither parsed nor validated, as its query is not used. Otherwise a
-// malformed filter value is InvalidArgument, so no search runs, and filter
-// keys the profile does not define are ignored. A request then needs a query,
-// a URI or at least one defined filter key.
-func validateResolveRequest(req *resolve.Request, filters *structpb.Struct) error {
+// validateResolveRequest checks the one field the wire shape leaves to the
+// handler: requester.id is required, but is otherwise free-form, so any
+// protocol-valid label passes, host or not.
+func validateResolveRequest(req *resolve.Request) error {
 	if req.RequesterID == "" {
 		return broker.Newf(broker.KindInvalidArgument, "requester.id is required").WithField("requester.id")
-	}
-	if req.URI == "" {
-		f, err := tagsearch.ParseFilters(filters.AsMap())
-		var ferr *tagsearch.FilterError
-		if errors.As(err, &ferr) {
-			return broker.Newf(broker.KindInvalidArgument, "%s", ferr.Error()).WithField("search_filters." + ferr.Key)
-		}
-		req.Filters = f
-	}
-	if req.Query == "" && req.URI == "" && req.Filters.Empty() {
-		// No single offending field — record the composite requirement so a client
-		// learns which one-of set was unsatisfied (ADR-019 §1 free-form metadata).
-		return broker.Newf(broker.KindInvalidArgument, "either query, uri or a search filter is required").
-			WithMeta("required_one_of", "query,uri,search_filters")
 	}
 	return nil
 }

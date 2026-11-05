@@ -12,8 +12,8 @@ import (
 
 	forav1 "github.com/FORA-Protocol/protocol/gen/go/fora/v1"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/catalogsearch"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/selection"
-	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/tagsearch"
 )
 
 // Request is the Broker's internal resolve input, mapped from the
@@ -21,7 +21,8 @@ import (
 // Callers provide a free-form query, search filters, or a direct URI
 // (single-domain probe); when a URI is present it takes precedence. A query and
 // filters go to the Broker's catalog search when that is enabled. Otherwise a
-// query goes to EXA search, and filters are refused.
+// query goes to EXA search, and a filter the vocabulary applies is refused; a
+// key it ignores is no filter (admitSearch).
 type Request struct {
 	// AgentID is the AUTHENTICATED agent identity: the canonical host of the
 	// verified Signature-Agent directory, set by the transport adapter. The
@@ -66,10 +67,14 @@ type Request struct {
 	// user_type / geography fields — self-declared requester attributes are not a
 	// filtering input.
 	IntendedUse string `json:"intended_use,omitempty"`
-	// Filters are the request's fora-music-v1 search filters, parsed by the
-	// transport adapter. They are set only when the request names no URI:
-	// explicit URIs take precedence, and their filters are ignored.
-	Filters tagsearch.Filters `json:"-"`
+	// RawFilters is search_filters exactly as the agent sent it, decoded from
+	// the wire by the transport adapter. The configured vocabulary reads it only
+	// when the request names no URI: explicit URIs take precedence, and their
+	// filters are neither parsed nor validated.
+	RawFilters map[string]any `json:"-"`
+	// Filters are RawFilters as the configured vocabulary parsed them, set by
+	// the service's admission step. Nil when the request names a URI.
+	Filters catalogsearch.Filters `json:"-"`
 	// searched marks URIs the Broker chose by searching its catalog for Query,
 	// rather than URIs the agent named. It decides the discovery method.
 	searched bool

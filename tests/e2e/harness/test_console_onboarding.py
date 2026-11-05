@@ -12,7 +12,9 @@ deployment.
 
 What it proves: the document the console hands a publisher names the Exchange
 and the contributor the running deployment is configured with, and the package
-beside it points at the same Exchange; a domain is kept after each step's Next,
+beside it points at the same Exchange and carries a README written for the
+domain, with the deployment's support address in it; a domain is kept after
+each step's Next,
 listed as not verified, and its setup reopens where it stands; the Exchange's
 check of a document that does not match reaches the publisher as the console's
 own repair sentences; and before the business is named every page of the
@@ -110,6 +112,11 @@ def test_a_publisher_saves_a_domain_and_gets_a_document_naming_this_deployment(
     configures, and the edge package it hands over beside it names the same
     Exchange. A console deployed with settings that disagree with its Exchange
     fails here, which neither service's own tests can see.
+
+    The package also carries its README, written for this domain and route, with
+    the support address the stack configures: the one place a test reads that
+    setting from the running console's environment rather than from the Go test
+    harness.
     """
     wizard, site, saved = _saved_domain(compose_stack, fresh_publisher())
     assert saved == SavedDomain(
@@ -142,12 +149,21 @@ def test_a_publisher_saves_a_domain_and_gets_a_document_naming_this_deployment(
     package = wizard.download(files["fora-cloudflare.zip"].url)
     with zipfile.ZipFile(io.BytesIO(package)) as archive:
         names = set(archive.namelist())
-        assert names == {"fora-worker.mjs", "wrangler.toml"}, names
+        assert names == {"README.md", "fora-worker.mjs", "wrangler.toml"}, names
         project = tomllib.loads(archive.read("wrangler.toml").decode())
+        readme = archive.read("README.md").decode()
     settings = project["vars"]
     assert settings["EXCHANGE_URL"] == exchanges[0].endpoint, settings
     retired = {"PROVIDER", "EXCHANGES_JSON", "CATALOG_CONTRIBUTORS_JSON", "RSL_BODY"}
     assert not retired & set(settings), settings
+
+    # The README is what the publisher follows once the console is closed: it
+    # names their domain and the route wrangler.toml deploys on, carries the
+    # deploy command, and gives the address the stack configures for help.
+    route = project["routes"][0]["pattern"]
+    for expected in (site.domain, route, "npx wrangler deploy", "help@exchange.example"):
+        assert expected in readme, (expected, readme)
+    assert "<host>" not in readme, readme
 
 
 @in_network_only

@@ -166,18 +166,13 @@ func deployedText(p cdn.Provider) string {
 	}
 }
 
-// edgeSteps is what to do with the edge configuration on this network. Only
-// the step that needs the publisher's own CDN account survives: the rest
-// describe what the wizard has already walked them through.
+// edgeSteps is this network's edge step as the wizard's last step shows it: the
+// commands a person runs on their own CDN account. The other steps of the path
+// are the ones the wizard has already walked them through, and the checks are
+// dropped because the step asks the site those questions itself and shows the
+// answers.
 func edgeSteps(s setup.Site) []setupsteps.Step {
-	all := setupsteps.RunnableByHand(setupsteps.For(cdnProvider(s.CDN), s.Domain, nil))
-	out := make([]setupsteps.Step, 0, 1)
-	for _, step := range all {
-		if step.Integration != "" {
-			out = append(out, step)
-		}
-	}
-	return out
+	return setupsteps.RunnableByHand([]setupsteps.Step{setupsteps.EdgeStep(cdnProvider(s.CDN), s.Domain)})
 }
 
 // splitPaths turns the comma-separated field into the list the Exchange stores.

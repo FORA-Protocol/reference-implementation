@@ -55,9 +55,6 @@ type Config struct {
 	Detector wizard.Detector
 	// DefaultRate fills the price field in when a publisher chooses to charge.
 	DefaultRate string
-	// SupportEmail is the address a publisher writes to when their network is
-	// not one the console can set up for them.
-	SupportEmail string
 	// DashboardPageSize is how many rows a dashboard list page shows. Zero is
 	// dashboard.DefaultPageSize, the Exchange's own default page.
 	DashboardPageSize int
@@ -148,7 +145,7 @@ func consoleHandlers(cfg Config, renderer *web.Renderer, clk clock.Clock) (handl
 		Bundles:        bundles,
 		Detector:       cfg.Detector,
 		Pages:          cfg.Pages,
-		SupportEmail:   cfg.SupportEmail,
+		SupportEmail:   cfg.Deployment.SupportEmail,
 		DefaultRate:    cfg.DefaultRate,
 		ExchangeDomain: cfg.Deployment.ExchangeDomain,
 	})

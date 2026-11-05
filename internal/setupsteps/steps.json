@@ -5,18 +5,27 @@
     "your site, whose two tasks are two entries here, done in either order: manifest,",
     "which the preview hands the discovery file on, and edge, which is replaced by the",
     "variant for the detected network. Both are found by those ids. The console reads",
-    "only the variants below, for the deploy commands on its last step; the step names",
-    "in the wizard's header are its own.",
+    "only the variants below and the package checks they end with: for the deploy",
+    "commands on its last step, and for the README inside each package it hands over.",
+    "The step names in the wizard's header are its own.",
     "Sources for the commands: the edge worker's deployment instructions for the",
     "Cloudflare path, the CloudFront edge Terraform module for the AWS path, and the",
     "publisher discovery-document reference for the manifest checks.",
-    "The integration field on each variant below is the one place that says whether",
-    "a network gets a package (edge_package) or a conversation (contact_us). The",
-    "preview copies it into cdn.integration; nothing in Go decides it again.",
-    "A command marked \"checked\" is one a signed-in publisher never runs: the console",
-    "asks their site the same question and reports the answer. It stays here because",
-    "the public preview page has no account and no button, so a visitor reading what",
-    "onboarding involves has to see the whole procedure.",
+    "The integration field on each variant below says whether a network's edge step is",
+    "a package to deploy (edge_package) or a conversation (contact_us), and so which",
+    "variants end with the package checks. The preview copies it into cdn.integration.",
+    "The console decides in its own code which networks it sets up and builds a",
+    "package for, and a console test renders the README for every network it sets up,",
+    "so a variant here that stops being edge_package fails that test.",
+    "A command marked \"checked\" is one the console's last step asks the site itself",
+    "and reports the answer, so the wizard does not show it. The console asks every",
+    "site the same questions, whatever network serves it, so the checks are written",
+    "once, under package_checks, and added after the commands of every edge_package",
+    "variant; a variant writes no checked command of its own. A console test holds",
+    "them equal to the questions the console asks.",
+    "It stays here because the public preview page has no account and no button, and",
+    "the README inside each package is read without the console, so both have to show",
+    "the whole procedure.",
     "Fastly is a conversation, not a package: nothing builds a Fastly package, because the edge build script has presets for the Cloudflare and AWS runtimes only and the Fastly entry point that reads a configuration store belongs to the end-to-end harness. It still has a variant of its own, so a publisher reads that we recognised their network."
   ],
   "steps": [
@@ -54,6 +63,26 @@
       "summary": "Replaced per network."
     }
   ],
+  "package_checks": [
+    {
+      "label": "Check an agent is refused",
+      "run": "curl -s -D - -o /dev/null -A \"GPTBot/1.0\" \\\n  https://<host>/your-article-path",
+      "expect": "403, with an x-content-rules header pointing at your discovery file and an x-fora-exchange header naming the exchange that sells your pages.",
+      "checked": true
+    },
+    {
+      "label": "Check a person is not",
+      "run": "curl -s -o /dev/null -w '%{http_code}\\n' \\\n  -A \"Mozilla/5.0\" \\\n  https://<host>/your-article-path",
+      "expect": "200, or a redirect code such as 301. Ordinary visitors and search crawlers are unaffected.",
+      "checked": true
+    },
+    {
+      "label": "Check AI agents can read your discovery file",
+      "run": "curl -s -o /dev/null -w '%{http_code}\\n' -A \"GPTBot/1.0\" \\\n  https://<host>/.well-known/fora.json",
+      "expect": "200, so AI agents can read your file. A 404 means your site has no file at that address. A 403 means something on your site refuses AI agents at that address; let them read it.",
+      "checked": true
+    }
+  ],
   "integrations": {
     "cloudfront": {
       "id": "edge",
@@ -74,18 +103,6 @@
         {
           "label": "Associate it with your cache behaviour",
           "expect": "In the CloudFront console, open your distribution, edit the cache behaviour for your licensed paths and add the published version as a viewer-request Lambda@Edge association. Leave the distribution's own signed-address check switched off: the function is what verifies, and both at once would refuse addresses the function had already accepted."
-        },
-        {
-          "label": "Check an agent is refused",
-          "run": "curl -s -D - -o /dev/null -A \"GPTBot/1.0\" \\\n  https://<host>/your-article-path",
-          "expect": "403, with an x-content-rules header pointing at your discovery file.",
-          "checked": true
-        },
-        {
-          "label": "Check a person is not",
-          "run": "curl -s -o /dev/null -w '%{http_code}\\n' \\\n  -A \"Mozilla/5.0\" \\\n  https://<host>/your-article-path",
-          "expect": "200. Ordinary visitors and search crawlers are unaffected.",
-          "checked": true
         }
       ]
     },
@@ -103,18 +120,6 @@
           "label": "Deploy",
           "run": "npx wrangler login\nnpx wrangler deploy",
           "expect": "You need Node.js 22 or newer. The first command opens your browser once to authorise your Cloudflare account. The second uploads the Worker and attaches it to your route."
-        },
-        {
-          "label": "Check your discovery file is reachable through the package",
-          "run": "curl -s -o /dev/null -w '%{http_code}\\n' -A \"GPTBot/1.0\" \\\n  https://<host>/.well-known/fora.json",
-          "expect": "200: the package passes the address through to your file, for an AI agent too. A 404 means your site has no file at that address. A 403 means something on your site refuses AI agents at that address; let them read it.",
-          "checked": true
-        },
-        {
-          "label": "Check an agent is refused",
-          "run": "curl -s -D - -o /dev/null -A \"GPTBot/1.0\" \\\n  https://<host>/your-article-path",
-          "expect": "403, with an x-content-rules header pointing at your discovery file.",
-          "checked": true
         }
       ]
     },

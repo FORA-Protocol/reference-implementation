@@ -93,10 +93,10 @@ const (
 // EdgeCheck is one question asked of the publisher's site and the answer, in
 // the words the publisher reads.
 //
-// These replace the curl commands the written instructions used to end with.
 // Each one is a request to a public address, so the console can make it and
 // report the result rather than ask a publisher to run a command and interpret
-// a status code.
+// a status code. The written instructions in each package carry the same
+// questions as curl commands, for whoever deploys without the console open.
 type EdgeCheck struct {
 	Label   string  `json:"label"`
 	Outcome Outcome `json:"outcome"`
@@ -136,8 +136,8 @@ func (r EdgeReport) PackageAnswers() bool {
 	return true
 }
 
-// inspectEdge asks the publisher's site everything the written instructions
-// used to ask them to ask it themselves.
+// inspectEdge asks the publisher's site the questions the written
+// instructions give a person to ask it by hand.
 //
 // Three requests at most, all to public addresses on their own site: what an
 // agent gets at the licensed path, what a visitor gets there, and, once the

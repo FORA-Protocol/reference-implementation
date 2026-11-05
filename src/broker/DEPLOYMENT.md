@@ -65,7 +65,7 @@ this is the only place this document names one, and every command below reuses
 it:
 
 ```bash
-VERSION=1.0.0
+VERSION=1.1.0
 docker pull ghcr.io/fora-protocol/broker:$VERSION
 ```
 
@@ -226,6 +226,7 @@ docker compose logs broker | head -20
 #   {"level":"INFO","msg":"migrations applied","version":3,"dirty":false, ...}
 #   {"level":"INFO","msg":"broker.redis.ready","addr":"..."}
 #   {"level":"INFO","msg":"broker.relay.signing","keyid":"0yN6xRMmYrgA78Ue3aR4..."}
+#   {"level":"INFO","msg":"broker.query_discovery.disabled"}
 #   {"level":"INFO","msg":"broker listening","addr":":8082"}
 #
 # The "keyid" is not the name you chose in BROKER_RELAY_KID — it is the key's
@@ -237,6 +238,15 @@ docker compose logs broker | head -20
 If you see `broker.redis.disabled`, `broker.relay.key_absent` or
 `broker.registry.no_bootstrap` instead, a setting is missing — see
 [`CONFIGURATION.md`](CONFIGURATION.md) §3 for what each one costs.
+
+With a catalog search configured, `broker.query_discovery.enabled` replaces the
+`.disabled` line. On the `elasticsearch` provider it names the template (`id:` for
+a stored one, `file:` for a file), the hit path, the authentication mode and the
+filter keys, and it is followed by `broker.es.ready`. A template file and a filter
+schema file are mounted beside the API key, read-only, like it. See
+[`CONFIGURATION.md`](CONFIGURATION.md) §7, and if you see `broker.es.misconfigured`
+or `broker.es.unreachable` instead, what it means; `broker.es.plain_http` or
+`broker.es.no_auth` mean the connection to the cluster is unprotected.
 
 ---
 

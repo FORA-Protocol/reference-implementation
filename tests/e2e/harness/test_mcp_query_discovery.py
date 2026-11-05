@@ -322,10 +322,11 @@ async def test_malformed_filter_is_a_tool_error(
 ) -> None:
     """A filter value the profile refuses is a tool error.
 
-    fora_discover's input schema leaves search_filters open, so the profile check
-    in the tool's handler is what refuses the value. The service sends the tool
-    error as text alone, with no structured content, so the refusal is asserted as
-    a tool error and its wording is not.
+    This stack's identity service loads no filter schema, so fora_discover's input
+    schema leaves search_filters open and the Broker's fora-music-v1 check is what
+    refuses the value; the tool's handler relays the refusal. The service sends the
+    tool error as text alone, with no structured content, so the refusal is
+    asserted as a tool error and its wording is not.
     """
     async with mcp_session(identity_ready, mcp_bearer, timeout=60) as mcp:
         # A number, where the profile requires a "MIN-MAX" string.

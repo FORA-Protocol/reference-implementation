@@ -76,6 +76,7 @@ is down will not come back up. Plan restarts accordingly.
 | A wildcard DNS record for the identity zone | `IDENTITY_BASE_DOMAIN` | `dig +short anything.agents.example.com` returns your address |
 | A wildcard TLS certificate matching that zone | your proxy or load balancer | `openssl s_client -connect anything.agents.example.com:443` shows a `*.agents.example.com` certificate |
 | The address of your Broker | `IDENTITY_MCP_BROKER_URL` | It does not have to be answering yet. No Exchange address is configured — an agent names the Exchange per call. |
+| Optional: the Broker's search-filter schema file, when its catalog search runs on Elasticsearch ([`CONFIGURATION.md`](CONFIGURATION.md) §2) | `IDENTITY_MCP_SEARCH_FILTERS_SCHEMA_FILE` | `cmp <the Broker's copy> <this service's copy>` prints nothing: both services read the same file. |
 | A container runtime | — | `docker version` |
 | Python 3 (to generate keys in §7) | — | `python3 --version` |
 
@@ -100,7 +101,7 @@ this is the only place this document names one, and every command below reuses
 it:
 
 ```bash
-VERSION=1.0.0
+VERSION=1.1.0
 docker pull ghcr.io/fora-protocol/identity:$VERSION
 ```
 
@@ -368,6 +369,9 @@ If it exited instead, the `identity.exit` line names the cause:
 | `keystore:` | The Vault client could not be built — usually a `VAULT_ADDR` that is not a valid address at all. |
 | `mcp config: IDENTITY_MCP_BROKER_URL is required` | The Broker address is unset. |
 | `mcp config: IDENTITY_MCP_MAX_` | One of the two content byte caps is not a positive whole number. |
+| `mcp config: IDENTITY_MCP_SEARCH_FILTERS_SCHEMA_FILE:` | The search-filter schema file is set but cannot be read — usually a path that is not mounted, or a file uid 65532 cannot read. |
+| `build server: app: mcp: search filters schema:` | The search-filter schema breaks the filter-schema rules. The rest of the message names the rule, and the Broker refuses the same file for the same reason ([`CONFIGURATION.md`](CONFIGURATION.md) §2). |
+| `build server: app: mcp: mcp: fora_discover input schema:` | The search-filter schema passes those rules but the MCP library still cannot use it as `fora_discover`'s input schema. The rules exist to rule this out, so no such file is known; the rest of the message names what the library refused. Fix the file for both services ([`CONFIGURATION.md`](CONFIGURATION.md) §2). |
 | `build server:` | The server could not be assembled from the settings — for example a per-item content cap larger than the per-call cap. The rest of the message names the exact cause. |
 
 Note that a **wrong-but-well-formed Vault address is not on that list** — only a

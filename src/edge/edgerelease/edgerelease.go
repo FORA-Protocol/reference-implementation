@@ -8,7 +8,9 @@
 // the test configuration and the local Miniflare server, lambda-entry.mjs.tmpl
 // by scripts/lambda-entry.mjs, which builds a deployment's own Lambda package.
 // So the console, which assembles a publisher's download, and the edge build,
-// which assembles a deployment's, write the same files from the same source.
+// which assembles a deployment's, write index.mjs from one template and run
+// the Worker under one set of runtime settings. The instructions the console
+// adds to a publisher's download are its own, not a file this package writes.
 package edgerelease
 
 import (
@@ -89,18 +91,40 @@ func WorkerName(domain string) string {
 	return prefix + slug + "-" + suffix
 }
 
-// WranglerConfig writes the wrangler.toml of a site's Cloudflare package.
+// Route is where a site's Worker is attached: the route pattern, and the zone
+// it is added in.
+type Route struct {
+	Pattern string
+	Zone    string
+}
+
+// WorkerRoute is the route a site's Worker is deployed on.
 //
-// main is the worker file beside it. The route covers the whole hostname on
-// purpose: the Worker sees every path, so the gate is never bypassed by a path
-// the route left out, and which paths it gates is a setting
-// (LICENSED_PATHS_JSON), not the route. The publisher's discovery document and
-// RSL file are on that hostname too; the Worker passes both through to the
-// origin, so the route takes nothing away from them.
-func WranglerConfig(domain, main string, settings map[string]string) ([]byte, error) {
+// The pattern covers the whole hostname on purpose: the Worker sees every
+// path, so the gate is never bypassed by a path the route left out, and which
+// paths it gates is a setting (LICENSED_PATHS_JSON), not the route. The
+// publisher's discovery document and RSL file are on that hostname too; the
+// Worker passes both through to the origin, so the route takes nothing away
+// from them. The zone is the registrable domain the hostname belongs to,
+// because that is the zone Cloudflare holds it in.
+//
+// It is the one place both are worked out, so wrangler.toml and anything that
+// tells a publisher where their Worker runs cannot name two different routes.
+func WorkerRoute(domain string) (Route, error) {
 	zone, err := publicsuffix.EffectiveTLDPlusOne(domain)
 	if err != nil {
-		return nil, fmt.Errorf("edgerelease: work out the zone for %q: %w", domain, err)
+		return Route{}, fmt.Errorf("edgerelease: work out the zone for %q: %w", domain, err)
+	}
+	return Route{Pattern: domain + "/*", Zone: zone}, nil
+}
+
+// WranglerConfig writes the wrangler.toml of a site's Cloudflare package.
+//
+// main is the worker file beside it, and the route is the site's WorkerRoute.
+func WranglerConfig(domain, main string, settings map[string]string) ([]byte, error) {
+	route, err := WorkerRoute(domain)
+	if err != nil {
+		return nil, err
 	}
 	compat, err := Compat()
 	if err != nil {
@@ -128,7 +152,7 @@ routes = [
 # address against the exchange's public keys, which it fetches for itself.
 [vars]
 `, domain, tomlString(WorkerName(domain)), tomlString(main), tomlString(compat.Date), flags,
-		tomlString(domain+"/*"), tomlString(zone))
+		tomlString(route.Pattern), tomlString(route.Zone))
 
 	for _, k := range slices.Sorted(maps.Keys(settings)) {
 		fmt.Fprintf(&out, "%s = %s\n", k, tomlString(settings[k]))

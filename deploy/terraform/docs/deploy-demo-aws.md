@@ -107,6 +107,15 @@ file next to it), and secrets go into a separate gitignored
 - **EXA API key (optional)** — enables the Broker's EXA-backed discovery.
   Goes into: `exa_api_key` in `secrets.auto.tfvars`. Without it the Broker
   still runs; only that discovery source is off.
+- **Catalog search (optional)** — the Broker runs at most one. Either
+  `query_discovery_enabled = true` (the model and the catalog feed), or
+  `elasticsearch_search` in `secrets.auto.tfvars` (an index someone else
+  maintains, searched through the index owner's search template). The plan
+  fails when both are set. An Elasticsearch search with a filter schema
+  (`filters_schema`) also hands that schema to the Identity Service, which
+  publishes the filter keys to agents in its `fora_discover` tool. The
+  commented example in `secrets.auto.tfvars.example` shows every field, and
+  [variables.md](variables.md) explains them.
 - **Local tools**: same list as the staging guide, plus `zip` (the Lambda
   bundle is a zip archive).
 

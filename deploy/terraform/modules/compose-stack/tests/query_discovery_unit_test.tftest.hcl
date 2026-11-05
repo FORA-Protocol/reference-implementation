@@ -55,7 +55,7 @@ run "query_discovery_renders_when_configured" {
 
   assert {
     condition = alltrue([for line in [
-      "BROKER_QUERY_DISCOVERY: \"on\"",
+      "BROKER_QUERY_PROVIDER: \"llm\"",
       "BROKER_QUERY_CATALOG_FILE: \"/catalog/feed.jsonl\"",
       "BROKER_QUERY_MODEL: \"amazon.nova-lite-v1:0\"",
       "AWS_REGION: \"us-east-1\"",
@@ -70,7 +70,7 @@ run "query_discovery_renders_when_configured" {
   # that breaks the YAML structure fails here even where the text still matches.
   assert {
     condition = (
-      yamldecode(output.compose_yaml).services.broker.environment.BROKER_QUERY_DISCOVERY == "on" &&
+      yamldecode(output.compose_yaml).services.broker.environment.BROKER_QUERY_PROVIDER == "llm" &&
       contains(yamldecode(output.compose_yaml).services.broker.volumes, "/opt/fora/catalog/feed.jsonl:/catalog/feed.jsonl:ro") &&
       contains([for f in yamldecode(output.user_data).write_files : f.path], "/opt/fora/keys/broker/aws-credentials")
     )

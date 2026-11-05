@@ -155,6 +155,7 @@ module "compose_stack" {
   caddy_data_volume_id = module.vm.data_volume_id
   exa_api_key          = var.exa_api_key
   query_discovery      = local.query_discovery
+  elasticsearch_search = var.elasticsearch_search
 
   # The seat is the Exchange itself, so its tenant row is keyed on the
   # Exchange's own hostname. The publisher is a separate record the seeding step

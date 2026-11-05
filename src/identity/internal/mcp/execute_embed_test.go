@@ -165,21 +165,7 @@ func TestExecute_EmbedContentRefusesNonBooleans(t *testing.T) {
 func TestExecute_AdvertisesEmbedContent(t *testing.T) {
 	f := newFixture(t)
 	a := f.provision(t, "dev-one")
-	session := f.connect(t, a.Token)
-
-	listed, err := session.ListTools(t.Context(), nil)
-	if err != nil {
-		t.Fatalf("list tools: %v", err)
-	}
-	var tool *mcpsdk.Tool
-	for _, candidate := range listed.Tools {
-		if candidate.Name == "fora_execute" {
-			tool = candidate
-		}
-	}
-	if tool == nil {
-		t.Fatal("fora_execute is not listed")
-	}
+	tool := listedTool(t, f.connect(t, a.Token), "fora_execute")
 	if !strings.Contains(tool.Description, "embed_content false") {
 		t.Errorf("tool description does not explain embed_content false: %q", tool.Description)
 	}
@@ -216,4 +202,20 @@ func TestExecute_AdvertisesEmbedContent(t *testing.T) {
 			t.Errorf("embed_content description lacks %q: %q", want, embed.Description)
 		}
 	}
+}
+
+// listedTool returns the tool as the adapter lists it to an agent.
+func listedTool(t *testing.T, session *mcpsdk.ClientSession, name string) *mcpsdk.Tool {
+	t.Helper()
+	listed, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	for _, tool := range listed.Tools {
+		if tool.Name == name {
+			return tool
+		}
+	}
+	t.Fatalf("%s is not listed", name)
+	return nil
 }

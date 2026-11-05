@@ -98,7 +98,7 @@ func (b *BrokerConnectHandler) Resolve(
 	creq *connect.Request[forav1.DiscoveryRequest],
 ) (*connect.Response[forav1.DiscoveryResponse], error) {
 	req := foraRequestToInput(creq.Msg)
-	if verr := validateResolveRequest(&req, creq.Msg.GetSearchFilters()); verr != nil {
+	if verr := validateResolveRequest(&req); verr != nil {
 		return nil, resolveFaultError(verr)
 	}
 	agentID, aerr := authenticatedAgentID(ctx)

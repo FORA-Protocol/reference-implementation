@@ -53,11 +53,12 @@ called out in §3 and §5.
 | `BROKER_REVOCATION_URL` | Optional, **set it** | The public web address where the Broker publishes its list of withdrawn keys. The Exchange polls this. If unset, the Broker does not advertise it and the Exchange has nothing to poll. | `https://broker.example/.well-known/fora-key-revocations.json` |
 | `BROKER_REVOCATION_FILE` | Optional | Path to the file whose contents are served at the address above. If unset or missing, the Broker serves an empty "nothing has ever been withdrawn" answer, dated 1 January 1970, forever. The file is re-read when it changes — no restart needed. | `/revocations/revocations.json` |
 | `BROKER_REGISTRY_FILE` | Optional, **set it** | Path to a YAML file listing the Exchanges this Broker routes to. Nothing else fills that list, so with this unset the Broker starts with no Exchanges and every discovery returns nothing. | `/config/exchanges.yaml` |
-| `EXA_API_KEY` | Optional | The key for the EXA search service. It is used only for requests that carry a free-text query and no URLs: EXA turns the query into candidate publisher domains. With it unset, every such request fails at once with `no domains for query`. Requests that name a URL directly never use it. Even with a key, the free-text path returns no offers yet — see [`RUNBOOK.md`](RUNBOOK.md) §6. | *(unset unless you serve free-text queries)* |
+| `BROKER_QUERY_PROVIDER` | Optional | Which catalog search turns a free-text query into URLs: `none`, `llm` or `elasticsearch`. Default `none`. Any other value stops the Broker at start-up. Each provider has settings of its own — see §7. | `elasticsearch` |
+| `EXA_API_KEY` | Optional | The key for the EXA search service. It is used only with `BROKER_QUERY_PROVIDER=none`, and only for requests that carry a free-text query and no URLs: EXA turns the query into candidate publisher domains. With it unset, every such request fails at once with `no domains for query`. Requests that name a URL directly never use it. Even with a key, this path returns no offers yet — see [`RUNBOOK.md`](RUNBOOK.md) §6. | *(unset unless you serve free-text queries)* |
 | `FORA_WELLKNOWN_SCHEME` | Optional | Which protocol the Broker uses when fetching other parties' `/.well-known/fora.json` documents. Default `https`. **Must stay `https` in production.** A key directory is always fetched over https, whatever this says. | `https` |
 | `FORA_WELLKNOWN_PORT` | Optional | Appends a port when fetching those documents. Only needed inside a local test network. Leave unset. It does not apply to key directories. | *(leave unset)* |
 | `SKIP_SSRF` | Optional — **leave unset** | Setting this to `true` removes the guard that stops the Broker being tricked into calling internal addresses. Development only. | *(leave unset)* |
-| `ALLOW_INSECURE` | Optional — **leave unset** | Setting this to `true` allows plain unencrypted `http` for those same calls. Development only. | *(leave unset)* |
+| `ALLOW_INSECURE` | Optional — **leave unset** | Setting this to `true` allows plain unencrypted `http` for those same calls. Development only. It does not admit a plain `http` Elasticsearch URL: that has its own opt-in, `BROKER_ES_ALLOW_HTTP` (§7). | *(leave unset)* |
 | `BROKER_ALLOW_EPHEMERAL_KEY` | Optional — **leave unset** | Setting this to `true` lets the Broker start without an identity key, creating an ephemeral (throwaway) one that changes on every restart. Development only. | *(leave unset)* |
 
 ### `BROKER_LOG_LEVEL` — what each level hides
@@ -125,7 +126,7 @@ requirement in place. **Never set it in production**; see §5.
 
 ## 3. The file settings, and what happens when one is missing
 
-Four settings point at files. Two of them fail quietly, which makes them the
+Ten settings point at files. Two of them fail quietly, which makes them the
 most common source of "it deployed fine but nothing works".
 
 There is no key file for verification: the Broker learns an agent's public key
@@ -138,6 +139,11 @@ header. An agent that does not publish its key gets `401`.
 | `BROKER_ED25519_KEY_FILE` | The Broker **refuses to start** unless `BROKER_ED25519_SEED` is set instead (see §2). | The Broker **refuses to start**. |
 | `BROKER_REGISTRY_FILE` | The Broker **refuses to start** — the open error appears in `broker.exit`. The quiet case is leaving the variable **unset**: then no Exchange is registered, every discovery returns nothing, and the only signal is one `broker.registry.no_bootstrap` warning at start-up. | The Broker **refuses to start**. |
 | `BROKER_REVOCATION_FILE` | Serves an empty list dated `1970-01-01T00:00:00Z` forever — the Exchange concludes no key has ever been withdrawn. | Returns HTTP `500` on that one route; the rest of the Broker keeps working. The log line `broker.revocation.unavailable` carries the validation error. |
+| `BROKER_QUERY_CATALOG_FILE` | With `BROKER_QUERY_PROVIDER=llm`, the Broker **refuses to start**. | The Broker **refuses to start**. |
+| `BROKER_ES_API_KEY_FILE`, `BROKER_ES_PASSWORD_FILE` | With `BROKER_QUERY_PROVIDER=elasticsearch`, the Broker **refuses to start**, naming the setting. | A key or password the cluster refuses stops the start too: see the boot probe in §7. |
+| `BROKER_ES_CA_FILE` | With `BROKER_QUERY_PROVIDER=elasticsearch`, the Broker **refuses to start**, naming the setting. | The Broker **refuses to start** when the file holds no PEM certificate. |
+| `BROKER_ES_TEMPLATE_FILE` | With `BROKER_QUERY_PROVIDER=elasticsearch`, the Broker **refuses to start**, naming the setting. | An empty file, one over 64 KiB, or one using `{{{ }}}`, `{{& }}`, `{{#join}}` or a change of delimiters (`{{= }}`) stops the start. A template the cluster cannot render starts the Broker with `broker.es.misconfigured`: see the boot probe in §7. |
+| `BROKER_ES_FILTERS_SCHEMA_FILE` | With `BROKER_QUERY_PROVIDER=elasticsearch`, the Broker **refuses to start**, naming the setting. | The Broker **refuses to start**, naming the rule the schema breaks (§7). |
 
 The withdrawn-keys file is the one file you edit while the Broker is running — it is
 re-read whenever it changes, no restart needed. A ready-to-copy starting file ships as
@@ -227,6 +233,7 @@ carried into production:
 | `FORA_WELLKNOWN_SCHEME: "http"` | The services serve plain http on the test networks. | Public documents would be fetched unencrypted and could be tampered with in transit. |
 | `SKIP_SSRF: "true"` | Test services live on private addresses the guard blocks. | Removes the protection against the Broker being steered into your internal network. |
 | `ALLOW_INSECURE: "true"` | Same reason. | Same consequence. |
+| `BROKER_ES_ALLOW_HTTP: "true"` | The test stack's Elasticsearch speaks plain `http`. | The Elasticsearch credential and every query would travel unencrypted. |
 | `sslmode=disable` in the DSN | The database is on the same private bridge. | Correct only while the connection stays on one host. On a network you do not control exclusively TLS is required: without it every row travels in the clear, and what the login exposes depends on the cluster's authentication method ([`deploy/storage/postgres/CONFIGURATION.md`](../../deploy/storage/postgres/CONFIGURATION.md) §2.3). |
 | `BROKER_ALLOW_EPHEMERAL_KEY: "true"` | Tests are torn down between runs, so nothing caches the Broker's identity. | Every restart changes the identity the Broker publishes, and everyone who cached it is left holding a key that no longer verifies. |
 
@@ -251,11 +258,223 @@ BROKER_REVOCATION_FILE=/revocations/revocations.json
 ```
 
 Everything not listed is left at its default. In particular `EXA_API_KEY`,
-`SKIP_SSRF`, `ALLOW_INSECURE` and `FORA_WELLKNOWN_PORT` stay unset, and
-`FORA_WELLKNOWN_SCHEME` stays at its `https` default.
+`SKIP_SSRF`, `ALLOW_INSECURE` and `FORA_WELLKNOWN_PORT` stay unset,
+`FORA_WELLKNOWN_SCHEME` stays at its `https` default, and
+`BROKER_QUERY_PROVIDER` stays at `none`, so this Broker answers requests that
+name URLs and has no catalog search (§7). A Broker on the `elasticsearch` provider
+adds the settings in §7, over `https`: `BROKER_ES_ALLOW_HTTP` stays unset there too.
 
 The secret values above (`BROKER_DSN`, `REDIS_URL`, `BROKER_ED25519_SEED`) are read
 as plain environment variables. The Broker does not know or care where they came
 from, so the secret store and the tooling that supplies them are your choice — the
 only requirement is that they are present in the environment when the process
 starts.
+
+---
+
+## 7. Catalog search providers
+
+A *catalog search* turns an agent's free-text query into catalog URLs. Each URL
+then takes the same route as a URL the agent named: the publisher's `fora.json`
+names the Exchange, the Exchange supplies the offers, prices and license terms,
+and the Broker verifies their signatures. A search can only propose a URL. It
+cannot produce an offer the Exchange does not stand behind.
+
+A deployment runs one provider, chosen with `BROKER_QUERY_PROVIDER`. When it fails,
+the Broker never falls back to another one.
+
+| Value | What a free-text query does | `search_filters` |
+|---|---|---|
+| `none` (default) | Goes to EXA, if configured. This path returns no offers yet ([`RUNBOOK.md`](RUNBOOK.md) §6). | A fora-music-v1 key is refused: `INVALID_ARGUMENT` when its value is malformed, otherwise `UNIMPLEMENTED` on the field `search_filters`. A key the profile does not define is ignored. |
+| `llm` | A model extracts music tags from the query, and the tags are matched against a copy of the music feed held in memory. | Applied, by the fora-music-v1 profile. A key the profile does not define is ignored. |
+| `elasticsearch` | The index owner's search template runs against their index. No model is called and no catalog file is read. | Applied when the deployment's filter schema declares the key; any other key is refused with `UNIMPLEMENTED`. |
+
+### `llm`
+
+| Name | Required? | What it is | Example |
+|---|---|---|---|
+| `BROKER_QUERY_CATALOG_FILE` | **Required** | Path to the JSONL catalog feed the Exchange ingests. It must hold `music.*` records. | `/catalog/feed.jsonl` |
+| `BROKER_QUERY_MODEL` | **Required** | The Bedrock model that extracts the tags. | `amazon.nova-lite-v1:0` |
+| `BROKER_QUERY_URI_SCHEME` | Optional | The scheme of the catalog URIs. Default `https`. It must match the Exchange's `EXCHANGE_CATALOG_URI_SCHEME`. | `https` |
+
+The model is reached through the standard AWS configuration chain, so the
+deployment also supplies a region and credentials (`AWS_REGION`,
+`AWS_SHARED_CREDENTIALS_FILE`). A Broker that cannot find a region refuses to
+start.
+
+### `elasticsearch`
+
+Tested with Elasticsearch 7.15.0.
+
+The Broker uses only the search-template and render-template APIs
+(`_search/template` and `_render/template`), which every Elasticsearch since 6.x
+and OpenSearch serve. It talks to them over plain HTTP, with no client library, so
+no product check or client version stands between it and the cluster.
+
+The index belongs to someone else: they populate it and keep it current, and the
+Broker only reads it. Indexing, synchronisation and hosting are outside the Broker.
+The query belongs to them too. The Broker runs their **search template**: they
+decide which fields are searched, how hits rank, how each filter applies and where
+a hit carries its URL. [`SEARCH-TEMPLATE.md`](SEARCH-TEMPLATE.md) is the guide for
+whoever writes it, and `deploy/broker/search-template.example.mustache` with
+`deploy/broker/search-filters.example.json` is a working pair to start from.
+
+| Name | Required? | What it is | Example |
+|---|---|---|---|
+| `BROKER_ES_URL` | **Required** | The cluster's base URL, over `https`. It carries no credentials, query or fragment. Plain `http` needs `BROKER_ES_ALLOW_HTTP`. | `https://search.example:9243` |
+| `BROKER_ES_ALLOW_HTTP` | Optional — **leave unset** | `true` or `1` admits a plain `http` `BROKER_ES_URL`, and relaxes nothing else. Anything else, a typo included, leaves it off. The Broker logs `broker.es.plain_http` at start-up while it is in use. The stack-wide `ALLOW_INSECURE` does not admit it. | *(leave unset)* |
+| `BROKER_ES_INDEX` | **Required** | One index or alias. A pattern or a list is refused, because it would widen what the Broker reads. | `catalog-current` |
+| `BROKER_ES_TEMPLATE_ID` | One of these two **required** | The id of a search template stored in the cluster (`PUT _scripts/<id>`, the index owner's call; the Broker never stores one). | `fora-catalog` |
+| `BROKER_ES_TEMPLATE_FILE` | The other | Path to the template's Mustache text, sent with every search. At most 64 KiB. A template using `{{{ }}}`, `{{& }}` or `{{#join}}` is refused, because those insert a value unescaped, and so is one that changes the delimiters with `{{= }}`, under which they can be written another way. Setting both template settings is refused. | `/keys/search-template.mustache` |
+| `BROKER_ES_HIT_URL_PATH` | **Required** | Where a hit carries its URL, as dotted names: `_source.url` for a stored field, `fields.url` for a projected or computed one. An array at any step stands for its first element. | `_source.url` |
+| `BROKER_ES_RESULT_LIMIT` | **Required** | The most URLs one search returns, from 1 to 256. It is also the template's `limit` parameter. There is no default, because how many resources one search may return is your decision, and Elasticsearch's own default of 10 must not make it for you. Hits past the limit are cut, lowest ranked first; there is no paging. | `50` |
+| `BROKER_ES_TIMEOUT` | Optional | How long one call to the cluster may take, as a Go duration. Default `3s`. It is the deadline on the Broker's own request, so a search never holds a request longer than this. | `1500ms` |
+| `BROKER_ES_AUTH` | **Required** | How the Broker authenticates: `none`, `api_key` or `basic`. There is no default. `none` sends no credentials and logs `broker.es.no_auth` at start-up. A credential setting of another mode is refused. | `api_key` |
+| `BROKER_ES_API_KEY` | With `api_key` | The API key: base64 of `id:api_key` from the key's creation answer (later versions also return it ready-made as `encoded`). | *(from the file below)* |
+| `BROKER_ES_API_KEY_FILE` | Alternative to the above | Path to a file holding the same value. Only read when `BROKER_ES_API_KEY` is empty. | `/keys/es-api-key` |
+| `BROKER_ES_USERNAME` | With `basic` | The user name. | `broker-reader` |
+| `BROKER_ES_PASSWORD` | With `basic` | The password. | *(from the file below)* |
+| `BROKER_ES_PASSWORD_FILE` | Alternative to the above | Path to a file holding the password. Only read when `BROKER_ES_PASSWORD` is empty. | `/keys/es-password` |
+| `BROKER_ES_CA_FILE` | Optional | Path to a PEM file of the CA that signed the cluster's certificate, for a private CA. The CA file replaces the system roots for this connection: it adds to nothing. Unset means the system roots. Certificate verification cannot be switched off. | `/keys/es-ca.pem` |
+| `BROKER_ES_FILTERS_SCHEMA` | Optional | The deployment's filter vocabulary: a JSON Schema naming the `search_filters` keys the template applies and the format of each value. Unset means the search applies no filter, and every `search_filters` key is refused. The rules it must follow are below. | *(from the file below)* |
+| `BROKER_ES_FILTERS_SCHEMA_FILE` | Alternative to the above | Path to a file holding the same document. Only read when `BROKER_ES_FILTERS_SCHEMA` is empty. Give the identity service the same file (`IDENTITY_MCP_SEARCH_FILTERS_SCHEMA_FILE`), so `fora_discover` tells agents the same vocabulary. | `/keys/search-filters.json` |
+
+Every setting that is missing or invalid is named in one error, so a deployment is
+fixed in one pass. The credentials are never logged.
+
+#### What the index owner provides
+
+- **A search template** that renders the request body for `{query, filters,
+  limit}`, stored in the cluster or kept in the file `BROKER_ES_TEMPLATE_FILE`
+  names. The cluster's `script.allowed_types` must allow it: `stored` for a stored
+  template, `inline` for a file.
+- **A URL in every hit**, at the path `BROKER_ES_HIT_URL_PATH` names: a stored field
+  read from `_source`, or one the template projects or computes (`fields`,
+  `script_fields`). Project only the URL: the Exchange supplies everything else.
+- **Each document's URL equal to the Exchange's stored URI, byte for byte.** That
+  URI is the Exchange's `EXCHANGE_CATALOG_URI_SCHEME`, then `://`, the domain and
+  the path, as the publisher's feed gave them. The Exchange looks a URL up by its
+  bytes, with nothing decoded or case-folded, so `http` for `https` or an
+  upper-case host is a URL the Exchange does not hold, and the document can never
+  produce an offer.
+- **An index that holds only what this Broker's agents may discover.** There is no
+  per-agent or per-seat filtering. If the index holds more, give the Broker a
+  filtered alias.
+- **A read-only key.** It needs the `read` privilege on the index or alias and
+  nothing else: rendering and searching are the only calls the Broker makes. On a
+  7.x cluster without TLS on its HTTP interface, API keys are off until
+  `xpack.security.authc.api_key.enabled` is set to `true`.
+
+For example, the index owner creates the Broker's key like this:
+
+```
+POST /_security/api_key
+{"name": "broker", "role_descriptors": {"broker_read": {"indices": [
+  {"names": ["catalog"], "privileges": ["read"]}]}}}
+```
+
+#### What the Broker sends
+
+Every search is `POST /<BROKER_ES_INDEX>/_search/template` with the template and
+three parameters, and the request id as `X-Opaque-Id`:
+
+```json
+{
+  "id": "fora-catalog",
+  "params": {
+    "query": "central bank",
+    "filters": {"news": {"language": "en"}},
+    "limit": 50
+  }
+}
+```
+
+- `query` is the agent's text, and it is **left out** when the request has none, so
+  a template tells a filter-only request by its absence. The template engine treats
+  any string as present, the empty one included.
+- `filters` holds the filters the schema accepted, nested by dot: `news.language`
+  arrives as `filters.news.language`. It is left out when there is none.
+- `limit` is `BROKER_ES_RESULT_LIMIT`.
+- With `BROKER_ES_TEMPLATE_FILE`, the body carries `"source": "<the file>"` instead
+  of `"id"`.
+
+#### The filter schema
+
+The schema is the contract between the agents and the template, so the Broker
+holds it to rules that keep it one flat list of keys:
+
+- `type` is `"object"`, `properties` declares at least one key, and
+  `additionalProperties` is `false`, so a key outside the schema is refused rather
+  than ignored.
+- Each key is dot-separated parts of letters, digits, `_` and `-`, and no key is
+  another's prefix (`news` beside `news.language` would make `filters.news` both a
+  value and an object).
+- Nothing at the top level constrains the whole object (`required`, `oneOf`,
+  `allOf`, `minProperties` and the rest are refused): a request carrying only a
+  query must pass.
+- No reference keyword anywhere (`$ref`, `$defs`, `$id`, `$anchor`, `$dynamicRef`,
+  `$dynamicAnchor`). The identity service embeds the schema in its `fora_discover`
+  tool, where a reference would resolve against the tool instead.
+- No `default` anywhere. A filter applies only when the agent sends it: the
+  identity service's MCP library would fill a default into every call, while the
+  Broker applies none to a request it receives directly.
+- `$schema` is absent or exactly `https://json-schema.org/draft/2020-12/schema`.
+- The protocol's rules for a published registration schema apply as well: at most
+  16 KiB, a bounded depth and evaluation cost, and `pattern` limited to an alphabet
+  every SDK language reads alike. `format` is not checked: state a value's shape
+  with `pattern` or `enum`.
+
+A schema that breaks a rule stops the start, naming `BROKER_ES_FILTERS_SCHEMA` and
+the rule.
+
+#### How a search behaves
+
+With `BROKER_QUERY_PROVIDER=elasticsearch`, a query returns one group per URL the search template matched, in the order the template ranks them, and every group is stamped `DISCOVERY_METHOD_SEARCH`.
+Two hits with one URL give one group. The example template breaks equal scores on the URL.
+
+A document whose URL the Exchange does not hold gets no offer: beside hits that have offers, its group comes back empty with the reason `NOT_IN_CATALOG`, and when no hit has an offer, the whole answer is `NOT_IN_CATALOG` with no groups.
+
+A query no document matches answers `NOT_IN_CATALOG` with no groups.
+
+The search applies the `search_filters` keys the deployment's filter schema declares: each accepted filter reaches the template as `filters.<key>`, and a well-formed value no document has answers `NOT_IN_CATALOG`.
+
+A `search_filters` key the schema does not declare is refused with `UNIMPLEMENTED` on the field `search_filters.<key>`, and with no schema every key is.
+
+A value that breaks its key's rule in the schema is refused with `INVALID_ARGUMENT` on the field `search_filters.<key>`.
+
+Neither refusal quotes the value, and no search runs. Results that ignored a filter
+would answer a different question, so a filter is never dropped.
+
+A request that names URLs never reaches the index, so it works while the cluster is down.
+
+A failed search answers `TEMPORARILY_UNAVAILABLE` with no groups, and no Exchange is contacted.
+That covers a connection failure, a timeout, a refused request, a template the
+cluster cannot render, a missing index, an unreadable answer, a timed-out or
+partial result, a redirect, an answer over 1 MiB, and a hit with no usable URL at
+`BROKER_ES_HIT_URL_PATH`: a result that may be incomplete is not an answer. The
+search is never retried, because the agent can retry. The cause is on the
+`broker.resolve.query_search_failed` log line ([`RUNBOOK.md`](RUNBOOK.md) §2.2).
+
+#### The boot probe
+
+At start-up the Broker renders the template once without searching
+(`_render/template`), then runs it once with a limit of one, both with a fixed
+query text. Both need only the `read` privilege.
+
+| Outcome | What the Broker does |
+|---|---|
+| Both calls succeed | Starts, and logs `broker.es.ready`. |
+| The cluster refuses the credentials (`401` or `403`) | **Refuses to start**, naming the credential settings. These are your own settings, and waiting does not fix them. |
+| The stored template is missing, the template does not render as a JSON object, or the index is missing (`404` or `400`) | Starts, and logs `broker.es.misconfigured`. |
+| The probe's search returns a hit with no URL at `BROKER_ES_HIT_URL_PATH` | Starts, and logs `broker.es.misconfigured` naming the path. |
+| No answer, a timeout or a server error | Starts, and logs `broker.es.unreachable`. |
+
+The middle rows can be the index owner's side, so they do not stop the Broker. An
+outage of the index must not take requests that name URLs, or purchases, down with
+it. Queries answer `TEMPORARILY_UNAVAILABLE` until it heals, and nothing needs a
+restart. The probe's query rarely matches anything, so a broken hit path can also
+first show on a real query.
+
+A node that has just restarted can answer `401` for a few seconds while it recovers,
+so a Broker started in that window refuses to start. Run it under a restart policy,
+as the deployment bundle does, and the next attempt succeeds.

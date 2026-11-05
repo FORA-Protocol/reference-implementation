@@ -520,8 +520,8 @@ run "data_volume_absent_by_default" {
   # one() of an empty list is null and is known at plan time, so this is the
   # one side of the output wiring a plan can check.
   assert {
-    condition     = output.data_volume_id == null
-    error_message = "data_volume_id must be null when there is no data volume"
+    condition     = output.data_volume_id == null && output.data_volume_name == null
+    error_message = "data_volume_id and data_volume_name must be null when there is no data volume"
   }
 }
 
@@ -562,6 +562,11 @@ run "data_volume_is_durable_when_sized" {
   assert {
     condition     = aws_ebs_volume.data[0].tags["Name"] == "fora-test-data"
     error_message = "The data volume's Name tag must derive from name_prefix"
+  }
+
+  assert {
+    condition     = output.data_volume_name == aws_ebs_volume.data[0].tags["Name"]
+    error_message = "data_volume_name must be the volume's own Name tag, the tag a snapshot policy selects it by"
   }
 
   assert {

@@ -60,6 +60,22 @@ func RunTigerBeetleMain(m *testing.M, assign func(*SharedTigerBeetle)) int {
 	return m.Run()
 }
 
+// RunElasticsearchMain brings up one shared Elasticsearch node for a package's
+// test binary, hands the handle to assign, runs the suite, and returns the exit
+// code. The caller wraps it in os.Exit so the terminate defer runs.
+func RunElasticsearchMain(m *testing.M, assign func(*SharedElasticsearch)) int {
+	ctx := context.Background()
+	shared, cleanup, err := StartSharedElasticsearch(ctx, DiscardLogger())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "start shared elasticsearch: %v\n", err)
+		return 1
+	}
+	defer cleanup()
+
+	assign(shared)
+	return m.Run()
+}
+
 // PostgresVaultMain configures RunPostgresVaultMain.
 type PostgresVaultMain struct {
 	// Migrations, MigrationsDir, and MigrationsTable locate the schema applied to

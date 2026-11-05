@@ -147,7 +147,6 @@ func loadConfig(ctx context.Context, logger *slog.Logger) (app.Config, error) {
 		Deployment:    deploymentFromEnv(),
 		Pages:         fetcher,
 		Detector:      detectorAdapter{detector},
-		SupportEmail:  runhttp.EnvOr("CONSOLE_SUPPORT_EMAIL", ""),
 		DefaultRate:   runhttp.EnvOr("CONSOLE_DEFAULT_RATE", ""),
 	}, nil
 }
@@ -275,6 +274,7 @@ func deploymentFromEnv() setup.Deployment {
 		EdgeReleaseRef: runhttp.EnvOr("CONSOLE_EDGE_RELEASE_REF", ""),
 		EdgePackageDir: runhttp.EnvOr("CONSOLE_EDGE_PACKAGE_DIR", ""),
 		ExchangeWBAURL: runhttp.EnvOr("CONSOLE_EXCHANGE_WBA_URL", ""),
+		SupportEmail:   runhttp.EnvTrimmed("CONSOLE_SUPPORT_EMAIL"),
 	}
 }
 

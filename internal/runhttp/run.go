@@ -34,15 +34,26 @@ func EnvOrFile(key string) (string, error) {
 	if v := EnvOr(key, ""); v != "" {
 		return v, nil
 	}
-	path := EnvOr(key+"_FILE", "")
-	if path == "" {
-		return "", nil
-	}
-	data, err := os.ReadFile(path) //nolint:gosec // operator-controlled secret path, same trust as the env var it replaces
+	data, err := EnvFile(key + "_FILE")
 	if err != nil {
-		return "", fmt.Errorf("%s_FILE: %w", key, err)
+		return "", err
 	}
 	return strings.TrimSpace(string(data)), nil
+}
+
+// EnvFile returns the bytes of the file the environment variable key names, or
+// nil when key is unset. A file that is named and unreadable is an error naming
+// key and the path, never the content.
+func EnvFile(key string) ([]byte, error) {
+	path := EnvOr(key, "")
+	if path == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // operator-controlled path, same trust as the env var naming it
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", key, err)
+	}
+	return data, nil
 }
 
 // EnvOr returns os.Getenv(key) if set, otherwise fallback.

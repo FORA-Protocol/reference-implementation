@@ -31,7 +31,7 @@ func TestConsole_DomainPageShowsWhatTheDomainIsRegisteredWith(t *testing.T) {
 // question. The Exchange is not asked to re-read the document and the site is
 // not asked anything.
 func TestConsole_OpeningTheDomainPageAsksNothing(t *testing.T) {
-	asked := make(chan string, 8)
+	asked := make(chan probeAsked, 8)
 	f := startConsole(t, verifiedClaims(), withPages(recordingProber{asked: asked}))
 	f.signIn(t)
 	addDomain(t, f)
@@ -48,7 +48,7 @@ func TestConsole_OpeningTheDomainPageAsksNothing(t *testing.T) {
 }
 
 // drain empties a recorder between the setup and what a test is about.
-func drain(c chan string) {
+func drain(c chan probeAsked) {
 	for {
 		select {
 		case <-c:

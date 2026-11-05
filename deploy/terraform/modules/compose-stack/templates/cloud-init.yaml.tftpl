@@ -109,6 +109,42 @@ write_files:
     encoding: b64
     content: ${base64encode("[default]\naws_access_key_id = ${query_discovery.aws_access_key_id}\naws_secret_access_key = ${query_discovery.aws_secret_access_key}\n")}
 %{ endif ~}
+%{ if elasticsearch_search != null ~}
+  # The Broker's read-only key for the Elasticsearch index. In the Broker's own
+  # key directory, so no other service can read it.
+  - path: /opt/fora/keys/broker/es-api-key
+    permissions: "0600"
+    encoding: b64
+    content: ${base64encode(elasticsearch_search.api_key)}
+%{ if elasticsearch_search.ca_pem != null ~}
+  # The CA the index's certificate chains to. Public, and the only root the
+  # Broker trusts for this connection.
+  - path: /opt/fora/keys/broker/es-ca.pem
+    permissions: "0644"
+    encoding: b64
+    content: ${base64encode(elasticsearch_search.ca_pem)}
+%{ endif ~}
+%{ if elasticsearch_search.template != null ~}
+  # The index owner's search template, which the Broker sends with every
+  # search. Public. Base64-delivered so the file holds the operator's bytes
+  # exactly: no line of it passes through YAML, or through the comment removal
+  # that makes the comment-free copy of this document.
+  - path: /opt/fora/keys/broker/es-search-template.mustache
+    permissions: "0644"
+    encoding: b64
+    content: ${base64encode(elasticsearch_search.template)}
+%{ endif ~}
+%{ if elasticsearch_search.filters_schema != null ~}
+  # The JSON Schema of the search_filters keys the template applies. Public:
+  # the Broker checks every request's filters against it, and the Identity
+  # Service, which mounts this one file, publishes it to agents.
+  # Base64-delivered for the same reason as the template.
+  - path: /opt/fora/keys/broker/es-search-filters.json
+    permissions: "0644"
+    encoding: b64
+    content: ${base64encode(elasticsearch_search.filters_schema)}
+%{ endif ~}
+%{ endif ~}
 %{ for wba_path, wba_body in static_wba_files }
   # The body of a pre-signed key directory, a public JWK Set (public keys
   # only, never private material), served byte for byte by Caddy at its

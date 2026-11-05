@@ -8,14 +8,15 @@ import (
 	"testing"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/catalogsearch"
 )
 
-// queryEnv sets the three query discovery settings and isolates the AWS
+// queryEnv sets the provider and its two llm settings, and isolates the AWS
 // configuration chain from the developer's machine: no shared config or
 // credentials file, and the region given (empty means none).
-func queryEnv(t *testing.T, sw, file, model, region string) {
+func queryEnv(t *testing.T, provider, file, model, region string) {
 	t.Helper()
-	t.Setenv(envQueryDiscovery, sw)
+	t.Setenv(envQueryProvider, provider)
 	t.Setenv(envQueryCatalogFile, file)
 	t.Setenv(envQueryModel, model)
 	t.Setenv(envQueryURIScheme, "")
@@ -39,17 +40,17 @@ func writeFeed(t *testing.T, content string) string {
 const validFeed = `{"domain":"music.example","path":"/a.mp3","terms":[],"ext":{"music.genre":"soundtrack"}}`
 
 func TestBuildQuerySearcherDisabled(t *testing.T) {
-	for _, sw := range []string{"", "off"} {
-		queryEnv(t, sw, "", "", "")
+	for _, provider := range []string{"", "none"} {
+		queryEnv(t, provider, "", "", "")
 		s, err := buildQuerySearcher(context.Background(), testutil.DiscardLogger())
 		if err != nil || s != nil {
-			t.Errorf("switch %q: searcher = %v, err = %v; want nil, nil", sw, s, err)
+			t.Errorf("provider %q: searcher = %v, err = %v; want nil, nil", provider, s, err)
 		}
 	}
 }
 
 func TestBuildQuerySearcherEnabled(t *testing.T) {
-	queryEnv(t, "on", writeFeed(t, validFeed), "amazon.nova-lite-v1:0", "us-east-1")
+	queryEnv(t, "llm", writeFeed(t, validFeed), "amazon.nova-lite-v1:0", "us-east-1")
 	s, err := buildQuerySearcher(context.Background(), testutil.DiscardLogger())
 	if err != nil || s == nil {
 		t.Fatalf("searcher = %v, err = %v; want a searcher", s, err)
@@ -60,41 +61,47 @@ func TestBuildQuerySearcherEnabled(t *testing.T) {
 func TestBuildQuerySearcherRefusesIncompleteConfig(t *testing.T) {
 	feed := writeFeed(t, validFeed)
 	cases := []struct {
-		name, sw, file, model, region string
-		want                          []string
+		name, provider, file, model, region string
+		want                                []string
 	}{
-		{"unknown switch value", "yes", feed, "m", "us-east-1", []string{envQueryDiscovery, `"yes"`}},
-		{"nothing configured", "on", "", "", "us-east-1", []string{envQueryCatalogFile, envQueryModel}},
-		{"no model", "on", feed, "", "us-east-1", []string{envQueryModel}},
-		{"missing file", "on", feed + ".absent", "m", "us-east-1", []string{envQueryCatalogFile, "absent"}},
-		{"invalid feed", "on", writeFeed(t, `{"domain":`), "m", "us-east-1", []string{envQueryCatalogFile}},
+		{"unknown provider", "yes", feed, "m", "us-east-1", []string{envQueryProvider, `"yes"`, "elasticsearch"}},
+		{"the retired switch value", "on", feed, "m", "us-east-1", []string{envQueryProvider, `"on"`}},
+		{"nothing configured", "llm", "", "", "us-east-1", []string{envQueryCatalogFile, envQueryModel}},
+		{"no model", "llm", feed, "", "us-east-1", []string{envQueryModel}},
+		{"missing file", "llm", feed + ".absent", "m", "us-east-1", []string{envQueryCatalogFile, "absent"}},
+		{"invalid feed", "llm", writeFeed(t, `{"domain":`), "m", "us-east-1", []string{envQueryCatalogFile}},
 		{
-			"no music records", "on", writeFeed(t, `{"domain":"d","path":"/p","terms":[]}`), "m", "us-east-1",
+			"no music records", "llm", writeFeed(t, `{"domain":"d","path":"/p","terms":[]}`), "m", "us-east-1",
 			[]string{envQueryCatalogFile, "music.*"},
 		},
-		{"no region", "on", feed, "m", "", []string{envQueryDiscovery, "AWS_REGION"}},
+		{"no region", "llm", feed, "m", "", []string{envQueryProvider, "AWS_REGION"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			queryEnv(t, tc.sw, tc.file, tc.model, tc.region)
+			queryEnv(t, tc.provider, tc.file, tc.model, tc.region)
 			s, err := buildQuerySearcher(context.Background(), testutil.DiscardLogger())
-			if err == nil || s != nil {
-				t.Fatalf("searcher = %v, err = %v; want a startup error", s, err)
-			}
-			for _, w := range tc.want {
-				if !strings.Contains(err.Error(), w) {
-					t.Errorf("error %q does not name %q", err, w)
-				}
-			}
+			assertBootRefusal(t, s, err, tc.want...)
 		})
 	}
 }
 
 func TestBuildQuerySearcherRefusesUnknownURIScheme(t *testing.T) {
-	queryEnv(t, "on", writeFeed(t, validFeed), "m", "us-east-1")
+	queryEnv(t, "llm", writeFeed(t, validFeed), "m", "us-east-1")
 	t.Setenv(envQueryURIScheme, "ftp")
 	s, err := buildQuerySearcher(context.Background(), testutil.DiscardLogger())
-	if err == nil || s != nil || !strings.Contains(err.Error(), envQueryURIScheme) {
-		t.Fatalf("searcher = %v, err = %v; want an error naming %s", s, err, envQueryURIScheme)
+	assertBootRefusal(t, s, err, envQueryURIScheme)
+}
+
+// assertBootRefusal fails unless the build refused to start, with an error that
+// names each of wants.
+func assertBootRefusal(t *testing.T, s catalogsearch.Searcher, err error, wants ...string) {
+	t.Helper()
+	if err == nil || s != nil {
+		t.Fatalf("searcher = %v, err = %v; want a startup error", s, err)
+	}
+	for _, w := range wants {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("error %q does not name %q", err, w)
+		}
 	}
 }

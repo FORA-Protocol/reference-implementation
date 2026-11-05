@@ -26,7 +26,7 @@ import (
 // case are unit-tested in src/broker/internal/tagsearch.
 //
 // Round-trip: signed Connect client -> RFC 9421 -> httpsig middleware ->
-// BrokerService handler (filter validation) -> resolve core (catalog search)
+// BrokerService handler -> resolve core (filter admission, then catalog search)
 // -> typed DiscoveryResponse or Connect error. Nothing is read below the RPC.
 //
 // queryFeed (in query_discovery_integration_test.go) holds:
@@ -75,6 +75,13 @@ func TestResolve_SearchFiltersWithoutMatchAreNotInCatalog(t *testing.T) {
 			extraction: tagsearch.Extraction{MaxBPM: &maxBPM},
 			filters:    map[string]any{"music.bpm_range": "100-"},
 		},
+		// The query alone matches tracks here, so an answer means the filter was
+		// dropped on the way to the index.
+		"a query that matches, with a filter no track passes": {
+			query:      "calm music",
+			extraction: tagsearch.Extraction{Include: []string{"mood:calm"}},
+			filters:    map[string]any{"music.genre": "funk"},
+		},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -120,9 +127,24 @@ func TestResolve_OnlyUnknownSearchFiltersAreInvalidArgument(t *testing.T) {
 	assertNothingSent(t, fx.wire)
 }
 
-// With query discovery switched off, search filters are refused. The Broker
-// must not answer through the search-provider fallback, which would ignore
-// them.
+// With no catalog search provider configured, a malformed fora-music-v1 value
+// is still the caller's fault: it is refused as INVALID_ARGUMENT on its key,
+// before the filters are refused for want of a search, and nothing is sent on.
+func TestResolve_MalformedSearchFilterIsInvalidArgumentWithoutCatalogSearch(t *testing.T) {
+	fx := newSinkFixture(t, context.Background(), fixtureOpts{providerDomain: "acme.example"})
+
+	err := signedResolveFault(t, fx,
+		filterRequest(t, reqOpts{query: "calm music", budgetMinor: 10000}, map[string]any{"music.bpm_range": "fast"}))
+
+	assertConnectCodeLocal(t, err, connect.CodeInvalidArgument)
+	assertBrokerErrorField(t, err, "field", "search_filters.music.bpm_range")
+	assertNothingSent(t, fx.wire)
+}
+
+// With no catalog search provider configured, a fora-music-v1 filter is refused.
+// The Broker must not answer through the search-provider fallback, which would
+// ignore it. The Elasticsearch provider, whose vocabulary is the deployment's
+// schema, is covered in query_elasticsearch_integration_test.go.
 func TestResolve_SearchFiltersWithoutCatalogSearchAreUnimplemented(t *testing.T) {
 	fx := newSinkFixture(t, context.Background(), fixtureOpts{providerDomain: "acme.example"})
 
@@ -132,4 +154,36 @@ func TestResolve_SearchFiltersWithoutCatalogSearchAreUnimplemented(t *testing.T)
 	assertConnectCodeLocal(t, err, connect.CodeUnimplemented)
 	assertBrokerErrorField(t, err, "field", "search_filters")
 	assertNothingSent(t, fx.wire)
+}
+
+// With no catalog search provider configured, a key the fora-music-v1 profile
+// does not define is ignored, as the profile's order of checks says: it is no
+// filter, so it is never refused for want of a search. Beside a query the request
+// goes on as if the key were not there and reaches the Exchange, which answers
+// 503 here; the arrival is what shows the Broker did not stop. Alone, the key
+// leaves the request with no search input at all.
+func TestResolve_KeyOutsideTheMusicProfileIsIgnoredWithoutCatalogSearch(t *testing.T) {
+	ignored := map[string]any{"news.language": "en"}
+
+	t.Run("beside a query", func(t *testing.T) {
+		fx := newFixture(t, context.Background(), fixtureOpts{
+			providerDomain: "acme.example", upstream: startUnavailableExchange(t),
+		})
+
+		resolveWithFilters(t, fx, filterRequest(t, reqOpts{query: "FORA intro", budgetMinor: 10000}, ignored))
+
+		if fx.wire.arrivals() == 0 {
+			t.Error("the query did not reach the Exchange: the key was refused or applied, not ignored")
+		}
+	})
+
+	t.Run("alone", func(t *testing.T) {
+		fx := newSinkFixture(t, context.Background(), fixtureOpts{providerDomain: "acme.example"})
+
+		err := signedResolveFault(t, fx, filterRequest(t, reqOpts{budgetMinor: 10000}, ignored))
+
+		assertConnectCodeLocal(t, err, connect.CodeInvalidArgument)
+		assertBrokerErrorField(t, err, "required_one_of", "query,uri,search_filters")
+		assertNothingSent(t, fx.wire)
+	})
 }

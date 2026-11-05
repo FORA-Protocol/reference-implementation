@@ -1,11 +1,8 @@
 package setup_test
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -41,12 +38,12 @@ func TestCloudflarePackageNeedsNothingFilledIn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := setup.NewEdgePackages(setuptest.ReleaseDir(t))
+	p := packagesIn(setuptest.ReleaseDir(t))
 	pkg, err := p.For(setup.Site{Domain: "www.publisher.example", CDN: "cloudflare"}, settings())
 	if err != nil {
 		t.Fatal(err)
 	}
-	entries := entriesOf(t, pkg.Body)
+	entries := setuptest.Entries(t, pkg.Body)
 	if _, ok := entries["fora-worker.mjs"]; !ok {
 		t.Fatalf("the package holds no worker: %v", keysOf(entries))
 	}
@@ -76,7 +73,7 @@ func TestCloudflarePackageNeedsNothingFilledIn(t *testing.T) {
 // worker, never the worker.
 func TestTheWorkerIsTheSameForEveryPublisher(t *testing.T) {
 	t.Parallel()
-	p := setup.NewEdgePackages(setuptest.ReleaseDir(t))
+	p := packagesIn(setuptest.ReleaseDir(t))
 	first, err := p.For(setup.Site{Domain: "a.example", CDN: "cloudflare"}, settings())
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +83,7 @@ func TestTheWorkerIsTheSameForEveryPublisher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, b := entriesOf(t, first.Body), entriesOf(t, second.Body)
+	a, b := setuptest.Entries(t, first.Body), setuptest.Entries(t, second.Body)
 	if a["fora-worker.mjs"] != b["fora-worker.mjs"] {
 		t.Fatal("two publishers were handed different workers")
 	}
@@ -105,14 +102,14 @@ func TestTheWorkerIsTheSameForEveryPublisher(t *testing.T) {
 // setting the same way, so one is enough.
 func TestTheProjectFileKeepsAPublishersValuesAsValues(t *testing.T) {
 	t.Parallel()
-	p := setup.NewEdgePackages(setuptest.ReleaseDir(t))
+	p := packagesIn(setuptest.ReleaseDir(t))
 	hostile := "/paid/\"\nadmin = true\nx = \""
 	pkg, err := p.For(setup.Site{Domain: "a.example", CDN: "cloudflare"},
 		map[string]string{"LICENSED_PATHS_JSON": hostile})
 	if err != nil {
 		t.Fatal(err)
 	}
-	toml := entriesOf(t, pkg.Body)["wrangler.toml"]
+	toml := setuptest.Entries(t, pkg.Body)["wrangler.toml"]
 	encoded, err := json.Marshal(hostile)
 	if err != nil {
 		t.Fatal(err)
@@ -136,14 +133,14 @@ func TestLambdaCarriesItsSettingsBesideTheReleaseBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := setup.NewEdgePackages(dir)
+	p := packagesIn(dir)
 	pkg, err := p.For(setup.Site{Domain: "www.publisher.example", CDN: "cloudfront"}, settings())
 	if err != nil {
 		t.Fatal(err)
 	}
-	entries := entriesOf(t, pkg.Body)
-	if got := keysOf(entries); !slices.Equal(got, []string{"index.mjs", "lambda-edge.mjs"}) {
-		t.Fatalf("the package holds %v, want the entry and the release bundle", got)
+	entries := setuptest.Entries(t, pkg.Body)
+	if got := keysOf(entries); !slices.Equal(got, []string{"README.md", "index.mjs", "lambda-edge.mjs"}) {
+		t.Fatalf("the package holds %v, want its README, the entry and the release bundle", got)
 	}
 	if entries["lambda-edge.mjs"] != string(release) {
 		t.Fatal("the release bundle in the package is not the release bundle")
@@ -163,7 +160,7 @@ func TestLambdaCarriesItsSettingsBesideTheReleaseBundle(t *testing.T) {
 // edge has not run.
 func TestLambdaEntryIsTheReleaseEntry(t *testing.T) {
 	t.Parallel()
-	p := setup.NewEdgePackages(setuptest.ReleaseDir(t))
+	p := packagesIn(setuptest.ReleaseDir(t))
 	pkg, err := p.For(setup.Site{Domain: "www.publisher.example", CDN: "cloudfront"}, settings())
 	if err != nil {
 		t.Fatal(err)
@@ -172,7 +169,7 @@ func TestLambdaEntryIsTheReleaseEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := entriesOf(t, pkg.Body)["index.mjs"]; got != string(want) {
+	if got := setuptest.Entries(t, pkg.Body)["index.mjs"]; got != string(want) {
 		t.Fatalf("the package's index.mjs is not the release entry:\n%s", got)
 	}
 }
@@ -182,14 +179,14 @@ func TestLambdaEntryIsTheReleaseEntry(t *testing.T) {
 // the second deploy would take over the first site's Worker.
 func TestTwoSitesInOneAccountDeployTwoWorkers(t *testing.T) {
 	t.Parallel()
-	p := setup.NewEdgePackages(setuptest.ReleaseDir(t))
+	p := packagesIn(setuptest.ReleaseDir(t))
 	names := map[string]string{}
 	for _, domain := range []string{"a.example", "b.example"} {
 		pkg, err := p.For(setup.Site{Domain: domain, CDN: "cloudflare"}, settings())
 		if err != nil {
 			t.Fatal(err)
 		}
-		toml := entriesOf(t, pkg.Body)["wrangler.toml"]
+		toml := setuptest.Entries(t, pkg.Body)["wrangler.toml"]
 		want := `name = "` + edgerelease.WorkerName(domain) + `"`
 		if !strings.Contains(toml, want) {
 			t.Fatalf("%s: the project file does not say %s:\n%s", domain, want, toml)
@@ -208,14 +205,14 @@ func TestTwoSitesInOneAccountDeployTwoWorkers(t *testing.T) {
 // never part of the program.
 func TestLambdaPackageKeepsAPublishersValuesAsValues(t *testing.T) {
 	t.Parallel()
-	p := setup.NewEdgePackages(setuptest.ReleaseDir(t))
+	p := packagesIn(setuptest.ReleaseDir(t))
 	hostile := `/paid/"};globalThis.stolen=1;Object.assign(process.env,{"x":"`
 	pkg, err := p.For(setup.Site{Domain: "a.example", CDN: "cloudfront"},
 		map[string]string{"LICENSED_PATHS_JSON": hostile})
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := entriesOf(t, pkg.Body)["index.mjs"]
+	body := setuptest.Entries(t, pkg.Body)["index.mjs"]
 	// Held against what the encoder produces, not against a substring. Both
 	// looser checks fail here for the same reason and in opposite directions:
 	// the escaped form CONTAINS the unescaped one, and the hostile value
@@ -240,7 +237,7 @@ func TestLambdaPackageKeepsAPublishersValuesAsValues(t *testing.T) {
 // registered is already normalized, so refusing anything else costs nothing.
 func TestADomainThatIsNotNormalizedGetsNoPackage(t *testing.T) {
 	t.Parallel()
-	p := setup.NewEdgePackages(setuptest.ReleaseDir(t))
+	p := packagesIn(setuptest.ReleaseDir(t))
 	for _, domain := range []string{
 		"a.example\nglobalThis.stolen = 1;",
 		"a.example\r\nadmin = true",
@@ -263,10 +260,10 @@ func TestADomainThatIsNotNormalizedGetsNoPackage(t *testing.T) {
 // publisher's fault and must not look like a broken download.
 func TestADeploymentWithoutPackagesSaysSo(t *testing.T) {
 	t.Parallel()
-	if setup.NewEdgePackages("").Available() {
+	if packagesIn("").Available() {
 		t.Fatal("a deployment with no package directory reported packages")
 	}
-	_, err := setup.NewEdgePackages("").For(setup.Site{CDN: "cloudflare"}, nil)
+	_, err := packagesIn("").For(setup.Site{CDN: "cloudflare"}, nil)
 	if err == nil {
 		t.Fatal("asking for a package succeeded where none are shipped")
 	}
@@ -276,34 +273,17 @@ func TestADeploymentWithoutPackagesSaysSo(t *testing.T) {
 // a Cloudflare worker would be worse than handing over nothing.
 func TestFastlyIsHandedNoPackage(t *testing.T) {
 	t.Parallel()
-	_, err := setup.NewEdgePackages(setuptest.ReleaseDir(t)).
+	_, err := packagesIn(setuptest.ReleaseDir(t)).
 		For(setup.Site{Domain: "a.example", CDN: "fastly"}, settings())
 	if err == nil {
 		t.Fatal("a network we ship no package for was handed one")
 	}
 }
 
-// entriesOf reads every file out of a package.
-func entriesOf(t *testing.T, raw []byte) map[string]string {
-	t.Helper()
-	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
-	if err != nil {
-		t.Fatalf("the package is not a zip: %v", err)
-	}
-	out := make(map[string]string, len(zr.File))
-	for _, f := range zr.File {
-		rc, err := f.Open()
-		if err != nil {
-			t.Fatal(err)
-		}
-		body, err := io.ReadAll(rc)
-		_ = rc.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		out[f.Name] = string(body)
-	}
-	return out
+// packagesIn is the packages of a deployment that keeps them in dir, with no
+// support address.
+func packagesIn(dir string) *setup.EdgePackages {
+	return setup.NewEdgePackages(setup.Deployment{EdgePackageDir: dir})
 }
 
 func keysOf(m map[string]string) []string {
@@ -394,6 +374,24 @@ func TestNoScopeGatesTheWholeSite(t *testing.T) {
 	}
 }
 
+// TestTheReadmeNamesTheExchangeThePackageIsBuiltFor goes through the bundle,
+// which writes the package's settings from the deployment, so the README's
+// Exchange line is read back from the settings production writes rather than
+// from a map a test wrote. If the two ever named the setting differently, the
+// line would be left out without an error.
+func TestTheReadmeNamesTheExchangeThePackageIsBuiltFor(t *testing.T) {
+	t.Parallel()
+	b := packagingBuilder(t)
+	for _, network := range []string{"cloudflare", "cloudfront"} {
+		site := setup.Site{Domain: "www.publisher.example", PublisherID: "pub_1", CDN: network}
+		readme := packageFile(t, b, site, "README.md")
+		if got := setuptest.ReadmeItems(t, readme, "## Your values")["Exchange"]; got != "https://exchange.example" {
+			t.Fatalf("%s: the README gives the exchange as %q, not the one the package is built for:\n%s",
+				network, got, readme)
+		}
+	}
+}
+
 func packagingBuilder(t *testing.T) *setup.Builder {
 	t.Helper()
 	return setup.NewBuilder(setup.Deployment{
@@ -411,7 +409,7 @@ func packageFile(t *testing.T, b *setup.Builder, s setup.Site, name string) stri
 	}
 	for _, f := range bundle.Files {
 		if f.Name == setup.FileCloudflarePackage || f.Name == setup.FileLambdaPackage {
-			return entriesOf(t, f.Body)[name]
+			return setuptest.Entries(t, f.Body)[name]
 		}
 	}
 	t.Fatalf("no package in the bundle for %s", s.CDN)

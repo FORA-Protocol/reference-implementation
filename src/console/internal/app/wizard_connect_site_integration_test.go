@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/cdn"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/pagefetch"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/setupsteps"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/app"
 )
 
@@ -98,12 +100,12 @@ func TestConsole_TellsTheSitesAnswersApart(t *testing.T) {
 // its own https address would never reach such a site. Once the package has
 // answered, the check also asks for the discovery document on the same site.
 func TestConsole_TheCheckAsksTheLicensedPath(t *testing.T) {
-	asked := make(chan string, 4)
+	asked := make(chan probeAsked, 4)
 	askTheSite(t, recordingProber{asked: asked}, false)
 
 	var asks []string
 	for len(asked) > 0 {
-		asks = append(asks, <-asked)
+		asks = append(asks, (<-asked).url)
 	}
 	want := []string{
 		// As an agent, then as an ordinary visitor, at the licensed path.
@@ -117,12 +119,85 @@ func TestConsole_TheCheckAsksTheLicensedPath(t *testing.T) {
 	}
 }
 
+// TestConsole_ThePackageInstructionsCheckWhatTheConsoleChecks holds the checks
+// the written instructions give to the questions the last step's check asks
+// the site itself. The instructions travel in each package and are read where
+// the console is not open. A question the console asks that they leave out is
+// one nobody asks there, and a check they add tests something the domain's
+// verification never looks at.
+//
+// One leg goes through the console's own check route to the site; the other
+// is the network's edge step as the onboarding steps carry it, compiled in.
+// The two lists are compared position by position: the same client, by the
+// first word of its user agent, at the same kind of address (a page, or the
+// discovery document), on the same site.
+func TestConsole_ThePackageInstructionsCheckWhatTheConsoleChecks(t *testing.T) {
+	for _, network := range cdn.SelfServe() {
+		t.Run(string(network), func(t *testing.T) {
+			asked := make(chan probeAsked, 8)
+			askTheSite(t, recordingProber{asked: asked}, false, withDetector(newStubDetector(network)))
+			var console []siteQuestion
+			for len(asked) > 0 {
+				console = append(console, questionAsked(<-asked))
+			}
+			var written []siteQuestion
+			for _, c := range setupsteps.EdgeStep(network, "stoa.example").Checks() {
+				written = append(written, questionWritten(t, c.Run))
+			}
+			if len(console) == 0 || !slices.Equal(console, written) {
+				t.Fatalf("the console asked %+v,\nthe instructions check %+v", console, written)
+			}
+		})
+	}
+}
+
+// siteQuestion is one question put to the publisher's site: who asks, by the
+// first word of the user agent; whether it asks for the discovery document or
+// for a page; and which site.
+type siteQuestion struct {
+	client   string
+	document bool
+	host     string
+}
+
+// questionAsked is the question one of the console's requests put.
+func questionAsked(p probeAsked) siteQuestion {
+	client, _, _ := strings.Cut(p.userAgent, " ")
+	return siteQuestion{client: client, document: atDocument(p.url), host: hostOf(p.url)}
+}
+
+// questionWritten is the question one written curl command puts: its -A value
+// and the https address it asks.
+func questionWritten(t *testing.T, run string) siteQuestion {
+	t.Helper()
+	fields := strings.Fields(strings.ReplaceAll(run, "\\\n", " "))
+	var q siteQuestion
+	for i, f := range fields {
+		switch {
+		case f == "-A" && i+1 < len(fields):
+			q.client = strings.Trim(fields[i+1], `"'`)
+		case strings.HasPrefix(f, "https://"):
+			q.document, q.host = atDocument(f), hostOf(f)
+		}
+	}
+	if q.client == "" || q.host == "" {
+		t.Fatalf("cannot read who asks, and where, out of %q", run)
+	}
+	return q
+}
+
 // recordingProber is a site with the package in front of it, which records
-// every address it was asked at. It reads sites over plain http, so the
-// address it was asked at shows whose scheme it carries.
+// every request it was sent: the address, and the user agent it was sent
+// under. It reads sites over plain http, so the address it was asked at shows
+// whose scheme it carries.
 type recordingProber struct {
 	stubPageReader
-	asked chan string
+	asked chan probeAsked
+}
+
+// probeAsked is one request the console sent the site.
+type probeAsked struct {
+	url, userAgent string
 }
 
 func (p recordingProber) SiteURL(domain, path string) string {
@@ -131,7 +206,7 @@ func (p recordingProber) SiteURL(domain, path string) string {
 
 func (p recordingProber) ProbeAs(_ context.Context, rawURL, userAgent string) (pagefetch.Probe, error) {
 	select {
-	case p.asked <- rawURL:
+	case p.asked <- probeAsked{url: rawURL, userAgent: userAgent}:
 	default:
 	}
 	if asAgent(userAgent) && !atDocument(rawURL) {
@@ -141,8 +216,9 @@ func (p recordingProber) ProbeAs(_ context.Context, rawURL, userAgent string) (p
 }
 
 // TestConsole_SaysWhatAnOrdinaryVisitorGets covers the second question the
-// check asks, which the written instructions used to hand to the publisher as a
-// curl command.
+// check asks. The console asks it for a signed-in publisher; the instructions
+// in each package write it as a curl command for whoever deploys without the
+// console open.
 //
 // The package is meant to leave people and search crawlers alone, so a refusal
 // here is the failure that costs a publisher readers. What matters is that the
@@ -246,10 +322,11 @@ func TestConsole_SaysWhatAnAgentGetsAtTheDiscoveryAddress(t *testing.T) {
 // askTheSite saves stoa.example with its terms on a console whose site reader
 // answers as reader does, publishes the discovery document the Exchange
 // accepts when publish is set, and returns what the last step's check
-// answered.
-func askTheSite(t *testing.T, reader app.SiteReader, publish bool) map[string]any {
+// answered. opts tune the console further, such as the network its lookup
+// reports.
+func askTheSite(t *testing.T, reader app.SiteReader, publish bool, opts ...option) map[string]any {
 	t.Helper()
-	f := startConsole(t, verifiedClaims(), withPages(reader))
+	f := startConsole(t, verifiedClaims(), append([]option{withPages(reader)}, opts...)...)
 	f.signIn(t)
 	f.walkToConnect(t)
 	if publish {

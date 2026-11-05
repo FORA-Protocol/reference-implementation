@@ -390,6 +390,7 @@ def sdk_broker_client(
     before_sign: BeforeSign | None = None,
     http: httpx.Client | None = None,
     request_id: RequestID | None = None,
+    broker_url: str | None = None,
 ) -> BrokerClient:
     """The SDK client for the Broker: Resolve to discover, ExecuteTransaction to buy.
 
@@ -400,10 +401,12 @@ def sdk_broker_client(
     before the SDK signs it, so the altered bytes still carry a valid signature;
     ``http`` replaces the client the SDK sends through, so a transport can alter a
     request after it was signed (see ``after_signing``). ``request_id`` mints the
-    X-Request-ID every call carries; without it the SDK sends none.
+    X-Request-ID every call carries; without it the SDK sends none. ``broker_url``
+    addresses another Broker of the stack than ``stack.broker``: ``None`` means
+    ``stack.broker``, and any other value, an empty one included, is used as given.
     """
     config = _agent_config(
-        stack.broker,
+        broker_url if broker_url is not None else stack.broker,
         agent_id,
         _signer(key_path, signer),
         verifier if verifier is not None else stack_offer_verifier(),

@@ -171,6 +171,39 @@ func TestTheProjectFilesOfTwoDomainsNameTwoWorkers(t *testing.T) {
 	}
 }
 
+// TestTheRouteCoversTheHostnameInItsOwnZone: the Worker is attached to the
+// whole hostname, in the zone Cloudflare holds that hostname in, which for a
+// name under a two-label suffix is not simply the last two labels.
+func TestTheRouteCoversTheHostnameInItsOwnZone(t *testing.T) {
+	t.Parallel()
+	for domain, want := range map[string]edgerelease.Route{
+		"www.publisher.example": {Pattern: "www.publisher.example/*", Zone: "publisher.example"},
+		"news.stoa-press.co.uk": {Pattern: "news.stoa-press.co.uk/*", Zone: "stoa-press.co.uk"},
+	} {
+		got, err := edgerelease.WorkerRoute(domain)
+		if err != nil {
+			t.Fatalf("%s: %v", domain, err)
+		}
+		if got != want {
+			t.Fatalf("%s: route %+v, want %+v", domain, got, want)
+		}
+	}
+}
+
+// TestNoRouteForAHostnameWithNoZone: a public suffix is not a zone anybody
+// holds, so there is no route to write and no project file either.
+func TestNoRouteForAHostnameWithNoZone(t *testing.T) {
+	t.Parallel()
+	for _, domain := range []string{"co.uk", "example"} {
+		if route, err := edgerelease.WorkerRoute(domain); err == nil {
+			t.Errorf("%s: a route was worked out: %+v", domain, route)
+		}
+		if _, err := edgerelease.WranglerConfig(domain, "fora-worker.mjs", nil); err == nil {
+			t.Errorf("%s: a project file was written", domain)
+		}
+	}
+}
+
 // TestTheLambdaEntryKeepsValuesAsValues: a value that looks like markup or
 // like one of the template's own placeholders is written as the string it is.
 func TestTheLambdaEntryKeepsValuesAsValues(t *testing.T) {

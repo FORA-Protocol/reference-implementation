@@ -3,6 +3,7 @@
 package mcp_test
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,9 +14,9 @@ import (
 
 // Filters reach the Broker exactly as the agent wrote them, with no query and no
 // URIs. The values cover each JSON type a profile uses — a string, a boolean
-// false, an array — plus a key no profile defines. This service keeps no list of
-// keys, so it must not drop the unknown one or the false value: the Broker is
-// the one that decides what they mean.
+// false, an array — plus a key no profile defines. Without a filter schema this
+// service keeps no list of keys, so it must not drop the unknown one or the false
+// value: the Broker is the one that decides what they mean.
 func TestDiscover_ForwardsSearchFiltersUnchanged(t *testing.T) {
 	f := newFixture(t)
 	a := f.provision(t, "dev-one")
@@ -39,6 +40,40 @@ func TestDiscover_ForwardsSearchFiltersUnchanged(t *testing.T) {
 	}
 	if sent.Query != nil || len(sent.GetUris()) != 0 {
 		t.Errorf("request carries query=%v uris=%v, want neither", sent.Query, sent.GetUris())
+	}
+}
+
+// The tool text is the only place an agent learns what a search does with its
+// arguments, and that depends on the deployment: a Broker whose search applies no
+// filters refuses them, and a keyword search does not read a sentence. A
+// deployment with no filter schema publishes no list of keys in the input schema,
+// so the text is where the fora-music-v1 keys stay, and search_filters stays an
+// object that takes any key.
+func TestDiscover_WithoutASchemaKeepsTheMusicText(t *testing.T) {
+	f := newFixture(t)
+	a := f.provision(t, "dev-one")
+
+	tool := listedTool(t, f.connect(t, a.Token), "fora_discover")
+
+	for _, want := range []string{
+		"Whether the Broker applies search_filters depends on its configured catalog search",
+		"refuses the request as unimplemented",
+		"match the query's keywords and do not interpret it",
+		"With the tag-based search and a query",
+		"ignored by the tag-based search, and by a Broker with no catalog search",
+		"fora-music-v1 keys: music.isrc",
+	} {
+		if !strings.Contains(tool.Description, want) {
+			t.Errorf("fora_discover description lacks %q: %q", want, tool.Description)
+		}
+	}
+	var property map[string]any
+	if err := json.Unmarshal(listedFilterProperty(t, tool), &property); err != nil {
+		t.Fatalf("decode the listed search_filters property: %v", err)
+	}
+	_, declared := property["properties"]
+	if property["type"] != "object" || declared || property["additionalProperties"] == false {
+		t.Errorf("search_filters = %v, want an object that takes any key", property)
 	}
 }
 

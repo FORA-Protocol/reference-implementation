@@ -1,0 +1,132 @@
+# The Broker's elasticsearch catalog search provider. It is this deployment's
+# choice of engine, not a protocol rule, so these are DECISION entries citing the
+# operator documentation. The provider-neutral rules (a search filter is a required
+# constraint, explicit URIs win) stay on the fora-music-v1 entries in catalog.yaml.
+
+- id: ESMODE-001
+  title: A query on the elasticsearch provider returns the template's URLs in its order, stamped SEARCH
+  level: DECISION
+  actor: broker
+  surface: sdk
+  source:
+    cite: src/broker/CONFIGURATION.md
+    quote: >-
+      With `BROKER_QUERY_PROVIDER=elasticsearch`, a query returns one group per URL the
+      search template matched, in the order the template ranks them, and every group is
+      stamped `DISCOVERY_METHOD_SEARCH`.
+  positive: >-
+    A query for one title returns that article first, ahead of the articles that only
+    mention it, each group stamped SEARCH and carrying verified offers from the Exchange
+    its publisher's fora.json names.
+  negative: []
+
+- id: ESMODE-002
+  title: A hit the Exchange does not hold gets no offer
+  level: DECISION
+  actor: broker
+  surface: sdk
+  source:
+    cite: src/broker/CONFIGURATION.md
+    quote: >-
+      A document whose URL the Exchange does not hold gets no offer: beside hits that
+      have offers, its group comes back empty with the reason `NOT_IN_CATALOG`, and when
+      no hit has an offer, the whole answer is `NOT_IN_CATALOG` with no groups.
+  positive: >-
+    A query matching the stale document and a catalog article returns the stale URL's
+    group, stamped SEARCH, with no offer and the reason NOT_IN_CATALOG, beside the
+    article's offers. A query matching only the stale document answers NOT_IN_CATALOG
+    with no groups.
+  negative: []
+
+- id: ESMODE-003
+  title: A query no document matches is NOT_IN_CATALOG
+  level: DECISION
+  actor: broker
+  surface: sdk
+  source:
+    cite: src/broker/CONFIGURATION.md
+    quote: >-
+      A query no document matches answers `NOT_IN_CATALOG` with no groups.
+  positive: A query for words no document holds answers NOT_IN_CATALOG with no groups.
+  negative: []
+
+- id: ESMODE-004
+  title: The elasticsearch provider applies the filter keys the deployment declares
+  level: DECISION
+  actor: broker
+  surface: sdk
+  source:
+    cite: src/broker/CONFIGURATION.md
+    quote: >-
+      The search applies the `search_filters` keys the deployment's filter schema
+      declares: each accepted filter reaches the template as `filters.<key>`, and a
+      well-formed value no document has answers `NOT_IN_CATALOG`.
+  positive: >-
+    A query with "news.language" returns only the matches in that language, and with
+    "news.date_published_after" only those published from that instant on. A filter with
+    no query returns every document that passes it. A well-formed language no document
+    has answers NOT_IN_CATALOG with no groups.
+  negative: []
+
+- id: ESMODE-005
+  title: A named URL never reaches the index, so it works while the cluster is down
+  level: DECISION
+  actor: broker
+  surface: sdk
+  source:
+    cite: src/broker/CONFIGURATION.md
+    quote: >-
+      A request that names URLs never reaches the index, so it works while the cluster
+      is down.
+  positive: >-
+    A request naming a catalog URL gets its offer with the method EXCHANGE, the query
+    and the filters it also carries are not used, and the same holds with Elasticsearch
+    stopped.
+  negative: []
+
+- id: ESMODE-006
+  title: A failed search answers TEMPORARILY_UNAVAILABLE and no other engine is tried
+  level: DECISION
+  actor: broker
+  surface: sdk
+  source:
+    cite: src/broker/CONFIGURATION.md
+    quote: >-
+      A failed search answers `TEMPORARILY_UNAVAILABLE` with no groups, and no Exchange
+      is contacted.
+  positive: >-
+    With Elasticsearch stopped a query answers TEMPORARILY_UNAVAILABLE with no groups,
+    and with it started again the same query answers without a Broker restart.
+  negative: []
+
+- id: ESMODE-007
+  title: A filter key the schema does not declare is refused as unimplemented, naming the key
+  level: DECISION
+  actor: broker
+  surface: sdk
+  source:
+    cite: src/broker/CONFIGURATION.md
+    quote: >-
+      A `search_filters` key the schema does not declare is refused with `UNIMPLEMENTED`
+      on the field `search_filters.<key>`, and with no schema every key is.
+  positive: The same query with a declared key answers.
+  negative:
+    - code: unimplemented
+      reason: none; a request with a query and "music.genre" "jazz", which the schema does not declare
+      side_effect: no result that ignores the filter is returned; the field is search_filters.music.genre
+
+- id: ESMODE-008
+  title: A filter value the schema refuses is INVALID_ARGUMENT, naming the key
+  level: DECISION
+  actor: broker
+  surface: sdk
+  source:
+    cite: src/broker/CONFIGURATION.md
+    quote: >-
+      A value that breaks its key's rule in the schema is refused with `INVALID_ARGUMENT`
+      on the field `search_filters.<key>`.
+  positive: The same query with a well-formed value answers.
+  negative:
+    - code: invalid_argument
+      reason: none; a request with a query and "news.language" "english", which is not a two-letter code
+      side_effect: no search runs; the field is search_filters.news.language and the value is not quoted

@@ -136,16 +136,23 @@ func run(logger *slog.Logger) error {
 // anywhere. A deployment that wants to limit which Exchanges are reachable sets
 // the optional allowlist below; that is a policy, not an address.
 func buildMCPConfig() (*app.MCPConfig, error) {
-	// Read through EnvTrimmed, like the allowlist eighteen lines below. "Is this
-	// variable set?" gets one answer per deployment: with EnvOr a value of spaces
-	// passed the check below and the service came up with a whitespace Broker URL,
-	// while the same mistake on the allowlist read as unset. One operator error,
-	// two behaviours, and nothing in the configuration file to show the difference.
+	// Read through EnvTrimmed, like the allowlist below. "Is this variable set?"
+	// gets one answer per deployment: with EnvOr a value of spaces passed the
+	// check below and the service came up with a whitespace Broker URL, while the
+	// same mistake on the allowlist read as unset. One operator error, two
+	// behaviours, and nothing in the configuration file to show the difference.
 	broker := runhttp.EnvTrimmed("IDENTITY_MCP_BROKER_URL")
 	if broker == "" {
 		return nil, errors.New("IDENTITY_MCP_BROKER_URL is required")
 	}
 	itemBytes, callBytes, err := contentByteCaps()
+	if err != nil {
+		return nil, err
+	}
+	// Optional, inline or as a file. An unreadable file stops the boot here,
+	// naming the setting; a document that is not a filter schema stops it at
+	// app.Build, which loads it.
+	filters, err := runhttp.EnvOrFile("IDENTITY_MCP_SEARCH_FILTERS_SCHEMA")
 	if err != nil {
 		return nil, err
 	}
@@ -183,6 +190,9 @@ func buildMCPConfig() (*app.MCPConfig, error) {
 		// by the MCP adapter rather than collapsing every batch to one item.
 		CallContentTimeout:  runhttp.EnvDuration("IDENTITY_MCP_CALL_CONTENT_TIMEOUT", 0),
 		MaxCallContentBytes: callBytes,
+		// The Broker's search-filter schema, which fora_discover publishes. Unset
+		// is the normal answer in front of a Broker that reads no filter schema.
+		SearchFiltersSchema: filters,
 	}, nil
 }
 

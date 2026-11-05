@@ -22,11 +22,13 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/offerkeys"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/testutil"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/budget"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/catalogsearch"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/exa"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/probe"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/purchase"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/repo"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/resolve"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/tagsearch"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/xclient"
 )
 
@@ -101,7 +103,9 @@ type fixtureOpts struct {
 	// test turns it on when the log record itself is the behavior under test.
 	captureLogs bool
 	// query, when non-nil, enables the Broker's catalog search (Deps.Query).
-	query resolve.QuerySearcher
+	// Without one the Broker validates fora-music-v1 values, as production
+	// wires it for no provider (Deps.Vocabulary).
+	query catalogsearch.Searcher
 	// upstream, when non-nil, is what sits at mp.acme.example's address instead
 	// of the mock Exchange: a sink, or a network condition
 	// (exchange_wire_fixture_test.go). A test whose subject is what the Broker
@@ -294,9 +298,10 @@ func newFixture(tb testing.TB, ctx context.Context, opts fixtureOpts) *fixture {
 		// well-known (registry = trust allowlist only). The fake maps the registered
 		// exchange domain to the mock Exchange URL, as the real resolver would from
 		// the exchange's /.well-known/fora.json.
-		Endpoints: endpoints,
-		Verifier:  verifier,
-		Query:     opts.query,
+		Endpoints:  endpoints,
+		Verifier:   verifier,
+		Query:      opts.query,
+		Vocabulary: tagsearch.MusicVocabulary{},
 	})
 	return &fixture{
 		resolveHandler: resolver, purchase: purchase.New(exchangeRepo, endpoints, xpool),

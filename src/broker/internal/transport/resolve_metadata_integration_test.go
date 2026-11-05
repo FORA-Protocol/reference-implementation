@@ -100,8 +100,9 @@ func assertRequesterIDViolation(t *testing.T, err error) {
 // rejected InvalidArgument carrying
 // metadata["required_one_of"]=="query,uri,search_filters" (the settled
 // composite key — there is no single offending field, so no "field" key; ADR-019
-// §1 metadata is a free map of axes). requester.id == the signing key so the
-// query/uri guard (before authorize) is the cause, not impersonation.
+// §1 metadata is a free map of axes). requester.id == the signing key, and the
+// caller is authenticated, so the resolve service's search-input admission is
+// the cause, not impersonation.
 func TestResolve_QueryAndURIBothEmpty_CarriesRequiredOneOfMetadata(t *testing.T) {
 	ctx := context.Background()
 	fx := newSinkFixture(t, ctx, fixtureOpts{providerDomain: "acme.example"})
@@ -120,8 +121,8 @@ func TestResolve_QueryAndURIBothEmpty_CarriesRequiredOneOfMetadata(t *testing.T)
 	assertNothingSent(t, fx.wire)
 }
 
-// TestResolve_UnparseableURI_CarriesFieldMetadata pins resolve.go:198
-// (urisToDomains → exa.DomainOf): a caller-supplied uri that url.Parse cannot
+// TestResolve_UnparseableURI_CarriesFieldMetadata pins resolve's
+// urisToDomains (→ exa.DomainOf): a caller-supplied uri that url.Parse cannot
 // parse fails the WHOLE resolve InvalidArgument with metadata["field"]=="uri".
 // "http://[::1" is a deterministic url.Parse failure ("missing ']' in host").
 // The request clears the agent_id + query/uri guards and authorize (id == signer)

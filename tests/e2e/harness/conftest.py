@@ -92,6 +92,7 @@ def _resolve_stack_urls(compose_file: Path) -> StackURLs:
             exchange_c=EXCHANGE_C_INTERNAL_URL,
             exchange_d=EXCHANGE_D_INTERNAL_URL,
             broker="http://broker:8082",
+            broker_es="http://broker-es:8082",
             edge="http://edge:80",
             aws_edge="http://aws-edge:80",
             fastly_edge="http://fastly-edge:80",
@@ -220,6 +221,30 @@ def fresh_agent_factory(
     factory.close()
 
 
+@pytest.fixture(scope="session")
+def es_broker_ready(
+    compose_stack: StackURLs,
+    seeded: SeededFixture,  # noqa: ARG001 — ordering: this Broker routes what the seed ingests
+    tmp_path_factory: pytest.TempPathFactory,
+) -> str:
+    """The URL of the Broker on the elasticsearch catalog search, once it routes.
+
+    In-network only. It learns its Exchanges the way the other Broker does, so it
+    needs the same wait, through an agent minted for it, as ``seeded`` does for the
+    other one.
+    """
+    from .seed import wait_until_broker_routes
+
+    if not compose_stack.broker_es:
+        pytest.skip("the Elasticsearch Broker is reachable only inside the compose network")
+    readiness = AgentFactory(compose_stack, tmp_path_factory.mktemp("es-broker-readiness"))
+    try:
+        wait_until_broker_routes(readiness().broker_client(broker_url=compose_stack.broker_es))
+    finally:
+        readiness.close()
+    return compose_stack.broker_es
+
+
 @pytest.fixture
 def fresh_agent(fresh_agent_factory: AgentFactory) -> FreshAgent:
     """One agent of this test's own; ``fresh_agent.fund(...)`` opens its accounts."""
@@ -295,6 +320,8 @@ def compose_stack() -> Iterator[StackURLs]:
         wait_healthy(f"{urls.exchange_c}/healthz")
         wait_healthy(f"{urls.exchange_d}/healthz")
         wait_healthy(f"{urls.broker}/healthz")
+        if urls.broker_es:
+            wait_healthy(f"{urls.broker_es}/healthz")
         wait_healthy(f"{urls.edge}/healthz")
         wait_healthy(f"{urls.aws_edge}/healthz")
         wait_healthy(f"{urls.console}/healthz")

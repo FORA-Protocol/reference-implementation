@@ -1,0 +1,27 @@
+{
+  "query": {
+    "bool": {
+      "must": [
+        {{#query}}
+        {"multi_match": {"query": "{{query}}", "type": "best_fields", "fields": ["title^3", "body"]}}
+        {{/query}}
+        {{^query}}
+        {"match_all": {}}
+        {{/query}}
+      ],
+      "filter": [
+        {{#filters.news.language}}
+        {"term": {"language": "{{filters.news.language}}"}},
+        {{/filters.news.language}}
+        {{#filters.news.date_published_after}}
+        {"range": {"date_published": {"gte": "{{filters.news.date_published_after}}"}}},
+        {{/filters.news.date_published_after}}
+        {"match_all": {}}
+      ]
+    }
+  },
+  "size": "{{limit}}",
+  "_source": ["url"],
+  "track_total_hits": false,
+  "sort": [{"_score": "desc"}, {"url": "asc"}]
+}

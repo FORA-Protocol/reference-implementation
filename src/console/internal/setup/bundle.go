@@ -79,7 +79,7 @@ type Builder struct {
 func NewBuilder(d Deployment, pages PageReader, defaults termspreset.Source) *Builder {
 	return &Builder{
 		deployment: d, pages: pages, defaults: defaults,
-		packages: NewEdgePackages(d.EdgePackageDir),
+		packages: NewEdgePackages(d),
 	}
 }
 
@@ -161,6 +161,19 @@ func (b *Builder) edgePackage(s Site) (*File, error) {
 	return &pkg, nil
 }
 
+// The names of the settings an edge package is configured with. They are keys
+// of the edge worker's own settings schema, src/edge/src/config.ts, which is the
+// authority on them; these constants keep this package's writer and readers of
+// each name in step. The tags on edgeConfigBody spell the first three, because
+// a tag cannot name a constant.
+const (
+	settingExchangeURL    = "EXCHANGE_URL"
+	settingExchangeWBAURL = "EXCHANGE_WBA_URL"
+	settingEnforceBinding = "FORA_ENFORCE_BINDING"
+	settingLicensedPaths  = "LICENSED_PATHS_JSON"
+	settingSameZoneOrigin = "SAME_ZONE_ORIGIN"
+)
+
 // edgeConfigBody is what the edge packages read. Every runtime takes the same
 // values; how they arrive differs -- Cloudflare binds them as variables, Fastly
 // as a configuration store, and Lambda@Edge, which takes no environment, gets
@@ -225,9 +238,9 @@ func (b *Builder) edgeSettings(s Site) (map[string]string, error) {
 		return nil, fmt.Errorf("setup: read back the edge settings: %w", err)
 	}
 	settings := map[string]string{
-		"EXCHANGE_URL":         body.ExchangeURL,
-		"EXCHANGE_WBA_URL":     body.ExchangeWBAURL,
-		"FORA_ENFORCE_BINDING": body.EnforceBinding,
+		settingExchangeURL:    body.ExchangeURL,
+		settingExchangeWBAURL: body.ExchangeWBAURL,
+		settingEnforceBinding: body.EnforceBinding,
 	}
 	// The paths the publisher licenses are the only ones the edge sends AI bots
 	// to negotiate for; the rest of the site passes as it did before. The route
@@ -239,7 +252,7 @@ func (b *Builder) edgeSettings(s Site) (map[string]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("setup: render the licensed paths: %w", err)
 		}
-		settings["LICENSED_PATHS_JSON"] = string(scope)
+		settings[settingLicensedPaths] = string(scope)
 	}
 	return settings, nil
 }

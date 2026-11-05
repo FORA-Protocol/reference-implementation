@@ -2,18 +2,20 @@
 // do, in what order, and the commands for the network they already run.
 //
 // The text lives in a data file next to this code rather than on the public
-// website, so the website has nothing to keep in step, and two callers read one
-// copy of it. The public preview answers a visitor with the whole path, in the
-// publisher console's own order: the business, the domain, the terms, and the
-// two tasks that connect the site, the discovery file and the edge package. The
-// console reads only the network's edge step, for the deploy commands on the
-// wizard's last step, with the publisher's real values in them.
+// website, so the website has nothing to keep in step, and every reader reads
+// one copy of it. The public preview answers a visitor with the whole path, in
+// the publisher console's own order: the business, the domain, the terms, and
+// the two tasks that connect the site, the discovery file and the edge
+// package. The console reads only the network's edge step, with the
+// publisher's real values in it, twice: for the deploy commands on the
+// wizard's last step, and for the README inside each package it hands over.
 package setupsteps
 
 import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/cdn"
@@ -29,10 +31,13 @@ const hostPlaceholder = "<host>"
 
 // Command is one thing to run, and what it should answer.
 //
-// Checked marks a command a caller may be able to answer on the publisher's
-// behalf. Every such command is a curl against a public address, so a caller
-// that can make requests -- the console, on a site it has registered -- gets
-// the same answer without the publisher opening a terminal. The deployment
+// Checked marks a command the console answers on the publisher's behalf. Every
+// such command is a curl against a public address, and the checked commands of
+// a network's edge step are exactly the questions the console's last step asks
+// the site, in its order -- a console test holds the two lists equal. The
+// console asks every site the same questions, so the data file writes them
+// once, as the package checks every package variant ends with. A curl the
+// console does not ask stays unmarked, or that test fails. The deployment
 // commands are not marked: they run against the publisher's own CDN account
 // with the publisher's own credentials, which is exactly what we do not hold.
 //
@@ -68,11 +73,15 @@ type Step struct {
 	Note string `json:"note,omitempty"`
 }
 
-// data is the parsed file: the steps that are the same for everyone, plus the
-// per-network variant of the edge step.
+// data is the parsed file: the steps that are the same for everyone, the
+// per-network variant of the edge step, and the checks every variant that
+// hands over a package ends with.
 type data struct {
-	Steps        []Step          `json:"steps"`
-	Integrations map[string]Step `json:"integrations"`
+	Steps []Step `json:"steps"`
+	// PackageChecks are written once because they are the same for every
+	// network; withPackageChecks adds them to each package variant.
+	PackageChecks []Command       `json:"package_checks"`
+	Integrations  map[string]Step `json:"integrations"`
 }
 
 // parsed is decoded once. A malformed data file is a build-time mistake that
@@ -85,6 +94,20 @@ func mustParse() data {
 	var d data
 	if err := json.Unmarshal(stepsJSON, &d); err != nil {
 		panic(fmt.Sprintf("steps: the embedded step data does not parse: %v", err))
+	}
+	return withPackageChecks(d)
+}
+
+// withPackageChecks ends every variant that hands over a package with the
+// package checks, after the variant's own commands, so the checks come after
+// the deployment they check wherever the whole step is shown. A conversation
+// has nothing to check and gets none.
+func withPackageChecks(d data) data {
+	for name, step := range d.Integrations {
+		if step.Integration == IntegrationEdgePackage {
+			step.Commands = slices.Concat(step.Commands, d.PackageChecks)
+			d.Integrations[name] = step
+		}
 	}
 	return d
 }
@@ -101,7 +124,8 @@ func For(provider cdn.Provider, host string, manifest json.RawMessage) []Step {
 	out := make([]Step, 0, len(parsed.Steps))
 	for _, step := range parsed.Steps {
 		if step.ID == edgeStepID {
-			step = integrationStep(provider)
+			out = append(out, EdgeStep(provider, host))
+			continue
 		}
 		if step.ID == manifestStepID {
 			step.Manifest = manifest
@@ -111,14 +135,49 @@ func For(provider cdn.Provider, host string, manifest json.RawMessage) []Step {
 	return out
 }
 
+// EdgeStep is the edge step for one network, with the publisher's host in it:
+// how to deploy the package, and how to check it once it is deployed.
+//
+// It is the step For puts in the path, so a caller that needs only this step
+// reads exactly what the whole path shows. A network the data file does not
+// describe gets the contact-us variant, as it does in the path.
+func EdgeStep(provider cdn.Provider, host string) Step {
+	return substituteHost(integrationStep(provider), host)
+}
+
+// ByHand is the step's commands a person runs, in the data file's order: the
+// ones that need the publisher's own CDN account. Nil when there are none.
+func (s Step) ByHand() []Command { return s.commandsWhere(false) }
+
+// Checks is the step's checked commands, in the data file's order: the requests
+// to public addresses that show whether the step worked. Nil when there are
+// none.
+//
+// ByHand and Checks are two methods rather than one function with two results,
+// so a caller cannot take one list for the other.
+func (s Step) Checks() []Command { return s.commandsWhere(true) }
+
+// commandsWhere is the step's commands whose Checked flag equals checked.
+func (s Step) commandsWhere(checked bool) []Command {
+	var out []Command
+	for _, c := range s.Commands {
+		if c.Checked == checked {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // RunnableByHand drops the commands a caller has already answered by asking
 // the site, leaving the steps that still need a person.
 //
-// It exists so one data file serves two readers. The public preview page shows
-// a visitor the whole procedure, checks included, because it has no site of
-// theirs to ask and nothing to report. The console has both, so showing a
-// publisher a command whose answer is printed further up the same page asks
-// them to do work to learn what they have just been told.
+// It exists so one data file serves every reader. The public preview page
+// shows a visitor the whole procedure, checks included, because it has no site
+// of theirs to ask and nothing to report, and the README inside each package
+// keeps the checks for the same reason: it is read without the console. The
+// wizard has both, so showing a publisher a command whose answer is printed
+// further up the same page asks them to do work to learn what they have just
+// been told.
 //
 // A step whose commands were all checked keeps its title, summary and note: the
 // step still happened, and the note is where an integration says its written
@@ -126,16 +185,7 @@ func For(provider cdn.Provider, host string, manifest json.RawMessage) []Step {
 func RunnableByHand(steps []Step) []Step {
 	out := make([]Step, 0, len(steps))
 	for _, step := range steps {
-		kept := make([]Command, 0, len(step.Commands))
-		for _, c := range step.Commands {
-			if !c.Checked {
-				kept = append(kept, c)
-			}
-		}
-		if len(kept) == 0 {
-			kept = nil
-		}
-		step.Commands = kept
+		step.Commands = step.ByHand()
 		out = append(out, step)
 	}
 	return out
@@ -151,7 +201,8 @@ const (
 // The two paths an edge step can take, as the data file writes them.
 const (
 	// IntegrationEdgePackage means a package is shipped for the network and
-	// the step says how to deploy it.
+	// the step says how to deploy it. Such a variant ends with the package
+	// checks.
 	IntegrationEdgePackage = "edge_package"
 	// IntegrationContactUs means no package is shipped and the step is a
 	// conversation.
@@ -160,7 +211,7 @@ const (
 
 // Integration names the path the edge step of a route takes. The preview
 // copies it into the answer's cdn.integration rather than deciding again, so
-// the data file is the one place that says which networks have a package.
+// the answer's two fields cannot disagree.
 func Integration(path []Step) string {
 	for _, step := range path {
 		if step.ID == edgeStepID {

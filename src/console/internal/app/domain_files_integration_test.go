@@ -3,8 +3,6 @@
 package app_test
 
 import (
-	"archive/zip"
-	"bytes"
 	"encoding/json"
 	"maps"
 	"net/http"
@@ -15,7 +13,9 @@ import (
 
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/cdn"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/pagefetch"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/setupsteps"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/setup"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/setup/setuptest"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/console/internal/web"
 )
 
@@ -242,19 +242,113 @@ func TestConsole_TheLastStepOnCloudFrontHandsOverTheLambdaPackage(t *testing.T) 
 	if status != http.StatusOK {
 		t.Fatalf("downloading %s = %d", setup.FileLambdaPackage, status)
 	}
-	archive, err := zip.NewReader(bytes.NewReader([]byte(body)), int64(len(body)))
-	if err != nil {
-		t.Fatalf("%s does not read as a zip: %v", setup.FileLambdaPackage, err)
-	}
-	entries := make([]string, 0, len(archive.File))
-	for _, entry := range archive.File {
-		entries = append(entries, entry.Name)
-	}
+	entries := setuptest.Entries(t, []byte(body))
 	for _, want := range []string{"index.mjs", "lambda-edge.mjs"} {
-		if !slices.Contains(entries, want) {
-			t.Fatalf("%s holds %v, without %s", setup.FileLambdaPackage, entries, want)
+		if _, ok := entries[want]; !ok {
+			t.Fatalf("%s holds %v, without %s", setup.FileLambdaPackage, slices.Sorted(maps.Keys(entries)), want)
 		}
 	}
+}
+
+// TestConsole_EachPackageCarriesTheLastStepsInstructions downloads each
+// network's package the way a publisher does and reads the README inside it
+// against what the wizard's last step showed for the same domain.
+//
+// Both legs go through the console's public routes, in front of the real
+// Exchange harness: POST /api/domain/files for what the wizard draws, and the
+// domain's file route for the zip. The step text itself is compiled in, so
+// what this holds is the two renderings of it to each other: a command the
+// wizard shows that the README leaves out, or a check the README drops, fails
+// here. The wizard itself shows no check, because it asks the site those
+// questions and reports the answers; the README keeps them, because it is read
+// without the console.
+func TestConsole_EachPackageCarriesTheLastStepsInstructions(t *testing.T) {
+	for _, tc := range []struct {
+		network cdn.Provider
+		pkg     string
+		// foreign is a command of the other network, which this one's README
+		// must not carry.
+		foreign string
+	}{
+		{cdn.ProviderCloudflare, setup.FileCloudflarePackage, "aws lambda"},
+		{cdn.ProviderCloudFront, setup.FileLambdaPackage, "wrangler"},
+	} {
+		t.Run(string(tc.network), func(t *testing.T) {
+			f := startConsole(t, verifiedClaims(), withDetector(newStubDetector(tc.network)), withEdgePackages(t))
+			f.signIn(t)
+			f.walkToConnect(t)
+			shown := shownEdgeSteps(t, f.files(t, "stoa.example"))
+
+			status, body := f.get(t, "/domains/stoa.example/files/"+tc.pkg)
+			if status != http.StatusOK {
+				t.Fatalf("downloading %s = %d", tc.pkg, status)
+			}
+			readme := setuptest.Entries(t, []byte(body))["README.md"]
+
+			var want []string
+			for _, step := range shown {
+				for _, c := range step.Commands {
+					if c.Checked || strings.HasPrefix(c.Run, "curl ") {
+						t.Fatalf("the wizard shows %q, a check its last step asks the site itself", c.Label)
+					}
+				}
+				want = append(want, step.Summary)
+				want = append(want, setuptest.CommandTexts(step.Commands)...)
+			}
+			if len(want) < 2 {
+				t.Fatalf("the wizard showed no deploy commands for %s: %+v", tc.network, shown)
+			}
+			want = append(want, setuptest.CommandTexts(setupsteps.EdgeStep(tc.network, "stoa.example").Checks())...)
+			want = append(want, "Write to us at help@exchange.example")
+			setuptest.AssertInOrder(t, tc.pkg+"'s README", readme, want)
+			for _, never := range []string{"<host>", tc.foreign} {
+				if strings.Contains(readme, never) {
+					t.Fatalf("%s's README carries %q:\n%s", tc.pkg, never, readme)
+				}
+			}
+			if !strings.Contains(readme, "built for stoa.example") {
+				t.Fatalf("%s's README does not name the domain it is for:\n%s", tc.pkg, readme)
+			}
+			// Its own check, not part of the order above: the values come
+			// before the deploy commands.
+			if got := setuptest.ReadmeItems(t, readme, "## Your values")["Exchange"]; got != "https://"+testExchangeDomain {
+				t.Fatalf("%s's README gives the exchange as %q, not this deployment's:\n%s", tc.pkg, got, readme)
+			}
+		})
+	}
+}
+
+// TestConsole_RefusesAnotherPublishersPackage is the files refusal for the
+// package: a domain somebody else registered is answered the way an
+// unregistered one is, and no zip, README included, is sent.
+func TestConsole_RefusesAnotherPublishersPackage(t *testing.T) {
+	f := startConsole(t, verifiedClaims(), withEdgePackages(t))
+	addDomain(t, f.otherPerson(t, otherClaims()))
+	f.signIn(t)
+	f.registerBusiness(t)
+
+	status, body := f.get(t, "/domains/stoa.example/files/"+setup.FileCloudflarePackage)
+	if status != http.StatusNotFound {
+		t.Fatalf("another publisher's package = %d, want %d", status, http.StatusNotFound)
+	}
+	if strings.HasPrefix(body, "PK") || strings.Contains(body, "README") {
+		t.Fatalf("the refusal carries the package: %s", head(body))
+	}
+}
+
+// shownEdgeSteps reads the edge steps a files answer carries, in the shape the
+// wizard's page draws them from.
+func shownEdgeSteps(t *testing.T, out map[string]any) []setupsteps.Step {
+	t.Helper()
+	raw, err := json.Marshal(out["edge_steps"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var steps []setupsteps.Step
+	if err := json.Unmarshal(raw, &steps); err != nil {
+		t.Fatalf("the edge steps do not read as steps: %v", err)
+	}
+	return steps
 }
 
 // fileBodies reads the files a wizard answer hands over, by name.

@@ -1,15 +1,18 @@
-// Structural guard: each registration schema is compiled in exactly one place,
-// and the environment variable that carries the Exchange's own is read in
-// exactly one place.
+// Structural guard: each schema the protocol SDK's registration compiler reads
+// is compiled in exactly one place, and the environment variable that carries
+// the Exchange's own registration schema is read in exactly one place.
 //
-// There are TWO schemas in this repository and they belong to different
-// parties, so there are two one-place rules rather than one rule with two
-// entries. The Exchange compiles the schema its OPERATOR configured, and
-// publishing it commits the Exchange to enforcing it. The identity adapter
-// compiles a schema it FETCHED from a third-party Exchange, to warn an agent
-// before signing. Same SDK call, different document, different owner, different
-// failure if it is done twice — so an allowlist shared between them would let a
-// second Exchange-side compile hide behind the identity entry.
+// Three documents, three owners, so three one-place rules rather than one rule
+// with three entries. The Exchange compiles the registration schema its
+// OPERATOR configured, and publishing it commits the Exchange to enforcing it.
+// The identity adapter compiles a registration schema it FETCHED from a
+// third-party Exchange, to warn an agent before signing. And the deployment's
+// search-filter schema, which the Broker enforces and the identity service
+// publishes in its discovery tool, is compiled by the one loader both services
+// call, so they refuse and accept the same documents. Same SDK call, different
+// document, different owner, different failure if it is done twice — so an
+// allowlist shared between them would let a second compile hide behind another
+// document's entry.
 //
 // The configured schema has two readers — the manifest that publishes it as
 // account_registration.data_schema, and the Register gate that checks an
@@ -88,6 +91,14 @@ const exchangeCompileHome = "src/exchange/internal/regschema/regschema.go"
 // where third-party input is compiled".
 const fetchedCompileHome = "src/identity/internal/exchreg/schema.go"
 
+// filtersCompileHome is the one file sanctioned to compile a deployment's
+// search-filter schema. The Broker validates search_filters against it and the
+// identity service publishes it to agents, and both reach it through this one
+// loader, so the two services cannot disagree about which documents are valid.
+// A second compile elsewhere would re-decide the loader's own rules (no whole-
+// object keyword, no reference keyword, one dialect) for one of them only.
+const filtersCompileHome = "internal/searchfilters/searchfilters.go"
+
 // countIsWrong reports whether n uses in rel break the one-place rule: the
 // sanctioned file holds exactly one, every other file none.
 //
@@ -160,7 +171,7 @@ func TestExchangeRegistrationSchemaCompiledOnlyInsideItsLoader(t *testing.T) {
 func TestFetchedRegistrationSchemaCompiledOnlyInsideItsReader(t *testing.T) {
 	t.Parallel()
 	forEachAppFile(t, func(rel string, f *ast.File) {
-		if strings.HasPrefix(rel, "src/exchange/") {
+		if strings.HasPrefix(rel, "src/exchange/") || rel == filtersCompileHome {
 			return
 		}
 		n := countSelectorCalls(f, sdkHelpersImportPath, "CompileRegistrationSchema")
@@ -172,6 +183,32 @@ func TestFetchedRegistrationSchemaCompiledOnlyInsideItsReader(t *testing.T) {
 			return
 		}
 		t.Errorf("%s calls helpers.CompileRegistrationSchema — compiling a FETCHED schema is %s's job. Take the Requirements it already produced; a second call site re-decides how a refused verdict is handled and pays the bounded compile again.", rel, fetchedCompileHome)
+	})
+}
+
+// TestSearchFilterSchemaCompiledOnlyInsideItsLoader fails when a search-filter
+// schema is compiled anywhere outside src/exchange but the loader, other than
+// the fetched-schema reader the rule above owns, and when the loader compiles
+// none or more than once.
+//
+// It shares the tree outside src/exchange with the fetched-schema rule, and the
+// two skip each other's one file, so between them a call there is either one
+// of those two or a failure of both.
+func TestSearchFilterSchemaCompiledOnlyInsideItsLoader(t *testing.T) {
+	t.Parallel()
+	forEachAppFile(t, func(rel string, f *ast.File) {
+		if strings.HasPrefix(rel, "src/exchange/") || rel == fetchedCompileHome {
+			return
+		}
+		n := countSelectorCalls(f, sdkHelpersImportPath, "CompileRegistrationSchema")
+		if !countIsWrong(rel, filtersCompileHome, n) {
+			return
+		}
+		if rel == filtersCompileHome {
+			t.Errorf("%s calls helpers.CompileRegistrationSchema %d times, want exactly 1 — the search-filter schema is compiled ONCE, by the loader both the Broker and the identity service call. Zero calls fails here too: the loader would then check nothing.", rel, n)
+			return
+		}
+		t.Errorf("%s calls helpers.CompileRegistrationSchema — compiling the search-filter schema is %s's job, so the Broker and the identity service accept the same documents. Call searchfilters.Load, or take the Schema it returned.", rel, filtersCompileHome)
 	})
 }
 
@@ -254,8 +291,8 @@ func TestMeta_CompileDetectorPassesOtherHelperCalls(t *testing.T) {
 func TestMeta_RegschemaGuardAllowlistsHoldOneFileEach(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	allowed := make([]string, 0, 2+len(registrationEnvVars))
-	allowed = append(allowed, exchangeCompileHome, fetchedCompileHome)
+	allowed := make([]string, 0, 3+len(registrationEnvVars))
+	allowed = append(allowed, exchangeCompileHome, fetchedCompileHome, filtersCompileHome)
 	for _, v := range registrationEnvVars {
 		allowed = append(allowed, v.allowed)
 	}
@@ -266,23 +303,30 @@ func TestMeta_RegschemaGuardAllowlistsHoldOneFileEach(t *testing.T) {
 	}
 }
 
-// TestMeta_TheTwoCompileHomesSitInDisjointTrees pins the split the two compile
-// rules divide the repo by. Each skips the other's tree, so the split is what
-// makes them add up to whole coverage.
+// TestMeta_TheThreeCompileHomesSitInDisjointTrees pins the split the three
+// compile rules divide the repo by. The Exchange rule covers src/exchange, and
+// the other two cover everything else while each skips the other's one file,
+// so the split is what makes them add up to whole coverage.
 //
 // It closes a blind spot that is quiet rather than loud. Move the fetched-schema
-// reader under src/exchange and the identity rule skips it — including its
-// zero-uses arm, which only ever runs for that one path — so the tree would
-// compile a third-party schema in a file no rule watches while both guards
-// reported clean.
-func TestMeta_TheTwoCompileHomesSitInDisjointTrees(t *testing.T) {
+// reader or the filter-schema loader under src/exchange and its rule skips it —
+// including its zero-uses arm, which only ever runs for that one path — so the
+// tree would compile the document in a file no rule watches while every guard
+// reported clean. The two outside src/exchange must also be distinct files and
+// sit in different packages, or one rule's skip would hide the other's file.
+func TestMeta_TheThreeCompileHomesSitInDisjointTrees(t *testing.T) {
 	t.Parallel()
 	const exchangeTree = "src/exchange/"
 	if !strings.HasPrefix(exchangeCompileHome, exchangeTree) {
 		t.Errorf("%s is outside %s, so the Exchange rule no longer covers it", exchangeCompileHome, exchangeTree)
 	}
-	if strings.HasPrefix(fetchedCompileHome, exchangeTree) {
-		t.Errorf("%s is inside %s, so the fetched-schema rule skips it and its zero-uses arm can never run", fetchedCompileHome, exchangeTree)
+	for _, home := range []string{fetchedCompileHome, filtersCompileHome} {
+		if strings.HasPrefix(home, exchangeTree) {
+			t.Errorf("%s is inside %s, so its rule skips it and its zero-uses arm can never run", home, exchangeTree)
+		}
+	}
+	if filepath.Dir(fetchedCompileHome) == filepath.Dir(filtersCompileHome) {
+		t.Errorf("%s and %s share a package, so the fetched-schema and filter-schema rules no longer watch disjoint trees", fetchedCompileHome, filtersCompileHome)
 	}
 }
 

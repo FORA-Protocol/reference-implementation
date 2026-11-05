@@ -35,6 +35,11 @@ output "data_volume_id" {
   value       = one(aws_ebs_volume.data[*].id)
 }
 
+output "data_volume_name" {
+  description = "Name tag of the durable data volume, or null when data_volume_gb is unset. A snapshot policy selects the volume by this tag."
+  value       = one(aws_ebs_volume.data[*].tags.Name)
+}
+
 output "availability_zone" {
   description = "Availability zone of the subnet, the instance and the data volume."
   value       = aws_subnet.public.availability_zone

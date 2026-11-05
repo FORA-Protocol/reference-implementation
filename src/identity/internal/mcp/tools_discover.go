@@ -33,12 +33,16 @@ type discoverInput struct {
 	// search is configured. URIs, when given, take priority and the query is
 	// not used.
 	Query string `json:"query,omitempty"`
-	// SearchFilters are required constraints on a search, keyed by a profile's
-	// filter names (fora-music-v1: "music.isrc", "music.bpm_range", ...). They
-	// are forwarded to the Broker unchanged. This service keeps no list of keys:
-	// the Broker owns the profile, validates each value, and ignores keys it does
-	// not define, so a second list here could only disagree with it. An empty
-	// object is the same as none.
+	// SearchFilters are required constraints on a search, keyed by filter name:
+	// the keys of the deployment's search-filter schema where one is configured,
+	// otherwise a profile's (fora-music-v1: "music.isrc", "music.bpm_range",
+	// ...). The handler forwards them to the Broker as it receives them. A
+	// configured schema is this field's input schema, so the MCP SDK refuses a
+	// call whose filters it does not allow before the handler runs (see
+	// discoverInputSchema), and that one document is the list of keys. Without a
+	// schema this service keeps no list of keys: the Broker owns the vocabulary
+	// its search applies and answers for every key, so a second list here could
+	// only disagree with it. An empty object is the same as none.
 	SearchFilters map[string]any `json:"search_filters,omitempty"`
 }
 

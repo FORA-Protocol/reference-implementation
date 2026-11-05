@@ -10,7 +10,9 @@
 # stack with few optional blocks ships it as it is: the staging-shaped run
 # measures that. With every optional block on, the commented document is over
 # the limit, so a stack that turns many of them on ships
-# user_data_without_comments instead: the fully-loaded run measures that one.
+# user_data_without_comments instead: the fully-loaded runs measure that one.
+# The staging stack switches to it while the Elasticsearch catalog search is
+# on, and the staging-shaped run with that search shows why.
 # If the comment-free document ever trips too, the fix is not to trim the
 # templates: it is to stop inlining the bundle and fetch it at boot, which is a
 # design change worth making deliberately.
@@ -157,15 +159,121 @@ run "fully_loaded_user_data_fits_the_ec2_limit" {
   }
 }
 
+# The same document with the other catalog search provider: the two exclude each
+# other, so each gets its turn at being the largest cloud-init the module emits.
+run "fully_loaded_with_elasticsearch_fits_the_ec2_limit" {
+  command = apply
+
+  variables {
+    exa_api_key = "00000000-0000-0000-0000-000000000000"
+
+    smtp_host      = "smtp.staging.example:587"
+    smtp_user      = "smtp-user-placeholder"
+    smtp_password  = "BEXAMPLEsmtppasswordEXAMPLEsmtppasswordEXAM"
+    smtp_from      = "noreply@demo.staging.example"
+    smtp_from_name = "FORA Demo"
+
+    onboarding_hostname           = "pub-onboarding.staging.example"
+    onboarding_image              = "registry.example.com/group/proj/onboarding:test"
+    onboarding_allowed_origins    = ["https://site.example"]
+    onboarding_contact_recipients = ["sales@demo.staging.example"]
+    onboarding_contact_from       = "noreply@demo.staging.example"
+
+    exchange_registration_schema = "{\"$schema\": \"https://json-schema.org/draft/2020-12/schema\", \"type\": \"object\", \"required\": [\"legal_entity\"]}"
+    exchange_terms_uri           = "https://exchange.staging.example/terms/revision-1.txt"
+    exchange_terms_digest        = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    exchange_terms_documents     = { "revision-1.txt" = "Terms\n" }
+    exchange_terms_currency      = "EUR"
+    exchange_terms_unit          = "fetches"
+
+    # Every member in its larger arm. The template is its text, which
+    # cloud-init writes as a file; a stored template would be only its id. The
+    # template and the filter schema are the repository's example pair, read
+    # from deploy/broker/search-template.example.mustache and
+    # deploy/broker/search-filters.example.json. The CA has a real
+    # certificate's size (about 1.3 KB of PEM) and a body that compresses like
+    # one; the API key has a real key's size.
+    elasticsearch_search = {
+      url            = "https://search.staging.example:9243"
+      index          = "catalog-current"
+      template       = file("../../../broker/search-template.example.mustache")
+      hit_url_path   = "_source.url"
+      result_limit   = 50
+      timeout        = "1500ms"
+      api_key        = substr(base64sha512("api-key-placeholder"), 0, 80)
+      ca_pem         = "-----BEGIN CERTIFICATE-----\n${join("\n", [for i in range(22) : substr(base64sha512("ca-placeholder-${i}"), 0, 64)])}\n-----END CERTIFICATE-----\n"
+      filters_schema = file("../../../broker/search-filters.example.json")
+    }
+
+    acme_ca              = "https://acme.staging.example/directory"
+    acme_eab_key_id      = "key-id_123"
+    acme_eab_mac_key     = "c2VjcmV0LW1hYy1rZXk_-"
+    caddy_data_volume_id = "vol-0123456789abcdef0"
+
+    vault_mode     = "server"
+    vault_kv_mount = "fora-agents"
+
+    console_hostname         = "console.staging.example"
+    console_image            = "registry.example.com/group/proj/console@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    console_signing_key_pem  = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIGZha2UgY29uc29sZSBzaWduaW5nIGtleSBmaXh0dXJl\n-----END PRIVATE KEY-----\n"
+    console_contributor_host = "catalog-contributor.staging.example"
+    console_support_email    = "help@staging.example"
+    console_default_rate     = "0.25"
+
+    # The publishers' Zitadel instance, in its larger arm: a recovery window,
+    # which adds the memberships. The System API key has the size of a real
+    # 3072-bit public key file (9 body lines, 564 characters) and a body that
+    # compresses like one.
+    console_login_hostname                  = "login.console.staging.example"
+    zitadel_system_api_public_key           = "-----BEGIN PUBLIC KEY-----\n${join("\n", [for i in range(9) : substr(base64sha512("system-api-placeholder-${i}"), 0, i < 8 ? 64 : 52)])}\n-----END PUBLIC KEY-----\n"
+    zitadel_system_api_recovery_instance_id = "393782486556999684"
+  }
+
+  assert {
+    condition     = length(base64gzip(output.user_data_without_comments)) < 21848
+    error_message = "The comment-free cloud-init with every optional block on, Elasticsearch included, exceeds EC2's 16 KB user-data limit — the instance would fail to launch."
+  }
+}
+
 run "staging_shaped_user_data_fits_the_ec2_limit" {
   command = apply
 
   # The optional blocks the staging stack turns on, all set above: the demo
   # publisher origin, the registry login, the RSA key, the two key directories
-  # and the importer. Staging ships user_data with its comments.
+  # and the importer. Staging ships user_data with its comments while the
+  # Elasticsearch catalog search is off.
 
   assert {
     condition     = length(base64gzip(output.user_data)) < 21848
     error_message = "The staging-shaped cloud-init, comments included, exceeds EC2's 16 KB user-data limit — the instance would fail to launch."
+  }
+}
+
+# The staging-shaped document with the Elasticsearch catalog search on and the
+# repository's example filter schema. Its comments take it over the limit,
+# which is why staging-aws ships the comment-free copy while the search is on.
+run "staging_shaped_with_elasticsearch_ships_without_comments" {
+  command = apply
+
+  variables {
+    elasticsearch_search = {
+      url            = "https://search.staging.example:9243"
+      index          = "catalog-current"
+      template_id    = "fora-catalog"
+      hit_url_path   = "_source.url"
+      result_limit   = 50
+      api_key        = substr(base64sha512("api-key-placeholder"), 0, 80)
+      filters_schema = file("../../../broker/search-filters.example.json")
+    }
+  }
+
+  assert {
+    condition     = length(base64gzip(output.user_data)) >= 21848
+    error_message = "With the Elasticsearch search on and a filter schema, the staging-shaped commented cloud-init is expected to exceed the limit, which is why staging-aws then ships user_data_without_comments. If it fits again, that reason has changed."
+  }
+
+  assert {
+    condition     = length(base64gzip(output.user_data_without_comments)) < 21848
+    error_message = "The staging-shaped comment-free cloud-init with the Elasticsearch search on exceeds EC2's 16 KB user-data limit — the instance would fail to launch."
   }
 }

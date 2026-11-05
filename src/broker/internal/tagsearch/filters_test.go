@@ -6,6 +6,7 @@ import (
 	"slices"
 	"testing"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/catalogsearch"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/broker/internal/tagsearch"
 )
 
@@ -72,9 +73,9 @@ func TestParseFiltersRefusesMalformedValues(t *testing.T) {
 	for key, values := range malformed {
 		for _, v := range values {
 			_, err := tagsearch.ParseFilters(map[string]any{key: v, "music.mood": "calm"})
-			var ferr *tagsearch.FilterError
-			if !errors.As(err, &ferr) || ferr.Key != key {
-				t.Errorf("%s = %#v: err = %v, want a FilterError naming %s", key, v, err, key)
+			var ferr *catalogsearch.FilterError
+			if !errors.As(err, &ferr) || ferr.Key != key || ferr.Unsupported {
+				t.Errorf("%s = %#v: err = %v, want a malformed-value FilterError naming %s", key, v, err, key)
 			}
 		}
 	}

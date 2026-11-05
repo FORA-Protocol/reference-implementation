@@ -70,6 +70,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/searchfilters"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/exchacct"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/token"
 )
@@ -90,10 +91,11 @@ const (
 // authenticate, with no account service cannot register, with no purchaser
 // cannot buy, and with no issuer URL cannot tell a client where to sign in.
 //
-// Two kinds of field are exempt, and both mean something when left unset.
+// Some fields are exempt, and each means something when left unset.
 // ExchangeAllowed is nil for a deployment that reaches every Exchange, which is
-// what an unset allowlist says. The three size and time bounds default, so a
-// caller states only the ones it wants moved.
+// what an unset allowlist says. SearchFilters is nil for a deployment that
+// configured no search-filter schema. The three size and time bounds default, so
+// a caller states only the ones it wants moved.
 type Config struct {
 	// Tokens verifies the inbound bearer. It is the same issuer the sign-in flow
 	// mints with, so a token is accepted here exactly when it was issued by us,
@@ -123,6 +125,14 @@ type Config struct {
 	// ExchangeAllowed is the deployment's Exchange policy. Optional: nil permits
 	// every Exchange, which is the same answer an unset allowlist gives.
 	ExchangeAllowed exchangeAllowed
+
+	// SearchFilters is the deployment's search-filter schema, as
+	// searchfilters.Load returned it. Optional: with nil, fora_discover keeps
+	// search_filters an open object and its description lists the fora-music-v1
+	// keys. When set, the schema becomes fora_discover's input schema for
+	// search_filters, so an agent reads the keys before it calls and the MCP SDK
+	// refuses a key or value the schema does not allow (see discoverInputSchema).
+	SearchFilters *searchfilters.Schema
 
 	// Content fetches licensed bytes from the delivery edge, signed as the calling
 	// agent. Typed as the narrow port this package calls (see ports.go).
@@ -176,6 +186,12 @@ func New(cfg Config) (*Server, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	// Built before anything is mounted, because the MCP SDK panics on an input
+	// schema it cannot resolve, and the filter schema is configuration.
+	discover, err := discoverTool(cfg.SearchFilters)
+	if err != nil {
+		return nil, err
+	}
 	metadataURL, err := metadataIdentifier(cfg.IssuerURL)
 	if err != nil {
 		return nil, err
@@ -204,7 +220,7 @@ func New(cfg Config) (*Server, error) {
 		log:                 cfg.Logger,
 		directory:           cfg.AgentDirectory,
 	}
-	tools.register(srv)
+	tools.register(srv, discover)
 
 	// One server instance serves every request: the tools hold no per-caller
 	// state, and everything caller-specific rides on the request context.

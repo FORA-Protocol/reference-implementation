@@ -243,6 +243,24 @@ variable "exa_api_key" {
   sensitive   = true
 }
 
+variable "elasticsearch_search" {
+  description = "Optional catalog search through an Elasticsearch index someone else maintains, run through the index owner's search template, with an optional filter schema the MCP endpoint publishes too: the shape, the rules and what each field means are compose-stack's variable of the same name. Null leaves it off."
+  type = object({
+    url            = string
+    index          = string
+    template_id    = optional(string)
+    template       = optional(string)
+    hit_url_path   = string
+    result_limit   = number
+    timeout        = optional(string)
+    api_key        = string
+    ca_pem         = optional(string)
+    filters_schema = optional(string)
+  })
+  default   = null
+  sensitive = true
+}
+
 variable "query_discovery_enabled" {
   description = "Turn on the Broker's catalog search: an agent's free-text query is matched against the catalog feed through a Bedrock model. Adds an IAM user that may invoke only that model, whose access key is delivered to the Broker alone. Off by default."
   type        = bool

@@ -69,3 +69,23 @@ terms are catalog metadata; the article bodies are neutral, so they are still
 shared. The retrieval canary the tests assert on lives in that content, so an
 edit to the demo copy can break a test here. Split the content tree when that
 starts happening, or when a test needs a body of its own.
+
+## The Elasticsearch index
+
+The `es-seed` one-shot (`tests/e2e/es-seed/seed.py`) builds the index `broker-es`
+searches from `philosophy.jsonl`, the feed exchange-a sells, and it stands in for
+the index owner: nothing else in the stack writes to Elasticsearch. Each record
+becomes one document, whose `url` is the catalog URI the Exchange stores for it,
+whose `title` is the record's title and whose `body` is the article text under
+`deploy/content/demo/stoa-press/articles/philosophers/`. One more document, titled
+Diogenes, is in the index and in no feed, so a search can hit a URL the Exchange
+does not hold; it is the last document.
+
+Each document also carries a `language` and a `date_published` for the example
+filter schema to select on. The seed assigns them by the document's position, in
+feed order with Diogenes last, and does not read them from the article: an even
+position is `en`, an odd one `el`, and position *i* was published on
+2026-01-(*i*+1). The seed also stores the example search template
+(`deploy/broker/search-template.example.mustache`) under the id `broker-es` names.
+`test_broker_es_query.py` expects exact results from all of this: change a title,
+an article, the feed order or the rule, and those tests may change with it.

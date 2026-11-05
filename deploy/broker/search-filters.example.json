@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Search filters this deployment's catalog search applies",
+  "description": "Example filter vocabulary for the elasticsearch provider. Each key is applied by the search template, which reads it as filters.<key>. A key not listed here is refused with UNIMPLEMENTED, and a value that breaks its key's rule with INVALID_ARGUMENT.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "news.language": {
+      "description": "Only articles in this language: a two-letter lower-case ISO 639-1 code, for example \"en\".",
+      "type": "string",
+      "pattern": "^[a-z]{2}$"
+    },
+    "news.date_published_after": {
+      "description": "Only articles published at or after this instant: a UTC date-time to the second, for example \"2026-01-05T00:00:00Z\".",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    }
+  }
+}

@@ -38,7 +38,7 @@ few that stop the boot.
 | `CONSOLE_SUPPORTED_PROFILES` | Optional | Space-separated extension profiles, written into the generated file. Default `fora-news-v1`. | `fora-news-v1` |
 | `CONSOLE_DEFAULT_RATE` | Optional | What a charging arrangement costs per access. Default `0.01`. Deliberately not zero — see §4. | `0.01` |
 | `CONSOLE_EDGE_PACKAGE_DIR` | Optional | Where the edge packages this release built are kept. The image sets it; a deployment that leaves it empty hands publishers the settings file and the written procedure, and no package to install. | `/edge-packages` |
-| `CONSOLE_SUPPORT_EMAIL` | Optional, **set it** | The address shown to a publisher whose network the console cannot set up for them. That screen is a dead end by design, so an empty value leaves them a sentence and nobody to send it to. | `help@exchange.example` |
+| `CONSOLE_SUPPORT_EMAIL` | Optional, **set it** | The address a publisher writes to for help. It is shown to a publisher whose network the console cannot set up for them; that screen is a dead end by design, so an empty value leaves them a sentence and nobody to send it to. It is also written into the README inside every edge package, as where to ask when a check keeps failing; an empty value leaves that line out. | `help@exchange.example` |
 | `CONSOLE_ADDR` | Optional | Address the console binds to. Default `:8085`. | `:8085` |
 | `CONSOLE_LOG_LEVEL` | Optional | `DEBUG`, `INFO`, `WARN` or `ERROR`. Default `INFO`. | `INFO` |
 | `CONSOLE_FETCH_TIMEOUT` | Optional | How long one read of a publisher's own page may take. Default `10s`. | `10s` |

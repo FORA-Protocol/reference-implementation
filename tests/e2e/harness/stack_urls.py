@@ -67,3 +67,7 @@ class StackURLs(NamedTuple):
     # only: empty on host runs.
     zitadel_publishers: str = ""
     mailpit: str = ""
+    # The Broker on the elasticsearch catalog search. It publishes no host port,
+    # and its index holds documents the stack's own seed wrote, so a host run has no
+    # use for it and leaves this empty.
+    broker_es: str = ""

@@ -71,7 +71,7 @@ variable "console_contributor_host" {
 }
 
 variable "console_support_email" {
-  description = "The address the console shows a publisher whose network it cannot set up for them (CONSOLE_SUPPORT_EMAIL). That screen is a dead end by design, so the console needs someone to send the publisher to. Required when console_hostname is set."
+  description = "The address the console shows a publisher whose network it cannot set up for them (CONSOLE_SUPPORT_EMAIL), and writes into the README inside every edge package as where to ask for help. That screen is a dead end by design, so the console needs someone to send the publisher to. Required when console_hostname is set."
   type        = string
   default     = null
 

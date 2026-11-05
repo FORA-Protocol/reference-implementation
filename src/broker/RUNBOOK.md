@@ -107,6 +107,15 @@ Broker and the Exchange — grep it in all three to trace one request end to end
 | `broker.exa.disabled` | INFO | `EXA_API_KEY` is unset. Logged once at start-up; free-text query requests will fail with `no domains for query`. |
 | `broker.exa.init_failed` | WARN | The key is set but the search client could not be built. Field `err`. The Broker starts anyway, and free-text query requests fail exactly as if the key were unset. |
 | `broker.relay.signing` | INFO | The relay key in use. `keyid` is a fingerprint, not the name you chose. |
+| `broker.query_discovery.disabled` / `.enabled` | INFO | Which catalog search this Broker runs, logged once at start-up. `.enabled` carries `provider` and that provider's settings, never a credential. |
+| `broker.es.ready` | INFO | The start-up probe rendered the search template and ran it. |
+| `broker.es.misconfigured` | WARN | The start-up probe reached the cluster, which cannot serve the configured search: the stored template is missing, the template does not render as a JSON object, the index is missing, or the probe's hit carries no URL at `BROKER_ES_HIT_URL_PATH`. Field `err`. The Broker started; every query answers `TEMPORARILY_UNAVAILABLE` until it is fixed. |
+| `broker.es.unreachable` | WARN | The start-up probe got no usable answer. Field `err`. The Broker started, and queries work again once the cluster does, without a restart. |
+| `broker.es.plain_http` | WARN | Logged once at start-up while `BROKER_ES_URL` is plain `http`, which `BROKER_ES_ALLOW_HTTP` admitted. Field `endpoint`. The credential and every query travel unencrypted. |
+| `broker.es.no_auth` | WARN | Logged once at start-up when `BROKER_ES_AUTH=none`: the Broker sends the cluster no credentials. Field `endpoint`. |
+| `broker.es.search` | INFO | One Elasticsearch search. Fields `index`, `hits` and `took_ms`, the cluster's own timing. Neither the query text nor a filter value is logged. |
+| `broker.query_search` | INFO | One tag search on the `llm` provider, with the tags it used and `matches`. |
+| `broker.resolve.query_search_failed` | WARN | A catalog search failed, and the agent got `TEMPORARILY_UNAVAILABLE`. Field `err` names the cause: for Elasticsearch the status, then the error type and reason the cluster reported. The reason is the cluster's own text, and it can quote the agent's query text or a filter value. Requests that name URLs are unaffected. |
 
 The four `broker.registry.*` failures at WARN above (`set_probe_result`, `resolve`,
 `list` and `refresh`) are written at DEBUG instead when the failure is the Broker
@@ -128,6 +137,8 @@ on duty, at any hour.**
 | `broker.httpsig.reject` rate spikes | **Wake on-call** | Key rotation, clocks that are out of sync, or a TLS proxy newly placed in front. |
 | `broker.revocation.unavailable` | **Wake on-call** | While broken, the Exchange cannot learn of any withdrawal. |
 | `broker.discover.offer_rejected` in bulk | Business hours | Exchange key rotation, or clocks that are out of sync between the two. |
+| `broker.resolve.query_search_failed` sustained | Business hours | The catalog search is failing, so queries answer `TEMPORARILY_UNAVAILABLE`. Requests that name URLs and purchases still work. Read `err`, then §3.1. |
+| `broker.es.plain_http` or `broker.es.no_auth` at start-up in production | Business hours | The connection to the cluster is unprotected. Confirm it was meant: `BROKER_ES_ALLOW_HTTP` and `BROKER_ES_AUTH` ([`CONFIGURATION.md`](CONFIGURATION.md) §7). |
 
 **Purchase `outcome` values.** Every refusal the purchase service records begins with
 `REJECTED_`, so one filter on that prefix catches all of them, and each stays
@@ -165,6 +176,13 @@ strict wire validation refuses never reaches it either, and is not recorded.
 | Ed25519 PEM rejected at start-up | `openssl genpkey` writes a format the Broker does not accept | Use `BROKER_ED25519_SEED`: [`CONFIGURATION.md`](CONFIGURATION.md) §3. |
 | A withdrawn key still works | The published list is empty — file unset or missing, or `as_of` did not move forward | Fetch the revocations document (§2.1). Procedure: §4.2. |
 | Revocations route returns 500 | The withdrawn-keys file is malformed | **Urgent** — while broken the Exchange learns of no withdrawal. The `broker.revocation.unavailable` line carries the exact error. |
+| Queries answer `TEMPORARILY_UNAVAILABLE` while requests that name URLs work | The catalog search is failing. `broker.resolve.query_search_failed` carries the cause. | For `elasticsearch`: a connection error or a timeout points at the cluster or its address, `security_exception` at the key, `index_not_found_exception` at `BROKER_ES_INDEX`. |
+| The same, with `resource_not_found_exception` or `script_exception` in `err`, or `broker.es.misconfigured` at start-up | The stored template `BROKER_ES_TEMPLATE_ID` names does not exist, or the template does not render: a Mustache error, or a body that is not valid JSON. | Render it yourself with `_render/template` and the parameters the Broker sends: [`SEARCH-TEMPLATE.md`](SEARCH-TEMPLATE.md) §6. |
+| The same, with `search hit carries no usable URL` in `err` | A hit has no URL at `BROKER_ES_HIT_URL_PATH`, or not an absolute one: the template does not project the field the path names, or a document lacks it. | `err` names the hit and the path. Correct the path or the template's projection ([`SEARCH-TEMPLATE.md`](SEARCH-TEMPLATE.md) §3), or have the document fixed: one bad hit fails the whole search. |
+| Every query answers `NOT_IN_CATALOG` | With `elasticsearch`, read `hits` on `broker.es.search`. At 0, the template matches nothing for these queries. Above 0, the documents' URLs differ from the URIs the Exchange stores, so no hit gets an offer. | At 0, render the template for one query and run it ([`SEARCH-TEMPLATE.md`](SEARCH-TEMPLATE.md) §6). Above 0, compare one document's URL with the catalog, byte for byte: [`CONFIGURATION.md`](CONFIGURATION.md) §7. |
+| Search filters answer `UNIMPLEMENTED` on `search_filters.<key>` | The key is not one the `elasticsearch` provider applies: it is not in the deployment's filter schema, or no schema is configured. | Add the key to the schema and the template if it should apply ([`SEARCH-TEMPLATE.md`](SEARCH-TEMPLATE.md) §4), or tell the agent the key is not offered. |
+| Search filters answer `UNIMPLEMENTED` on the field `search_filters` | `BROKER_QUERY_PROVIDER=none`: there is no catalog search to apply a fora-music-v1 filter, and an answer without it would answer a different question. A key outside that profile is ignored rather than refused. | Choose a provider that applies the filters ([`CONFIGURATION.md`](CONFIGURATION.md) §7), or tell the agent this Broker takes no filters. |
+| Refuses to start, naming `BROKER_QUERY_PROVIDER` or a `BROKER_ES_` setting | A setting is missing or invalid, or the cluster refused the credentials. | The `broker.exit` line names every fault at once. [`CONFIGURATION.md`](CONFIGURATION.md) §7. |
 | An agent starts getting `NOT_AUTHORIZED` part-way through the month | Spend accumulates per agent per calendar month: every admitted discovery adds the winning offer's value to that agent's counter, and a request is refused once the counter has reached the request's budget limit. The counters live in Redis (or per process without Redis) and reset at the month boundary. | Working as designed — §6. |
 
 ### 3.2 Diagnostics
@@ -230,15 +248,25 @@ No row means the discovery produced no offers. `outcome` is `discovered` or
   configured), but it fails closed: every signed request is rejected with `401`
   until the Broker's published documents are reachable again. Both processes look
   healthy while nothing works.
-- **Free-text search needs `EXA_API_KEY` — and still returns no offers.** Without
-  the key, a request that carries only a free-text query fails at once with
-  `no domains for query`. With it, EXA supplies candidate publisher domains, but
-  the query itself is never forwarded to the Exchange: the Exchange receives a
-  call with no URLs, a compliant Exchange rejects that, and the agent sees
-  `TEMPORARILY_UNAVAILABLE`. Requests that name URLs work without the key.
+- **With no catalog search, free-text search needs `EXA_API_KEY` — and still
+  returns no offers.** At `BROKER_QUERY_PROVIDER=none`, without the key, a request
+  that carries only a free-text query fails at once with `no domains for query`.
+  With it, EXA supplies candidate publisher domains, but the query itself is never
+  forwarded to the Exchange: the Exchange receives a call with no URLs, a compliant
+  Exchange rejects that, and the agent sees `TEMPORARILY_UNAVAILABLE`. Requests
+  that name URLs work without the key. A configured catalog search does not use
+  EXA ([`CONFIGURATION.md`](CONFIGURATION.md) §7).
 - **There is no shared key file.** The Broker learns an agent's public key by
   fetching that agent's own published directory, and publishes its own keys
   (identity and relay) in its own directory for the Exchange to fetch.
+- **A stored search template is not checked by the Broker.** The Broker refuses a
+  template file that inserts a value unescaped (`{{{ }}}`, `{{& }}`, `{{#join}}`)
+  or changes the delimiters (`{{= }}`), but its read-only key cannot read a stored
+  template, so a stored one is the index owner's to keep free of them
+  ([`SEARCH-TEMPLATE.md`](SEARCH-TEMPLATE.md) §2).
+- **The schema and the template must agree.** A key the filter schema declares and
+  the template has no section for is accepted and has no effect. Change both
+  together, and give the identity service the same schema file.
 
 ---
 
@@ -441,6 +469,12 @@ PostgreSQL and Redis are covered by their own operating guides.
 - **The reported discovery method depends on the path.** Offers for requests that
   name URLs are reported as `EXCHANGE`; offers for free-text query requests are
   reported as `SEARCH`.
-- **Free-text search discovery is incomplete.** With `EXA_API_KEY` set, EXA supplies
-  candidate publisher domains, but the query is never forwarded to the Exchange, so
-  a compliant Exchange returns no offers for a free-text request (§3.3).
+- **Free-text search needs a catalog search provider.** With
+  `BROKER_QUERY_PROVIDER=none` and `EXA_API_KEY` set, EXA supplies candidate
+  publisher domains, but the query is never forwarded to the Exchange, so a
+  compliant Exchange returns no offers for a free-text request (§3.3). The `llm`
+  and `elasticsearch` providers return offers.
+- **The `elasticsearch` provider runs the index owner's template.** The Broker does
+  not interpret a query, and it applies only the `search_filters` keys the
+  deployment's filter schema declares; any other key is refused
+  ([`CONFIGURATION.md`](CONFIGURATION.md) §7).

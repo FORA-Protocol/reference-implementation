@@ -304,12 +304,41 @@ services:
       # the model. The Broker's key pair for the model is a file in its own
       # key directory, so it is not in this environment; the metadata service
       # is never asked.
-      BROKER_QUERY_DISCOVERY: "on"
+      BROKER_QUERY_PROVIDER: "llm"
       BROKER_QUERY_CATALOG_FILE: "/catalog/feed.jsonl"
       BROKER_QUERY_MODEL: "${query_discovery.model}"
       AWS_REGION: "${query_discovery.aws_region}"
       AWS_SHARED_CREDENTIALS_FILE: "/keys/aws-credentials"
       AWS_EC2_METADATA_DISABLED: "true"
+%{ endif ~}
+%{ if elasticsearch_search != null ~}
+      # Catalog search: the index owner's search template runs against this
+      # index, which someone else populates. The template is either stored in
+      # the cluster under its id, or a file in the Broker's own key directory
+      # that the Broker sends with every search. The read-only key is a file
+      # there too, so it is not in this environment.
+      BROKER_QUERY_PROVIDER: "elasticsearch"
+      BROKER_ES_URL: "${elasticsearch_search.url}"
+      BROKER_ES_INDEX: "${elasticsearch_search.index}"
+%{ if elasticsearch_search.template_id != null ~}
+      BROKER_ES_TEMPLATE_ID: "${elasticsearch_search.template_id}"
+%{ endif ~}
+%{ if elasticsearch_search.template != null ~}
+      BROKER_ES_TEMPLATE_FILE: "/keys/es-search-template.mustache"
+%{ endif ~}
+      BROKER_ES_HIT_URL_PATH: "${elasticsearch_search.hit_url_path}"
+      BROKER_ES_RESULT_LIMIT: "${elasticsearch_search.result_limit}"
+      BROKER_ES_TIMEOUT: "${elasticsearch_search.timeout}"
+      BROKER_ES_AUTH: "api_key"
+      BROKER_ES_API_KEY_FILE: "/keys/es-api-key"
+%{ if elasticsearch_search.ca_pem != null ~}
+      BROKER_ES_CA_FILE: "/keys/es-ca.pem"
+%{ endif ~}
+%{ if elasticsearch_search.filters_schema != null ~}
+      # The search_filters keys the template applies. Without the schema the
+      # Broker refuses every filter.
+      BROKER_ES_FILTERS_SCHEMA_FILE: "/keys/es-search-filters.json"
+%{ endif ~}
 %{ endif ~}
     volumes:
       - /opt/fora/keys/broker:/keys:ro
@@ -604,10 +633,25 @@ services:
       # and send to an Exchange the operator did not choose.
       IDENTITY_MCP_EXCHANGE_ALLOWLIST: "${exchange_hostname}"
       IDENTITY_MCP_WELLKNOWN_SCHEME: "https"
+%{ if elasticsearch_search != null ~}
+%{ if elasticsearch_search.filters_schema != null ~}
+      # The search_filters keys the Broker's catalog search applies, which the
+      # fora_discover tool publishes to agents. It is the file the Broker
+      # reads, so the two services cannot disagree on the keys.
+      IDENTITY_MCP_SEARCH_FILTERS_SCHEMA_FILE: "/search-filters/es-search-filters.json"
+%{ endif ~}
+%{ endif ~}
     volumes:
       - zitadelbootstrap:/bootstrap:ro
 %{ if external_database ~}
       - /opt/fora/database/ca.pem:/db-ca/ca.pem:ro
+%{ endif ~}
+%{ if elasticsearch_search != null ~}
+%{ if elasticsearch_search.filters_schema != null ~}
+      # That one file from the Broker's key directory, never the directory:
+      # the schema is public, the Broker's keys beside it are not.
+      - /opt/fora/keys/broker/es-search-filters.json:/search-filters/es-search-filters.json:ro
+%{ endif ~}
 %{ endif ~}
 %{ if vault_mode == "server" ~}
       # Read-only is enough to connect to the Proxy's socket: connecting is

@@ -17,6 +17,7 @@ import (
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/clock"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/offerkeys"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/oidcup"
+	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/searchfilters"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/internal/session"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/agentsign"
 	"gitlab.postindustria.com/pi-ai/prebid-agentic-content-access/src/identity/internal/exchacct"
@@ -108,6 +109,14 @@ type MCPConfig struct {
 	// choice. Both default inside the MCP adapter.
 	CallContentTimeout  time.Duration
 	MaxCallContentBytes int64
+	// SearchFiltersSchema is the deployment's search-filter schema as configured:
+	// the JSON Schema naming the search_filters keys the Broker's catalog search
+	// applies, and the format of each value. Empty is none. Build loads it with
+	// searchfilters.Load, the loader the Broker loads its copy with, so a
+	// document that loader refuses stops both services for the same reason. The
+	// MCP adapter then publishes it in fora_discover, and refuses it at start-up
+	// if the MCP SDK could not use it there.
+	SearchFiltersSchema string
 }
 
 // AuthConfig wires the OAuth developer sign-up server, which is always mounted.
@@ -337,6 +346,12 @@ func buildAccountService(
 // itself, so the identity a tool call sends and the Signature-Agent it signs
 // cannot disagree.
 func buildMCPServer(cfg Config, clk clock.Clock) (*mcp.Server, error) {
+	// Loaded first, so a document the services refuse stops the boot before
+	// anything here is built.
+	filters, err := searchfilters.Load([]byte(cfg.MCP.SearchFiltersSchema))
+	if err != nil {
+		return nil, fmt.Errorf("app: mcp: search filters schema: %w", err)
+	}
 	signer, err := agentsign.New(agentsign.Config{
 		Keys:       cfg.Keys,
 		BaseDomain: cfg.BaseDomain,
@@ -409,6 +424,7 @@ func buildMCPServer(cfg Config, clk clock.Clock) (*mcp.Server, error) {
 		MaxCallContentBytes: cfg.MCP.MaxCallContentBytes,
 		MaxItemContentBytes: maxItemBytes,
 		IssuerURL:           cfg.Auth.Issuer,
+		SearchFilters:       filters,
 		// The signer's OWN directory construction, so the origin a tool sends is
 		// byte-identical to the Signature-Agent the Broker and the Exchange derive
 		// the caller's identity from — one function, not two settings that happen

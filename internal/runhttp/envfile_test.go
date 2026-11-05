@@ -3,6 +3,7 @@ package runhttp
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -86,4 +87,25 @@ func writeTemp(t *testing.T, content string) string {
 		t.Fatalf("write temp secret: %v", err)
 	}
 	return path
+}
+
+// A setting that names a binary or multi-line file gets its bytes unchanged, and
+// the error for a file it cannot read names the setting.
+func TestEnvFile(t *testing.T) {
+	const content = " first line\n\xff\xfe second line \n"
+	t.Setenv("FORA_TEST_FILE", writeTemp(t, content))
+	got, err := EnvFile("FORA_TEST_FILE")
+	if err != nil || string(got) != content {
+		t.Fatalf("EnvFile = %q, %v", got, err)
+	}
+
+	t.Setenv("FORA_TEST_FILE", "")
+	if got, err := EnvFile("FORA_TEST_FILE"); got != nil || err != nil {
+		t.Fatalf("EnvFile unset = %q, %v; want nil, nil", got, err)
+	}
+
+	t.Setenv("FORA_TEST_FILE", filepath.Join(t.TempDir(), "absent"))
+	if _, err := EnvFile("FORA_TEST_FILE"); err == nil || !strings.Contains(err.Error(), "FORA_TEST_FILE") {
+		t.Fatalf("err = %v, want an error naming the setting", err)
+	}
 }

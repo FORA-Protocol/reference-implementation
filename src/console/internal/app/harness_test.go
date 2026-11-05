@@ -215,8 +215,8 @@ func consoleConfig(
 			ExchangeEndpoint:  "https://" + testExchangeDomain,
 			ContributorHost:   testContributor,
 			SupportedProfiles: []string{"fora-news-v1"},
+			SupportEmail:      "help@exchange.example",
 		},
-		SupportEmail: "help@exchange.example",
 		// Detection decides whether the wizard goes on at all, so a fixture
 		// without one would dead-end every test at the domain step. A test
 		// about detection installs its own.
